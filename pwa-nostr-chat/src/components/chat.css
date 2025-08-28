@@ -1,3 +1,6 @@
+:root {
+  --header-h: 56px;
+}
 html, body, #root {
   height: 100%;
   min-height: 100dvh;
@@ -24,7 +27,8 @@ body {
   border-bottom: 1px solid rgba(255,255,255,0.12);
   position: sticky;
   top: 0;
-  background: inherit;
+  background-color: #111827;
+  min-height: var(--header-h);
   z-index: 10;
 }
 
@@ -36,6 +40,11 @@ body {
   display: flex;
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
+  position: sticky;
+  top: var(--header-h);
+  z-index: 9;
+  background-color: #111827;
+  border-bottom: 1px solid rgba(255,255,255,0.12);
 }
 
 .group-select, .relay-input {
@@ -89,7 +98,8 @@ body {
   border-top: 1px solid rgba(255,255,255,0.12);
   position: sticky;
   bottom: 0;
-  background: inherit;
+  background-color: #111827;
+  z-index: 10;
 }
 
 .text {
