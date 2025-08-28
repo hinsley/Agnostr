@@ -127,10 +127,9 @@ export default function Chat() {
     } catch {
       setMessages([])
     }
-    const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 // 24h
     const filters = [
-      // Plain filters only
-      { kinds: [20000], g: [normalized], t: ['teleport'], since, limit: 500 },
+      // Minimal live filter (kind 20000 is ephemeral on most relays)
+      { kinds: [20000], g: [normalized], t: ['teleport'] },
     ] as any
     try {
       console.log('REQ', { relays, filters, channel: normalized })
