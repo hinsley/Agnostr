@@ -415,12 +415,13 @@ export default function Chat() {
         }}
       >
         {messages.map((m) => {
-          const name = getTagValue(m.tags, 'n') || formatPubkey(m.pubkey)
+          const baseName = getTagValue(m.tags, 'n') || formatPubkey(m.pubkey)
+          const last4 = m.pubkey?.slice?.(-4) || ''
+          const combined = `@${baseName}#${last4}`
           return (
             <li key={m.id} className="message">
               <div className="meta">
-                <span className="name">{name}</span>
-                <span className="pk">{formatPubkey(m.pubkey)}</span>
+                <span className="name">{combined}</span>
                 <span className="time">{formatTime(m.created_at)}</span>
               </div>
               <div className="content">{m.content}</div>
