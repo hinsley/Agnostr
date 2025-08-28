@@ -20,6 +20,7 @@ const DEFAULT_RELAYS: string[] = [
   'wss://nostr-relay.zimage.com',
   'wss://articles.layer3.news',
   'wss://relay-testnet.k8s.layer3.news',
+  'wss://nostr21.com',
 ]
 
 function formatPubkey(pubkey: string): string {
