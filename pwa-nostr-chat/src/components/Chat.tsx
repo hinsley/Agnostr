@@ -65,6 +65,7 @@ export default function Chat() {
     const n = Math.floor(Math.random() * 10000).toString().padStart(4, '0')
     return 'anon' + n
   })
+  const [menuOpen, setMenuOpen] = useState(false)
   const poolRef = useRef<SimplePool | null>(null)
   const subRef = useRef<{ close: (reason?: string) => void } | null>(null)
   const listRef = useRef<HTMLUListElement | null>(null)
@@ -334,6 +335,13 @@ export default function Chat() {
   return (
     <div className="chat-root">
       <header className="chat-header">
+        <button
+          className="menu"
+          aria-label="Menu"
+          onClick={() => setMenuOpen((v) => !v)}
+        >
+          ☰
+        </button>
         <div className="title">Agnostr</div>
         <div className="status">
           {signMode === 'extension' && (isNip07 ? 'NIP-07' : 'NIP-07 missing')}
@@ -341,6 +349,7 @@ export default function Chat() {
           {signMode === 'auto' && (autoPubkey ? 'auto: ' + formatPubkey(autoPubkey) : 'auto key')}
         </div>
       </header>
+      {menuOpen && (
       <div className="chat-controls">
         <input
           className="group-select"
@@ -392,6 +401,7 @@ export default function Chat() {
           style={{ display: 'none' }}
         />
       </div>
+      )}
       
       <ul
         ref={listRef}

@@ -43,6 +43,18 @@ body {
   text-overflow: ellipsis;
 }
 
+.chat-header .menu {
+  appearance: none;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 0.5rem;
+  color: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.4rem 0.6rem;
+  margin-right: 0.5rem;
+}
+
 .chat-controls {
   display: flex;
   gap: 0.5rem;
