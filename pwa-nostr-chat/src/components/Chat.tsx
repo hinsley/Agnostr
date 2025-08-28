@@ -76,6 +76,7 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [group, setGroup] = useState('4gn0str')
+  const [groupDraft, setGroupDraft] = useState('4gn0str')
   const [sending, setSending] = useState(false)
   const [signMode, setSignMode] = useState<'extension' | 'local' | 'auto'>(() =>
     typeof (window as any).nostr !== 'undefined' ? 'extension' : 'auto'
@@ -203,6 +204,11 @@ export default function Chat() {
         history.replaceState(null, '', newHash)
       }
     } catch {}
+  }, [group])
+
+  // Keep the draft in sync when group changes externally
+  useEffect(() => {
+    setGroupDraft(group)
   }, [group])
 
   // Initialize/load ephemeral key for Auto mode
@@ -395,8 +401,15 @@ export default function Chat() {
         <input
           className="group-select"
           type="text"
-          value={group}
-          onChange={(e) => setGroup(e.target.value.replace(/^#/, '').toLowerCase().trim())}
+          value={groupDraft}
+          onChange={(e) => setGroupDraft(e.target.value.replace(/^#/, '').toLowerCase())}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              const next = (groupDraft || '').replace(/^#/, '').toLowerCase().trim()
+              if (next) setGroup(next)
+            }
+          }}
           placeholder="group (e.g., 9q)"
         />
         <input
