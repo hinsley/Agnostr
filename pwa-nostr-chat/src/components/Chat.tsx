@@ -129,8 +129,12 @@ export default function Chat() {
     }
     const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 // 24h
     const filters = [
+      // NIP-01 compliant tag filters
       { kinds: [20000], "#g": [normalized], "#t": ['teleport'], since, limit: 500 },
       { kinds: [20000], "#g": ['#' + normalized], "#t": ['teleport'], since, limit: 500 },
+      // Non-standard servers that expect plain keys
+      { kinds: [20000], g: [normalized], t: ['teleport'], since, limit: 500 },
+      { kinds: [20000], g: ['#' + normalized], t: ['teleport'], since, limit: 500 },
     ] as any
     try {
       console.log('REQ', { relays, filters, channel: normalized })
@@ -143,9 +147,9 @@ export default function Chat() {
           // capture whether we were at the bottom before adding
           pendingAutoScrollRef.current = !!stickToBottomRef.current
           // defensively ensure the event matches current channel and topic
-          const rawG = getTagValue(ev.tags || [], 'g') || ''
+          const rawG = getTagValue(ev.tags || [], 'g') || getTagValue(ev.tags || [], '#g') || ''
           const evGroup = rawG.replace(/^#/, '').toLowerCase()
-          const evTopic = getTagValue(ev.tags || [], 't')
+          const evTopic = getTagValue(ev.tags || [], 't') || getTagValue(ev.tags || [], '#t')
           try { console.log('EVENT', { ev }) } catch {}
           if (evGroup !== normalized || evTopic !== 'teleport') return
           setMessages((prev) => {
