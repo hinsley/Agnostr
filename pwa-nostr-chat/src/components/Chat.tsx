@@ -350,7 +350,7 @@ export default function Chat() {
         </div>
       </header>
       {menuOpen && (
-      <div className="chat-controls">
+      <div className="chat-controls menu-open">
         <input
           className="group-select"
           type="text"
