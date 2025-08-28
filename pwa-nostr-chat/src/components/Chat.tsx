@@ -69,12 +69,15 @@ export default function Chat() {
     if (subRef.current) {
       try { subRef.current.close() } catch {}
     }
-    const normalized = group.replace(/^#/, '')
+    const normalized = group.replace(/^#/, '').toLowerCase()
+    setMessages([])
+    const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 // 24h
+    const filters = [
+      { kinds: [20000], '#g': [normalized, '#' + normalized], '#t': ['teleport'], since, limit: 500 },
+    ] as any
     const sub = poolRef.current.subscribeMany(
       relays,
-      [
-        { kinds: [20000], '#g': [normalized, '#' + normalized] },
-      ],
+      filters,
       {
         onevent: (ev: any) => {
           setMessages((prev) => {
