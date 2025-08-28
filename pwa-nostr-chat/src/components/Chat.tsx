@@ -48,6 +48,29 @@ function getTagValue(tags: string[][], key: string): string | null {
   return null
 }
 
+function cacheKeyForGroup(normalizedGroup: string): string {
+  return `agnostr_cache_${normalizedGroup}`
+}
+
+function loadCachedMessages(normalizedGroup: string): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(cacheKeyForGroup(normalizedGroup))
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed as ChatMessage[]
+  } catch {
+    return []
+  }
+}
+
+function saveCachedMessages(normalizedGroup: string, messages: ChatMessage[]): void {
+  try {
+    const limited = messages.slice(-500)
+    localStorage.setItem(cacheKeyForGroup(normalizedGroup), JSON.stringify(limited))
+  } catch {}
+}
+
 export default function Chat() {
   const [relays, setRelays] = useState<string[]>(DEFAULT_RELAYS)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -92,7 +115,13 @@ export default function Chat() {
       try { subRef.current.close() } catch {}
     }
     const normalized = group.replace(/^#/, '').toLowerCase()
-    setMessages([])
+    // load cached messages for this channel
+    try {
+      const cached = loadCachedMessages(normalized)
+      setMessages(cached)
+    } catch {
+      setMessages([])
+    }
     const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 // 24h
     const filters = [
       { kinds: [20000], "g": [normalized], "t": ['teleport'], since, limit: 500 },
@@ -117,6 +146,8 @@ export default function Chat() {
               },
             ]
             next.sort((a, b) => a.created_at - b.created_at)
+            // persist channel-specific cache
+            saveCachedMessages(normalized, next)
             return next
           })
         },
@@ -323,6 +354,11 @@ export default function Chat() {
           },
         ]
         next.sort((a, b) => a.created_at - b.created_at)
+        // persist channel-specific cache for current normalized group
+        try {
+          const normalizedNow = group.replace(/^#/, '').toLowerCase()
+          saveCachedMessages(normalizedNow, next)
+        } catch {}
         return next
       })
     } catch (e) {
