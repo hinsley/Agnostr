@@ -302,6 +302,7 @@ export default function Chat() {
           }
         } catch {}
         const ev = signed as any
+        if (prev.some((m) => m.id === ev.id)) return prev
         const next = [
           ...prev,
           {
