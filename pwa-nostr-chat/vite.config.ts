@@ -10,8 +10,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['vite.svg'],
       manifest: {
-        name: 'Nostr PWA Chat',
-        short_name: 'NostrChat',
+        name: 'Agnostr',
+        short_name: 'Agnostr',
         start_url: '/',
         display: 'standalone',
         background_color: '#111827',
