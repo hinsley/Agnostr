@@ -1,5 +1,8 @@
 :root {
   --header-h: 56px;
+  --controls-h: 56px;
+  --composer-h: 72px;
+  --shell-bg: #111827;
 }
 html, body, #root {
   height: 100%;
@@ -25,11 +28,15 @@ body {
   align-items: center;
   padding: 0.75rem 1rem;
   border-bottom: 1px solid rgba(255,255,255,0.12);
-  position: sticky;
+  position: fixed;
   top: 0;
-  background-color: #111827;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 48rem;
+  background-color: var(--shell-bg);
   min-height: var(--header-h);
-  z-index: 10;
+  z-index: 20;
 }
 
 .chat-header .title {
@@ -40,10 +47,14 @@ body {
   display: flex;
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
-  position: sticky;
+  position: fixed;
   top: var(--header-h);
-  z-index: 9;
-  background-color: #111827;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 48rem;
+  z-index: 15;
+  background-color: var(--shell-bg);
   border-bottom: 1px solid rgba(255,255,255,0.12);
 }
 
@@ -65,7 +76,13 @@ body {
   flex-direction: column;
   gap: 0.75rem;
   overflow-y: auto;
-  flex: 1 1 auto;
+  position: fixed;
+  top: calc(var(--header-h) + var(--controls-h));
+  bottom: var(--composer-h);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 48rem;
 }
 
 .message {
@@ -96,10 +113,15 @@ body {
   gap: 0.5rem;
   padding: 0.75rem;
   border-top: 1px solid rgba(255,255,255,0.12);
-  position: sticky;
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
   bottom: 0;
-  background-color: #111827;
-  z-index: 10;
+  width: 100%;
+  max-width: 48rem;
+  background-color: var(--shell-bg);
+  min-height: var(--composer-h);
+  z-index: 20;
 }
 
 .text {
