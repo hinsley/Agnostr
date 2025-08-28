@@ -343,11 +343,7 @@ export default function Chat() {
           ☰
         </button>
         <div className="title">Agnostr</div>
-        <div className="status">
-          {signMode === 'extension' && (isNip07 ? 'NIP-07' : 'NIP-07 missing')}
-          {signMode === 'local' && (localPubkey ? 'local: ' + formatPubkey(localPubkey) : 'local key')}
-          {signMode === 'auto' && (autoPubkey ? 'auto: ' + formatPubkey(autoPubkey) : 'auto key')}
-        </div>
+        <div className="status">#{group}</div>
       </header>
       {menuOpen && (
       <div className="chat-controls menu-open">
