@@ -15,6 +15,11 @@ const DEFAULT_RELAYS: string[] = [
   'wss://relay.primal.net',
   'wss://nos.lol',
   'wss://relay.nostr.band',
+  'wss://offchain.pub',
+  'wss://nostr.2b9t.xyz',
+  'wss://nostr-relay.zimage.com',
+  'wss://articles.layer3.news',
+  'wss://relay-testnet.k8s.layer3.news',
 ]
 
 function formatPubkey(pubkey: string): string {
