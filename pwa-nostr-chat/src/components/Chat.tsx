@@ -131,7 +131,6 @@ export default function Chat() {
     const filters = [
       // Plain filters only
       { kinds: [20000], g: [normalized], t: ['teleport'], since, limit: 500 },
-      { kinds: [20000], g: ['#' + normalized], t: ['teleport'], since, limit: 500 },
     ] as any
     try {
       console.log('REQ', { relays, filters, channel: normalized })
