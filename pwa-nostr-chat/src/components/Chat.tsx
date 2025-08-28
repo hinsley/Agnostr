@@ -95,6 +95,30 @@ export default function Chat() {
     }
   }, [relays, group])
 
+  // Initialize group from URL hash and keep in sync with hash changes
+  useEffect(() => {
+    const applyHashGroup = () => {
+      try {
+        const hash = (window.location.hash || '').replace(/^#/, '').trim()
+        if (hash) setGroup(hash)
+      } catch {}
+    }
+    applyHashGroup()
+    window.addEventListener('hashchange', applyHashGroup)
+    return () => window.removeEventListener('hashchange', applyHashGroup)
+  }, [])
+
+  // Reflect current group in the URL hash
+  useEffect(() => {
+    try {
+      const current = (window.location.hash || '').replace(/^#/, '')
+      if (group !== current) {
+        const newHash = '#' + group
+        history.replaceState(null, '', newHash)
+      }
+    } catch {}
+  }, [group])
+
   async function handleSend() {
     if (!input.trim()) return
     if (!poolRef.current) return
@@ -149,15 +173,13 @@ export default function Chat() {
         <div className="status">{isNip07 ? 'NIP-07' : 'read-only'}</div>
       </header>
       <div className="chat-controls">
-        <select
+        <input
           className="group-select"
+          type="text"
           value={group}
-          onChange={(e) => setGroup(e.target.value)}
-        >
-          <option value="global">global</option>
-          <option value="dev">dev</option>
-          <option value="teleport">teleport</option>
-        </select>
+          onChange={(e) => setGroup(e.target.value.trim())}
+          placeholder="group (e.g., 9q)"
+        />
         <input
           className="relay-input"
           type="text"
