@@ -60,6 +60,9 @@ export default function Chat() {
   })
   const poolRef = useRef<SimplePool | null>(null)
   const subRef = useRef<{ close: (reason?: string) => void } | null>(null)
+  const listRef = useRef<HTMLUListElement | null>(null)
+  const stickToBottomRef = useRef<boolean>(true)
+  const pendingAutoScrollRef = useRef<boolean>(false)
 
   const isNip07 = useMemo(() => typeof (window as any).nostr !== 'undefined', [])
 
@@ -89,6 +92,14 @@ export default function Chat() {
       filters,
       {
         onevent: (ev: any) => {
+          // capture whether we were at the bottom before adding
+          try {
+            const el = listRef.current as unknown as HTMLElement | null
+            if (el) {
+              const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24
+              pendingAutoScrollRef.current = atBottom
+            }
+          } catch {}
           setMessages((prev) => {
             if (prev.some((m) => m.id === ev.id)) return prev
             const next = [
@@ -115,6 +126,17 @@ export default function Chat() {
       try { sub.close() } catch {}
     }
   }, [relays, group])
+
+  // After messages render, scroll to bottom if we were previously at bottom
+  useEffect(() => {
+    if (!listRef.current) return
+    if (pendingAutoScrollRef.current) {
+      try {
+        listRef.current.scrollTop = listRef.current.scrollHeight
+      } catch {}
+      pendingAutoScrollRef.current = false
+    }
+  }, [messages.length])
 
   // Initialize group from URL hash and keep in sync with hash changes
   useEffect(() => {
@@ -272,6 +294,13 @@ export default function Chat() {
       setInput('')
       // optimistic add
       setMessages((prev) => {
+        try {
+          const el = listRef.current as unknown as HTMLElement | null
+          if (el) {
+            const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24
+            pendingAutoScrollRef.current = atBottom
+          }
+        } catch {}
         const ev = signed as any
         const next = [
           ...prev,
@@ -353,6 +382,19 @@ export default function Chat() {
         />
       </div>
       <ul className="messages">
+        
+      </ul>
+      <ul
+        ref={listRef}
+        className="messages"
+        onScroll={() => {
+          try {
+            const el = listRef.current as unknown as HTMLElement | null
+            if (!el) return
+            stickToBottomRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24
+          } catch {}
+        }}
+      >
         {messages.map((m) => (
           <li key={m.id} className="message">
             <div className="meta">
