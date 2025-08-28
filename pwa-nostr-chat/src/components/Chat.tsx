@@ -1,0 +1,209 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { SimplePool, type EventTemplate } from 'nostr-tools'
+import './chat.css'
+
+type ChatMessage = {
+  id: string
+  content: string
+  pubkey: string
+  created_at: number
+  tags: string[][]
+}
+
+const DEFAULT_RELAYS: string[] = [
+  'wss://relay.damus.io',
+  'wss://relay.primal.net',
+  'wss://nos.lol',
+  'wss://relay.nostr.band',
+]
+
+function formatPubkey(pubkey: string): string {
+  if (pubkey.length <= 12) return pubkey
+  return pubkey.slice(0, 8) + '…' + pubkey.slice(-4)
+}
+
+function formatTime(ts: number): string {
+  const date = new Date(ts * 1000)
+  const now = Date.now()
+  const diffMs = Math.max(0, now - date.getTime())
+  const minutes = Math.floor(diffMs / 60000)
+  if (minutes < 1) return 'now'
+  if (minutes < 60) return minutes + 'm'
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return hours + 'h'
+  const days = Math.floor(hours / 24)
+  return days + 'd'
+}
+
+export default function Chat() {
+  const [relays, setRelays] = useState<string[]>(DEFAULT_RELAYS)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [input, setInput] = useState('')
+  const [group, setGroup] = useState('global')
+  const [sending, setSending] = useState(false)
+  const poolRef = useRef<SimplePool | null>(null)
+  const subRef = useRef<{ close: (reason?: string) => void } | null>(null)
+
+  const isNip07 = useMemo(() => typeof (window as any).nostr !== 'undefined', [])
+
+  useEffect(() => {
+    poolRef.current = new SimplePool()
+    return () => {
+      try {
+        poolRef.current?.close(relays)
+      } catch {}
+      poolRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!poolRef.current) return
+    if (subRef.current) {
+      try { subRef.current.close() } catch {}
+    }
+    const sub = poolRef.current.subscribeMany(
+      relays,
+      [
+        { kinds: [20000], '#g': [group] },
+      ],
+      {
+        onevent: (ev: any) => {
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === ev.id)) return prev
+            const next = [
+              ...prev,
+              {
+                id: ev.id,
+                content: ev.content,
+                pubkey: ev.pubkey,
+                created_at: ev.created_at,
+                tags: ev.tags as string[][],
+              },
+            ]
+            next.sort((a, b) => a.created_at - b.created_at)
+            return next
+          })
+        },
+        oneose: () => {
+          // no-op
+        },
+      }
+    )
+    subRef.current = sub
+    return () => {
+      try { sub.close() } catch {}
+    }
+  }, [relays, group])
+
+  async function handleSend() {
+    if (!input.trim()) return
+    if (!poolRef.current) return
+    if (!isNip07) {
+      alert('NIP-07 signer not available. Install a Nostr extension to send.')
+      return
+    }
+    setSending(true)
+    try {
+      const nostr = (window as any).nostr
+      const pubkey: string = await nostr.getPublicKey()
+      const unsigned: EventTemplate = {
+        kind: 20000,
+        created_at: Math.floor(Date.now() / 1000),
+        content: input.trim(),
+        tags: [
+          ['g', group],
+        ],
+      }
+      const signed = await nostr.signEvent(unsigned)
+      const pubs: Promise<string>[] = poolRef.current.publish(relays, signed)
+      await Promise.any(pubs)
+      setInput('')
+      // optimistic add
+      setMessages((prev) => {
+        const ev = signed as any
+        const next = [
+          ...prev,
+          {
+            id: ev.id,
+            content: ev.content,
+            pubkey,
+            created_at: ev.created_at,
+            tags: ev.tags as string[][],
+          },
+        ]
+        next.sort((a, b) => a.created_at - b.created_at)
+        return next
+      })
+    } catch (e) {
+      console.error(e)
+      alert('Failed to send event')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <div className="chat-root">
+      <header className="chat-header">
+        <div className="title">Nostr Chat</div>
+        <div className="status">{isNip07 ? 'NIP-07' : 'read-only'}</div>
+      </header>
+      <div className="chat-controls">
+        <select
+          className="group-select"
+          value={group}
+          onChange={(e) => setGroup(e.target.value)}
+        >
+          <option value="global">global</option>
+          <option value="dev">dev</option>
+          <option value="teleport">teleport</option>
+        </select>
+        <input
+          className="relay-input"
+          type="text"
+          value={relays.join(',')}
+          onChange={(e) =>
+            setRelays(
+              e.target.value
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean)
+            )
+          }
+          placeholder="Comma-separated relay URLs"
+        />
+      </div>
+      <ul className="messages">
+        {messages.map((m) => (
+          <li key={m.id} className="message">
+            <div className="meta">
+              <span className="pk">{formatPubkey(m.pubkey)}</span>
+              <span className="time">{formatTime(m.created_at)}</span>
+            </div>
+            <div className="content">{m.content}</div>
+          </li>
+        ))}
+      </ul>
+      <form
+        className="composer"
+        onSubmit={(e) => {
+          e.preventDefault()
+          handleSend()
+        }}
+      >
+        <input
+          className="text"
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder={isNip07 ? 'Write a message…' : 'Install a Nostr extension to send'}
+          disabled={!isNip07 || sending}
+        />
+        <button className="send" type="submit" disabled={!isNip07 || sending}>
+          {sending ? 'Sending…' : 'Send'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
