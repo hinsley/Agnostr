@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { SimplePool, type EventTemplate } from 'nostr-tools'
+import { SimplePool, type EventTemplate, finalizeEvent, getPublicKey, nip19 } from 'nostr-tools'
 import './chat.css'
 
 type ChatMessage = {
@@ -41,6 +41,11 @@ export default function Chat() {
   const [input, setInput] = useState('')
   const [group, setGroup] = useState('global')
   const [sending, setSending] = useState(false)
+  const [signMode, setSignMode] = useState<'extension' | 'local'>(() =>
+    typeof (window as any).nostr !== 'undefined' ? 'extension' : 'local'
+  )
+  const [secretInput, setSecretInput] = useState('')
+  const [localPubkey, setLocalPubkey] = useState<string | null>(null)
   const poolRef = useRef<SimplePool | null>(null)
   const subRef = useRef<{ close: (reason?: string) => void } | null>(null)
 
@@ -119,17 +124,54 @@ export default function Chat() {
     } catch {}
   }, [group])
 
+  // Derive local pubkey when secret changes
+  useEffect(() => {
+    if (!secretInput.trim()) {
+      setLocalPubkey(null)
+      return
+    }
+    const sk = parseSecretKey(secretInput.trim())
+    if (!sk) {
+      setLocalPubkey(null)
+      return
+    }
+    try {
+      const pk = getPublicKey(sk)
+      setLocalPubkey(pk)
+    } catch {
+      setLocalPubkey(null)
+    }
+  }, [secretInput])
+
+  function parseSecretKey(text: string): Uint8Array | null {
+    try {
+      const t = text.trim()
+      if (!t) return null
+      if (t.startsWith('nsec')) {
+        const decoded = nip19.decode(t)
+        if (decoded.type === 'nsec' && decoded.data) {
+          return decoded.data as Uint8Array
+        }
+        return null
+      }
+      // hex fallback
+      const hex = t.startsWith('0x') ? t.slice(2) : t
+      if (!/^[0-9a-fA-F]{64}$/.test(hex)) return null
+      const out = new Uint8Array(32)
+      for (let i = 0; i < 32; i++) {
+        out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+      }
+      return out
+    } catch {
+      return null
+    }
+  }
+
   async function handleSend() {
     if (!input.trim()) return
     if (!poolRef.current) return
-    if (!isNip07) {
-      alert('NIP-07 signer not available. Install a Nostr extension to send.')
-      return
-    }
     setSending(true)
     try {
-      const nostr = (window as any).nostr
-      const pubkey: string = await nostr.getPublicKey()
       const unsigned: EventTemplate = {
         kind: 20000,
         created_at: Math.floor(Date.now() / 1000),
@@ -138,7 +180,22 @@ export default function Chat() {
           ['g', group],
         ],
       }
-      const signed = await nostr.signEvent(unsigned)
+      let signed: any
+      if (signMode === 'extension') {
+        if (!isNip07) {
+          alert('NIP-07 signer not available. Install a Nostr extension or use Local key.')
+          return
+        }
+        const nostr = (window as any).nostr
+        signed = await nostr.signEvent(unsigned)
+      } else {
+        const sk = parseSecretKey(secretInput)
+        if (!sk) {
+          alert('Enter a valid secret key (nsec… or 64-hex)')
+          return
+        }
+        signed = finalizeEvent(unsigned, sk)
+      }
       const pubs: Promise<string>[] = poolRef.current.publish(relays, signed)
       await Promise.any(pubs)
       setInput('')
@@ -150,7 +207,7 @@ export default function Chat() {
           {
             id: ev.id,
             content: ev.content,
-            pubkey,
+            pubkey: ev.pubkey,
             created_at: ev.created_at,
             tags: ev.tags as string[][],
           },
@@ -170,7 +227,11 @@ export default function Chat() {
     <div className="chat-root">
       <header className="chat-header">
         <div className="title">Nostr Chat</div>
-        <div className="status">{isNip07 ? 'NIP-07' : 'read-only'}</div>
+        <div className="status">
+          {signMode === 'extension'
+            ? (isNip07 ? 'NIP-07' : 'NIP-07 missing')
+            : (localPubkey ? 'local: ' + formatPubkey(localPubkey) : 'local key')}
+        </div>
       </header>
       <div className="chat-controls">
         <input
@@ -180,6 +241,23 @@ export default function Chat() {
           onChange={(e) => setGroup(e.target.value.trim())}
           placeholder="group (e.g., 9q)"
         />
+        <select
+          className="relay-input"
+          value={signMode}
+          onChange={(e) => setSignMode(e.target.value as 'extension' | 'local')}
+        >
+          <option value="extension">Extension</option>
+          <option value="local">Local key</option>
+        </select>
+        {signMode === 'local' && (
+          <input
+            className="relay-input"
+            type="password"
+            value={secretInput}
+            onChange={(e) => setSecretInput(e.target.value)}
+            placeholder="nsec1… or 64-hex secret"
+          />
+        )}
         <input
           className="relay-input"
           type="text"
