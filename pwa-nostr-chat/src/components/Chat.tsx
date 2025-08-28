@@ -66,10 +66,11 @@ export default function Chat() {
     if (subRef.current) {
       try { subRef.current.close() } catch {}
     }
+    const normalized = group.replace(/^#/, '')
     const sub = poolRef.current.subscribeMany(
       relays,
       [
-        { kinds: [20000], '#g': [group] },
+        { kinds: [20000], '#g': [normalized, '#' + normalized] },
       ],
       {
         onevent: (ev: any) => {
@@ -172,12 +173,14 @@ export default function Chat() {
     if (!poolRef.current) return
     setSending(true)
     try {
+      const normalized = group.replace(/^#/, '')
       const unsigned: EventTemplate = {
         kind: 20000,
         created_at: Math.floor(Date.now() / 1000),
         content: input.trim(),
         tags: [
-          ['g', group],
+          ['g', normalized],
+          ['g', '#' + normalized],
         ],
       }
       let signed: any
@@ -238,7 +241,7 @@ export default function Chat() {
           className="group-select"
           type="text"
           value={group}
-          onChange={(e) => setGroup(e.target.value.trim())}
+          onChange={(e) => setGroup(e.target.value.replace(/^#/, '').trim())}
           placeholder="group (e.g., 9q)"
         />
         <select
