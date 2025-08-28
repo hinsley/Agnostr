@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { SimplePool, type EventTemplate, finalizeEvent, getPublicKey, nip19 } from 'nostr-tools'
+import { SimplePool, type EventTemplate, finalizeEvent, getPublicKey, nip19, generateSecretKey } from 'nostr-tools'
 import './chat.css'
 
 type ChatMessage = {
@@ -41,11 +41,13 @@ export default function Chat() {
   const [input, setInput] = useState('')
   const [group, setGroup] = useState('global')
   const [sending, setSending] = useState(false)
-  const [signMode, setSignMode] = useState<'extension' | 'local'>(() =>
-    typeof (window as any).nostr !== 'undefined' ? 'extension' : 'local'
+  const [signMode, setSignMode] = useState<'extension' | 'local' | 'auto'>(() =>
+    typeof (window as any).nostr !== 'undefined' ? 'extension' : 'auto'
   )
   const [secretInput, setSecretInput] = useState('')
   const [localPubkey, setLocalPubkey] = useState<string | null>(null)
+  const [ephemeralSkHex, setEphemeralSkHex] = useState<string | null>(null)
+  const [autoPubkey, setAutoPubkey] = useState<string | null>(null)
   const [nickname, setNickname] = useState('')
   const poolRef = useRef<SimplePool | null>(null)
   const subRef = useRef<{ close: (reason?: string) => void } | null>(null)
@@ -126,6 +128,30 @@ export default function Chat() {
     } catch {}
   }, [group])
 
+  // Initialize/load ephemeral key for Auto mode
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('ephemeral_sk')
+      if (saved && /^[0-9a-fA-F]{64}$/.test(saved)) {
+        setEphemeralSkHex(saved)
+        try { setAutoPubkey(getPublicKey(hexToBytes(saved))) } catch {}
+      }
+    } catch {}
+  }, [])
+
+  // Ensure an ephemeral key exists when switching to Auto
+  useEffect(() => {
+    if (signMode !== 'auto') return
+    if (ephemeralSkHex && /^[0-9a-fA-F]{64}$/.test(ephemeralSkHex)) return
+    try {
+      const sk = generateSecretKey()
+      const hex = bytesToHex(sk)
+      setEphemeralSkHex(hex)
+      try { setAutoPubkey(getPublicKey(sk)) } catch {}
+      try { localStorage.setItem('ephemeral_sk', hex) } catch {}
+    } catch {}
+  }, [signMode])
+
   // Derive local pubkey when secret changes
   useEffect(() => {
     if (!secretInput.trim()) {
@@ -169,6 +195,17 @@ export default function Chat() {
     }
   }
 
+  function bytesToHex(bytes: Uint8Array): string {
+    return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
+  }
+
+  function hexToBytes(hex: string): Uint8Array {
+    const clean = hex.toLowerCase()
+    const out = new Uint8Array(clean.length / 2)
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i*2, i*2+2), 16)
+    return out
+  }
+
   async function handleSend() {
     if (!input.trim()) return
     if (!poolRef.current) return
@@ -194,12 +231,20 @@ export default function Chat() {
         }
         const nostr = (window as any).nostr
         signed = await nostr.signEvent(unsigned)
-      } else {
+      } else if (signMode === 'local') {
         const sk = parseSecretKey(secretInput)
         if (!sk) {
           alert('Enter a valid secret key (nsec… or 64-hex)')
           return
         }
+        signed = finalizeEvent(unsigned, sk)
+      } else {
+        // auto
+        if (!ephemeralSkHex || !/^[0-9a-fA-F]{64}$/.test(ephemeralSkHex)) {
+          alert('Auto key unavailable. Try switching mode or reloading.')
+          return
+        }
+        const sk = hexToBytes(ephemeralSkHex)
         signed = finalizeEvent(unsigned, sk)
       }
       const pubs: Promise<string>[] = poolRef.current.publish(relays, signed)
@@ -234,9 +279,9 @@ export default function Chat() {
       <header className="chat-header">
         <div className="title">Nostr Chat</div>
         <div className="status">
-          {signMode === 'extension'
-            ? (isNip07 ? 'NIP-07' : 'NIP-07 missing')
-            : (localPubkey ? 'local: ' + formatPubkey(localPubkey) : 'local key')}
+          {signMode === 'extension' && (isNip07 ? 'NIP-07' : 'NIP-07 missing')}
+          {signMode === 'local' && (localPubkey ? 'local: ' + formatPubkey(localPubkey) : 'local key')}
+          {signMode === 'auto' && (autoPubkey ? 'auto: ' + formatPubkey(autoPubkey) : 'auto key')}
         </div>
       </header>
       <div className="chat-controls">
@@ -257,10 +302,11 @@ export default function Chat() {
         <select
           className="relay-input"
           value={signMode}
-          onChange={(e) => setSignMode(e.target.value as 'extension' | 'local')}
+          onChange={(e) => setSignMode(e.target.value as 'extension' | 'local' | 'auto')}
         >
           <option value="extension">Extension</option>
           <option value="local">Local key</option>
+          <option value="auto">Auto (ephemeral)</option>
         </select>
         {signMode === 'local' && (
           <input
@@ -311,12 +357,14 @@ export default function Chat() {
           onChange={(e) => setInput(e.target.value)}
           placeholder={
             signMode === 'extension'
-              ? (isNip07 ? 'Write a message…' : 'Install a Nostr extension or switch to Local key')
-              : (localPubkey ? 'Write a message…' : 'Enter your nsec to enable sending')
+              ? (isNip07 ? 'Write a message…' : 'Install a Nostr extension or switch to Auto/Local')
+              : signMode === 'local'
+                ? (localPubkey ? 'Write a message…' : 'Enter your nsec to enable sending')
+                : (autoPubkey ? 'Write a message…' : 'Generating ephemeral key…')
           }
-          disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || sending}
+          disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || (signMode === 'auto' && !autoPubkey) || sending}
         />
-        <button className="send" type="submit" disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || sending}>
+        <button className="send" type="submit" disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || (signMode === 'auto' && !autoPubkey) || sending}>
           {sending ? 'Sending…' : 'Send'}
         </button>
       </form>
