@@ -403,57 +403,61 @@ export default function Chat() {
       </div>
       )}
       
-      <ul
-        ref={listRef}
-        className="messages"
-        onScroll={() => {
-          try {
-            const el = listRef.current as unknown as HTMLElement | null
-            if (!el) return
-            stickToBottomRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24
-          } catch {}
-        }}
-      >
-        {messages.map((m) => {
-          const baseName = getTagValue(m.tags, 'n') || formatPubkey(m.pubkey)
-          const last4 = m.pubkey?.slice?.(-4) || ''
-          const combined = `@${baseName}#${last4}`
-          return (
-            <li key={m.id} className="message">
-              <div className="meta">
-                <span className="name">{combined}</span>
-                <span className="time">{formatTime(m.created_at)}</span>
-              </div>
-              <div className="content">{m.content}</div>
-            </li>
-          )
-        })}
-      </ul>
-      <form
-        className="composer"
-        onSubmit={(e) => {
-          e.preventDefault()
-          handleSend()
-        }}
-      >
-        <input
-          className="text"
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={
-            signMode === 'extension'
-              ? (isNip07 ? 'Write a message…' : 'Install a Nostr extension or switch to Auto/Local')
-              : signMode === 'local'
-                ? (localPubkey ? 'Write a message…' : 'Enter your nsec to enable sending')
-                : (autoPubkey ? 'Write a message…' : 'Generating ephemeral key…')
-          }
-          disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || (signMode === 'auto' && !autoPubkey) || sending}
-        />
-        <button className="send" type="submit" disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || (signMode === 'auto' && !autoPubkey) || sending}>
-          {sending ? 'Sending…' : 'Send'}
-        </button>
-      </form>
+      {!menuOpen && (
+        <>
+          <ul
+            ref={listRef}
+            className="messages"
+            onScroll={() => {
+              try {
+                const el = listRef.current as unknown as HTMLElement | null
+                if (!el) return
+                stickToBottomRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24
+              } catch {}
+            }}
+          >
+            {messages.map((m) => {
+              const baseName = getTagValue(m.tags, 'n') || formatPubkey(m.pubkey)
+              const last4 = m.pubkey?.slice?.(-4) || ''
+              const combined = `@${baseName}#${last4}`
+              return (
+                <li key={m.id} className="message">
+                  <div className="meta">
+                    <span className="name">{combined}</span>
+                    <span className="time">{formatTime(m.created_at)}</span>
+                  </div>
+                  <div className="content">{m.content}</div>
+                </li>
+              )
+            })}
+          </ul>
+          <form
+            className="composer"
+            onSubmit={(e) => {
+              e.preventDefault()
+              handleSend()
+            }}
+          >
+            <input
+              className="text"
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={
+                signMode === 'extension'
+                  ? (isNip07 ? 'Write a message…' : 'Install a Nostr extension or switch to Auto/Local')
+                  : signMode === 'local'
+                    ? (localPubkey ? 'Write a message…' : 'Enter your nsec to enable sending')
+                    : (autoPubkey ? 'Write a message…' : 'Generating ephemeral key…')
+              }
+              disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || (signMode === 'auto' && !autoPubkey) || sending}
+            />
+            <button className="send" type="submit" disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || (signMode === 'auto' && !autoPubkey) || sending}>
+              {sending ? 'Sending…' : 'Send'}
+            </button>
+          </form>
+        </>
+      )}
     </div>
   )
 }
