@@ -46,6 +46,7 @@ export default function Chat() {
   )
   const [secretInput, setSecretInput] = useState('')
   const [localPubkey, setLocalPubkey] = useState<string | null>(null)
+  const [nickname, setNickname] = useState('')
   const poolRef = useRef<SimplePool | null>(null)
   const subRef = useRef<{ close: (reason?: string) => void } | null>(null)
 
@@ -174,14 +175,16 @@ export default function Chat() {
     setSending(true)
     try {
       const normalized = group.replace(/^#/, '')
+      const tags: string[][] = [
+        ['g', normalized],
+        ['t', 'teleport'],
+      ]
+      if (nickname.trim()) tags.push(['n', nickname.trim()])
       const unsigned: EventTemplate = {
         kind: 20000,
         created_at: Math.floor(Date.now() / 1000),
         content: input.trim(),
-        tags: [
-          ['g', normalized],
-          ['g', '#' + normalized],
-        ],
+        tags,
       }
       let signed: any
       if (signMode === 'extension') {
@@ -243,6 +246,13 @@ export default function Chat() {
           value={group}
           onChange={(e) => setGroup(e.target.value.replace(/^#/, '').trim())}
           placeholder="group (e.g., 9q)"
+        />
+        <input
+          className="relay-input"
+          type="text"
+          value={nickname}
+          onChange={(e) => setNickname(e.target.value)}
+          placeholder="Nickname (optional)"
         />
         <select
           className="relay-input"
