@@ -79,7 +79,7 @@ export default function Chat() {
     setMessages([])
     const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 // 24h
     const filters = [
-      { kinds: [20000], g: [normalized], '#t': ['teleport'], since, limit: 500 },
+      { kinds: [20000], g: [normalized], t: ['teleport'], since, limit: 500 },
     ] as any
     const sub = poolRef.current.subscribeMany(
       relays,
