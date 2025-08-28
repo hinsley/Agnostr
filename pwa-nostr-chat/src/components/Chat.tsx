@@ -75,7 +75,7 @@ export default function Chat() {
   const [relays, setRelays] = useState<string[]>(DEFAULT_RELAYS)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [group, setGroup] = useState('agnostr')
+  const [group, setGroup] = useState('4gn0str')
   const [sending, setSending] = useState(false)
   const [signMode, setSignMode] = useState<'extension' | 'local' | 'auto'>(() =>
     typeof (window as any).nostr !== 'undefined' ? 'extension' : 'auto'
