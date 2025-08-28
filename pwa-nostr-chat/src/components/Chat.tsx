@@ -69,6 +69,7 @@ export default function Chat() {
   const poolRef = useRef<SimplePool | null>(null)
   const subRef = useRef<{ close: (reason?: string) => void } | null>(null)
   const listRef = useRef<HTMLUListElement | null>(null)
+  const bottomRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef<boolean>(true)
   const pendingAutoScrollRef = useRef<boolean>(false)
@@ -102,13 +103,7 @@ export default function Chat() {
       {
         onevent: (ev: any) => {
           // capture whether we were at the bottom before adding
-          try {
-            const el = listRef.current as unknown as HTMLElement | null
-            if (el) {
-              const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24
-              pendingAutoScrollRef.current = atBottom
-            }
-          } catch {}
+          pendingAutoScrollRef.current = !!stickToBottomRef.current
           setMessages((prev) => {
             if (prev.some((m) => m.id === ev.id)) return prev
             const next = [
@@ -139,9 +134,9 @@ export default function Chat() {
   // After messages render, scroll to bottom if we were previously at bottom
   useEffect(() => {
     if (!listRef.current) return
-    if (pendingAutoScrollRef.current) {
+    if (stickToBottomRef.current || pendingAutoScrollRef.current) {
       try {
-        listRef.current.scrollTop = listRef.current.scrollHeight
+        bottomRef.current?.scrollIntoView({ block: 'end' })
       } catch {}
       pendingAutoScrollRef.current = false
     }
@@ -314,13 +309,7 @@ export default function Chat() {
       setInput('')
       // optimistic add
       setMessages((prev) => {
-        try {
-          const el = listRef.current as unknown as HTMLElement | null
-          if (el) {
-            const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24
-            pendingAutoScrollRef.current = atBottom
-          }
-        } catch {}
+        pendingAutoScrollRef.current = !!stickToBottomRef.current
         const ev = signed as any
         if (prev.some((m) => m.id === ev.id)) return prev
         const next = [
@@ -438,6 +427,7 @@ export default function Chat() {
                 </li>
               )
             })}
+            <div ref={bottomRef} />
           </ul>
           <form
             className="composer"
