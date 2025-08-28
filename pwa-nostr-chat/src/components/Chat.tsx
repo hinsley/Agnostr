@@ -132,6 +132,9 @@ export default function Chat() {
       { kinds: [20000], "#g": [normalized], "#t": ['teleport'], since, limit: 500 },
       { kinds: [20000], "#g": ['#' + normalized], "#t": ['teleport'], since, limit: 500 },
     ] as any
+    try {
+      console.log('REQ', { relays, filters, channel: normalized })
+    } catch {}
     const sub = poolRef.current.subscribeMany(
       relays,
       filters,
@@ -143,6 +146,7 @@ export default function Chat() {
           const rawG = getTagValue(ev.tags || [], 'g') || ''
           const evGroup = rawG.replace(/^#/, '').toLowerCase()
           const evTopic = getTagValue(ev.tags || [], 't')
+          try { console.log('EVENT', { ev }) } catch {}
           if (evGroup !== normalized || evTopic !== 'teleport') return
           setMessages((prev) => {
             if (prev.some((m) => m.id === ev.id)) return prev
@@ -163,12 +167,15 @@ export default function Chat() {
           })
         },
         oneose: () => {
-          // no-op
+          try { console.log('EOSE', { channel: normalized }) } catch {}
         },
       }
     )
     subRef.current = sub
     return () => {
+      try {
+        console.log('CLOSE', { channel: normalized })
+      } catch {}
       try { sub.close() } catch {}
     }
   }, [relays, group])
@@ -351,6 +358,7 @@ export default function Chat() {
         const sk = hexToBytes(ephemeralSkHex)
         signed = finalizeEvent(unsigned, sk)
       }
+      try { console.log('PUBLISH', { ev: signed, relays }) } catch {}
       const pubs: Promise<string>[] = poolRef.current.publish(relays, signed)
       await Promise.any(pubs)
       setInput('')
