@@ -130,6 +130,7 @@ export default function Chat() {
     const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 // 24h
     const filters = [
       { kinds: [20000], "#g": [normalized], "#t": ['teleport'], since, limit: 500 },
+      { kinds: [20000], "#g": ['#' + normalized], "#t": ['teleport'], since, limit: 500 },
     ] as any
     const sub = poolRef.current.subscribeMany(
       relays,
@@ -139,7 +140,8 @@ export default function Chat() {
           // capture whether we were at the bottom before adding
           pendingAutoScrollRef.current = !!stickToBottomRef.current
           // defensively ensure the event matches current channel and topic
-          const evGroup = (getTagValue(ev.tags || [], 'g') || '').replace(/^#/, '').toLowerCase()
+          const rawG = getTagValue(ev.tags || [], 'g') || ''
+          const evGroup = rawG.replace(/^#/, '').toLowerCase()
           const evTopic = getTagValue(ev.tags || [], 't')
           if (evGroup !== normalized || evTopic !== 'teleport') return
           setMessages((prev) => {
