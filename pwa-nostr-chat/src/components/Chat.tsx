@@ -115,10 +115,14 @@ export default function Chat() {
       try { subRef.current.close() } catch {}
     }
     const normalized = group.replace(/^#/, '').toLowerCase()
-    // load cached messages for this channel
+    // load cached messages for this channel (filter by g tag)
     try {
       const cached = loadCachedMessages(normalized)
-      setMessages(cached)
+      const filtered = cached.filter((m) => {
+        const g = (getTagValue(m.tags, 'g') || '').replace(/^#/, '').toLowerCase()
+        return g === normalized
+      })
+      setMessages(filtered)
     } catch {
       setMessages([])
     }
@@ -133,6 +137,10 @@ export default function Chat() {
         onevent: (ev: any) => {
           // capture whether we were at the bottom before adding
           pendingAutoScrollRef.current = !!stickToBottomRef.current
+          // defensively ensure the event matches current channel and topic
+          const evGroup = (getTagValue(ev.tags || [], 'g') || '').replace(/^#/, '').toLowerCase()
+          const evTopic = getTagValue(ev.tags || [], 't')
+          if (evGroup !== normalized || evTopic !== 'teleport') return
           setMessages((prev) => {
             if (prev.some((m) => m.id === ev.id)) return prev
             const next = [
