@@ -129,10 +129,7 @@ export default function Chat() {
     }
     const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 // 24h
     const filters = [
-      // NIP-01 compliant tag filters
-      { kinds: [20000], "#g": [normalized], "#t": ['teleport'], since, limit: 500 },
-      { kinds: [20000], "#g": ['#' + normalized], "#t": ['teleport'], since, limit: 500 },
-      // Also include nonstandard plain keys for broader interop
+      // Plain filters only
       { kinds: [20000], g: [normalized], t: ['teleport'], since, limit: 500 },
       { kinds: [20000], g: ['#' + normalized], t: ['teleport'], since, limit: 500 },
     ] as any
