@@ -185,7 +185,7 @@ export default function Chat() {
   useEffect(() => {
     const applyHashGroup = () => {
       try {
-        const hash = (window.location.hash || '').replace(/^#/, '').trim()
+        const hash = (window.location.hash || '').replace(/^#/, '').trim().toLowerCase()
         if (hash) setGroup(hash)
       } catch {}
     }
@@ -307,7 +307,7 @@ export default function Chat() {
     if (!poolRef.current) return
     setSending(true)
     try {
-      const normalized = group.replace(/^#/, '')
+      const normalized = group.replace(/^#/, '').toLowerCase()
       const tags: string[][] = [
         ['g', normalized],
         ['t', 'teleport'],
@@ -396,7 +396,7 @@ export default function Chat() {
           className="group-select"
           type="text"
           value={group}
-          onChange={(e) => setGroup(e.target.value.replace(/^#/, '').trim())}
+          onChange={(e) => setGroup(e.target.value.replace(/^#/, '').toLowerCase().trim())}
           placeholder="group (e.g., 9q)"
         />
         <input
