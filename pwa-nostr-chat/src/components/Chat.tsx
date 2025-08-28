@@ -296,10 +296,14 @@ export default function Chat() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={isNip07 ? 'Write a message…' : 'Install a Nostr extension to send'}
-          disabled={!isNip07 || sending}
+          placeholder={
+            signMode === 'extension'
+              ? (isNip07 ? 'Write a message…' : 'Install a Nostr extension or switch to Local key')
+              : (localPubkey ? 'Write a message…' : 'Enter your nsec to enable sending')
+          }
+          disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || sending}
         />
-        <button className="send" type="submit" disabled={!isNip07 || sending}>
+        <button className="send" type="submit" disabled={(signMode === 'extension' && !isNip07) || (signMode === 'local' && !localPubkey) || sending}>
           {sending ? 'Sending…' : 'Send'}
         </button>
       </form>
