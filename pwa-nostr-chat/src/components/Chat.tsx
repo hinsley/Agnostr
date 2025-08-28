@@ -69,6 +69,7 @@ export default function Chat() {
   const poolRef = useRef<SimplePool | null>(null)
   const subRef = useRef<{ close: (reason?: string) => void } | null>(null)
   const listRef = useRef<HTMLUListElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef<boolean>(true)
   const pendingAutoScrollRef = useRef<boolean>(false)
 
@@ -248,6 +249,17 @@ export default function Chat() {
     return out
   }
 
+  // Scroll behavior when toggling menu/chat views
+  useEffect(() => {
+    try {
+      if (menuOpen) {
+        if (menuRef.current) menuRef.current.scrollTop = 0
+      } else {
+        if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
+      }
+    } catch {}
+  }, [menuOpen])
+
   // Ensure nickname is always set; regenerate if cleared
   useEffect(() => {
     if (!nickname.trim()) {
@@ -346,7 +358,7 @@ export default function Chat() {
         <div className="status">#{group}</div>
       </header>
       {menuOpen && (
-      <div className="chat-controls menu-open">
+      <div ref={menuRef} className="chat-controls menu-open">
         <input
           className="group-select"
           type="text"
