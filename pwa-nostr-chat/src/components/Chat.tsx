@@ -385,9 +385,7 @@ export default function Chat() {
           style={{ display: 'none' }}
         />
       </div>
-      <ul className="messages">
-        
-      </ul>
+      
       <ul
         ref={listRef}
         className="messages"
