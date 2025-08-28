@@ -353,6 +353,7 @@ export default function Chat() {
           className="relay-input"
           value={signMode}
           onChange={(e) => setSignMode(e.target.value as 'extension' | 'local' | 'auto')}
+          style={{ display: 'none' }}
         >
           <option value="extension">Extension</option>
           <option value="local">Local key</option>
@@ -365,6 +366,7 @@ export default function Chat() {
             value={secretInput}
             onChange={(e) => setSecretInput(e.target.value)}
             placeholder="nsec1… or 64-hex secret"
+            style={{ display: 'none' }}
           />
         )}
         <input
@@ -380,6 +382,7 @@ export default function Chat() {
             )
           }
           placeholder="Comma-separated relay URLs"
+          style={{ display: 'none' }}
         />
       </div>
       <ul className="messages">
