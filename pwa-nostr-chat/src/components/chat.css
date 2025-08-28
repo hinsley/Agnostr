@@ -11,6 +11,7 @@ html, body, #root {
 
 body {
   margin: 0;
+  font-size: clamp(14px, 3.5vw, 16px);
 }
 
 .chat-root {
@@ -37,6 +38,9 @@ body {
 
 .chat-header .title {
   font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-controls {
@@ -48,6 +52,7 @@ body {
   z-index: 9;
   background-color: var(--shell-bg);
   border-bottom: 1px solid rgba(255,255,255,0.12);
+  flex-wrap: wrap;
 }
 
 .group-select, .relay-input {
@@ -117,5 +122,11 @@ body {
 
 .send {
   padding: 0.75rem 1rem;
+}
+
+@media (max-width: 420px) {
+  .group-select, .relay-input { flex: 1 1 100%; }
+  .text { padding: 0.6rem; }
+  .send { padding: 0.6rem 0.8rem; }
 }
 
