@@ -41,6 +41,13 @@ function formatTime(ts: number): string {
   return days + 'd'
 }
 
+function getTagValue(tags: string[][], key: string): string | null {
+  for (const t of tags) {
+    if (t && t[0] === key && typeof t[1] === 'string') return t[1]
+  }
+  return null
+}
+
 export default function Chat() {
   const [relays, setRelays] = useState<string[]>(DEFAULT_RELAYS)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -397,15 +404,19 @@ export default function Chat() {
           } catch {}
         }}
       >
-        {messages.map((m) => (
-          <li key={m.id} className="message">
-            <div className="meta">
-              <span className="pk">{formatPubkey(m.pubkey)}</span>
-              <span className="time">{formatTime(m.created_at)}</span>
-            </div>
-            <div className="content">{m.content}</div>
-          </li>
-        ))}
+        {messages.map((m) => {
+          const name = getTagValue(m.tags, 'n') || formatPubkey(m.pubkey)
+          return (
+            <li key={m.id} className="message">
+              <div className="meta">
+                <span className="name">{name}</span>
+                <span className="pk">{formatPubkey(m.pubkey)}</span>
+                <span className="time">{formatTime(m.created_at)}</span>
+              </div>
+              <div className="content">{m.content}</div>
+            </li>
+          )
+        })}
       </ul>
       <form
         className="composer"
