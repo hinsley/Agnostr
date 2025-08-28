@@ -54,7 +54,10 @@ export default function Chat() {
   const [localPubkey, setLocalPubkey] = useState<string | null>(null)
   const [ephemeralSkHex, setEphemeralSkHex] = useState<string | null>(null)
   const [autoPubkey, setAutoPubkey] = useState<string | null>(null)
-  const [nickname, setNickname] = useState('')
+  const [nickname, setNickname] = useState(() => {
+    const n = Math.floor(Math.random() * 10000).toString().padStart(4, '0')
+    return 'anon' + n
+  })
   const poolRef = useRef<SimplePool | null>(null)
   const subRef = useRef<{ close: (reason?: string) => void } | null>(null)
 
@@ -215,6 +218,14 @@ export default function Chat() {
     return out
   }
 
+  // Ensure nickname is always set; regenerate if cleared
+  useEffect(() => {
+    if (!nickname.trim()) {
+      const n = Math.floor(Math.random() * 10000).toString().padStart(4, '0')
+      setNickname('anon' + n)
+    }
+  }, [nickname])
+
   async function handleSend() {
     if (!input.trim()) return
     if (!poolRef.current) return
@@ -224,8 +235,8 @@ export default function Chat() {
       const tags: string[][] = [
         ['g', normalized],
         ['t', 'teleport'],
+        ['n', nickname.trim()],
       ]
-      if (nickname.trim()) tags.push(['n', nickname.trim()])
       const unsigned: EventTemplate = {
         kind: 20000,
         created_at: Math.floor(Date.now() / 1000),
@@ -306,7 +317,7 @@ export default function Chat() {
           type="text"
           value={nickname}
           onChange={(e) => setNickname(e.target.value)}
-          placeholder="Nickname (optional)"
+          placeholder="Nickname (auto: anon####)"
         />
         <select
           className="relay-input"
