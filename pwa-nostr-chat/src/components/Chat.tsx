@@ -286,7 +286,7 @@ export default function Chat() {
   return (
     <div className="chat-root">
       <header className="chat-header">
-        <div className="title">Nostr Chat</div>
+        <div className="title">Agnostr</div>
         <div className="status">
           {signMode === 'extension' && (isNip07 ? 'NIP-07' : 'NIP-07 missing')}
           {signMode === 'local' && (localPubkey ? 'local: ' + formatPubkey(localPubkey) : 'local key')}
