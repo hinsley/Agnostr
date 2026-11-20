@@ -6,10 +6,15 @@ import {
   Globe,
   Hash,
   Key,
+  Lock,
   Palette,
+  Plus,
   Radio,
   RotateCw,
   Search,
+  Server,
+  Shield,
+  ShieldCheck,
   StickyNote,
   Terminal,
   Users,
@@ -17,6 +22,7 @@ import {
   Wifi,
 } from 'lucide-react'
 import type { AgnostrEngine, InspectorTab, ThemeId } from '../types/protocol'
+import type { ServerHubTab } from './ServerHubModal'
 
 const GEOHASH_REGEX = /^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$/i
 
@@ -43,6 +49,8 @@ export interface CommandPaletteProps {
   engine: AgnostrEngine
   onClose: () => void
   onTuneChannel: (geohash: string) => void
+  onSelectServerChannel?: (serverId: string, channelId: string) => void
+  onOpenServerHub?: (initialTab?: ServerHubTab) => void
   onLocateMe: () => void
   onOpenInspectorTab: (tab: InspectorTab) => void
   onToggleSound: () => void
@@ -55,6 +63,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   engine,
   onClose,
   onTuneChannel,
+  onSelectServerChannel,
+  onOpenServerHub,
   onLocateMe,
   onOpenInspectorTab,
   onToggleSound,
@@ -95,6 +105,39 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       })
     }
 
+    // Joined Servers & Channels
+    for (const srv of engine.servers.joinedServers) {
+      for (const chan of srv.channels) {
+        list.push({
+          id: `srv-${srv.id}-${chan.id}`,
+          group: 'Servers & Channels',
+          title: `${srv.name} › #${chan.name}`,
+          subtitle:
+            chan.topic ||
+            (srv.kind === 'nip29'
+              ? `NIP-29 · ${srv.relayUrl?.replace(/^wss?:\/\//i, '') ?? 'relay'}`
+              : srv.encrypted
+                ? 'E2EE Private Server (AES-256-GCM)'
+                : 'Public Virtual Server'),
+          keywords: `server channel ${srv.name} ${chan.name} #${chan.name} ${srv.kind} ${srv.encrypted ? 'e2ee encrypted private' : 'public'}`,
+          badge: srv.kind === 'nip29' ? 'NIP-29' : srv.encrypted ? 'E2EE' : 'SERVER',
+          icon: srv.encrypted ? (
+            <Lock size={15} style={{ color: 'var(--dm-accent)' }} />
+          ) : (
+            <Server size={15} />
+          ),
+          run: () => {
+            if (onSelectServerChannel) {
+              onSelectServerChannel(srv.id, chan.id)
+            } else {
+              engine.servers.selectChannel(srv.id, chan.id)
+            }
+            onClose()
+          },
+        })
+      }
+    }
+
     // Live Global Pulse Rooms
     for (const room of engine.pulseRooms.slice(0, 8)) {
       list.push({
@@ -130,6 +173,30 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
     // Tactical Actions
     list.push(
+      {
+        id: 'act-create-join-server',
+        group: 'Actions',
+        title: 'Create / Join Server',
+        subtitle: 'Launch an Instant Public or E2EE Private server, or join via invite link',
+        keywords: 'create join server new invite discord room e2ee private public',
+        icon: <Plus size={15} />,
+        run: () => {
+          onClose()
+          onOpenServerHub?.('create')
+        },
+      },
+      {
+        id: 'act-browse-nip29',
+        group: 'Actions',
+        title: 'Browse NIP-29 Communities',
+        subtitle: 'Explore live relay-moderated NIP-29 communities & public groups',
+        keywords: 'browse explore nip29 nip-29 communities groups relays servers',
+        icon: <Server size={15} />,
+        run: () => {
+          onClose()
+          onOpenServerHub?.('explore')
+        },
+      },
       {
         id: 'act-gps',
         group: 'Actions',
@@ -199,6 +266,33 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         icon: <Volume2 size={15} />,
         run: () => {
           onToggleSound()
+          onClose()
+        },
+      },
+      {
+        id: 'act-trusted-only',
+        group: 'Actions',
+        title: 'Toggle Trusted Peers Only',
+        subtitle: engine.strictWhitelistMode
+          ? 'Currently ON — hiding text from untrusted peers (click to show all text)'
+          : 'Currently OFF — show all text (voice memos still require trusting sender)',
+        keywords: 'trust trusted peers only strict whitelist safety filter hide untrusted',
+        badge: engine.strictWhitelistMode ? 'ON' : 'OFF',
+        icon: <Shield size={15} />,
+        run: () => {
+          engine.setStrictWhitelistMode(!engine.strictWhitelistMode)
+          onClose()
+        },
+      },
+      {
+        id: 'act-trusted-safety',
+        group: 'Actions',
+        title: 'Trusted Peers & Safety Settings',
+        subtitle: `${engine.trustedPubkeys.length} trusted ${engine.trustedPubkeys.length === 1 ? 'peer' : 'peers'} · manage trust list & Blossom voice servers`,
+        keywords: 'trusted peers safety settings whitelist media voice blossom servers security',
+        icon: <ShieldCheck size={15} />,
+        run: () => {
+          onOpenInspectorTab('identity')
           onClose()
         },
       },
@@ -296,6 +390,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     query,
     engine,
     onTuneChannel,
+    onSelectServerChannel,
+    onOpenServerHub,
     onClose,
     onLocateMe,
     onOpenInspectorTab,
@@ -359,7 +455,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 entries[clampedIdx]?.run()
               }
             }}
-            placeholder="Jump to #geohash, city, command, theme, or action…"
+            placeholder="Jump to server, #channel, #geohash, city, command, or action…"
           />
           <kbd className="ag-kbd">ESC</kbd>
         </div>
@@ -390,7 +486,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                     </div>
                     {entry.badge && (
                       <span
-                        className={`ag-badge ${entry.badge === 'LIVE' ? 'ok' : 'accent'}`}
+                        className={`ag-badge ${
+                          entry.badge === 'LIVE' || entry.badge === 'ON'
+                            ? 'ok'
+                            : entry.badge === 'OFF'
+                              ? 'muted'
+                              : entry.badge === 'E2EE'
+                                ? 'dm'
+                                : entry.badge === 'NIP-29'
+                                  ? 'mesh'
+                                  : 'accent'
+                        }`}
                       >
                         {entry.badge}
                       </span>

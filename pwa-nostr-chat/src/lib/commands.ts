@@ -1,4 +1,4 @@
-import type { PeerInfo, SlashCommandDef, ThemeId } from '../types/protocol.ts'
+import type { PeerInfo, SlashCommandDef, ThemeId, TrustedPeerEntry } from '../types/protocol.ts'
 import { decodePubkeyInput } from './identity.ts'
 
 export const SLASH_COMMANDS: SlashCommandDef[] = [
@@ -80,6 +80,34 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     category: 'peer',
   },
   {
+    name: 'trust',
+    aliases: ['allow'],
+    usage: '/trust <@handle | npub | hex>',
+    description: 'Trust a peer to unlock their voice memos & media',
+    category: 'peer',
+  },
+  {
+    name: 'untrust',
+    aliases: ['revoke'],
+    usage: '/untrust <@handle | npub | hex>',
+    description: 'Remove a peer from your Trusted Peers',
+    category: 'peer',
+  },
+  {
+    name: 'trusted',
+    aliases: ['whitelist'],
+    usage: '/trusted',
+    description: 'List all Trusted Peers',
+    category: 'peer',
+  },
+  {
+    name: 'strict',
+    aliases: [],
+    usage: '/strict [on | off]',
+    description: 'Toggle Trusted Peers Only mode (hides untrusted text too)',
+    category: 'system',
+  },
+  {
     name: 'clear',
     aliases: [],
     usage: '/clear',
@@ -114,6 +142,8 @@ export interface CommandExecutionContext {
   activeGeohash: string
   peers: PeerInfo[]
   blockedPubkeys: string[]
+  trustedPubkeys: TrustedPeerEntry[]
+  strictWhitelistMode: boolean
   setNickname: (nick: string) => void
   tuneGeohash: (target: string) => boolean
   openDmThread: (pubkey: string, nicknameHint?: string) => void
@@ -122,6 +152,9 @@ export interface CommandExecutionContext {
   postLocationNote: (content: string) => Promise<boolean>
   refreshLocationNotes: () => void
   toggleBlockPeer: (pubkey: string, label?: string) => void
+  trustPubkey: (pubkeyOrNpub: string, label?: string) => boolean
+  untrustPubkey: (pubkey: string) => void
+  setStrictWhitelistMode: (enabled: boolean) => void
   clearCurrentTimeline: () => void
   setTheme: (theme: ThemeId) => void
   rotateIdentity: () => void
@@ -324,6 +357,93 @@ export async function executeSlashCommand(
       }
       ctx.toggleBlockPeer(directPk, peer?.displayHandle)
       ctx.addSystemMessage(`Unblocked ${peer?.displayHandle ?? directPk.slice(0, 8)}.`)
+      return true
+    }
+
+    case 'trust':
+    case 'allow': {
+      if (!args) {
+        ctx.addSystemMessage('Usage: /trust <@handle | npub | hex>')
+        return true
+      }
+      const peer = resolvePeer(args, ctx.peers)
+      const directPk = peer?.pubkey ?? decodePubkeyInput(args)
+      if (!directPk) {
+        ctx.addSystemMessage(`Could not resolve "${args}" to a peer handle, npub, or 64-char hex pubkey.`)
+        return true
+      }
+      const label = peer && peer.nickname !== `anon${directPk.slice(-4)}` ? peer.displayHandle : undefined
+      const ok = ctx.trustPubkey(directPk, label)
+      if (ok) {
+        ctx.addSystemMessage(
+          `Trusted ${label ?? `#${directPk.slice(-6)}`} — voice memos & media from this pubkey are now enabled.`
+        )
+      }
+      return true
+    }
+
+    case 'untrust':
+    case 'revoke': {
+      if (!args) {
+        ctx.addSystemMessage('Usage: /untrust <@handle | npub | hex>')
+        return true
+      }
+      const clean = args.trim().replace(/^@/, '').toLowerCase()
+      const peer = resolvePeer(args, ctx.peers)
+      const directPk =
+        peer?.pubkey ??
+        decodePubkeyInput(args) ??
+        ctx.trustedPubkeys.find(
+          (t) =>
+            t.pubkey.endsWith(clean) ||
+            t.npub.toLowerCase() === clean ||
+            (t.label && t.label.toLowerCase().replace(/^@/, '').includes(clean))
+        )?.pubkey
+      if (!directPk || !ctx.trustedPubkeys.some((t) => t.pubkey === directPk)) {
+        ctx.addSystemMessage(`"${args}" is not in your Trusted Peers.`)
+        return true
+      }
+      ctx.untrustPubkey(directPk)
+      ctx.addSystemMessage(`Removed ${peer?.displayHandle ?? `#${directPk.slice(-6)}`} from Trusted Peers.`)
+      return true
+    }
+
+    case 'trusted':
+    case 'whitelist': {
+      if (ctx.trustedPubkeys.length === 0) {
+        ctx.addSystemMessage(
+          `No Trusted Peers yet (Trusted Peers Only: ${ctx.strictWhitelistMode ? 'ON' : 'OFF'}). Use /trust <@handle|npub> to unlock voice memos & media from a peer.`
+        )
+      } else {
+        const list = ctx.trustedPubkeys
+          .map((t) => `${t.label ? `${t.label} ` : ''}(${t.npub.slice(0, 12)}…${t.npub.slice(-4)})`)
+          .join(', ')
+        ctx.addSystemMessage(
+          `Trusted Peers (${ctx.trustedPubkeys.length}, Trusted Peers Only: ${ctx.strictWhitelistMode ? 'ON' : 'OFF'}): ${list}`
+        )
+      }
+      return true
+    }
+
+    case 'strict': {
+      const arg = args.toLowerCase()
+      let next: boolean
+      if (!arg) {
+        next = !ctx.strictWhitelistMode
+      } else if (arg === 'on' || arg === 'true' || arg === '1') {
+        next = true
+      } else if (arg === 'off' || arg === 'false' || arg === '0') {
+        next = false
+      } else {
+        ctx.addSystemMessage('Usage: /strict [on | off]')
+        return true
+      }
+      ctx.setStrictWhitelistMode(next)
+      ctx.addSystemMessage(
+        next
+          ? 'Trusted Peers Only ENABLED — hiding text & media from untrusted peers.'
+          : 'Trusted Peers Only DISABLED — public text visible; voice memos & media still require trusting the sender.'
+      )
       return true
     }
 

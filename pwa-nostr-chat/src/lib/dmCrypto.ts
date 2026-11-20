@@ -12,9 +12,92 @@ import {
   type Event as NostrEvent,
   type EventTemplate,
 } from 'nostr-tools'
-import type { DmProtocol } from '../types/protocol.ts'
+import type { DmProtocol, VoiceMemoAttachment, VoiceMemoEncryption } from '../types/protocol.ts'
 import { KIND_DM_RUMOR, KIND_GIFT_WRAP, KIND_SEAL } from './bitchatProtocol.ts'
 import { bytesToHex, type SigningKeyMaterial } from './identity.ts'
+
+export const DM_VOICE_PAYLOAD_PREFIX = 'agnostr-voice-v1:'
+
+interface SerializedDmVoicePayload {
+  url: string
+  mime: string
+  size: number
+  durationSec: number
+  waveform: number[]
+  sha256: string
+  encryption?: VoiceMemoEncryption
+  server?: string
+  caption?: string
+}
+
+export function encodeDmVoicePayload(memo: VoiceMemoAttachment, caption?: string): string {
+  const payload: SerializedDmVoicePayload = {
+    url: memo.url,
+    mime: memo.mime,
+    size: memo.size,
+    durationSec: memo.durationSec,
+    waveform: memo.waveform,
+    sha256: memo.sha256,
+    encryption: memo.encryption,
+    server: memo.server,
+    caption: caption?.trim() || undefined,
+  }
+  return `${DM_VOICE_PAYLOAD_PREFIX}${JSON.stringify(payload)}`
+}
+
+export function decodeDmVoicePayload(
+  rawContent: string
+): { voiceMemo: VoiceMemoAttachment; caption: string } | null {
+  if (!rawContent.startsWith(DM_VOICE_PAYLOAD_PREFIX)) return null
+  let parsed: Partial<SerializedDmVoicePayload>
+  try {
+    parsed = JSON.parse(rawContent.slice(DM_VOICE_PAYLOAD_PREFIX.length)) as Partial<SerializedDmVoicePayload>
+  } catch {
+    return null
+  }
+  if (typeof parsed.url !== 'string' || !/^https?:\/\//i.test(parsed.url)) return null
+  if (typeof parsed.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(parsed.sha256)) return null
+
+  let encryption: VoiceMemoEncryption | undefined
+  if (parsed.encryption) {
+    const enc = parsed.encryption
+    if (
+      enc.alg !== 'aes-gcm-256' ||
+      typeof enc.keyB64 !== 'string' ||
+      typeof enc.ivB64 !== 'string' ||
+      typeof enc.plaintextSha256 !== 'string'
+    ) {
+      return null
+    }
+    encryption = {
+      alg: 'aes-gcm-256',
+      keyB64: enc.keyB64,
+      ivB64: enc.ivB64,
+      plaintextSha256: enc.plaintextSha256.toLowerCase(),
+    }
+  }
+
+  const waveform = Array.isArray(parsed.waveform)
+    ? parsed.waveform
+        .filter((n): n is number => typeof n === 'number' && Number.isFinite(n))
+        .slice(0, 64)
+        .map((n) => Math.max(4, Math.min(100, Math.round(n))))
+    : Array.from({ length: 32 }, () => 24)
+
+  return {
+    voiceMemo: {
+      url: parsed.url,
+      mime: typeof parsed.mime === 'string' && parsed.mime ? parsed.mime : 'audio/webm',
+      size: typeof parsed.size === 'number' && parsed.size > 0 ? parsed.size : 0,
+      durationSec: typeof parsed.durationSec === 'number' && parsed.durationSec > 0 ? parsed.durationSec : 0,
+      waveform: waveform.length > 0 ? waveform : Array.from({ length: 32 }, () => 24),
+      sha256: parsed.sha256.toLowerCase(),
+      encryption,
+      server: typeof parsed.server === 'string' ? parsed.server : undefined,
+    },
+    caption: typeof parsed.caption === 'string' ? parsed.caption.trim() : '',
+  }
+}
 
 const MAX_CIPHERTEXT_BYTES = 64 * 1024
 const BITCHAT_HKDF_INFO = new TextEncoder().encode('nip44-v2')

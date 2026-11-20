@@ -3,6 +3,7 @@ import {
   Activity,
   Fingerprint,
   Radar,
+  Server,
   StickyNote,
   Users,
   X,
@@ -14,6 +15,8 @@ import { IdentitySettingsPanel } from './IdentitySettingsPanel.tsx'
 import { LocationNotesPanel } from './LocationNotesPanel.tsx'
 import { PeersPanel } from './PeersPanel.tsx'
 import { RelayTelemetryPanel } from './RelayTelemetryPanel.tsx'
+import { ServerInfoPanel } from './ServerInfoPanel.tsx'
+import type { ServerSettingsTab } from './ServerSettingsModal.tsx'
 
 export type { InspectorTab }
 
@@ -27,10 +30,12 @@ export interface InspectorDrawerProps {
   onMentionPeer: (handle: string) => void
   onStartDm: (pubkey: string, nickname?: string) => void
   onTuneChannel: (geohash: string) => void
+  onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
+  onLeftServer?: () => void
   onPlaySound?: (cue: SoundCue) => void
 }
 
-const TAB_DEFS: readonly {
+const GEO_TAB_DEFS: readonly {
   id: InspectorTab
   label: string
   shortLabel: string
@@ -38,6 +43,16 @@ const TAB_DEFS: readonly {
   { id: 'radar', label: 'Geo Radar', shortLabel: 'Radar' },
   { id: 'peers', label: 'Peers', shortLabel: 'Peers' },
   { id: 'notes', label: 'Location Notes', shortLabel: 'Notes' },
+  { id: 'relays', label: 'Relays', shortLabel: 'Relays' },
+  { id: 'identity', label: 'Identity & Settings', shortLabel: 'ID' },
+]
+
+const SERVER_TAB_DEFS: readonly {
+  id: InspectorTab
+  label: string
+  shortLabel: string
+}[] = [
+  { id: 'radar', label: 'Server Info', shortLabel: 'Server' },
   { id: 'relays', label: 'Relays', shortLabel: 'Relays' },
   { id: 'identity', label: 'Identity & Settings', shortLabel: 'ID' },
 ]
@@ -52,19 +67,27 @@ export function InspectorDrawer({
   onMentionPeer,
   onStartDm,
   onTuneChannel,
+  onOpenServerSettings,
+  onLeftServer,
   onPlaySound,
 }: InspectorDrawerProps) {
-  const { presence, locationNotes, connectedRelayCount, totalRelayCount } = engine
+  const { presence, locationNotes, connectedRelayCount, totalRelayCount, activeView, servers } =
+    engine
   const bodyRef = useRef<HTMLDivElement | null>(null)
+
+  const isServerView = activeView.type === 'server' && servers.activeServer !== null
+  const tabDefs = isServerView ? SERVER_TAB_DEFS : GEO_TAB_DEFS
+  const effectiveTab: InspectorTab =
+    isServerView && (activeTab === 'notes' || activeTab === 'peers') ? 'radar' : activeTab
 
   useEffect(() => {
     if (bodyRef.current) {
       bodyRef.current.scrollTop = 0
     }
-  }, [activeTab, open])
+  }, [effectiveTab, open, isServerView])
 
   const handleSelectTab = (tab: InspectorTab) => {
-    if (tab !== activeTab) {
+    if (tab !== effectiveTab) {
       onPlaySound?.('click')
       onTabChange(tab)
     }
@@ -73,7 +96,7 @@ export function InspectorDrawer({
   const renderTabIcon = (id: InspectorTab) => {
     switch (id) {
       case 'radar':
-        return <Radar size={14} />
+        return isServerView ? <Server size={14} /> : <Radar size={14} />
       case 'peers':
         return <Users size={14} />
       case 'notes':
@@ -92,7 +115,7 @@ export function InspectorDrawer({
         ? 'ag-led-warn'
         : 'ag-led-danger'
 
-  const activeTitle = TAB_DEFS.find((t) => t.id === activeTab)?.label ?? 'Inspector'
+  const activeTitle = tabDefs.find((t) => t.id === effectiveTab)?.label ?? 'Inspector'
 
   return (
     <>
@@ -123,9 +146,13 @@ export function InspectorDrawer({
             </button>
           </div>
 
-          <nav className="ag-inspector-tabs" role="tablist" aria-label="Inspector sections">
-            {TAB_DEFS.map((tab) => {
-              const selected = activeTab === tab.id
+          <nav
+            className={`ag-inspector-tabs ${isServerView ? 'ag-inspector-tabs-3' : ''}`}
+            role="tablist"
+            aria-label="Inspector sections"
+          >
+            {tabDefs.map((tab) => {
+              const selected = effectiveTab === tab.id
               return (
                 <button
                   key={tab.id}
@@ -138,6 +165,9 @@ export function InspectorDrawer({
                 >
                   <span className="ag-inspector-tab-icon">
                     {renderTabIcon(tab.id)}
+                    {tab.id === 'radar' && isServerView && servers.members.length > 0 && (
+                      <span className="ag-tab-count mono">{servers.members.length}</span>
+                    )}
                     {tab.id === 'relays' && (
                       <span className={`ag-tab-dot ag-led ${relayDotClass}`} />
                     )}
@@ -146,7 +176,7 @@ export function InspectorDrawer({
                         {presence.isUncertainCount ? '?' : presence.onlineCount}
                       </span>
                     )}
-                    {tab.id === 'notes' && locationNotes.length > 0 && (
+                    {tab.id === 'notes' && !isServerView && locationNotes.length > 0 && (
                       <span className="ag-tab-count mono">{locationNotes.length}</span>
                     )}
                   </span>
@@ -158,14 +188,25 @@ export function InspectorDrawer({
         </div>
 
         <div ref={bodyRef} className="ag-inspector-body">
-          {activeTab === 'radar' && (
-            <GeoRadarPanel
-              engine={engine}
-              onTuneChannel={onTuneChannel}
-              onPlaySound={onPlaySound}
-            />
-          )}
-          {activeTab === 'peers' && (
+          {effectiveTab === 'radar' &&
+            (isServerView ? (
+              <ServerInfoPanel
+                engine={engine}
+                servers={servers}
+                onInspectPeer={onInspectPeer}
+                onStartDm={onStartDm}
+                onOpenSettings={(serverId, tab) => onOpenServerSettings?.(serverId, tab)}
+                onLeftServer={onLeftServer}
+                onPlaySound={onPlaySound}
+              />
+            ) : (
+              <GeoRadarPanel
+                engine={engine}
+                onTuneChannel={onTuneChannel}
+                onPlaySound={onPlaySound}
+              />
+            ))}
+          {effectiveTab === 'peers' && !isServerView && (
             <PeersPanel
               engine={engine}
               onInspectPeer={onInspectPeer}
@@ -173,13 +214,13 @@ export function InspectorDrawer({
               onMentionPeer={onMentionPeer}
             />
           )}
-          {activeTab === 'notes' && (
+          {effectiveTab === 'notes' && !isServerView && (
             <LocationNotesPanel engine={engine} onPlaySound={onPlaySound} />
           )}
-          {activeTab === 'relays' && (
+          {effectiveTab === 'relays' && (
             <RelayTelemetryPanel engine={engine} onPlaySound={onPlaySound} />
           )}
-          {activeTab === 'identity' && (
+          {effectiveTab === 'identity' && (
             <IdentitySettingsPanel engine={engine} onPlaySound={onPlaySound} />
           )}
         </div>

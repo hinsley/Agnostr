@@ -8,14 +8,30 @@ import {
   Cpu,
   Lock,
   Radio,
+  ShieldCheck,
   Smile,
+  Trash2,
   User,
   AlertCircle,
   Loader2,
 } from 'lucide-react'
-import type { GeoMessage } from '../types/protocol'
+import type { GeoMessage, VoiceMemoAttachment } from '../types/protocol'
 import { identiconDataUrl, pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
+import { VoiceMemoPlayer } from './VoiceMemoPlayer'
+
+function extractVoiceCaption(content: string, memoUrl: string): string {
+  const trimmed = content.trim()
+  if (!trimmed) return ''
+  const target = memoUrl.trim()
+  if (!target) return trimmed
+  if (trimmed === target) return ''
+  return trimmed
+    .split(target)
+    .join('')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
 
 const QUICK_EMOJIS = ['⚡', '🔥', '👍', '👀', '🫡', '❤️']
 
@@ -46,8 +62,14 @@ export interface MessageItemProps {
   showBridgeBadges: boolean
   isDmMode?: boolean
   dmProtocolLabel?: string
+  isSenderTrusted: boolean
+  isSenderExplicitlyTrusted: boolean
+  fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
+  onTrustSender: (pubkey: string, nickname: string) => void
+  onBlockSender: (pubkey: string, displayHandle: string) => void
   onReply?: (message: GeoMessage) => void
   onReact?: (message: GeoMessage, emoji: string) => void
+  onDelete?: (message: GeoMessage) => void
   onInspectAuthor?: (pubkey: string, nickname: string) => void
   onStartDm?: (pubkey: string, nickname?: string) => void
   onTuneGeohash?: (geohash: string) => void
@@ -67,8 +89,14 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     showBridgeBadges,
     isDmMode = false,
     dmProtocolLabel,
+    isSenderTrusted,
+    isSenderExplicitlyTrusted,
+    fetchVoiceMemoBlob,
+    onTrustSender,
+    onBlockSender,
     onReply,
     onReact,
+    onDelete,
     onInspectAuthor,
     onStartDm,
     onTuneGeohash,
@@ -107,10 +135,14 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
     const handle = formatHandle(message.nickname, message.pubkey)
     const authorColor = pubkeyToColor(message.pubkey)
+    const visibleContent = message.voiceMemo
+      ? extractVoiceCaption(message.content, message.voiceMemo.url)
+      : message.content
 
     const handleCopy = () => {
-      navigator.clipboard?.writeText(message.content).catch(() => {})
-      onCopyText?.(message.content)
+      const toCopy = visibleContent || message.content
+      navigator.clipboard?.writeText(toCopy).catch(() => {})
+      onCopyText?.(toCopy)
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
     }
@@ -167,6 +199,16 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 <span>@{handle.base}</span>
                 <span className="ag-msg-author-suffix">#{handle.suffix}</span>
               </button>
+
+              {isSenderExplicitlyTrusted && !message.isOwn && (
+                <span
+                  className="ag-trusted-shield-icon"
+                  title={`Trusted peer — voice memos from ${handle.full} are unlocked`}
+                  aria-label="Trusted peer"
+                >
+                  <ShieldCheck size={13} />
+                </span>
+              )}
 
               {message.isOwn && <span className="ag-badge accent">YOU</span>}
 
@@ -269,13 +311,31 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             </button>
           )}
 
-          {/* Rich Content */}
-          <RichMessageContent
-            content={message.content}
-            onTuneGeohash={onTuneGeohash}
-            onClickMention={onClickMention}
-            highlightQuery={highlightQuery}
-          />
+          {/* Voice Memo Player / Untrusted Shielded Card */}
+          {message.voiceMemo && (
+            <VoiceMemoPlayer
+              memo={message.voiceMemo}
+              senderPubkey={message.pubkey}
+              senderNickname={handle.base}
+              senderDisplayHandle={handle.full}
+              isTrusted={isSenderTrusted}
+              isDmMode={isDmMode}
+              fetchVoiceMemoBlob={fetchVoiceMemoBlob}
+              onTrustSender={onTrustSender}
+              onInspectSender={(pk, nick) => onInspectAuthor?.(pk, nick)}
+              onBlockSender={onBlockSender}
+            />
+          )}
+
+          {/* Rich Content (omits redundant raw Blossom URL for voice-only memos) */}
+          {visibleContent.length > 0 && (
+            <RichMessageContent
+              content={visibleContent}
+              onTuneGeohash={onTuneGeohash}
+              onClickMention={onClickMention}
+              highlightQuery={highlightQuery}
+            />
+          )}
 
           {/* Aggregated Emoji Reactions */}
           {!isDmMode && message.reactions.length > 0 && (
@@ -376,6 +436,18 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
               aria-label={`Inspect ${handle.full}`}
             >
               <User size={14} />
+            </button>
+          )}
+
+          {onDelete && (
+            <button
+              type="button"
+              className="ag-msg-act-btn danger"
+              onClick={() => onDelete(message)}
+              title="Delete message"
+              aria-label="Delete message"
+            >
+              <Trash2 size={13} />
             </button>
           )}
         </div>

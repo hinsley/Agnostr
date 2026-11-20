@@ -1,3 +1,5 @@
+import type { ServersEngine } from './servers.ts'
+
 export type ThemeId = 'phosphor' | 'amber' | 'obsidian' | 'daylight'
 
 export type InspectorTab = 'radar' | 'peers' | 'notes' | 'relays' | 'identity'
@@ -92,6 +94,46 @@ export interface ReplyReference {
 
 export type MessageDeliveryStatus = 'sending' | 'sent' | 'failed'
 
+export interface VoiceMemoEncryption {
+  alg: 'aes-gcm-256'
+  keyB64: string
+  ivB64: string
+  plaintextSha256: string
+}
+
+export interface VoiceMemoAttachment {
+  url: string
+  mime: string
+  size: number
+  durationSec: number
+  /** 32 normalized amplitude peaks in range 0..100 */
+  waveform: number[]
+  /** SHA-256 hex of the Blossom blob (ciphertext if encrypted, audio if public) */
+  sha256: string
+  encryption?: VoiceMemoEncryption
+  server?: string
+}
+
+export interface RecordedVoiceMemo {
+  blob: Blob
+  mime: string
+  size: number
+  durationSec: number
+  /** 32 normalized amplitude peaks in range 0..100 */
+  waveform: number[]
+  /** Local preview object URL (revoked on discard/send) */
+  previewUrl: string
+}
+
+export interface TrustedPeerEntry {
+  pubkey: string
+  npub: string
+  label?: string
+  addedAt: number // unix ms
+}
+
+export type VoiceSendPhase = 'idle' | 'encrypting' | 'uploading' | 'signing' | 'publishing'
+
 export interface GeoMessage {
   id: string
   geohash: string
@@ -111,6 +153,7 @@ export interface GeoMessage {
   replyTo?: ReplyReference
   reactions: ReactionSummary[]
   mentions: string[]
+  voiceMemo?: VoiceMemoAttachment
   deliveryStatus?: MessageDeliveryStatus
   relayCount?: number
 }
@@ -126,6 +169,7 @@ export interface PeerInfo {
   isTeleported: boolean
   isMeshBridge: boolean
   isBlocked: boolean
+  isTrusted?: boolean
   messageCount: number
   channels: string[]
 }
@@ -195,6 +239,7 @@ export interface DmMessage {
   createdAt: number // unix seconds
   isOwn: boolean
   protocol: DmProtocol
+  voiceMemo?: VoiceMemoAttachment
   deliveryStatus: 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
 }
 
@@ -243,6 +288,8 @@ export interface AppSettings {
   presenceEnabled: boolean
   perGeohashIdentity: boolean
   showBridgeBadges: boolean
+  /** When true, hides text messages from unwhitelisted pubkeys too (media/voice is ALWAYS whitelist-gated) */
+  strictWhitelistMode: boolean
 }
 
 export type ToastLevel = 'info' | 'success' | 'warning' | 'error'
@@ -274,6 +321,7 @@ export interface PinnedChannel {
 export type ActiveView =
   | { type: 'channel'; geohash: string }
   | { type: 'dm'; peerPubkey: string }
+  | { type: 'server'; serverId: string; channelId: string }
 
 export interface ChannelPresenceSummary {
   onlineCount: number
@@ -326,11 +374,33 @@ export interface AgnostrEngine {
   clearCurrentTimeline: () => void
   markChannelRead: (geohash?: string) => void
 
-  // Peer moderation
+  // Peer moderation & whitelist-based receipt
   blockedPubkeys: string[]
   isPeerBlocked: (pubkey: string) => boolean
   toggleBlockPeer: (pubkey: string, label?: string) => void
   getPeerByPubkey: (pubkey: string) => PeerInfo | null
+  trustedPubkeys: TrustedPeerEntry[]
+  /** True if pubkey is in trusted whitelist OR is one of the user's own pubkeys */
+  isTrusted: (pubkey: string) => boolean
+  /** True only if pubkey is explicitly stored in trustedPubkeys */
+  isExplicitlyTrusted: (pubkey: string) => boolean
+  trustPubkey: (pubkeyOrNpub: string, label?: string) => boolean
+  untrustPubkey: (pubkey: string) => void
+  clearTrustedPubkeys: () => void
+  strictWhitelistMode: boolean
+  setStrictWhitelistMode: (enabled: boolean) => void
+  /** Count of text messages in active channel currently hidden by strictWhitelistMode */
+  hiddenByWhitelistCount: number
+
+  // Blossom media servers & voice memos (BUD-01/BUD-02 + E2EE DM audio)
+  blossomServers: string[]
+  addBlossomServer: (url: string) => boolean
+  removeBlossomServer: (url: string) => void
+  resetBlossomServers: () => void
+  voiceSendPhase: VoiceSendPhase
+  sendVoiceMemo: (recorded: RecordedVoiceMemo, caption?: string) => Promise<boolean>
+  /** STRICT whitelist-gated fetch: refuses unwhitelisted senders with zero network requests */
+  fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
 
   // Relays & telemetry
   relays: RelayTelemetry[]
@@ -354,6 +424,9 @@ export interface AgnostrEngine {
   updateSettings: (patch: Partial<AppSettings>) => void
   setTheme: (theme: ThemeId) => void
   panicWipe: () => void
+
+  // Discord-like Servers (Instant Virtual Public/E2EE + NIP-29 Relay Communities)
+  servers: ServersEngine
 
   // Commands, export & notifications
   commands: SlashCommandDef[]

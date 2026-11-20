@@ -2,6 +2,8 @@ import type { Event as NostrEvent, Filter } from 'nostr-tools'
 import type { RelayRole, RelayStatus, RelayTelemetry } from '../types/protocol.ts'
 import type { SelectedRelayMeta } from './geoRelays.ts'
 
+export type Nip42AuthSigner = (relayUrl: string, challenge: string) => Promise<NostrEvent | null>
+
 export interface SubscriptionHandlers {
   onEvent: (event: NostrEvent, relayUrl: string) => void
   onEose?: (relayUrl: string) => void
@@ -56,6 +58,8 @@ interface RelayConnection {
   connectStartedAt: number | null
   activeSubIds: Set<string>
   pendingOks: Map<string, PendingOk>
+  pendingAuthId: string | null
+  authenticated: boolean
   manuallyClosed: boolean
 }
 
@@ -70,8 +74,13 @@ export class RelayPool {
   private connections = new Map<string, RelayConnection>()
   private subscriptions = new Map<string, ActiveSub>()
   private telemetryListeners = new Set<(telemetry: RelayTelemetry[]) => void>()
+  private authSigner: Nip42AuthSigner | null = null
   private emitTimer: number | null = null
   private disposed = false
+
+  setAuthSigner(signer: Nip42AuthSigner | null): void {
+    this.authSigner = signer
+  }
 
   onTelemetryChange(listener: (telemetry: RelayTelemetry[]) => void): () => void {
     this.telemetryListeners.add(listener)
@@ -344,6 +353,8 @@ export class RelayPool {
       connectStartedAt: null,
       activeSubIds: new Set(),
       pendingOks: new Map(),
+      pendingAuthId: null,
+      authenticated: false,
       manuallyClosed: false,
     }
     this.connections.set(url, conn)
@@ -424,6 +435,8 @@ export class RelayPool {
     ws.addEventListener('close', (ev) => {
       if (conn.ws !== ws) return
       conn.ws = null
+      conn.pendingAuthId = null
+      conn.authenticated = false
       // Fail pending OKs
       for (const pending of conn.pendingOks.values()) {
         window.clearTimeout(pending.timer)
@@ -487,10 +500,43 @@ export class RelayPool {
       return
     }
 
+    if (frameType === 'AUTH' && typeof parsed[1] === 'string') {
+      const challenge = parsed[1]
+      if (!this.authSigner || !conn.ws || conn.ws.readyState !== WebSocket.OPEN) return
+      const activeWs = conn.ws
+      void this.authSigner(conn.url, challenge)
+        .then((signedAuth) => {
+          if (!signedAuth || this.disposed || conn.ws !== activeWs || activeWs.readyState !== WebSocket.OPEN) {
+            return
+          }
+          conn.pendingAuthId = signedAuth.id
+          activeWs.send(JSON.stringify(['AUTH', signedAuth]))
+          conn.txCount += 1
+        })
+        .catch(() => {
+          // Ignore auth rejection
+        })
+      return
+    }
+
     if (frameType === 'OK' && parsed.length >= 3 && typeof parsed[1] === 'string') {
       const eventId = parsed[1]
       const accepted = Boolean(parsed[2])
       const reason = typeof parsed[3] === 'string' ? parsed[3] : ''
+
+      if (conn.pendingAuthId && eventId === conn.pendingAuthId) {
+        conn.pendingAuthId = null
+        conn.authenticated = accepted
+        if (accepted && conn.ws && conn.ws.readyState === WebSocket.OPEN) {
+          // Replay subscriptions that may have required NIP-42 AUTH
+          for (const subId of conn.activeSubIds) {
+            const sub = this.subscriptions.get(subId)
+            if (sub) this.sendReq(conn, sub)
+          }
+        }
+        this.scheduleTelemetryEmit()
+        return
+      }
 
       if (accepted) {
         conn.okCount += 1

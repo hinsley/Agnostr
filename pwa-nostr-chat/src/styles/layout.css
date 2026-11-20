@@ -21,8 +21,18 @@
 }
 
 /* --------------------------------------------------------------------------
-   Left Sidebar Rail
+   Left Navigation Shell (Far-Left 58px Server Rail + Channel Sidebar)
+   Desktop/Tablet: Rail stays permanently visible when Sidebar collapses (Cmd+B).
+   Mobile (<768px): Entire shell slides over as a single drawer with a top rail strip.
    -------------------------------------------------------------------------- */
+.ag-nav-shell {
+  display: flex;
+  flex-direction: row;
+  flex: 0 0 auto;
+  height: 100%;
+  z-index: 22;
+}
+
 .ag-sidebar {
   width: var(--sidebar-w);
   flex: 0 0 var(--sidebar-w);
@@ -65,7 +75,8 @@
   overflow: hidden;
 }
 
-.ag-main.dm-mode {
+.ag-main.dm-mode,
+.ag-main.server-e2ee-mode {
   background-image: radial-gradient(
     620px circle at 50% 0%,
     rgba(167, 139, 250, 0.065),
@@ -193,25 +204,44 @@
     display: none !important;
   }
 
-  .ag-sidebar {
+  .ag-nav-shell {
     position: fixed;
     top: 0;
     bottom: 0;
     left: 0;
-    width: min(86vw, 310px);
+    width: min(88vw, 336px);
+    height: 100%;
     flex: none;
+    flex-direction: column;
+    background-color: var(--bg-surface);
+    border-right: 1px solid var(--border-subtle);
     z-index: var(--z-drawer);
     box-shadow: var(--shadow-lg);
     transform: translateX(0);
     opacity: 1;
     pointer-events: auto;
+    transition: transform var(--dur-med) var(--ease-out), opacity var(--dur-fast) ease;
   }
 
-  .ag-sidebar.collapsed {
-    width: min(86vw, 310px);
+  .ag-nav-shell.drawer-closed {
     transform: translateX(-104%);
     opacity: 0;
     pointer-events: none;
+  }
+
+  .ag-nav-shell .ag-sidebar,
+  .ag-nav-shell .ag-sidebar.collapsed {
+    position: static;
+    width: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    border-right: none;
+    box-shadow: none;
+    transform: none;
+    opacity: 1;
+    pointer-events: auto;
+    padding-top: 0;
   }
 
   .ag-header-top {

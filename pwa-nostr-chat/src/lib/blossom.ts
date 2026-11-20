@@ -1,0 +1,392 @@
+import { sha256 } from '@noble/hashes/sha256'
+import type { Event as NostrEvent, EventTemplate } from 'nostr-tools'
+import type { VoiceMemoAttachment, VoiceMemoEncryption } from '../types/protocol.ts'
+import { bytesToHex } from './identity.ts'
+
+export const KIND_BLOSSOM_AUTH = 24242
+export const MAX_VOICE_BLOB_BYTES = 15 * 1024 * 1024 // 15 MiB safety bound
+
+/**
+ * Live-verified CORS-friendly BUD-02 Blossom servers.
+ * First two accept BOTH audio/* AND application/octet-stream (E2EE DM blobs);
+ * the remaining two provide redundant public audio/* fallback.
+ */
+export const DEFAULT_BLOSSOM_SERVERS: readonly string[] = [
+  'https://nostr.download',
+  'https://blossom.yakihonne.com',
+  'https://blossom.primal.net',
+  'https://blossom.band',
+]
+
+export function normalizeBlossomServerUrl(raw: string): string | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  const candidate = trimmed.includes('://') ? trimmed : `https://${trimmed}`
+  try {
+    const parsed = new URL(candidate)
+    const scheme = parsed.protocol.toLowerCase()
+    const host = parsed.hostname.toLowerCase()
+    const isLocalDev = scheme === 'http:' && (host === 'localhost' || host === '127.0.0.1')
+    if (scheme !== 'https:' && !isLocalDev) return null
+    if (!host || host.length > 253 || host.endsWith('.local') || host.endsWith('.internal')) return null
+    if (scheme === 'https:' && (host === 'localhost' || host.endsWith('.localhost'))) return null
+    const portPart = parsed.port && parsed.port !== '443' && parsed.port !== '80' ? `:${parsed.port}` : ''
+    const pathPart = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/+$/, '') : ''
+    return `${scheme}//${host}${portPart}${pathPart}`
+  } catch {
+    return null
+  }
+}
+
+export function cleanMimeType(rawMime: string): string {
+  const base = rawMime.split(';')[0].trim().toLowerCase()
+  return base || 'audio/webm'
+}
+
+export function computeSha256Hex(bytes: Uint8Array): string {
+  return bytesToHex(sha256(bytes))
+}
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const sub = bytes.subarray(i, Math.min(i + chunkSize, bytes.length))
+    for (let j = 0; j < sub.length; j++) {
+      binary += String.fromCharCode(sub[j])
+    }
+  }
+  return btoa(binary)
+}
+
+export function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64.trim())
+  const out = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i)
+  }
+  return out
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength)
+  copy.set(bytes)
+  return copy.buffer
+}
+
+/**
+ * Encrypts DM audio bytes client-side with AES-256-GCM before uploading opaque
+ * ciphertext to Blossom. Blossom servers never see plaintext audio.
+ */
+export async function encryptVoiceBytesAesGcm(plaintext: Uint8Array): Promise<{
+  ciphertext: Uint8Array
+  ciphertextSha256: string
+  encryption: VoiceMemoEncryption
+}> {
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new Error('Web Crypto API (SubtleCrypto) is unavailable in this browser context.')
+  }
+  const keyBytes = new Uint8Array(32)
+  const ivBytes = new Uint8Array(12)
+  crypto.getRandomValues(keyBytes)
+  crypto.getRandomValues(ivBytes)
+
+  const plaintextSha256 = computeSha256Hex(plaintext)
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    toArrayBuffer(keyBytes),
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt']
+  )
+  const encryptedBuf = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: toArrayBuffer(ivBytes) },
+    cryptoKey,
+    toArrayBuffer(plaintext)
+  )
+  const ciphertext = new Uint8Array(encryptedBuf)
+  const ciphertextSha256 = computeSha256Hex(ciphertext)
+
+  return {
+    ciphertext,
+    ciphertextSha256,
+    encryption: {
+      alg: 'aes-gcm-256',
+      keyB64: bytesToBase64(keyBytes),
+      ivB64: bytesToBase64(ivBytes),
+      plaintextSha256,
+    },
+  }
+}
+
+export async function decryptVoiceBytesAesGcm(
+  ciphertext: Uint8Array,
+  encryption: VoiceMemoEncryption
+): Promise<Uint8Array> {
+  if (encryption.alg !== 'aes-gcm-256') {
+    throw new Error(`Unsupported voice encryption algorithm: ${String(encryption.alg)}`)
+  }
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new Error('Web Crypto API (SubtleCrypto) is unavailable in this browser context.')
+  }
+  const keyBytes = base64ToBytes(encryption.keyB64)
+  const ivBytes = base64ToBytes(encryption.ivB64)
+  if (keyBytes.length !== 32 || ivBytes.length !== 12) {
+    throw new Error('Malformed AES-256-GCM key or IV in voice memo metadata.')
+  }
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    toArrayBuffer(keyBytes),
+    { name: 'AES-GCM' },
+    false,
+    ['decrypt']
+  )
+  const decryptedBuf = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: toArrayBuffer(ivBytes) },
+    cryptoKey,
+    toArrayBuffer(ciphertext)
+  )
+  const plaintext = new Uint8Array(decryptedBuf)
+  if (encryption.plaintextSha256) {
+    const actualPlainHash = computeSha256Hex(plaintext)
+    if (actualPlainHash !== encryption.plaintextSha256.toLowerCase()) {
+      throw new Error('Decrypted voice memo SHA-256 integrity check failed.')
+    }
+  }
+  return plaintext
+}
+
+export interface BlossomUploadResult {
+  url: string
+  sha256: string
+  size: number
+  mime: string
+  server: string
+}
+
+interface BlossomDescriptor {
+  url?: string
+  sha256?: string
+  size?: number
+  type?: string
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: controller.signal })
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+/**
+ * BUD-02 Blossom upload (`PUT /upload` with signed `kind: 24242` auth event).
+ * Tries configured servers in order with automatic fallback.
+ */
+export async function uploadBlobToBlossom(opts: {
+  bytes: Uint8Array
+  mime: string
+  servers: readonly string[]
+  signAuthEvent: (template: EventTemplate) => Promise<NostrEvent>
+  timeoutMs?: number
+}): Promise<BlossomUploadResult> {
+  const { bytes, signAuthEvent, timeoutMs = 15_000 } = opts
+  if (bytes.byteLength === 0) {
+    throw new Error('Cannot upload an empty voice memo.')
+  }
+  if (bytes.byteLength > MAX_VOICE_BLOB_BYTES) {
+    throw new Error('Voice memo exceeds maximum 15 MiB size limit.')
+  }
+
+  const cleanMime = cleanMimeType(opts.mime)
+  const hashHex = computeSha256Hex(bytes)
+  const nowSec = Math.floor(Date.now() / 1000)
+
+  const authTemplate: EventTemplate = {
+    kind: KIND_BLOSSOM_AUTH,
+    created_at: nowSec,
+    tags: [
+      ['t', 'upload'],
+      ['x', hashHex],
+      ['expiration', String(nowSec + 300)],
+    ],
+    content: 'Upload voice memo',
+  }
+
+  const signedAuth = await signAuthEvent(authTemplate)
+  const authJsonBytes = new TextEncoder().encode(JSON.stringify(signedAuth))
+  const authHeader = `Nostr ${bytesToBase64(authJsonBytes)}`
+
+  const candidates = (opts.servers.length > 0 ? opts.servers : DEFAULT_BLOSSOM_SERVERS)
+    .map((s) => normalizeBlossomServerUrl(s))
+    .filter((s): s is string => s !== null)
+
+  if (candidates.length === 0) {
+    throw new Error('No valid Blossom servers configured.')
+  }
+
+  const errors: string[] = []
+  const bodyBuf = toArrayBuffer(bytes)
+
+  for (const server of candidates) {
+    try {
+      const res = await fetchWithTimeout(
+        `${server}/upload`,
+        {
+          method: 'PUT',
+          mode: 'cors',
+          headers: {
+            Authorization: authHeader,
+            'Content-Type': cleanMime,
+          },
+          body: bodyBuf,
+        },
+        timeoutMs
+      )
+
+      const text = await res.text()
+      if (!res.ok) {
+        const reason = res.headers.get('x-reason') || text.slice(0, 100) || `HTTP ${res.status}`
+        errors.push(`${new URL(server).host}: ${reason}`)
+        continue
+      }
+
+      let desc: BlossomDescriptor = {}
+      try {
+        desc = JSON.parse(text) as BlossomDescriptor
+      } catch {
+        // Some relays return empty body; derive BUD-01 URL
+      }
+
+      const finalUrl =
+        typeof desc.url === 'string' && /^https?:\/\//i.test(desc.url)
+          ? desc.url
+          : `${server}/${hashHex}`
+
+      return {
+        url: finalUrl,
+        sha256: hashHex,
+        size: bytes.byteLength,
+        mime: cleanMime,
+        server,
+      }
+    } catch (err) {
+      const host = (() => {
+        try {
+          return new URL(server).host
+        } catch {
+          return server
+        }
+      })()
+      errors.push(`${host}: ${err instanceof Error ? err.message : 'network error'}`)
+    }
+  }
+
+  throw new Error(`Blossom upload failed across all servers (${errors.slice(0, 3).join('; ')})`)
+}
+
+/**
+ * Fetches, SHA-256 verifies, and (if encrypted) AES-256-GCM decrypts a Blossom voice memo.
+ * Caller MUST enforce whitelist authorization BEFORE invoking this function.
+ */
+export async function downloadAndVerifyVoiceMemo(
+  memo: VoiceMemoAttachment,
+  assertAuthorized: () => void,
+  timeoutMs = 20_000
+): Promise<Blob> {
+  // Defense-in-depth authorization guard BEFORE any network I/O
+  assertAuthorized()
+
+  if (!/^https?:\/\//i.test(memo.url)) {
+    throw new Error('Blocked invalid non-HTTP(S) voice memo URL.')
+  }
+
+  const res = await fetchWithTimeout(memo.url, { method: 'GET', mode: 'cors' }, timeoutMs)
+  if (!res.ok) {
+    throw new Error(`Blossom download failed (HTTP ${res.status})`)
+  }
+
+  const contentLength = Number.parseInt(res.headers.get('content-length') ?? '', 10)
+  if (Number.isFinite(contentLength) && contentLength > MAX_VOICE_BLOB_BYTES) {
+    throw new Error('Voice memo exceeds maximum allowed download size.')
+  }
+
+  const rawBuf = await res.arrayBuffer()
+  if (rawBuf.byteLength > MAX_VOICE_BLOB_BYTES) {
+    throw new Error('Voice memo exceeds maximum allowed download size.')
+  }
+
+  const rawBytes = new Uint8Array(rawBuf)
+
+  if (memo.sha256 && /^[0-9a-f]{64}$/i.test(memo.sha256)) {
+    const actualHash = computeSha256Hex(rawBytes)
+    if (actualHash !== memo.sha256.toLowerCase()) {
+      throw new Error('Voice memo SHA-256 hash mismatch — refusing corrupted or tampered audio.')
+    }
+  }
+
+  const audioBytes = memo.encryption
+    ? await decryptVoiceBytesAesGcm(rawBytes, memo.encryption)
+    : rawBytes
+
+  return new Blob([toArrayBuffer(audioBytes)], { type: cleanMimeType(memo.mime || 'audio/webm') })
+}
+
+/**
+ * Caches decrypted/verified object URLs per memo and cleanly revokes all URLs on wipe/unmount.
+ */
+export class VoiceBlobCache {
+  private urls = new Map<string, string>()
+  private inflight = new Map<string, Promise<string>>()
+
+  private keyFor(memo: VoiceMemoAttachment): string {
+    return `${memo.url}|${memo.sha256}|${memo.encryption?.ivB64 ?? 'plain'}`
+  }
+
+  async getOrFetch(
+    memo: VoiceMemoAttachment,
+    assertAuthorized: () => void
+  ): Promise<string> {
+    // Always re-verify authorization even on cache hit so untrusting a peer immediately blocks playback!
+    assertAuthorized()
+
+    const key = this.keyFor(memo)
+    const cached = this.urls.get(key)
+    if (cached) return cached
+
+    const pending = this.inflight.get(key)
+    if (pending) return pending
+
+    const task = downloadAndVerifyVoiceMemo(memo, assertAuthorized)
+      .then((blob) => {
+        const objectUrl = URL.createObjectURL(blob)
+        this.urls.set(key, objectUrl)
+        return objectUrl
+      })
+      .finally(() => {
+        this.inflight.delete(key)
+      })
+
+    this.inflight.set(key, task)
+    return task
+  }
+
+  revokeAll(): void {
+    for (const objectUrl of this.urls.values()) {
+      try {
+        URL.revokeObjectURL(objectUrl)
+      } catch {
+        // Ignore
+      }
+    }
+    this.urls.clear()
+    this.inflight.clear()
+  }
+}

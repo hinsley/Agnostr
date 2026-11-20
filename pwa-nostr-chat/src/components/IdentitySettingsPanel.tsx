@@ -13,12 +13,20 @@ import {
   Fingerprint,
   Flame,
   Key,
+  Lock,
   Palette,
+  Plus,
   Radio,
   RefreshCw,
+  RotateCcw,
+  Server,
   Shield,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react'
 import type { AgnostrEngine, SignMode, ThemeId } from '../types/protocol.ts'
 import { radioAudio, type SoundCue } from '../utils/sound.ts'
@@ -95,14 +103,33 @@ async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
+function stripHttpScheme(url: string): string {
+  return url.replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+}
+
 export function IdentitySettingsPanel({ engine, onPlaySound }: IdentitySettingsPanelProps) {
-  const { identity, settings, activeGeohash } = engine
+  const {
+    identity,
+    settings,
+    activeGeohash,
+    trustedPubkeys,
+    strictWhitelistMode,
+    hiddenByWhitelistCount,
+    blossomServers,
+  } = engine
 
   const [nickDraft, setNickDraft] = useState(identity.nickname)
   const [localSecretDraft, setLocalSecretDraft] = useState('')
   const [secretFeedback, setSecretFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [revealNsec, setRevealNsec] = useState(false)
   const [copiedField, setCopiedField] = useState<'npub' | 'nsec' | null>(null)
+
+  // Whitelist & Blossom form state
+  const [trustKeyDraft, setTrustKeyDraft] = useState('')
+  const [trustLabelDraft, setTrustLabelDraft] = useState('')
+  const [trustFeedback, setTrustFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [blossomDraft, setBlossomDraft] = useState('')
+  const [blossomError, setBlossomError] = useState<string | null>(null)
 
   // Hold-to-confirm Panic Wipe state
   const [panicProgress, setPanicProgress] = useState(0)
@@ -154,6 +181,11 @@ export function IdentitySettingsPanel({ engine, onPlaySound }: IdentitySettingsP
         setPanicProgress(0)
         setRevealNsec(false)
         setLocalSecretDraft('')
+        setTrustKeyDraft('')
+        setTrustLabelDraft('')
+        setTrustFeedback(null)
+        setBlossomDraft('')
+        setBlossomError(null)
         onPlaySound?.('wipe')
         engine.panicWipe()
         setJustWiped(true)
@@ -249,6 +281,42 @@ export function IdentitySettingsPanel({ engine, onPlaySound }: IdentitySettingsP
     URL.revokeObjectURL(url)
     onPlaySound?.('click')
     engine.pushToast('success', `Exported ${filename}`)
+  }
+
+  const handleToggleStrictWhitelist = () => {
+    engine.setStrictWhitelistMode(!strictWhitelistMode)
+    onPlaySound?.('click')
+  }
+
+  const handleAddTrustedPeer = (e: FormEvent) => {
+    e.preventDefault()
+    const key = trustKeyDraft.trim()
+    if (!key) return
+    const label = trustLabelDraft.trim() || undefined
+    const ok = engine.trustPubkey(key, label)
+    if (ok) {
+      setTrustKeyDraft('')
+      setTrustLabelDraft('')
+      setTrustFeedback({ ok: true, msg: 'Added to trusted peers' })
+      onPlaySound?.('click')
+    } else {
+      setTrustFeedback({ ok: false, msg: 'Enter a valid npub1… or 64-char hex pubkey' })
+    }
+  }
+
+  const handleAddBlossomServer = (e: FormEvent) => {
+    e.preventDefault()
+    const raw = blossomDraft.trim()
+    if (!raw) return
+    const normalized = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
+    const ok = engine.addBlossomServer(normalized)
+    if (ok) {
+      setBlossomDraft('')
+      setBlossomError(null)
+      onPlaySound?.('click')
+    } else {
+      setBlossomError('Enter a valid https:// Blossom server URL')
+    }
   }
 
   const handleColor = pubkeyToColor(identity.activePubkey)
@@ -394,6 +462,244 @@ export function IdentitySettingsPanel({ engine, onPlaySound }: IdentitySettingsP
             </div>
           )}
         </div>
+      </section>
+
+      {/* Trusted Peers & Media Safety */}
+      <section className="ag-panel-card ag-safety-card" aria-label="Trusted peers and media safety">
+        <div className="ag-panel-card-head">
+          <div className="ag-panel-card-title">
+            <ShieldCheck size={13} />
+            <span>TRUSTED PEERS &amp; MEDIA SAFETY</span>
+          </div>
+          <span className="ag-chip ag-chip-mono">
+            {trustedPubkeys.length} trusted
+          </span>
+        </div>
+
+        <div className="ag-safety-notice">
+          <ShieldAlert size={13} />
+          <span>
+            Voice memos &amp; media <strong>always require trusting the sender</strong> — zero
+            network fetches for untrusted peers.
+          </span>
+        </div>
+
+        <label className="ag-toggle-row">
+          <div className="ag-toggle-copy">
+            <span className="ag-toggle-title">
+              <Shield size={13} />
+              Trusted Peers Only (Text)
+            </span>
+            <span className="ag-toggle-desc">
+              Also hide text messages from untrusted peers (your own messages stay visible).
+            </span>
+          </div>
+          <input
+            type="checkbox"
+            className="ag-switch"
+            checked={strictWhitelistMode}
+            onChange={handleToggleStrictWhitelist}
+          />
+        </label>
+
+        {strictWhitelistMode && hiddenByWhitelistCount > 0 && (
+          <div className="ag-strict-stat mono">
+            Hiding {hiddenByWhitelistCount} untrusted{' '}
+            {hiddenByWhitelistCount === 1 ? 'message' : 'messages'} in #{activeGeohash}
+          </div>
+        )}
+
+        <div className="ag-subsection-head">
+          <span className="ag-section-label">TRUSTED PEERS</span>
+          {trustedPubkeys.length > 0 && (
+            <button
+              type="button"
+              className="ag-btn ag-btn-ghost ag-btn-xs"
+              onClick={() => {
+                engine.clearTrustedPubkeys()
+                onPlaySound?.('click')
+              }}
+              title="Revoke trust for all peers"
+            >
+              <Trash2 size={11} />
+              <span>Clear All</span>
+            </button>
+          )}
+        </div>
+
+        {trustedPubkeys.length === 0 ? (
+          <p className="ag-field-hint ag-whitelist-empty">
+            No trusted peers yet. Trust someone from a voice shield card, peer roster, or paste
+            their key below.
+          </p>
+        ) : (
+          <div className="ag-whitelist-list" role="list" aria-label="Trusted peers">
+            {trustedPubkeys.map((entry) => (
+              <div key={entry.pubkey} role="listitem" className="ag-whitelist-row">
+                <img
+                  src={identiconDataUrl(entry.pubkey)}
+                  alt=""
+                  className="ag-whitelist-avatar"
+                  width={26}
+                  height={26}
+                />
+                <div className="ag-whitelist-meta">
+                  <span
+                    className="ag-whitelist-name truncate"
+                    style={{ color: pubkeyToColor(entry.pubkey) }}
+                  >
+                    {entry.label ? `@${entry.label}` : shortPubkey(entry.pubkey, 8, 6)}
+                  </span>
+                  <span className="ag-whitelist-npub mono truncate" title={entry.npub}>
+                    {shortPubkey(entry.npub, 11, 6)}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="ag-icon-btn-xs ag-icon-btn-danger"
+                  onClick={() => {
+                    engine.untrustPubkey(entry.pubkey)
+                    onPlaySound?.('click')
+                  }}
+                  title={`Untrust ${entry.label || shortPubkey(entry.npub, 8, 4)}`}
+                  aria-label={`Untrust ${entry.label || entry.npub}`}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <form className="ag-whitelist-form" onSubmit={handleAddTrustedPeer}>
+          <label className="ag-field-label" htmlFor="ag-trust-key-input">
+            Add trusted npub or hex pubkey
+          </label>
+          <input
+            id="ag-trust-key-input"
+            type="text"
+            className="ag-input mono"
+            placeholder="npub1… or 64-char hex pubkey"
+            value={trustKeyDraft}
+            onChange={(e) => {
+              setTrustKeyDraft(e.target.value)
+              if (trustFeedback) setTrustFeedback(null)
+            }}
+          />
+          <div className="ag-jump-form">
+            <input
+              type="text"
+              maxLength={28}
+              className="ag-input"
+              placeholder="Label (optional)"
+              value={trustLabelDraft}
+              onChange={(e) => setTrustLabelDraft(e.target.value)}
+              aria-label="Optional nickname label for trusted peer"
+            />
+            <button
+              type="submit"
+              className="ag-btn ag-btn-primary"
+              disabled={!trustKeyDraft.trim()}
+            >
+              <Plus size={13} />
+              <span>Trust</span>
+            </button>
+          </div>
+          {trustFeedback && (
+            <p
+              className={`ag-field-hint ${
+                trustFeedback.ok ? 'ag-field-hint-ok' : 'ag-field-hint-danger'
+              }`}
+            >
+              {trustFeedback.msg}
+            </p>
+          )}
+        </form>
+      </section>
+
+      {/* Blossom Media Servers */}
+      <section className="ag-panel-card" aria-label="Blossom media servers">
+        <div className="ag-panel-card-head">
+          <div className="ag-panel-card-title">
+            <Server size={13} />
+            <span>BLOSSOM MEDIA SERVERS</span>
+          </div>
+          <button
+            type="button"
+            className="ag-btn ag-btn-ghost ag-btn-xs"
+            onClick={() => {
+              engine.resetBlossomServers()
+              setBlossomError(null)
+              onPlaySound?.('click')
+            }}
+            title="Restore default live-verified Blossom servers"
+          >
+            <RotateCcw size={11} />
+            <span>Reset</span>
+          </button>
+        </div>
+
+        <div className="ag-blossom-e2ee-note">
+          <Lock size={12} />
+          <span>
+            Encrypted DM voice memos are <strong>AES-256-GCM</strong> encrypted client-side before
+            upload — Blossom servers never see plaintext DM audio.
+          </span>
+        </div>
+
+        {blossomServers.length === 0 ? (
+          <p className="ag-field-hint ag-field-hint-warn">
+            No Blossom servers configured. Click Reset to restore default servers or add one below.
+          </p>
+        ) : (
+          <div className="ag-blossom-list" role="list" aria-label="Configured Blossom servers">
+            {blossomServers.map((url, index) => (
+              <div key={url} role="listitem" className="ag-blossom-row">
+                <div className="ag-blossom-host-wrap">
+                  <span className="ag-blossom-host mono truncate" title={url}>
+                    {stripHttpScheme(url)}
+                  </span>
+                  {index === 0 && <span className="ag-badge ag-badge-accent">PRIMARY</span>}
+                </div>
+                <button
+                  type="button"
+                  className="ag-icon-btn-xs ag-icon-btn-danger"
+                  onClick={() => {
+                    engine.removeBlossomServer(url)
+                    onPlaySound?.('click')
+                  }}
+                  title={`Remove Blossom server ${url}`}
+                  aria-label={`Remove ${url}`}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <form className="ag-jump-form" onSubmit={handleAddBlossomServer}>
+          <input
+            type="text"
+            className="ag-input mono"
+            placeholder="https://blossom.example.com"
+            value={blossomDraft}
+            onChange={(e) => {
+              setBlossomDraft(e.target.value)
+              if (blossomError) setBlossomError(null)
+            }}
+            aria-label="Add custom https Blossom server URL"
+          />
+          <button
+            type="submit"
+            className="ag-btn ag-btn-secondary"
+            disabled={!blossomDraft.trim()}
+            aria-label="Add Blossom server"
+          >
+            <Plus size={14} />
+          </button>
+        </form>
+        {blossomError && <p className="ag-field-hint ag-field-hint-danger">{blossomError}</p>}
       </section>
 
       {/* Signer Mode Switcher */}
@@ -654,7 +960,8 @@ export function IdentitySettingsPanel({ engine, onPlaySound }: IdentitySettingsP
         </div>
 
         <p className="ag-field-hint">
-          Hold for 1.5s to purge all local keys, messages, DMs, pins, and caches and immediately rotate to a fresh ephemeral identity.
+          Hold for 1.5s to purge all local keys, messages, DMs, trusted peers, cached voice memos,
+          pins, and caches and immediately rotate to a fresh ephemeral identity.
         </p>
 
         <button

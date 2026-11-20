@@ -1,0 +1,1087 @@
+/* ==========================================================================
+   Agnostr Discord-like Servers UI:
+   Far-Left Server Rail, Server Sidebar, Hub & Settings Modals, Info Panel
+   Theme-adaptive via tokens.css across phosphor | amber | obsidian | daylight
+   ========================================================================== */
+
+:root {
+  --rail-w: 58px;
+}
+
+/* --------------------------------------------------------------------------
+   Far-Left Server Rail (58px Desktop/Tablet Dock; Horizontal Strip on Mobile)
+   -------------------------------------------------------------------------- */
+.ag-server-rail {
+  width: var(--rail-w);
+  flex: 0 0 var(--rail-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  padding: calc(0.6rem + env(safe-area-inset-top, 0px)) 0 calc(0.65rem + env(safe-area-inset-bottom, 0px));
+  background-color: var(--bg-canvas);
+  border-right: 1px solid var(--border-subtle);
+  z-index: 22;
+  user-select: none;
+}
+
+.ag-rail-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.42rem;
+  flex-shrink: 0;
+}
+
+.ag-rail-divider {
+  width: 26px;
+  height: 1px;
+  background-color: var(--border-default);
+  flex-shrink: 0;
+  margin: 0.1rem 0;
+}
+
+.ag-rail-servers {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.44rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding: 0.1rem 0 0.4rem;
+}
+
+.ag-rail-servers::-webkit-scrollbar {
+  display: none;
+}
+
+.ag-rail-slot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  flex-shrink: 0;
+}
+
+.ag-rail-item {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  transition:
+    border-radius var(--dur-med) var(--ease-spring),
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-rail-item:hover {
+  border-radius: 11px;
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background-color: var(--bg-subtle);
+}
+
+.ag-rail-item:active {
+  transform: translateY(1px);
+}
+
+.ag-rail-pill {
+  position: absolute;
+  left: -10px;
+  top: 50%;
+  width: 3px;
+  height: 0;
+  border-radius: 0 3px 3px 0;
+  background-color: var(--accent);
+  transform: translateY(-50%);
+  opacity: 0;
+  transition:
+    height var(--dur-med) var(--ease-spring),
+    opacity var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-rail-item:hover .ag-rail-pill {
+  height: 14px;
+  opacity: 0.7;
+}
+
+.ag-rail-item.active .ag-rail-pill {
+  height: 24px;
+  opacity: 1;
+}
+
+/* Geo Radio button */
+.ag-rail-geo.active {
+  border-radius: 11px;
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+  box-shadow: var(--accent-glow);
+}
+
+/* Encrypted DMs button */
+.ag-rail-dm:hover {
+  color: var(--dm-accent);
+  border-color: color-mix(in srgb, var(--dm-accent) 45%, transparent);
+}
+
+.ag-rail-dm.active {
+  border-radius: 11px;
+  color: var(--dm-accent);
+  background-color: var(--dm-soft);
+  border-color: color-mix(in srgb, var(--dm-accent) 55%, transparent);
+}
+
+.ag-rail-dm.active .ag-rail-pill,
+.ag-rail-dm:hover .ag-rail-pill {
+  background-color: var(--dm-accent);
+}
+
+/* Joined Server squircle */
+.ag-rail-server {
+  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 14%, var(--bg-elevated));
+  border-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 32%, var(--border-subtle));
+  color: var(--text-primary);
+}
+
+.ag-rail-server:hover {
+  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 22%, var(--bg-elevated));
+  border-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 56%, transparent);
+}
+
+.ag-rail-server.active {
+  border-radius: 11px;
+  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 26%, var(--bg-elevated));
+  border-color: var(--srv-accent, var(--accent));
+  box-shadow: 0 0 16px color-mix(in srgb, var(--srv-accent, var(--accent)) 24%, transparent);
+}
+
+.ag-rail-server .ag-rail-pill {
+  background-color: var(--srv-accent, var(--accent));
+}
+
+.ag-rail-server-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+  display: block;
+}
+
+.ag-rail-server-emoji {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.ag-rail-server-mono {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/* Corner micro-indicator (E2EE lock or NIP-29 relay dot) */
+.ag-rail-kind-dot {
+  position: absolute;
+  bottom: -3px;
+  right: -3px;
+  width: 15px;
+  height: 15px;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--bg-canvas);
+}
+
+.ag-rail-kind-dot.e2ee {
+  background-color: var(--dm-accent);
+  color: #ffffff;
+}
+
+.ag-rail-kind-dot.nip29 {
+  background-color: var(--mesh-accent);
+  color: #06131c;
+}
+
+/* Top-right unread / mention pills on Rail */
+.ag-rail-badge {
+  position: absolute;
+  top: -4px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  border: 2px solid var(--bg-canvas);
+  font-size: 9px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.ag-rail-badge-dm {
+  background-color: var(--dm-accent);
+  color: #ffffff;
+}
+
+.ag-rail-badge-unread {
+  background-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+.ag-rail-badge-mention {
+  background-color: var(--status-danger);
+  color: #ffffff;
+}
+
+/* Add / Explore Server '+' button */
+.ag-rail-add {
+  background-color: transparent;
+  border: 1px dashed var(--border-strong);
+  color: var(--text-muted);
+}
+
+.ag-rail-add:hover {
+  color: var(--accent);
+  border-style: solid;
+  border-color: var(--border-accent);
+  background-color: var(--accent-soft);
+}
+
+/* --------------------------------------------------------------------------
+   Server Sidebar (Swaps into .ag-sidebar slot when a Server is active)
+   -------------------------------------------------------------------------- */
+.ag-srv-side-header {
+  flex: 0 0 auto;
+  padding: 0.68rem 0.72rem 0.6rem;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--srv-accent, var(--accent)) 8%, var(--bg-surface)) 0%,
+    var(--bg-surface) 100%
+  );
+}
+
+.ag-srv-side-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.ag-srv-side-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 700;
+  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 18%, var(--bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--srv-accent, var(--accent)) 45%, transparent);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.ag-srv-side-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-srv-side-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.ag-srv-side-name {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.ag-srv-side-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.22rem;
+}
+
+.ag-srv-side-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.14rem;
+  flex-shrink: 0;
+}
+
+.ag-srv-side-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.ag-srv-side-desc {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.38;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ag-srv-relay-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  max-width: 100%;
+  padding: 0.14rem 0.42rem;
+  border-radius: var(--radius-xs);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.ag-srv-add-ch-trigger {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  transition:
+    color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-srv-add-ch-trigger:hover {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-srv-inline-add {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.25rem 0.45rem;
+}
+
+.ag-srv-inline-add .ag-input {
+  height: 30px;
+}
+
+.ag-srv-mini-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-srv-quick-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  padding: 0.2rem 0.15rem;
+}
+
+.ag-srv-nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  width: 100%;
+  padding: 0.44rem 0.55rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition:
+    color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-srv-nav-btn:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+  border-color: var(--border-default);
+}
+
+/* --------------------------------------------------------------------------
+   Server Hub Modal & Server Settings Modal
+   -------------------------------------------------------------------------- */
+.ag-srv-modal {
+  width: min(100%, 548px);
+  max-height: min(90dvh, 720px);
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: ag-scale-in var(--dur-med) var(--ease-spring);
+}
+
+.ag-srv-modal-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.95rem 1rem 0.65rem;
+}
+
+.ag-srv-modal-title-group {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+}
+
+.ag-srv-modal-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+
+.ag-srv-modal-sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ag-srv-hub-tabs,
+.ag-srv-settings-tabs {
+  margin: 0 1rem 0.7rem;
+  flex: 0 0 auto;
+}
+
+.ag-srv-hub-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.34rem;
+}
+
+.ag-srv-settings-tabs button {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ag-srv-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 1rem 1rem;
+  overscroll-behavior-y: contain;
+}
+
+.ag-srv-form,
+.ag-srv-settings-stack,
+.ag-srv-explore {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.ag-srv-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* 3-Card Mode Picker */
+.ag-srv-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.ag-srv-mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.28rem;
+  padding: 0.58rem 0.6rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-srv-mode-card:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-hover);
+}
+
+.ag-srv-mode-card.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-srv-mode-card.active.e2ee {
+  background-color: var(--dm-soft);
+  border-color: color-mix(in srgb, var(--dm-accent) 55%, transparent);
+}
+
+.ag-srv-mode-card.active.nip29 {
+  background-color: var(--mesh-soft);
+  border-color: color-mix(in srgb, var(--mesh-accent) 55%, transparent);
+}
+
+.ag-srv-mode-top {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-srv-mode-card.active .ag-srv-mode-top {
+  color: var(--accent);
+}
+
+.ag-srv-mode-card.active.e2ee .ag-srv-mode-top {
+  color: var(--dm-accent);
+}
+
+.ag-srv-mode-card.active.nip29 .ag-srv-mode-top {
+  color: var(--mesh-accent);
+}
+
+.ag-srv-mode-desc {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+/* Icon & Color Customizer */
+.ag-srv-customize-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 0.7rem;
+}
+
+.ag-emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.26rem;
+}
+
+.ag-emoji-pill {
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-emoji-pill:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+
+.ag-emoji-pill.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.36rem;
+  align-items: center;
+}
+
+.ag-color-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #07100c;
+  transition: transform 80ms ease, box-shadow var(--dur-fast) ease;
+}
+
+.ag-color-swatch:hover {
+  transform: scale(1.08);
+}
+
+.ag-color-swatch.active {
+  border-color: var(--text-primary);
+  box-shadow: 0 0 0 2px var(--bg-surface);
+}
+
+/* Editable channel chips */
+.ag-srv-edit-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-default);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ag-srv-chip-rm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: var(--radius-full);
+  color: var(--text-muted);
+}
+
+.ag-srv-chip-rm:hover {
+  color: var(--status-danger);
+  background-color: var(--status-danger-soft);
+}
+
+/* NIP-29 Creation Options */
+.ag-srv-nip29-create-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.ag-srv-preset-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.ag-srv-inline-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.ag-srv-check-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.ag-srv-check-pill input {
+  accent-color: var(--accent);
+}
+
+/* Decoded Invite Preview Card */
+.ag-srv-invite-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.72rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid color-mix(in srgb, var(--srv-accent, var(--accent)) 45%, var(--border-subtle));
+}
+
+.ag-srv-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.ag-srv-preview-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ag-srv-preview-inviter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.ag-srv-tiny-avatar {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+}
+
+/* NIP-29 Explore List */
+.ag-srv-explore-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+  max-height: 310px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.ag-srv-group-card {
+  display: flex;
+  align-items: center;
+  gap: 0.62rem;
+  padding: 0.58rem 0.65rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  transition: border-color var(--dur-fast) ease;
+}
+
+.ag-srv-group-card:hover {
+  border-color: var(--border-default);
+}
+
+.ag-srv-group-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.ag-srv-group-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-srv-group-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.ag-srv-group-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.ag-srv-group-name {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-srv-group-id {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.ag-srv-group-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.24rem;
+}
+
+.ag-srv-group-about {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Metadata Edit Form inside Settings */
+.ag-srv-meta-inputs {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 0.4rem;
+}
+
+.ag-srv-icon-input {
+  text-align: center;
+  font-size: 17px;
+  padding: 0;
+}
+
+.ag-srv-meta-save-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* --------------------------------------------------------------------------
+   Server Info Panel (Right Inspector Tab)
+   -------------------------------------------------------------------------- */
+.ag-srv-info-hero {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.ag-srv-info-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: 700;
+  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 18%, var(--bg-input));
+  border: 1px solid color-mix(in srgb, var(--srv-accent, var(--accent)) 48%, transparent);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.ag-srv-info-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-srv-info-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.24rem;
+}
+
+.ag-srv-info-name {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.25;
+}
+
+.ag-srv-info-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.ag-srv-active-chan {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  font-size: 11.5px;
+  color: var(--text-primary);
+}
+
+.ag-srv-info-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.36rem;
+}
+
+.ag-srv-security-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.42rem;
+  padding: 0.44rem 0.55rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.ag-srv-security-note svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--mesh-accent);
+}
+
+.ag-srv-member-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* 3-tab Inspector mode when viewing a Server (Geo Peers & Notes hidden) */
+.ag-inspector-tabs.ag-inspector-tabs-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ag-inspector-tabs.ag-inspector-tabs-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+/* --------------------------------------------------------------------------
+   Mobile Responsive Rail Transformation (< 768px)
+   Transforms the Server Rail into a sleek horizontal top strip inside
+   the slide-over left navigation drawer so mobile chat keeps full 390px width.
+   -------------------------------------------------------------------------- */
+@media (max-width: 767px) {
+  .ag-server-rail {
+    width: 100%;
+    flex: 0 0 auto;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.42rem;
+    padding: calc(0.42rem + env(safe-area-inset-top, 0px)) 0.65rem 0.35rem;
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .ag-rail-group {
+    flex-direction: row;
+    gap: 0.38rem;
+    padding: 6px 0 11px;
+  }
+
+  .ag-rail-divider {
+    width: 1px;
+    height: 24px;
+    margin: 0 0.08rem 4px;
+  }
+
+  .ag-rail-servers {
+    flex-direction: row;
+    width: auto;
+    height: auto;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 6px 4px 11px;
+    gap: 0.42rem;
+  }
+
+  .ag-rail-slot {
+    width: auto;
+  }
+
+  .ag-rail-item {
+    width: 36px;
+    height: 36px;
+    border-radius: 11px;
+  }
+
+  .ag-rail-pill {
+    left: 50%;
+    top: auto;
+    bottom: -8px;
+    width: 0;
+    height: 3px;
+    border-radius: 3px 3px 0 0;
+    transform: translateX(-50%);
+  }
+
+  .ag-rail-item:hover .ag-rail-pill {
+    width: 12px;
+    height: 3px;
+  }
+
+  .ag-rail-item.active .ag-rail-pill {
+    width: 20px;
+    height: 3px;
+  }
+
+  .ag-srv-mode-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ag-srv-customize-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ag-srv-modal {
+    border-radius: var(--radius-md);
+    max-height: 92dvh;
+  }
+
+  /* iOS Safari 16px input zoom guard */
+  .ag-srv-modal .ag-input,
+  .ag-srv-modal .ag-textarea,
+  .ag-server-sidebar .ag-input {
+    font-size: 16px;
+  }
+}

@@ -6,6 +6,7 @@ import './styles/base.css'
 import './styles/layout.css'
 import './styles/components.css'
 import './styles/panels.css'
+import './styles/servers.css'
 import App from './App.tsx'
 
 createRoot(document.getElementById('root')!).render(

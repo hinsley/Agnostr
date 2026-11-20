@@ -1,22 +1,37 @@
 import React, { useEffect, useRef } from 'react'
+import type { CSSProperties } from 'react'
 import {
   ArrowLeft,
   Compass,
   Crosshair,
+  Download,
+  Globe,
   Lock,
   Navigation,
   PanelLeft,
   PanelRight,
   Search,
+  Server,
+  Settings,
+  ShieldCheck,
   Star,
   StickyNote,
   User,
+  UserPlus,
   Users,
   Volume2,
   VolumeX,
 } from 'lucide-react'
 import type { AgnostrEngine, InspectorTab, PeerInfo } from '../types/protocol'
+import type { ServerSettingsTab } from './ServerSettingsModal'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon'
+
+function getServerMonogram(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return 'SV'
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
+  return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
+}
 
 export interface ChannelHeaderProps {
   engine: AgnostrEngine
@@ -32,6 +47,8 @@ export interface ChannelHeaderProps {
   onTuneChannel: (geohash: string) => void
   onLocateMe: () => void
   onInspectPeer: (peer: PeerInfo) => void
+  onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
+  onExport?: (format: 'markdown' | 'json') => void
 }
 
 export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
@@ -48,21 +65,29 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   onTuneChannel,
   onLocateMe,
   onInspectPeer,
+  onOpenServerSettings,
+  onExport,
 }) => {
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
+  const isServer =
+    engine.activeView.type === 'server' &&
+    engine.servers.activeServer !== null &&
+    engine.servers.activeChannel !== null
   const dmThread = engine.activeDmThread
+  const activeServer = engine.servers.activeServer
+  const activeChannel = engine.servers.activeChannel
   const pinned = engine.isChannelPinned(engine.activeGeohash)
   const activeStepRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
-    if (!isDm && activeStepRef.current) {
+    if (!isDm && !isServer && activeStepRef.current) {
       activeStepRef.current.scrollIntoView({
         inline: 'nearest',
         block: 'nearest',
         behavior: 'smooth',
       })
     }
-  }, [engine.activeGeohash, isDm])
+  }, [engine.activeGeohash, isDm, isServer])
 
   const relayStatusClass =
     engine.connectedRelayCount === 0
@@ -73,7 +98,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
 
   // Determine deepest known local geohash if user has GPS lock & current cell is a prefix of it
   const deeperLocalStep = (() => {
-    if (!engine.location.coords || isDm) return null
+    if (!engine.location.coords || isDm || isServer) return null
     const nextLen = engine.cell.precision + 1
     if (nextLen > 8) return null
     const localAtNext = engine.location.localGeohashes[nextLen]
@@ -123,6 +148,15 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                   >
                     {dmThread.peerDisplayHandle}
                   </span>
+                  {engine.isExplicitlyTrusted(dmThread.peerPubkey) && (
+                    <span
+                      className="ag-trusted-shield-icon"
+                      title={`Trusted peer — voice memos from ${dmThread.peerDisplayHandle} are unlocked`}
+                      aria-label="Trusted peer"
+                    >
+                      <ShieldCheck size={13} />
+                    </span>
+                  )}
                   <span className="ag-badge dm">
                     <Lock size={10} />
                     {dmThread.protocol === 'bitchat' ? 'BITCHAT v2' : 'NIP-17 E2EE'}
@@ -132,6 +166,69 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                   End-to-end encrypted · {dmThread.messages.length}{' '}
                   {dmThread.messages.length === 1 ? 'msg' : 'msgs'}
                 </span>
+              </div>
+            </div>
+          ) : isServer && activeServer && activeChannel ? (
+            <div className="ag-dm-header-peer">
+              <div
+                className="ag-srv-header-chip"
+                style={
+                  {
+                    '--srv-accent': activeServer.accentColor || 'var(--accent)',
+                  } as CSSProperties
+                }
+                aria-hidden="true"
+              >
+                {activeServer.picture && /^https?:\/\//i.test(activeServer.picture) ? (
+                  <img
+                    src={activeServer.picture}
+                    alt=""
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : activeServer.icon?.trim() ? (
+                  <span>{activeServer.icon}</span>
+                ) : (
+                  <span className="mono">{getServerMonogram(activeServer.name)}</span>
+                )}
+              </div>
+              <div className="ag-chan-meta">
+                <div className="ag-chan-title-line">
+                  <span className="ag-chan-title-geo">
+                    <span
+                      className="hash"
+                      style={{ color: activeServer.accentColor || 'var(--accent)' }}
+                    >
+                      #
+                    </span>
+                    {activeChannel.name}
+                  </span>
+                  <span className="ag-chan-city ag-desktop-only">· {activeServer.name}</span>
+                  {activeServer.kind === 'nip29' ? (
+                    <span className="ag-badge mesh" title="NIP-29 Relay-Moderated Community">
+                      <Server size={9} />
+                      NIP-29
+                    </span>
+                  ) : activeServer.encrypted ? (
+                    <span
+                      className="ag-badge dm"
+                      title="End-to-end encrypted virtual server (AES-256-GCM)"
+                    >
+                      <Lock size={9} />
+                      E2EE
+                    </span>
+                  ) : (
+                    <span className="ag-badge accent" title="Public Nostr virtual server">
+                      <Globe size={9} />
+                      PUBLIC
+                    </span>
+                  )}
+                </div>
+                {(activeChannel.topic || activeServer.description) && (
+                  <span className="ag-chan-sub">
+                    {activeChannel.topic || activeServer.description}
+                  </span>
+                )}
               </div>
             </div>
           ) : (
@@ -187,7 +284,20 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
 
         {/* Right Header Toolbar */}
         <div className="ag-header-actions">
-          {!isDm && (
+          {engine.strictWhitelistMode && (
+            <button
+              type="button"
+              className={`ag-pill-btn ag-trusted-only-pill ${inspectorOpen && inspectorTab === 'identity' ? 'active' : ''}`}
+              onClick={() => onOpenInspectorTab('identity')}
+              title="Trusted Peers Only mode active — hiding messages from untrusted peers. Click to open Trusted Peers & Safety settings."
+              aria-label="Trusted Peers Only active — open Trusted Peers and Safety settings"
+            >
+              <ShieldCheck size={13} />
+              <span className="mono">TRUSTED ONLY</span>
+            </button>
+          )}
+
+          {!isDm && !isServer && (
             <>
               <button
                 type="button"
@@ -217,6 +327,42 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
             </>
           )}
 
+          {isServer && activeServer && (
+            <>
+              <button
+                type="button"
+                className="ag-pill-btn ag-hide-xs"
+                onClick={() => onOpenServerSettings?.(activeServer.id, 'overview')}
+                title={`Invite peers to ${activeServer.name}`}
+              >
+                <UserPlus size={13} />
+                <span className="ag-desktop-only">Invite</span>
+              </button>
+
+              <button
+                type="button"
+                className="ag-icon-btn ag-hide-xs"
+                onClick={() => onOpenServerSettings?.(activeServer.id, 'overview')}
+                title="Server settings, channels & moderation"
+                aria-label="Server settings"
+              >
+                <Settings size={15} />
+              </button>
+
+              {onExport && (
+                <button
+                  type="button"
+                  className="ag-icon-btn ag-hide-xs"
+                  onClick={() => onExport('markdown')}
+                  title="Export channel transcript (Markdown)"
+                  aria-label="Export channel transcript"
+                >
+                  <Download size={15} />
+                </button>
+              )}
+            </>
+          )}
+
           {isDm && dmThread && (
             <button
               type="button"
@@ -235,6 +381,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                     isTeleported: false,
                     isMeshBridge: false,
                     isBlocked: engine.isPeerBlocked(dmThread.peerPubkey),
+                    isTrusted: engine.isTrusted(dmThread.peerPubkey),
                     messageCount: dmThread.messages.length,
                     channels: [engine.activeGeohash],
                   }
@@ -296,7 +443,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
       </div>
 
       {/* Geohash Precision Zoom Stepper Bar (Channel Mode Only) */}
-      {!isDm && (
+      {!isDm && !isServer && (
         <div className="ag-geozoom-bar" role="navigation" aria-label="Geohash precision zoom">
           <div className="ag-geozoom-steps">
             <span className="ag-geozoom-label">

@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
 import type { GeoMessage, InspectorTab, PeerInfo, ThemeId } from './types/protocol'
+import type { ServerMessage, ServerSummary } from './types/servers'
 import { radioAudio, type SoundCue } from './utils/sound'
+import ServerRail from './components/ServerRail'
 import Sidebar from './components/Sidebar'
+import ServerSidebar from './components/ServerSidebar'
+import ServerHubModal, { type ServerHubTab } from './components/ServerHubModal'
+import ServerSettingsModal, { type ServerSettingsTab } from './components/ServerSettingsModal'
 import ChannelHeader from './components/ChannelHeader'
 import SearchBar from './components/SearchBar'
 import MessageStream from './components/MessageStream'
@@ -19,7 +24,17 @@ const THEME_META_COLORS: Record<ThemeId, string> = {
   daylight: '#F4F5F2',
 }
 
-const ZERO_ARG_COMMANDS = new Set(['/who', '/w', '/help', '/clear', '/notes', '/burn'])
+const ZERO_ARG_COMMANDS = new Set([
+  '/who',
+  '/w',
+  '/help',
+  '/clear',
+  '/notes',
+  '/burn',
+  '/whitelist',
+  '/trusted',
+  '/strict',
+])
 
 function getInitialViewportFlags() {
   if (typeof window === 'undefined') {
@@ -43,10 +58,43 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [searchMatchIdx, setSearchMatchIdx] = useState(0)
   const [inspectedPeer, setInspectedPeer] = useState<PeerInfo | null>(null)
+  const [serverHubState, setServerHubState] = useState<{ open: boolean; tab: ServerHubTab }>({
+    open: false,
+    tab: 'create',
+  })
+  const [serverSettingsState, setServerSettingsState] = useState<{
+    serverId: string | null
+    tab: ServerSettingsTab
+  }>({
+    serverId: null,
+    tab: 'overview',
+  })
   const [externalDraftToken, setExternalDraftToken] = useState<{ id: number; text: string } | null>(
     null
   )
   const [panicFlash, setPanicFlash] = useState(false)
+
+  const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
+  const isServer =
+    engine.activeView.type === 'server' &&
+    engine.servers.activeServer !== null &&
+    engine.servers.activeChannel !== null
+  const activeServer = engine.servers.activeServer
+  const activeChannel = engine.servers.activeChannel
+  const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
+
+  const settingsServer: ServerSummary | null = useMemo(() => {
+    if (!serverSettingsState.serverId) return null
+    return engine.servers.joinedServers.find((s) => s.id === serverSettingsState.serverId) ?? null
+  }, [serverSettingsState.serverId, engine.servers.joinedServers])
+
+  // Auto-open ServerHubModal on Join tab when `#invite=...` is detected in URL hash
+  const pendingInviteCode = engine.servers.pendingInvite?.rawCode ?? null
+  useEffect(() => {
+    if (pendingInviteCode) {
+      setServerHubState({ open: true, tab: 'join' })
+    }
+  }, [pendingInviteCode])
 
   // Sync theme attribute & browser chrome <meta name="theme-color">
   useEffect(() => {
@@ -63,17 +111,32 @@ export function App() {
     radioAudio.setEnabled(engine.settings.soundEnabled)
   }, [engine.settings.soundEnabled])
 
-  // Sync dynamic document title with active channel or DM
+  // Sync dynamic document title with active channel, DM, or Server channel
   useEffect(() => {
-    const unreadPrefix = engine.totalDmUnread > 0 ? `(${engine.totalDmUnread}) ` : ''
+    const totalUnread = engine.totalDmUnread + engine.servers.totalServerUnread
+    const unreadPrefix = totalUnread > 0 ? `(${totalUnread}) ` : ''
     if (engine.activeView.type === 'dm' && engine.activeDmThread) {
       document.title = `${unreadPrefix}${engine.activeDmThread.peerDisplayHandle} · Agnostr`
+    } else if (
+      engine.activeView.type === 'server' &&
+      engine.servers.activeServer &&
+      engine.servers.activeChannel
+    ) {
+      document.title = `${unreadPrefix}#${engine.servers.activeChannel.name} · ${engine.servers.activeServer.name} · Agnostr`
     } else {
       document.title = `${unreadPrefix}#${engine.activeGeohash} · Agnostr`
     }
-  }, [engine.activeView, engine.activeGeohash, engine.activeDmThread, engine.totalDmUnread])
+  }, [
+    engine.activeView,
+    engine.activeGeohash,
+    engine.activeDmThread,
+    engine.servers.activeServer,
+    engine.servers.activeChannel,
+    engine.totalDmUnread,
+    engine.servers.totalServerUnread,
+  ])
 
-  // Subtle audio cue when fresh live messages arrive
+  // Subtle audio cue when fresh live geohash messages arrive
   const lastMsgIdRef = useRef<string | null>(null)
   const lastChannelRef = useRef<string>(engine.activeGeohash)
   useEffect(() => {
@@ -98,6 +161,38 @@ export function App() {
     }
   }, [engine.messages, engine.activeGeohash, engine.identity.nickname, engine.identity.activePubkey])
 
+  // Subtle audio cue when fresh live Server messages arrive
+  const activeServerStreamKey =
+    isServer && activeServer && activeChannel ? `${activeServer.id}:${activeChannel.id}` : ''
+  const lastSrvMsgIdRef = useRef<string | null>(null)
+  const lastSrvKeyRef = useRef<string>(activeServerStreamKey)
+  useEffect(() => {
+    const list = engine.servers.messages
+    if (lastSrvKeyRef.current !== activeServerStreamKey) {
+      lastSrvKeyRef.current = activeServerStreamKey
+      lastSrvMsgIdRef.current = list.length ? list[list.length - 1].id : null
+      return
+    }
+    if (!activeServerStreamKey || !list.length) return
+    const newest = list[list.length - 1]
+    if (newest.id === lastSrvMsgIdRef.current) return
+    lastSrvMsgIdRef.current = newest.id
+
+    const nowSec = Math.floor(Date.now() / 1000)
+    if (!newest.isOwn && !newest.isSystem && nowSec - newest.createdAt <= 30) {
+      const nickLower = engine.identity.nickname.toLowerCase()
+      const mentionsUs =
+        newest.mentions.includes(engine.identity.masterPubkey) ||
+        (nickLower.length > 0 && newest.content.toLowerCase().includes(`@${nickLower}`))
+      radioAudio.play(mentionsUs ? 'mention' : 'receive')
+    }
+  }, [
+    engine.servers.messages,
+    activeServerStreamKey,
+    engine.identity.nickname,
+    engine.identity.masterPubkey,
+  ])
+
   // Audio cue on incoming unread DM
   const prevDmUnreadRef = useRef(engine.totalDmUnread)
   useEffect(() => {
@@ -107,7 +202,7 @@ export function App() {
     prevDmUnreadRef.current = engine.totalDmUnread
   }, [engine.totalDmUnread])
 
-  // Detect identity panic wipe (masterPubkey changes while messages cleared) for subtle flash
+  // Detect identity panic wipe (masterPubkey changes) for subtle flash & modal teardown
   const prevMasterPkRef = useRef(engine.identity.masterPubkey)
   useEffect(() => {
     if (
@@ -115,6 +210,7 @@ export function App() {
       engine.identity.masterPubkey &&
       prevMasterPkRef.current !== engine.identity.masterPubkey
     ) {
+      setServerSettingsState({ serverId: null, tab: 'overview' })
       setPanicFlash(true)
       const t = window.setTimeout(() => setPanicFlash(false), 700)
       prevMasterPkRef.current = engine.identity.masterPubkey
@@ -123,13 +219,23 @@ export function App() {
     prevMasterPkRef.current = engine.identity.masterPubkey
   }, [engine.identity.masterPubkey])
 
-  // Compute in-stream search matches
+  // Compute in-stream search matches across Geohash, DM, and Server streams
   const searchMatchIds = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
     if (!q) return []
     if (engine.activeView.type === 'dm' && engine.activeDmThread) {
       return engine.activeDmThread.messages
         .filter((m) => m.content.toLowerCase().includes(q))
+        .map((m) => m.id)
+    }
+    if (engine.activeView.type === 'server') {
+      return engine.servers.messages
+        .filter(
+          (m) =>
+            m.content.toLowerCase().includes(q) ||
+            m.nickname.toLowerCase().includes(q) ||
+            m.displayHandle.toLowerCase().includes(q)
+        )
         .map((m) => m.id)
     }
     return engine.messages
@@ -140,16 +246,29 @@ export function App() {
           m.displayHandle.toLowerCase().includes(q)
       )
       .map((m) => m.id)
-  }, [searchQuery, engine.activeView, engine.activeDmThread, engine.messages])
+  }, [searchQuery, engine.activeView, engine.activeDmThread, engine.servers.messages, engine.messages])
 
   useEffect(() => {
     setSearchMatchIdx(searchMatchIds.length > 0 ? searchMatchIds.length - 1 : 0)
-  }, [searchQuery, engine.activeGeohash, engine.activeView.type, searchMatchIds.length])
+  }, [
+    searchQuery,
+    engine.activeGeohash,
+    engine.activeView.type,
+    activeServerStreamKey,
+    searchMatchIds.length,
+  ])
 
   const activeSearchMessageId =
     searchOpen && searchMatchIds.length > 0
       ? searchMatchIds[Math.min(searchMatchIdx, searchMatchIds.length - 1)]
       : null
+
+  const closeServerHub = useCallback(() => {
+    setServerHubState((prev) => ({ ...prev, open: false }))
+    if (engine.servers.pendingInvite) {
+      engine.servers.clearPendingInvite()
+    }
+  }, [engine.servers])
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -178,6 +297,10 @@ export function App() {
       if (e.key === 'Escape') {
         if (cmdkOpen) {
           setCmdkOpen(false)
+        } else if (serverSettingsState.serverId) {
+          setServerSettingsState({ serverId: null, tab: 'overview' })
+        } else if (serverHubState.open) {
+          closeServerHub()
         } else if (inspectedPeer) {
           setInspectedPeer(null)
         } else if (searchOpen) {
@@ -192,7 +315,16 @@ export function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [cmdkOpen, inspectedPeer, searchOpen, inspectorOpen, sidebarOpen])
+  }, [
+    cmdkOpen,
+    serverSettingsState.serverId,
+    serverHubState.open,
+    closeServerHub,
+    inspectedPeer,
+    searchOpen,
+    inspectorOpen,
+    sidebarOpen,
+  ])
 
   const playSound = useCallback((cue: SoundCue) => {
     radioAudio.play(cue)
@@ -214,6 +346,91 @@ export function App() {
     },
     [engine]
   )
+
+  const handleSelectGeoRadio = useCallback(() => {
+    engine.tuneGeohash(engine.activeGeohash)
+    if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+      setSidebarOpen(true)
+    }
+  }, [engine])
+
+  const handleSelectDms = useCallback(() => {
+    if (engine.dmThreads.length > 0) {
+      const latest = engine.dmThreads[0]
+      engine.openDmThread(latest.peerPubkey, latest.peerNickname)
+      if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+        setSidebarOpen(true)
+      }
+    } else {
+      engine.tuneGeohash(engine.activeGeohash)
+      setSidebarOpen(true)
+      engine.pushToast(
+        'info',
+        'No encrypted DMs yet',
+        'Click any peer handle or open the Peers tab to start an E2EE DM.'
+      )
+    }
+  }, [engine])
+
+  const handleSelectServer = useCallback(
+    (serverId: string) => {
+      engine.servers.selectServer(serverId)
+      if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+        setSidebarOpen(true)
+      }
+    },
+    [engine.servers]
+  )
+
+  const handleSelectServerChannel = useCallback(
+    (serverId: string, channelId: string) => {
+      engine.servers.selectChannel(serverId, channelId)
+      radioAudio.play('tune')
+      if (typeof window !== 'undefined' && window.innerWidth < 768) {
+        setSidebarOpen(false)
+      }
+      if (typeof window !== 'undefined' && window.innerWidth < 1100) {
+        setInspectorOpen(false)
+      }
+    },
+    [engine.servers]
+  )
+
+  const handleOpenServerHub = useCallback((initialTab: ServerHubTab = 'create') => {
+    setServerHubState({ open: true, tab: initialTab })
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setSidebarOpen(false)
+    }
+  }, [])
+
+  const handleOpenServerSettings = useCallback(
+    (serverId: string, initialTab: ServerSettingsTab = 'overview') => {
+      setServerSettingsState({ serverId, tab: initialTab })
+      if (typeof window !== 'undefined' && window.innerWidth < 768) {
+        setSidebarOpen(false)
+      }
+      if (typeof window !== 'undefined' && window.innerWidth < 1100) {
+        setInspectorOpen(false)
+      }
+    },
+    []
+  )
+
+  const handleJoinedServer = useCallback(
+    (server: ServerSummary) => {
+      engine.servers.selectServer(server.id)
+      closeServerHub()
+      if (typeof window !== 'undefined' && window.innerWidth < 768) {
+        setSidebarOpen(false)
+      }
+    },
+    [engine.servers, closeServerHub]
+  )
+
+  const handleLeftServer = useCallback(() => {
+    setServerSettingsState({ serverId: null, tab: 'overview' })
+    engine.tuneGeohash(engine.activeGeohash)
+  }, [engine])
 
   const handleOpenDm = useCallback(
     (pubkey: string, nickname?: string) => {
@@ -250,23 +467,44 @@ export function App() {
       )
       if (matched) {
         setInspectedPeer(matched)
-      } else {
-        handleMentionPeer(mention)
+        return
       }
+      const matchedMember = engine.servers.members.find(
+        (m) =>
+          m.displayHandle.toLowerCase() === `@${lower}` ||
+          m.nickname.toLowerCase() === lower ||
+          m.displayHandle.toLowerCase().includes(lower)
+      )
+      if (matchedMember) {
+        setInspectedPeer({
+          pubkey: matchedMember.pubkey,
+          npub: matchedMember.npub,
+          nickname: matchedMember.nickname,
+          displayHandle: matchedMember.displayHandle,
+          lastSeenAt: Math.floor(Date.now() / 1000),
+          isOnline: true,
+          isSelf: matchedMember.isSelf,
+          isTeleported: false,
+          isMeshBridge: false,
+          isBlocked: engine.isPeerBlocked(matchedMember.pubkey),
+          isTrusted: engine.isTrusted(matchedMember.pubkey),
+          messageCount: 1,
+          channels: activeChannel ? [activeChannel.name] : [],
+        })
+        return
+      }
+      handleMentionPeer(mention)
     },
-    [engine.peers, handleMentionPeer]
+    [engine, activeChannel, handleMentionPeer]
   )
 
-  const handleOpenInspectorTab = useCallback(
-    (tab: InspectorTab) => {
-      setInspectorTab(tab)
-      setInspectorOpen(true)
-      if (typeof window !== 'undefined' && window.innerWidth < 768) {
-        setSidebarOpen(false)
-      }
-    },
-    []
-  )
+  const handleOpenInspectorTab = useCallback((tab: InspectorTab) => {
+    setInspectorTab(tab)
+    setInspectorOpen(true)
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setSidebarOpen(false)
+    }
+  }, [])
 
   const handleToggleSound = useCallback(() => {
     const next = !engine.settings.soundEnabled
@@ -303,6 +541,22 @@ export function App() {
     [engine]
   )
 
+  const handleReplyServer = useCallback(
+    (msg: ServerMessage) => {
+      engine.servers.setReplyingTo(msg)
+      setExternalDraftToken((prev) => ({ id: (prev?.id ?? 0) + 1, text: '' }))
+    },
+    [engine.servers]
+  )
+
+  const handleReactServer = useCallback(
+    (msg: ServerMessage, emoji: string) => {
+      radioAudio.play('click')
+      void engine.servers.sendReaction(msg, emoji)
+    },
+    [engine.servers]
+  )
+
   const handleRunCommand = useCallback(
     (cmdLine: string) => {
       const normalized = cmdLine.trim().toLowerCase()
@@ -317,7 +571,54 @@ export function App() {
 
   const handleExport = useCallback(
     (format: 'markdown' | 'json') => {
-      const file = engine.exportTranscript(format)
+      let file: { filename: string; content: string; mimeType: string }
+      if (isServer && activeServer && activeChannel) {
+        const slug = `${activeServer.name}-${activeChannel.name}`
+          .toLowerCase()
+          .replace(/[^a-z0-9-]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+        const stamp = new Date().toISOString().slice(0, 10)
+        if (format === 'json') {
+          file = {
+            filename: `agnostr-server-${slug}-${stamp}.json`,
+            mimeType: 'application/json;charset=utf-8',
+            content: JSON.stringify(
+              {
+                server: {
+                  id: activeServer.id,
+                  kind: activeServer.kind,
+                  name: activeServer.name,
+                  encrypted: activeServer.encrypted,
+                },
+                channel: activeChannel,
+                exportedAt: new Date().toISOString(),
+                messages: engine.servers.messages,
+              },
+              null,
+              2
+            ),
+          }
+        } else {
+          const lines = [
+            `# ${activeServer.name} — #${activeChannel.name}`,
+            `Exported ${new Date().toISOString()} (${activeServer.kind === 'nip29' ? 'NIP-29' : activeServer.encrypted ? 'E2EE Virtual Server' : 'Public Virtual Server'})`,
+            '',
+            ...engine.servers.messages.map((m) => {
+              const ts = new Date(m.createdAt * 1000).toISOString()
+              const voice = m.voiceMemo ? ` [Voice memo: ${m.voiceMemo.url}]` : ''
+              return `- **${m.displayHandle}** (${ts}): ${m.content}${voice}`
+            }),
+          ]
+          file = {
+            filename: `agnostr-server-${slug}-${stamp}.md`,
+            mimeType: 'text/markdown;charset=utf-8',
+            content: lines.join('\n'),
+          }
+        }
+      } else {
+        file = engine.exportTranscript(format)
+      }
+
       try {
         const blob = new Blob([file.content], { type: file.mimeType })
         const url = URL.createObjectURL(blob)
@@ -333,12 +634,12 @@ export function App() {
         engine.pushToast('error', 'Failed to export transcript')
       }
     },
-    [engine]
+    [engine, isServer, activeServer, activeChannel]
   )
 
   return (
     <div className={`ag-app ${panicFlash ? 'ag-panic-active' : ''}`}>
-      {/* Mobile Left Sidebar Scrim */}
+      {/* Mobile Left Navigation Scrim */}
       {sidebarOpen && (
         <div
           className="ag-backdrop ag-mobile-only"
@@ -347,20 +648,54 @@ export function App() {
         />
       )}
 
-      {/* Left Frequency & Global Pulse Rail */}
-      <Sidebar
-        engine={engine}
-        open={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-        onTuneChannel={handleTuneChannel}
-        onOpenDm={handleOpenDm}
-        onOpenCommandPalette={() => setCmdkOpen(true)}
-        onOpenInspectorTab={handleOpenInspectorTab}
-        onLocateMe={() => void handleLocateMe()}
-      />
+      {/* Left Workspace Rail + Channel / Server Sidebar Shell */}
+      <div className={`ag-nav-shell ${sidebarOpen ? '' : 'drawer-closed'}`}>
+        <ServerRail
+          mode={engine.activeView.type}
+          activeServerId={activeServer?.id ?? null}
+          joinedServers={engine.servers.joinedServers}
+          totalDmUnread={engine.totalDmUnread}
+          onSelectGeoRadio={handleSelectGeoRadio}
+          onSelectDms={handleSelectDms}
+          onSelectServer={handleSelectServer}
+          onOpenHub={handleOpenServerHub}
+          onPlaySound={playSound}
+        />
+
+        {isServer && activeServer && activeChannel ? (
+          <ServerSidebar
+            engine={engine}
+            servers={engine.servers}
+            server={activeServer}
+            activeChannelId={activeChannel.id}
+            open={sidebarOpen}
+            onClose={() => setSidebarOpen(false)}
+            onSelectChannel={handleSelectServerChannel}
+            onBackToGeoRadio={handleSelectGeoRadio}
+            onOpenCommandPalette={() => setCmdkOpen(true)}
+            onOpenInspectorTab={handleOpenInspectorTab}
+            onOpenHub={handleOpenServerHub}
+            onOpenSettings={handleOpenServerSettings}
+            onPlaySound={playSound}
+          />
+        ) : (
+          <Sidebar
+            engine={engine}
+            open={sidebarOpen}
+            onClose={() => setSidebarOpen(false)}
+            onTuneChannel={handleTuneChannel}
+            onOpenDm={handleOpenDm}
+            onOpenCommandPalette={() => setCmdkOpen(true)}
+            onOpenInspectorTab={handleOpenInspectorTab}
+            onLocateMe={() => void handleLocateMe()}
+          />
+        )}
+      </div>
 
       {/* Center Stage */}
-      <main className={`ag-main ${engine.activeView.type === 'dm' ? 'dm-mode' : ''}`}>
+      <main
+        className={`ag-main ${isDm ? 'dm-mode' : isServerE2ee ? 'server-e2ee-mode' : ''}`}
+      >
         <ChannelHeader
           engine={engine}
           sidebarOpen={sidebarOpen}
@@ -380,6 +715,8 @@ export function App() {
           onTuneChannel={handleTuneChannel}
           onLocateMe={() => void handleLocateMe()}
           onInspectPeer={setInspectedPeer}
+          onOpenServerSettings={handleOpenServerSettings}
+          onExport={handleExport}
         />
 
         <SearchBar
@@ -410,6 +747,8 @@ export function App() {
           activeSearchMessageId={activeSearchMessageId}
           onReply={handleReply}
           onReact={handleReact}
+          onReplyServer={handleReplyServer}
+          onReactServer={handleReactServer}
           onInspectPeer={setInspectedPeer}
           onStartDm={handleOpenDm}
           onTuneChannel={handleTuneChannel}
@@ -417,16 +756,17 @@ export function App() {
           onLocateMe={() => void handleLocateMe()}
           onOpenRadar={() => handleOpenInspectorTab('radar')}
           onRunHelpCommand={() => void engine.sendInput('/help')}
+          onOpenServerSettings={handleOpenServerSettings}
         />
 
         <Composer
           engine={engine}
           externalDraftToken={externalDraftToken}
-          onSent={(isDm) => radioAudio.play(isDm ? 'dm' : 'send')}
+          onSent={(isEncrypted) => radioAudio.play(isEncrypted ? 'dm' : 'send')}
         />
       </main>
 
-      {/* Right Tabbed Inspector Drawer (Geo Radar | Peers | Notes | Relays | Identity) */}
+      {/* Right Tabbed Inspector Drawer (Geo Radar/Server | Peers | Notes | Relays | Identity) */}
       <InspectorDrawer
         engine={engine}
         activeTab={inspectorTab}
@@ -437,6 +777,8 @@ export function App() {
         onMentionPeer={handleMentionPeer}
         onStartDm={handleOpenDm}
         onTuneChannel={handleTuneChannel}
+        onOpenServerSettings={handleOpenServerSettings}
+        onLeftServer={handleLeftServer}
         onPlaySound={playSound}
       />
 
@@ -449,12 +791,35 @@ export function App() {
         onMentionPeer={handleMentionPeer}
       />
 
+      {/* Create / Join / Explore Servers Hub Modal */}
+      <ServerHubModal
+        open={serverHubState.open}
+        initialTab={serverHubState.tab}
+        servers={engine.servers}
+        onClose={closeServerHub}
+        onJoinedServer={handleJoinedServer}
+        onPlaySound={playSound}
+      />
+
+      {/* Server Settings, Invite & Moderation Modal */}
+      <ServerSettingsModal
+        server={settingsServer}
+        initialTab={serverSettingsState.tab}
+        engine={engine}
+        servers={engine.servers}
+        onClose={() => setServerSettingsState({ serverId: null, tab: 'overview' })}
+        onLeftServer={handleLeftServer}
+        onPlaySound={playSound}
+      />
+
       {/* Spotlight Command Palette (Cmd+K) */}
       <CommandPalette
         open={cmdkOpen}
         engine={engine}
         onClose={() => setCmdkOpen(false)}
         onTuneChannel={handleTuneChannel}
+        onSelectServerChannel={handleSelectServerChannel}
+        onOpenServerHub={handleOpenServerHub}
         onLocateMe={() => void handleLocateMe()}
         onOpenInspectorTab={handleOpenInspectorTab}
         onToggleSound={handleToggleSound}

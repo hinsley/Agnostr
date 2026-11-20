@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { DmMessage, DmProtocol, DmThread } from '../types/protocol.ts'
+import type { DmMessage, DmProtocol, DmThread, VoiceMemoAttachment } from '../types/protocol.ts'
 import { KIND_GIFT_WRAP, verifyEventCached } from '../lib/bitchatProtocol.ts'
-import { createEncryptedDmEvent, decryptGiftWrapEvent } from '../lib/dmCrypto.ts'
+import {
+  createEncryptedDmEvent,
+  decodeDmVoicePayload,
+  decryptGiftWrapEvent,
+  encodeDmVoicePayload,
+} from '../lib/dmCrypto.ts'
 import {
   bytesToHex,
   encodeNpubSafe,
@@ -12,6 +17,7 @@ import {
 import type { PresenceTracker } from '../lib/presenceService.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 import { loadDmThreads, saveDmThreads } from '../lib/storage.ts'
+import { formatVoiceDuration } from '../lib/voiceRecorder.ts'
 
 const DM_LOOKBACK_SEC = 3 * 24 * 60 * 60 // 3 days to account for NIP-59 ±2d randomized timestamps
 
@@ -147,6 +153,14 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
             if (!decrypted.content.trim()) return
 
+            const decodedVoice = decodeDmVoicePayload(decrypted.content)
+            const displayContent = decodedVoice ? decodedVoice.caption : decrypted.content
+            const previewText = decodedVoice
+              ? decodedVoice.caption
+                ? `🎤 ${decodedVoice.caption}`
+                : `🎤 Voice memo (${formatVoiceDuration(decodedVoice.voiceMemo.durationSec)})`
+              : decrypted.content.slice(0, 96)
+
             const nick = presenceTracker.getNickname(senderPk) || `anon${senderPk.slice(-4)}`
             const handle = formatDisplayHandle(nick, senderPk)
             const isViewing = activeDmPeerRef.current?.toLowerCase() === senderPk
@@ -155,10 +169,11 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               id: decrypted.id,
               peerPubkey: senderPk,
               senderPubkey: senderPk,
-              content: decrypted.content,
+              content: displayContent,
               createdAt: decrypted.createdAt,
               isOwn: false,
               protocol: decrypted.protocol,
+              voiceMemo: decodedVoice?.voiceMemo,
               deliveryStatus: 'delivered',
             }
 
@@ -178,7 +193,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                   messages: nextMsgs,
                   unreadCount: isViewing ? 0 : existing.unreadCount + 1,
                   lastMessageAt: Math.max(existing.lastMessageAt, newMsg.createdAt),
-                  lastPreview: newMsg.content.slice(0, 96),
+                  lastPreview: previewText.slice(0, 96),
                 }
                 const copy = [...prev]
                 copy[existingIdx] = updated
@@ -195,13 +210,13 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                 messages: [newMsg],
                 unreadCount: isViewing ? 0 : 1,
                 lastMessageAt: newMsg.createdAt,
-                lastPreview: newMsg.content.slice(0, 96),
+                lastPreview: previewText.slice(0, 96),
               }
               return [created, ...prev].sort((a, b) => b.lastMessageAt - a.lastMessageAt)
             })
 
             if (added && !isViewing) {
-              onIncomingRef.current?.(handle, newMsg.content.slice(0, 80), senderPk)
+              onIncomingRef.current?.(handle, previewText.slice(0, 80), senderPk)
             }
           })
         },
@@ -377,6 +392,126 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     [pool, threads, identityManager, activeGeohash, presenceTracker, dmRelays, onError]
   )
 
+  const sendDirectVoiceMemo = useCallback(
+    async (
+      peerPubkey: string,
+      voiceMemo: VoiceMemoAttachment,
+      caption?: string,
+      protocolOverride?: DmProtocol
+    ): Promise<boolean> => {
+      if (!pool) return false
+      const pk = peerPubkey.toLowerCase()
+      const cleanCaption = caption?.trim() ?? ''
+      const wireContent = encodeDmVoicePayload(voiceMemo, cleanCaption)
+      const previewText = cleanCaption
+        ? `🎤 ${cleanCaption}`
+        : `🎤 Voice memo (${formatVoiceDuration(voiceMemo.durationSec)})`
+
+      const existingThread = threads.find((t) => t.peerPubkey === pk)
+      const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
+      const chosenProtocol: DmProtocol =
+        protocolOverride ??
+        existingThread?.protocol ??
+        (signer.mode === 'extension' ? 'nip17' : 'bitchat')
+
+      const localMsgId = bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
+      const nowSec = Math.floor(Date.now() / 1000)
+
+      const optimistic: DmMessage = {
+        id: localMsgId,
+        peerPubkey: pk,
+        senderPubkey: signer.pubkey,
+        content: cleanCaption,
+        createdAt: nowSec,
+        isOwn: true,
+        protocol: chosenProtocol,
+        voiceMemo,
+        deliveryStatus: 'sending',
+      }
+
+      const nick = existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
+      const handle = formatDisplayHandle(nick, pk)
+
+      setThreads((prev) => {
+        const idx = prev.findIndex((t) => t.peerPubkey === pk)
+        if (idx !== -1) {
+          const updated: DmThread = {
+            ...prev[idx],
+            messages: [...prev[idx].messages, optimistic],
+            lastMessageAt: nowSec,
+            lastPreview: previewText.slice(0, 96),
+            unreadCount: 0,
+          }
+          const copy = [...prev]
+          copy[idx] = updated
+          copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+          return copy
+        }
+        const created: DmThread = {
+          peerPubkey: pk,
+          peerNpub: encodeNpubSafe(pk),
+          peerNickname: nick,
+          peerDisplayHandle: handle,
+          protocol: chosenProtocol,
+          messages: [optimistic],
+          unreadCount: 0,
+          lastMessageAt: nowSec,
+          lastPreview: previewText.slice(0, 96),
+        }
+        return [created, ...prev]
+      })
+
+      try {
+        const { event, protocol } = await createEncryptedDmEvent({
+          content: wireContent,
+          recipientPubkey: pk,
+          signer,
+          protocol: chosenProtocol,
+          messageId: localMsgId,
+        })
+        processedWrapIdsRef.current.add(event.id)
+        const res = await pool.publish(dmRelays, event)
+        const ok = res.acceptedRelays.length > 0
+
+        setThreads((prev) =>
+          prev.map((t) => {
+            if (t.peerPubkey !== pk) return t
+            return {
+              ...t,
+              protocol,
+              messages: t.messages.map((m) =>
+                m.id === localMsgId ? { ...m, protocol, deliveryStatus: ok ? 'sent' : 'failed' } : m
+              ),
+            }
+          })
+        )
+
+        if (!ok) {
+          onError?.('Encrypted voice DM failed', 'No DM-capable relay accepted the gift wrap.')
+        }
+        return ok
+      } catch (err) {
+        setThreads((prev) =>
+          prev.map((t) => {
+            if (t.peerPubkey !== pk) return t
+            return {
+              ...t,
+              messages: t.messages.map((m) =>
+                m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
+              ),
+            }
+          })
+        )
+        onError?.(
+          'Encrypted voice DM error',
+          err instanceof Error ? err.message : 'Unable to send encrypted voice memo'
+        )
+        return false
+      }
+    },
+    [pool, threads, identityManager, activeGeohash, presenceTracker, dmRelays, onError]
+  )
+
   const clearThread = useCallback((peerPubkey: string) => {
     const pk = peerPubkey.toLowerCase()
     setThreads((prev) =>
@@ -399,6 +534,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     totalDmUnread,
     ensureThread,
     sendDirectMessage,
+    sendDirectVoiceMemo,
     clearThread,
     clearAllDms,
   }

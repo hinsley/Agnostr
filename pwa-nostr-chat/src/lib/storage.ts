@@ -5,9 +5,13 @@ import type {
   GeoMessage,
   PinnedChannel,
   SignMode,
+  TrustedPeerEntry,
 } from '../types/protocol.ts'
+import type { ServerMessage, ServerSummary } from '../types/servers.ts'
+import { DEFAULT_BLOSSOM_SERVERS, normalizeBlossomServerUrl } from './blossom.ts'
 import type { GeoRelayEntry } from './geoRelays.ts'
 import { DEFAULT_GEOHASH, isValidGeohash, normalizeGeohash } from './geohash.ts'
+import { encodeNpubSafe } from './identity.ts'
 
 const PREFIX = 'agnostr:v2:'
 const MAX_MESSAGES_PER_CHANNEL = 250
@@ -21,6 +25,10 @@ const KEYS = {
   pinnedChannels: `${PREFIX}pinned_channels`,
   recentChannels: `${PREFIX}recent_channels`,
   blockedPubkeys: `${PREFIX}blocked_pubkeys`,
+  trusted: `${PREFIX}trusted`,
+  blossomServers: `${PREFIX}blossom_servers`,
+  servers: `${PREFIX}servers`,
+  serverMsgChannel: (serverId: string, channelId: string) => `${PREFIX}smsgs:${serverId}:${channelId}`,
   customRelays: `${PREFIX}custom_relays`,
   dmThreads: `${PREFIX}dm_threads`,
   deviceSeed: `${PREFIX}device_seed`,
@@ -39,6 +47,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   presenceEnabled: true,
   perGeohashIdentity: false,
   showBridgeBadges: true,
+  strictWhitelistMode: false,
 }
 
 function safeGet(key: string): string | null {
@@ -98,6 +107,10 @@ export function loadSettings(): AppSettings {
         : DEFAULT_SETTINGS.perGeohashIdentity,
     showBridgeBadges:
       typeof parsed.showBridgeBadges === 'boolean' ? parsed.showBridgeBadges : DEFAULT_SETTINGS.showBridgeBadges,
+    strictWhitelistMode:
+      typeof parsed.strictWhitelistMode === 'boolean'
+        ? parsed.strictWhitelistMode
+        : DEFAULT_SETTINGS.strictWhitelistMode,
   }
 }
 
@@ -177,6 +190,90 @@ export function loadCustomRelays(): string[] {
 
 export function saveCustomRelays(relays: string[]): void {
   safeSet(KEYS.customRelays, JSON.stringify(relays))
+}
+
+export function loadTrustedPubkeys(): TrustedPeerEntry[] {
+  const parsed = safeJsonParse<TrustedPeerEntry[]>(safeGet(KEYS.trusted), [])
+  if (!Array.isArray(parsed)) return []
+  const seen = new Set<string>()
+  const out: TrustedPeerEntry[] = []
+  for (const item of parsed) {
+    if (!item || typeof item.pubkey !== 'string' || !/^[0-9a-f]{64}$/i.test(item.pubkey)) continue
+    const pk = item.pubkey.toLowerCase()
+    if (seen.has(pk)) continue
+    seen.add(pk)
+    out.push({
+      pubkey: pk,
+      npub: typeof item.npub === 'string' && item.npub.startsWith('npub1') ? item.npub : encodeNpubSafe(pk),
+      label: typeof item.label === 'string' && item.label.trim() ? item.label.trim().slice(0, 48) : undefined,
+      addedAt: typeof item.addedAt === 'number' ? item.addedAt : Date.now(),
+    })
+  }
+  return out
+}
+
+export function saveTrustedPubkeys(entries: TrustedPeerEntry[]): void {
+  safeSet(KEYS.trusted, JSON.stringify(entries))
+}
+
+export function loadBlossomServers(): string[] {
+  const raw = safeGet(KEYS.blossomServers)
+  if (!raw) return [...DEFAULT_BLOSSOM_SERVERS]
+  const parsed = safeJsonParse<string[]>(raw, [])
+  if (!Array.isArray(parsed)) return [...DEFAULT_BLOSSOM_SERVERS]
+  const valid = parsed
+    .filter((u): u is string => typeof u === 'string')
+    .map((u) => normalizeBlossomServerUrl(u))
+    .filter((u): u is string => u !== null)
+  return valid.length > 0 ? Array.from(new Set(valid)) : [...DEFAULT_BLOSSOM_SERVERS]
+}
+
+export function saveBlossomServers(servers: string[]): void {
+  safeSet(KEYS.blossomServers, JSON.stringify(servers))
+}
+
+export function loadJoinedServers(): ServerSummary[] {
+  const parsed = safeJsonParse<ServerSummary[]>(safeGet(KEYS.servers), [])
+  if (!Array.isArray(parsed)) return []
+  return parsed
+    .filter((s) => s && typeof s.id === 'string' && (s.kind === 'virtual' || s.kind === 'nip29') && typeof s.name === 'string')
+    .map((s) => ({
+      ...s,
+      channels: Array.isArray(s.channels) && s.channels.length > 0 ? s.channels : [{ id: s.groupId || 'general', name: s.groupId || 'general' }],
+      moderators: Array.isArray(s.moderators) ? s.moderators : [],
+      bannedPubkeys: Array.isArray(s.bannedPubkeys) ? s.bannedPubkeys : [],
+      relays: Array.isArray(s.relays) ? s.relays : [],
+      unreadCount: 0,
+      mentionCount: 0,
+    }))
+}
+
+export function saveJoinedServers(servers: ServerSummary[]): void {
+  const clean = servers.slice(0, 40).map((s) => ({
+    ...s,
+    unreadCount: 0,
+    mentionCount: 0,
+  }))
+  safeSet(KEYS.servers, JSON.stringify(clean))
+}
+
+export function loadServerChannelMessages(serverId: string, channelId: string): ServerMessage[] {
+  const parsed = safeJsonParse<ServerMessage[]>(safeGet(KEYS.serverMsgChannel(serverId, channelId)), [])
+  if (!Array.isArray(parsed)) return []
+  return parsed.filter((m) => m && typeof m.id === 'string' && typeof m.content === 'string')
+}
+
+export function saveServerChannelMessages(
+  serverId: string,
+  channelId: string,
+  messages: ServerMessage[]
+): void {
+  const trimmed = messages.filter((m) => !m.isSystem).slice(-MAX_MESSAGES_PER_CHANNEL)
+  safeSet(KEYS.serverMsgChannel(serverId, channelId), JSON.stringify(trimmed))
+}
+
+export function clearServerChannelMessagesStorage(serverId: string, channelId: string): void {
+  safeRemove(KEYS.serverMsgChannel(serverId, channelId))
 }
 
 export function loadDeviceSeedHex(): string | null {
@@ -336,6 +433,7 @@ export function formatTranscriptExport(
             isMeshBridge: m.isMeshBridge,
             powBits: m.powBits,
             replyToId: m.replyTo?.id ?? null,
+            voiceMemo: m.voiceMemo ?? null,
             reactions: m.reactions.map((r) => ({ emoji: r.emoji, count: r.count })),
           })),
         },
@@ -367,7 +465,8 @@ export function formatTranscriptExport(
     if (m.isSystem) {
       lines.push(`*${iso} — ${m.content}*`)
     } else {
-      lines.push(`**[${iso}] ${m.displayHandle}**${badgeStr}: ${m.content}`)
+      const voiceSuffix = m.voiceMemo ? ` [Voice memo ${Math.round(m.voiceMemo.durationSec)}s]` : ''
+      lines.push(`**[${iso}] ${m.displayHandle}**${badgeStr}${voiceSuffix}: ${m.content}`)
       if (m.reactions.length > 0) {
         lines.push(`  > Reactions: ${m.reactions.map((r) => `${r.emoji} ${r.count}`).join('  ')}`)
       }

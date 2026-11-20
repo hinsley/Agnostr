@@ -6,7 +6,9 @@ import {
   Copy,
   Hash,
   Lock,
+  Shield,
   ShieldCheck,
+  ShieldOff,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
@@ -56,6 +58,7 @@ export function PeerInspectorModal({
 
   const livePeer = engine.getPeerByPubkey(peer.pubkey) ?? peer
   const isBlocked = engine.isPeerBlocked(livePeer.pubkey)
+  const isTrustedPeer = !livePeer.isSelf && engine.isExplicitlyTrusted(livePeer.pubkey)
   const handle = formatHandle(livePeer.nickname, livePeer.pubkey)
   const handleColor = pubkeyToColor(livePeer.pubkey)
 
@@ -89,6 +92,14 @@ export function PeerInspectorModal({
 
   const handleToggleBlock = () => {
     engine.toggleBlockPeer(livePeer.pubkey, livePeer.displayHandle)
+  }
+
+  const handleToggleTrust = () => {
+    if (isTrustedPeer) {
+      engine.untrustPubkey(livePeer.pubkey)
+    } else {
+      engine.trustPubkey(livePeer.pubkey, livePeer.nickname)
+    }
   }
 
   return (
@@ -134,6 +145,15 @@ export function PeerInspectorModal({
                   {livePeer.isOnline ? 'ONLINE' : 'AWAY'}
                 </span>
                 {livePeer.isSelf && <span className="ag-badge ag-badge-accent">YOU</span>}
+                {isTrustedPeer && (
+                  <span
+                    className="ag-badge ag-badge-ok"
+                    title="Trusted peer — voice memos & media unlocked, text visible in Trusted-Only mode"
+                  >
+                    <ShieldCheck size={9} />
+                    <span>TRUSTED</span>
+                  </span>
+                )}
                 {livePeer.isTeleported && <span className="ag-badge ag-badge-warn">TELEPORT</span>}
                 {livePeer.isMeshBridge && <span className="ag-badge ag-badge-mesh">MESH BRIDGE</span>}
                 {isBlocked && <span className="ag-badge ag-badge-danger">MUTED</span>}
@@ -230,8 +250,31 @@ export function PeerInspectorModal({
           </div>
         </div>
 
+        {/* Trust Info */}
+        {!livePeer.isSelf && (
+          <div className={`ag-trust-callout ${isTrustedPeer ? 'trusted' : ''}`}>
+            {isTrustedPeer ? <ShieldCheck size={14} /> : <Shield size={14} />}
+            <span>
+              {isTrustedPeer
+                ? 'Trusted peer — voice memos & media unlock automatically and their text stays visible in Trusted-Only mode.'
+                : 'Untrusted — voice memos & media stay shielded (zero bytes fetched) until you trust this peer, which also keeps their text visible in Trusted-Only mode.'}
+            </span>
+          </div>
+        )}
+
         {/* Actions */}
-        <div className="ag-peer-modal-actions">
+        <div className={`ag-peer-modal-actions ${!livePeer.isSelf ? 'ag-peer-modal-actions-grid' : ''}`}>
+          {!livePeer.isSelf && (
+            <button
+              type="button"
+              className={`ag-btn ${isTrustedPeer ? 'ag-btn-trust-active' : 'ag-btn-trust'}`}
+              onClick={handleToggleTrust}
+              aria-pressed={isTrustedPeer}
+            >
+              {isTrustedPeer ? <ShieldCheck size={14} /> : <Shield size={14} />}
+              <span>{isTrustedPeer ? 'Trusted' : 'Trust'}</span>
+            </button>
+          )}
           {!livePeer.isSelf && (
             <button type="button" className="ag-btn ag-btn-dm" onClick={handleDm}>
               <Lock size={14} />
@@ -248,7 +291,7 @@ export function PeerInspectorModal({
               className={`ag-btn ${isBlocked ? 'ag-btn-ok-outline' : 'ag-btn-danger-outline'}`}
               onClick={handleToggleBlock}
             >
-              {isBlocked ? <ShieldCheck size={14} /> : <Ban size={14} />}
+              {isBlocked ? <ShieldOff size={14} /> : <Ban size={14} />}
               <span>{isBlocked ? 'Unblock' : 'Mute / Block'}</span>
             </button>
           )}

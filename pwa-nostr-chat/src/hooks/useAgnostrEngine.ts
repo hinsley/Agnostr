@@ -8,10 +8,22 @@ import type {
   LocationNote,
   PeerInfo,
   PinnedChannel,
+  RecordedVoiceMemo,
   RelayTelemetry,
   SignMode,
   ThemeId,
+  TrustedPeerEntry,
+  VoiceMemoAttachment,
+  VoiceSendPhase,
 } from '../types/protocol.ts'
+import {
+  cleanMimeType,
+  DEFAULT_BLOSSOM_SERVERS,
+  encryptVoiceBytesAesGcm,
+  normalizeBlossomServerUrl,
+  uploadBlobToBlossom,
+  VoiceBlobCache,
+} from '../lib/blossom.ts'
 import {
   buildGeohashChatTemplate,
   buildLocationNoteTemplate,
@@ -53,7 +65,9 @@ import {
   type GeoRelayEntry,
 } from '../lib/geoRelays.ts'
 import {
+  decodePubkeyInput,
   detectNip07,
+  encodeNpubSafe,
   generateRandomNickname,
   IdentityManager,
 } from '../lib/identity.ts'
@@ -69,6 +83,7 @@ import {
   formatTranscriptExport,
   loadActiveGeohash,
   loadBlockedPubkeys,
+  loadBlossomServers,
   loadChannelMessages,
   loadCustomRelays,
   loadDeviceSeedHex,
@@ -79,9 +94,11 @@ import {
   loadRecentChannels,
   loadSettings,
   loadSignMode,
+  loadTrustedPubkeys,
   panicWipeStorage,
   saveActiveGeohash,
   saveBlockedPubkeys,
+  saveBlossomServers,
   saveChannelMessages,
   saveCustomRelays,
   saveDeviceSeedHex,
@@ -92,10 +109,14 @@ import {
   saveRecentChannels,
   saveSettings,
   saveSignMode,
+  saveTrustedPubkeys,
 } from '../lib/storage.ts'
+import { buildNip42AuthTemplate } from '../lib/nip29.ts'
+import { revokeVoicePreviewUrl } from '../lib/voiceRecorder.ts'
 import { useDirectMessages } from './useDirectMessages.ts'
 import { useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
+import { useServers } from './useServers.ts'
 import { useToasts } from './useToasts.ts'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
@@ -261,11 +282,13 @@ export function useAgnostrEngine(): AgnostrEngine {
     saveSettings(settings)
   }, [settings])
 
-  // Sync URL hash <-> activeGeohash
+  // Sync URL hash <-> activeGeohash (preserve #invite=... links until dismissed)
   useEffect(() => {
     saveActiveGeohash(activeGeohash)
     try {
-      const currentHash = normalizeGeohash(window.location.hash || '')
+      const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
+      if (rawHash.toLowerCase().startsWith('invite=')) return
+      const currentHash = normalizeGeohash(rawHash)
       if (currentHash !== activeGeohash) {
         window.history.replaceState(null, '', `#${activeGeohash}`)
       }
@@ -276,7 +299,9 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   useEffect(() => {
     const onHashChange = () => {
-      const hash = normalizeGeohash(window.location.hash || '')
+      const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
+      if (rawHash.toLowerCase().startsWith('invite=')) return
+      const hash = normalizeGeohash(rawHash)
       if (hash && isValidGeohash(hash)) {
         setActiveGeohash(hash)
         setActiveView({ type: 'channel', geohash: hash })
@@ -311,16 +336,6 @@ export function useAgnostrEngine(): AgnostrEngine {
     [activeGeohash, geoDirectory, customRelays]
   )
 
-  useEffect(() => {
-    if (!pool) return
-    const keepUrls = new Set<string>([
-      ...relaySelection.channelRelays,
-      ...relaySelection.dmRelays,
-      ...relaySelection.pulseRelays,
-    ])
-    pool.syncMetadata(relaySelection.allMetadata, keepUrls)
-  }, [pool, relaySelection])
-
   // Channel messages, peers, reactions, notes, pins, recents, blocks
   const [messages, setMessages] = useState<GeoMessage[]>(() => loadChannelMessages(activeGeohash))
   const [peers, setPeers] = useState<PeerInfo[]>([])
@@ -338,8 +353,27 @@ export function useAgnostrEngine(): AgnostrEngine {
   const [blockedPubkeys, setBlockedPubkeys] = useState<string[]>(() => loadBlockedPubkeys())
   const blockedSet = useMemo(() => new Set(blockedPubkeys), [blockedPubkeys])
 
+  // Whitelist-based receipt & Blossom media servers
+  const [trustedPubkeys, setTrustedPubkeys] = useState<TrustedPeerEntry[]>(() => loadTrustedPubkeys())
+  const trustedSet = useMemo(() => new Set(trustedPubkeys.map((t) => t.pubkey)), [trustedPubkeys])
+  const [blossomServers, setBlossomServers] = useState<string[]>(() => loadBlossomServers())
+  const [voiceSendPhase, setVoiceSendPhase] = useState<VoiceSendPhase>('idle')
+
+  const voiceCacheRef = useRef<VoiceBlobCache | null>(null)
+  if (!voiceCacheRef.current) {
+    voiceCacheRef.current = new VoiceBlobCache()
+  }
+  useEffect(() => {
+    const cache = voiceCacheRef.current
+    return () => {
+      cache?.revokeAll()
+    }
+  }, [])
+
   const messagesRef = useRef<GeoMessage[]>(messages)
   const blockedSetRef = useRef<Set<string>>(blockedSet)
+  const trustedSetRef = useRef<Set<string>>(trustedSet)
+  const strictWhitelistRef = useRef<boolean>(settings.strictWhitelistMode)
   const ownPubkeysRef = useRef<Set<string>>(ownPubkeys)
   const activeViewRef = useRef<ActiveView>(activeView)
 
@@ -352,6 +386,14 @@ export function useAgnostrEngine(): AgnostrEngine {
   }, [blockedSet])
 
   useEffect(() => {
+    trustedSetRef.current = trustedSet
+  }, [trustedSet])
+
+  useEffect(() => {
+    strictWhitelistRef.current = settings.strictWhitelistMode
+  }, [settings.strictWhitelistMode])
+
+  useEffect(() => {
     ownPubkeysRef.current = ownPubkeys
   }, [ownPubkeys])
 
@@ -361,17 +403,23 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const refreshPeers = useCallback(
     (geohash: string) => {
-      setPeers(presenceTracker.getPeers(geohash, ownPubkeysRef.current, blockedSetRef.current))
+      const base = presenceTracker.getPeers(geohash, ownPubkeysRef.current, blockedSetRef.current)
+      setPeers(
+        base.map((p) => ({
+          ...p,
+          isTrusted: p.isSelf || trustedSetRef.current.has(p.pubkey),
+        }))
+      )
     },
     [presenceTracker]
   )
 
-  // Periodic peer online-window refresh (every 15s)
+  // Periodic peer online-window refresh (every 15s) & immediate update when trust/block changes
   useEffect(() => {
     refreshPeers(activeGeohash)
     const timer = window.setInterval(() => refreshPeers(activeGeohash), 15_000)
     return () => window.clearInterval(timer)
-  }, [activeGeohash, blockedSet, ownPubkeys, refreshPeers])
+  }, [activeGeohash, blockedSet, trustedSet, ownPubkeys, refreshPeers])
 
   // Record self in presence tracker for active geohash
   useEffect(() => {
@@ -637,6 +685,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           seen.add(ev.id)
           const pk = ev.pubkey.toLowerCase()
           if (ownPubkeysRef.current.has(pk) || blockedSetRef.current.has(pk)) return
+          if (strictWhitelistRef.current && !trustedSetRef.current.has(pk)) return
           const gh = extractGeohashTag(ev.tags)
           if (!gh || !(ev.content ?? '').trim()) return
 
@@ -707,6 +756,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     totalDmUnread,
     ensureThread,
     sendDirectMessage,
+    sendDirectVoiceMemo,
     clearThread,
     clearAllDms,
   } = useDirectMessages({
@@ -730,6 +780,69 @@ export function useAgnostrEngine(): AgnostrEngine {
     () => (activeDmPeer ? dmThreads.find((t) => t.peerPubkey === activeDmPeer.toLowerCase()) ?? null : null),
     [activeDmPeer, dmThreads]
   )
+
+  // Discord-like Servers (Instant Virtual Public/E2EE + NIP-29 Relay Communities)
+  const {
+    engine: serversEngine,
+    activeServerRelays,
+    resetAllServers,
+  } = useServers({
+    pool,
+    identityManager,
+    presenceTracker,
+    activeView,
+    setActiveView,
+    activeGeohash,
+    ownPubkeys,
+    blockedSet,
+    trustedSet,
+    settings,
+    blossomServers,
+    setVoiceSendPhase,
+    sendDirectMessage,
+    pushToast,
+  })
+
+  // Keep active geohash + DM + pulse + active server/NIP-29 relays synced in RelayPool
+  const activeServerRelaysRef = useRef<string[]>(activeServerRelays)
+  useEffect(() => {
+    activeServerRelaysRef.current = activeServerRelays
+  }, [activeServerRelays])
+
+  useEffect(() => {
+    if (!pool) return
+    const keepUrls = new Set<string>([
+      ...relaySelection.channelRelays,
+      ...relaySelection.dmRelays,
+      ...relaySelection.pulseRelays,
+      ...activeServerRelays,
+    ])
+    const combinedMeta = new Map(relaySelection.allMetadata)
+    for (const url of activeServerRelays) {
+      if (!combinedMeta.has(url)) {
+        combinedMeta.set(url, { url, roles: ['custom'], supportsDm: false })
+      }
+    }
+    pool.syncMetadata(combinedMeta, keepUrls)
+  }, [pool, relaySelection, activeServerRelays])
+
+  // Wire NIP-42 AUTH responder onto RelayPool (auto-signs for NIP-29 relays)
+  useEffect(() => {
+    if (!pool) return
+    pool.setAuthSigner(async (relayUrl, challenge) => {
+      if (identityManager.getSignMode() === 'extension' && !activeServerRelaysRef.current.includes(relayUrl)) {
+        return null
+      }
+      try {
+        return await identityManager.signEvent(buildNip42AuthTemplate(relayUrl, challenge))
+      } catch {
+        return null
+      }
+    })
+    return () => {
+      pool.setAuthSigner(null)
+    }
+  }, [pool, identityManager])
 
   const presence = useMemo(
     () =>
@@ -988,10 +1101,15 @@ export function useAgnostrEngine(): AgnostrEngine {
       pushToast('info', 'DM cleared', 'Local conversation messages cleared.')
       return
     }
+    if (activeView.type === 'server') {
+      serversEngine.clearChannelCache()
+      pushToast('info', 'Channel cleared', 'Local server channel cache cleared.')
+      return
+    }
     setMessages([])
     setUnreadDividerId(null)
     clearChannelMessagesStorage(activeGeohash)
-  }, [activeView, activeGeohash, clearThread, pushToast])
+  }, [activeView, activeGeohash, clearThread, serversEngine, pushToast])
 
   // Moderation
   const isPeerBlocked = useCallback((pubkey: string) => blockedSet.has(pubkey.toLowerCase()), [blockedSet])
@@ -1005,6 +1123,14 @@ export function useAgnostrEngine(): AgnostrEngine {
         saveBlockedPubkeys(next)
         if (!exists) {
           setMessages((msgs) => msgs.filter((m) => m.pubkey.toLowerCase() !== pk))
+          // Blocking automatically revokes trust & cached voice audio
+          voiceCacheRef.current?.revokeAll()
+          setTrustedPubkeys((trustedPrev) => {
+            if (!trustedPrev.some((t) => t.pubkey === pk)) return trustedPrev
+            const trimmed = trustedPrev.filter((t) => t.pubkey !== pk)
+            saveTrustedPubkeys(trimmed)
+            return trimmed
+          })
           pushToast('info', `Blocked ${label ?? pk.slice(0, 8)}`, 'Their messages are now hidden.')
         } else {
           pushToast('info', `Unblocked ${label ?? pk.slice(0, 8)}`)
@@ -1016,8 +1142,314 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const getPeerByPubkey = useCallback(
-    (pubkey: string) => presenceTracker.getPeerByPubkey(pubkey, ownPubkeys, blockedSet),
-    [presenceTracker, ownPubkeys, blockedSet]
+    (pubkey: string) => {
+      const peer = presenceTracker.getPeerByPubkey(pubkey, ownPubkeys, blockedSet)
+      if (!peer) return null
+      return {
+        ...peer,
+        isTrusted: peer.isSelf || trustedSet.has(peer.pubkey),
+      }
+    },
+    [presenceTracker, ownPubkeys, blockedSet, trustedSet]
+  )
+
+  // Whitelist-based receipt controls
+  const isExplicitlyTrusted = useCallback(
+    (pubkey: string) => trustedSet.has(pubkey.toLowerCase()),
+    [trustedSet]
+  )
+
+  const isTrusted = useCallback(
+    (pubkey: string) => {
+      const pk = pubkey.toLowerCase()
+      return ownPubkeys.has(pk) || trustedSet.has(pk)
+    },
+    [ownPubkeys, trustedSet]
+  )
+
+  const trustPubkey = useCallback(
+    (pubkeyOrNpub: string, label?: string): boolean => {
+      const pk = decodePubkeyInput(pubkeyOrNpub)
+      if (!pk) {
+        pushToast('warning', 'Invalid pubkey', 'Expected npub1… or 64-character hex pubkey.')
+        return false
+      }
+      const cleanLabel =
+        label?.trim() || presenceTracker.getNickname(pk) || undefined
+      setTrustedPubkeys((prev) => {
+        const existingIdx = prev.findIndex((t) => t.pubkey === pk)
+        let next: TrustedPeerEntry[]
+        if (existingIdx !== -1) {
+          const updated: TrustedPeerEntry = {
+            ...prev[existingIdx],
+            label: cleanLabel ?? prev[existingIdx].label,
+          }
+          next = [...prev]
+          next[existingIdx] = updated
+        } else {
+          const entry: TrustedPeerEntry = {
+            pubkey: pk,
+            npub: encodeNpubSafe(pk),
+            label: cleanLabel,
+            addedAt: Date.now(),
+          }
+          next = [entry, ...prev]
+        }
+        saveTrustedPubkeys(next)
+        return next
+      })
+      setBlockedPubkeys((prev) => {
+        if (!prev.includes(pk)) return prev
+        const unblocked = prev.filter((p) => p !== pk)
+        saveBlockedPubkeys(unblocked)
+        return unblocked
+      })
+      pushToast(
+        'success',
+        `Trusted ${cleanLabel ?? `#${pk.slice(-6)}`}`,
+        'Voice memos & media from this peer are now unlocked.'
+      )
+      return true
+    },
+    [presenceTracker, pushToast]
+  )
+
+  const untrustPubkey = useCallback(
+    (pubkey: string) => {
+      const pk = pubkey.toLowerCase()
+      voiceCacheRef.current?.revokeAll()
+      setTrustedPubkeys((prev) => {
+        const next = prev.filter((t) => t.pubkey !== pk)
+        saveTrustedPubkeys(next)
+        return next
+      })
+      pushToast('info', 'Removed from Trusted Peers', `Media from #${pk.slice(-6)} is now shielded again.`)
+    },
+    [pushToast]
+  )
+
+  const clearTrustedPubkeys = useCallback(() => {
+    voiceCacheRef.current?.revokeAll()
+    setTrustedPubkeys([])
+    saveTrustedPubkeys([])
+    pushToast('info', 'Trusted Peers cleared', 'All external voice memos & media are shielded.')
+  }, [pushToast])
+
+  // Blossom media server management
+  const addBlossomServer = useCallback(
+    (rawUrl: string): boolean => {
+      const url = normalizeBlossomServerUrl(rawUrl)
+      if (!url) {
+        pushToast('warning', 'Invalid Blossom server', 'Use a valid https:// Blossom server URL.')
+        return false
+      }
+      setBlossomServers((prev) => {
+        if (prev.includes(url)) return prev
+        const next = [url, ...prev]
+        saveBlossomServers(next)
+        return next
+      })
+      pushToast('success', 'Blossom server added', url)
+      return true
+    },
+    [pushToast]
+  )
+
+  const removeBlossomServer = useCallback(
+    (url: string) => {
+      setBlossomServers((prev) => {
+        if (prev.length <= 1) {
+          pushToast('warning', 'Keep at least one server', 'Use Reset Defaults to restore default Blossom servers.')
+          return prev
+        }
+        const next = prev.filter((s) => s !== url)
+        saveBlossomServers(next)
+        return next
+      })
+    },
+    [pushToast]
+  )
+
+  const resetBlossomServers = useCallback(() => {
+    const defaults = [...DEFAULT_BLOSSOM_SERVERS]
+    setBlossomServers(defaults)
+    saveBlossomServers(defaults)
+    pushToast('info', 'Blossom servers reset', 'Restored live-verified default Blossom servers.')
+  }, [pushToast])
+
+  // Voice memo send (Blossom BUD-02 + NIP-92 imeta for public; AES-256-GCM + kind 1059 for DMs; delegates to Servers in server view)
+  const sendVoiceMemo = useCallback(
+    async (recorded: RecordedVoiceMemo, caption?: string): Promise<boolean> => {
+      if (activeView.type === 'server') {
+        return await serversEngine.sendVoiceMemo(recorded, caption)
+      }
+      if (!pool) return false
+      if (recorded.size <= 0) {
+        pushToast('warning', 'Empty recording', 'Hold or record for at least a second before sending.')
+        return false
+      }
+
+      const gh = activeGeohash
+      const isDm = activeView.type === 'dm'
+      const cleanMime = cleanMimeType(recorded.mime)
+      const cleanCaption = caption?.trim() ?? ''
+
+      setSending(true)
+      try {
+        const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
+
+        if (isDm) {
+          setVoiceSendPhase('encrypting')
+          const { ciphertext, encryption } = await encryptVoiceBytesAesGcm(rawBytes)
+
+          setVoiceSendPhase('uploading')
+          const upload = await uploadBlobToBlossom({
+            bytes: ciphertext,
+            mime: 'application/octet-stream',
+            servers: blossomServers,
+            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+          })
+
+          const attachment: VoiceMemoAttachment = {
+            url: upload.url,
+            mime: cleanMime,
+            size: recorded.size,
+            durationSec: recorded.durationSec,
+            waveform: recorded.waveform,
+            sha256: upload.sha256,
+            encryption,
+            server: upload.server,
+          }
+
+          setVoiceSendPhase('publishing')
+          const ok = await sendDirectVoiceMemo(activeView.peerPubkey, attachment, cleanCaption)
+          if (ok) {
+            revokeVoicePreviewUrl(recorded)
+            pushToast('success', 'Encrypted voice memo sent', 'AES-256-GCM audio delivered inside E2EE gift wrap.')
+          }
+          return ok
+        }
+
+        // Public geohash channel: upload audio to Blossom + publish kind 20000 with NIP-92 imeta
+        setVoiceSendPhase('uploading')
+        const upload = await uploadBlobToBlossom({
+          bytes: rawBytes,
+          mime: cleanMime,
+          servers: blossomServers,
+          signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+        })
+
+        const attachment: VoiceMemoAttachment = {
+          url: upload.url,
+          mime: cleanMime,
+          size: upload.size,
+          durationSec: recorded.durationSec,
+          waveform: recorded.waveform,
+          sha256: upload.sha256,
+          server: upload.server,
+        }
+
+        setVoiceSendPhase('signing')
+        const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
+        const activeKey = identityManager.getKeyMaterialForGeohash(gh)
+        const template = buildGeohashChatTemplate({
+          content,
+          geohash: gh,
+          nickname: identityManager.getNickname(),
+          isTeleported: location.isTeleported,
+          replyTo: replyingTo,
+          voiceMemo: attachment,
+        })
+
+        if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
+          const nonceTag = await mineNip13NonceTag(template, activeKey.pubkey, settings.powTargetBits, 450)
+          if (nonceTag) {
+            template.tags = [...template.tags, nonceTag]
+          }
+        }
+
+        const signed = await identityManager.signEvent(template, gh)
+        const optimistic = parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
+          messagesRef.current.find((m) => m.id === id)
+        )
+        if (optimistic) {
+          optimistic.deliveryStatus = 'sending'
+          optimistic.isOwn = true
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === optimistic.id)) return prev
+            const next = [...prev, optimistic].sort((a, b) => a.createdAt - b.createdAt)
+            saveChannelMessages(gh, next)
+            return next
+          })
+        }
+
+        setReplyingTo(null)
+        setVoiceSendPhase('publishing')
+
+        const res = await pool.publish(relaySelection.channelRelays, signed)
+        const ok = res.acceptedRelays.length > 0
+
+        setMessages((prev) => {
+          const next = prev.map((m) =>
+            m.id === signed.id
+              ? {
+                  ...m,
+                  deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
+                  relayCount: res.acceptedRelays.length,
+                }
+              : m
+          )
+          saveChannelMessages(gh, next)
+          return next
+        })
+
+        if (ok) {
+          revokeVoicePreviewUrl(recorded)
+        } else {
+          pushToast('error', 'Voice memo publish failed', 'Uploaded to Blossom, but no Nostr relay accepted the event.')
+        }
+        return ok
+      } catch (err) {
+        pushToast('error', 'Voice memo failed', err instanceof Error ? err.message : 'Unable to upload voice memo.')
+        return false
+      } finally {
+        setVoiceSendPhase('idle')
+        setSending(false)
+      }
+    },
+    [
+      pool,
+      activeGeohash,
+      activeView,
+      serversEngine,
+      blossomServers,
+      identityManager,
+      sendDirectVoiceMemo,
+      location.isTeleported,
+      replyingTo,
+      settings.powEnabled,
+      settings.powTargetBits,
+      relaySelection.channelRelays,
+      pushToast,
+    ]
+  )
+
+  // STRICT engine-level whitelist guard: zero network requests for unwhitelisted senders
+  const fetchVoiceMemoBlob = useCallback(
+    async (memo: VoiceMemoAttachment, senderPubkey: string): Promise<string> => {
+      const pk = senderPubkey.toLowerCase()
+      const assertAuthorized = () => {
+        if (!ownPubkeysRef.current.has(pk) && !trustedSetRef.current.has(pk)) {
+          throw new Error('Blocked: trust this sender before loading voice memos or media.')
+        }
+      }
+      // Enforce immediately before touching cache or network
+      assertAuthorized()
+      const cache = voiceCacheRef.current
+      if (!cache) throw new Error('Voice media cache unavailable.')
+      return await cache.getOrFetch(memo, assertAuthorized)
+    },
+    []
   )
 
   // Relay management
@@ -1125,12 +1557,28 @@ export function useAgnostrEngine(): AgnostrEngine {
     [updateSettings]
   )
 
+  const setStrictWhitelistMode = useCallback(
+    (enabled: boolean) => {
+      updateSettings({ strictWhitelistMode: enabled })
+      pushToast(
+        'info',
+        enabled ? 'Trusted Peers Only ON' : 'Trusted Peers Only OFF',
+        enabled
+          ? 'Hiding text and media from untrusted peers.'
+          : 'Public text visible; voice memos & media still require trusting the sender.'
+      )
+    },
+    [updateSettings, pushToast]
+  )
+
   const panicWipe = useCallback(() => {
     pool?.closeAll()
+    voiceCacheRef.current?.revokeAll()
     clearProtocolCaches()
     presenceTracker.clear()
     clearPulse()
     clearAllDms()
+    resetAllServers()
     resetLocation()
     panicWipeStorage()
 
@@ -1143,6 +1591,9 @@ export function useAgnostrEngine(): AgnostrEngine {
     setPinnedChannels([])
     setRecentChannels([DEFAULT_GEOHASH])
     setBlockedPubkeys([])
+    setTrustedPubkeys([])
+    setBlossomServers([...DEFAULT_BLOSSOM_SERVERS])
+    setVoiceSendPhase('idle')
     setCustomRelays([])
     setMessages([])
     setPeers([])
@@ -1154,8 +1605,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     setIdentityVersion((v) => v + 1)
 
     clearToasts()
-    pushToast('warning', 'Panic Wipe Complete', 'All local keys, caches, and transcripts purged. Fresh identity active.')
-  }, [pool, presenceTracker, clearPulse, clearAllDms, resetLocation, identityManager, clearToasts, pushToast])
+    pushToast('warning', 'Panic Wipe Complete', 'All local keys, caches, servers, trusted peers, and decrypted audio purged. Fresh identity active.')
+  }, [pool, presenceTracker, clearPulse, clearAllDms, resetAllServers, resetLocation, identityManager, clearToasts, pushToast])
 
   // Unified composer submit (commands, DMs, public messages)
   const addSystemMessage = useCallback(
@@ -1177,6 +1628,8 @@ export function useAgnostrEngine(): AgnostrEngine {
           activeGeohash,
           peers,
           blockedPubkeys,
+          trustedPubkeys,
+          strictWhitelistMode: settings.strictWhitelistMode,
           setNickname,
           tuneGeohash,
           openDmThread,
@@ -1185,6 +1638,9 @@ export function useAgnostrEngine(): AgnostrEngine {
           postLocationNote,
           refreshLocationNotes,
           toggleBlockPeer,
+          trustPubkey,
+          untrustPubkey,
+          setStrictWhitelistMode,
           clearCurrentTimeline,
           setTheme,
           rotateIdentity,
@@ -1196,6 +1652,10 @@ export function useAgnostrEngine(): AgnostrEngine {
         return await sendDirectMessage(activeView.peerPubkey, trimmed)
       }
 
+      if (activeView.type === 'server') {
+        return await serversEngine.sendMessage(trimmed)
+      }
+
       return await sendPublicContent(trimmed)
     },
     [
@@ -1203,6 +1663,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       activeGeohash,
       peers,
       blockedPubkeys,
+      trustedPubkeys,
+      settings.strictWhitelistMode,
       setNickname,
       tuneGeohash,
       openDmThread,
@@ -1211,17 +1673,36 @@ export function useAgnostrEngine(): AgnostrEngine {
       postLocationNote,
       refreshLocationNotes,
       toggleBlockPeer,
+      trustPubkey,
+      untrustPubkey,
+      setStrictWhitelistMode,
       clearCurrentTimeline,
       setTheme,
       rotateIdentity,
       addSystemMessage,
       activeView,
+      serversEngine,
     ]
   )
 
+  const visibleMessages = useMemo(() => {
+    if (!settings.strictWhitelistMode) return messages
+    return messages.filter(
+      (m) =>
+        m.isSystem ||
+        m.isOwn ||
+        ownPubkeys.has(m.pubkey.toLowerCase()) ||
+        trustedSet.has(m.pubkey.toLowerCase())
+    )
+  }, [messages, settings.strictWhitelistMode, ownPubkeys, trustedSet])
+
+  const hiddenByWhitelistCount = settings.strictWhitelistMode
+    ? Math.max(0, messages.length - visibleMessages.length)
+    : 0
+
   const exportTranscript = useCallback(
-    (format: 'markdown' | 'json') => formatTranscriptExport(format, cell, messages),
-    [cell, messages]
+    (format: 'markdown' | 'json') => formatTranscriptExport(format, cell, visibleMessages),
+    [cell, visibleMessages]
   )
 
   // Relay telemetry aggregates
@@ -1242,7 +1723,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     location,
     quickCities: QUICK_CITIES,
 
-    messages,
+    messages: visibleMessages,
     peers,
     presence,
     locationNotes,
@@ -1276,6 +1757,23 @@ export function useAgnostrEngine(): AgnostrEngine {
     isPeerBlocked,
     toggleBlockPeer,
     getPeerByPubkey,
+    trustedPubkeys,
+    isTrusted,
+    isExplicitlyTrusted,
+    trustPubkey,
+    untrustPubkey,
+    clearTrustedPubkeys,
+    strictWhitelistMode: settings.strictWhitelistMode,
+    setStrictWhitelistMode,
+    hiddenByWhitelistCount,
+
+    blossomServers,
+    addBlossomServer,
+    removeBlossomServer,
+    resetBlossomServers,
+    voiceSendPhase,
+    sendVoiceMemo,
+    fetchVoiceMemoBlob,
 
     relays,
     connectedRelayCount: connectedRelays.length,
@@ -1297,6 +1795,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     updateSettings,
     setTheme,
     panicWipe,
+
+    servers: serversEngine,
 
     commands: SLASH_COMMANDS,
     exportTranscript,

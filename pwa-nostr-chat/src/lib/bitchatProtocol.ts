@@ -1,6 +1,11 @@
 import { sha256 } from '@noble/hashes/sha256'
 import { verifyEvent, type Event as NostrEvent, type EventTemplate } from 'nostr-tools'
-import type { GeoMessage, LocationNote, ReplyReference } from '../types/protocol.ts'
+import type {
+  GeoMessage,
+  LocationNote,
+  ReplyReference,
+  VoiceMemoAttachment,
+} from '../types/protocol.ts'
 import { isValidGeohash, normalizeGeohash } from './geohash.ts'
 import { bytesToHex, formatDisplayHandle } from './identity.ts'
 
@@ -206,12 +211,90 @@ export function isEmoteContent(content: string): boolean {
   return t.length >= 4 && t.startsWith('* ') && t.endsWith(' *')
 }
 
+export function buildImetaTag(memo: VoiceMemoAttachment): string[] {
+  const fields: string[] = [
+    'imeta',
+    `url ${memo.url}`,
+    `m ${memo.mime}`,
+  ]
+  if (memo.sha256) fields.push(`x ${memo.sha256}`)
+  if (memo.size > 0) fields.push(`size ${Math.round(memo.size)}`)
+  if (memo.durationSec > 0) fields.push(`duration ${memo.durationSec.toFixed(1)}`)
+  if (memo.waveform.length > 0) {
+    fields.push(`waveform ${memo.waveform.map((n) => Math.max(0, Math.min(100, Math.round(n)))).join(',')}`)
+  }
+  return fields
+}
+
+const AUDIO_URL_EXT_RE = /\.(?:webm|weba|m4a|mp4|ogg|opus|mp3|wav)(?:[?#].*)?$/i
+
+export function parseVoiceMemoFromImeta(tags: string[][]): VoiceMemoAttachment | undefined {
+  for (const tag of tags) {
+    if (tag[0] !== 'imeta' || tag.length < 2) continue
+    const map = new Map<string, string>()
+    for (let i = 1; i < tag.length; i++) {
+      const entry = tag[i]
+      if (typeof entry !== 'string') continue
+      const spaceIdx = entry.indexOf(' ')
+      if (spaceIdx <= 0) continue
+      const key = entry.slice(0, spaceIdx).trim().toLowerCase()
+      const val = entry.slice(spaceIdx + 1).trim()
+      if (key && val) map.set(key, val)
+    }
+
+    const url = map.get('url')
+    if (!url || !/^https?:\/\//i.test(url)) continue
+    const rawMime = (map.get('m') ?? '').toLowerCase()
+    const hasAudioHints =
+      rawMime.startsWith('audio/') ||
+      (rawMime === 'video/webm' && (map.has('duration') || map.has('waveform'))) ||
+      AUDIO_URL_EXT_RE.test(url)
+    if (!hasAudioHints) continue
+
+    const sha256Hex = (map.get('x') ?? '').toLowerCase()
+    const size = Number.parseInt(map.get('size') ?? '0', 10)
+    const durationSec = Number.parseFloat(map.get('duration') ?? '0')
+    const rawWave = map.get('waveform')
+    let waveform: number[] = []
+    if (rawWave) {
+      waveform = rawWave
+        .split(/[,\s]+/)
+        .map((n) => Number.parseInt(n, 10))
+        .filter((n) => Number.isFinite(n))
+        .slice(0, 64)
+        .map((n) => Math.max(4, Math.min(100, n)))
+    }
+    if (waveform.length === 0) {
+      waveform = Array.from({ length: 32 }, (_, idx) => 22 + ((idx * 19) % 45))
+    }
+
+    let server: string | undefined
+    try {
+      server = new URL(url).origin
+    } catch {
+      server = undefined
+    }
+
+    return {
+      url,
+      mime: rawMime.startsWith('audio/') ? rawMime : 'audio/webm',
+      size: Number.isFinite(size) && size > 0 ? size : 0,
+      durationSec: Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0,
+      waveform,
+      sha256: /^[0-9a-f]{64}$/.test(sha256Hex) ? sha256Hex : '',
+      server,
+    }
+  }
+  return undefined
+}
+
 export function buildGeohashChatTemplate(opts: {
   content: string
   geohash: string
   nickname: string
   isTeleported: boolean
   replyTo?: GeoMessage | null
+  voiceMemo?: VoiceMemoAttachment
 }): EventTemplate {
   const gh = normalizeGeohash(opts.geohash)
   const tags: string[][] = [['g', gh]]
@@ -227,6 +310,9 @@ export function buildGeohashChatTemplate(opts: {
     if (/^[0-9a-f]{64}$/i.test(opts.replyTo.pubkey)) {
       tags.push(['p', opts.replyTo.pubkey.toLowerCase()])
     }
+  }
+  if (opts.voiceMemo) {
+    tags.push(buildImetaTag(opts.voiceMemo))
   }
   return {
     kind: KIND_GEOHASH_CHAT,
@@ -329,6 +415,8 @@ export function parseGeohashChatEvent(
     }
   }
 
+  const voiceMemo = parseVoiceMemoFromImeta(event.tags)
+
   return {
     id: event.id,
     geohash: gh,
@@ -347,6 +435,7 @@ export function parseGeohashChatEvent(
     replyTo,
     reactions: [],
     mentions: extractMentions(content),
+    voiceMemo,
     deliveryStatus: 'sent',
   }
 }

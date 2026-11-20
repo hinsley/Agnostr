@@ -6,6 +6,8 @@ import {
   Lock,
   Radio,
   Search,
+  Shield,
+  ShieldCheck,
   ShieldOff,
   Users,
   X,
@@ -20,7 +22,7 @@ export interface PeersPanelProps {
   onMentionPeer: (handle: string) => void
 }
 
-type PeerFilterMode = 'all' | 'online' | 'blocked'
+type PeerFilterMode = 'all' | 'online' | 'trusted' | 'blocked'
 
 function formatRelativeSeconds(unixSec: number): string {
   const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSec)
@@ -40,15 +42,21 @@ export function PeersPanel({
   onStartDm,
   onMentionPeer,
 }: PeersPanelProps) {
-  const { peers, presence, activeGeohash, cell, blockedPubkeys } = engine
+  const { peers, presence, activeGeohash, cell, blockedPubkeys, trustedPubkeys } = engine
   const [query, setQuery] = useState('')
   const [filterMode, setFilterMode] = useState<PeerFilterMode>('all')
+
+  const trustedSet = useMemo(
+    () => new Set(trustedPubkeys.map((entry) => entry.pubkey)),
+    [trustedPubkeys],
+  )
 
   const filteredPeers = useMemo(() => {
     const q = query.trim().toLowerCase()
     return peers
       .filter((peer) => {
         if (filterMode === 'online' && !peer.isOnline) return false
+        if (filterMode === 'trusted' && (peer.isSelf || !trustedSet.has(peer.pubkey))) return false
         if (filterMode === 'blocked' && !peer.isBlocked) return false
         if (!q) return true
         return (
@@ -63,7 +71,12 @@ export function PeersPanel({
         if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1
         return b.lastSeenAt - a.lastSeenAt
       })
-  }, [peers, query, filterMode])
+  }, [peers, query, filterMode, trustedSet])
+
+  const trustedInChannelCount = useMemo(
+    () => peers.filter((p) => !p.isSelf && trustedSet.has(p.pubkey)).length,
+    [peers, trustedSet],
+  )
 
   const blockedInChannelCount = useMemo(
     () => peers.filter((p) => p.isBlocked).length,
@@ -168,6 +181,15 @@ export function PeersPanel({
           >
             Online ({presence.onlineCount})
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={filterMode === 'trusted'}
+            className={filterMode === 'trusted' ? 'active' : ''}
+            onClick={() => setFilterMode('trusted')}
+          >
+            Trusted ({trustedInChannelCount})
+          </button>
           {(blockedInChannelCount > 0 || blockedPubkeys.length > 0) && (
             <button
               type="button"
@@ -190,22 +212,27 @@ export function PeersPanel({
             <p className="ag-empty-title">
               {query
                 ? 'No matching peers'
-                : presence.isUncertainCount
-                  ? 'Presence uncertain (?)'
-                  : 'Quiet frequency'}
+                : filterMode === 'trusted'
+                  ? 'No trusted peers here'
+                  : presence.isUncertainCount
+                    ? 'Presence uncertain (?)'
+                    : 'Quiet frequency'}
             </p>
             <p className="ag-empty-sub">
               {query
                 ? 'Try clearing the search filter.'
-                : presence.isUncertainCount
-                  ? 'Peers at this precision appear once they send a message.'
-                  : 'Peers tuning into this geohash will appear here automatically.'}
+                : filterMode === 'trusted'
+                  ? 'Tap the shield icon on any peer to trust them and unlock their voice memos & media.'
+                  : presence.isUncertainCount
+                    ? 'Peers at this precision appear once they send a message.'
+                    : 'Peers tuning into this geohash will appear here automatically.'}
             </p>
           </div>
         ) : (
           filteredPeers.map((peer) => {
             const handle = formatHandle(peer.nickname, peer.pubkey)
             const handleColor = pubkeyToColor(peer.pubkey)
+            const isPeerTrusted = !peer.isSelf && trustedSet.has(peer.pubkey)
             return (
               <div
                 key={peer.pubkey}
@@ -241,6 +268,15 @@ export function PeersPanel({
                     </div>
 
                     <div className="ag-peer-badges-row">
+                      {isPeerTrusted && (
+                        <span
+                          className="ag-badge ag-badge-ok"
+                          title="Trusted peer — voice memos & media unlocked, text visible in Trusted-Only mode"
+                        >
+                          <ShieldCheck size={9} />
+                          <span>TRUSTED</span>
+                        </span>
+                      )}
                       {peer.isTeleported && (
                         <span className="ag-badge ag-badge-warn">TELEPORT</span>
                       )}
@@ -262,6 +298,32 @@ export function PeersPanel({
                 </button>
 
                 <div className="ag-peer-quick-actions">
+                  {!peer.isSelf && (
+                    <button
+                      type="button"
+                      className={`ag-icon-btn-xs ag-icon-btn-trust ${isPeerTrusted ? 'trusted' : ''}`}
+                      onClick={() => {
+                        if (isPeerTrusted) {
+                          engine.untrustPubkey(peer.pubkey)
+                        } else {
+                          engine.trustPubkey(peer.pubkey, peer.nickname)
+                        }
+                      }}
+                      aria-pressed={isPeerTrusted}
+                      title={
+                        isPeerTrusted
+                          ? `Untrust ${peer.displayHandle}`
+                          : `Trust ${peer.displayHandle} (unlocks voice memos & media)`
+                      }
+                      aria-label={
+                        isPeerTrusted
+                          ? `Untrust ${peer.displayHandle}`
+                          : `Trust ${peer.displayHandle}`
+                      }
+                    >
+                      {isPeerTrusted ? <ShieldCheck size={13} /> : <Shield size={13} />}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="ag-icon-btn-xs"
