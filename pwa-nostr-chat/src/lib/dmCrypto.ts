@@ -1,0 +1,442 @@
+import { xchacha20poly1305 } from '@noble/ciphers/chacha'
+import { secp256k1 } from '@noble/curves/secp256k1'
+import { hkdf } from '@noble/hashes/hkdf'
+import { sha256 } from '@noble/hashes/sha256'
+import {
+  finalizeEvent,
+  generateSecretKey,
+  getPublicKey,
+  nip44,
+  nip59,
+  verifyEvent,
+  type Event as NostrEvent,
+  type EventTemplate,
+} from 'nostr-tools'
+import type { DmProtocol } from '../types/protocol.ts'
+import { KIND_DM_RUMOR, KIND_GIFT_WRAP, KIND_SEAL } from './bitchatProtocol.ts'
+import { bytesToHex, type SigningKeyMaterial } from './identity.ts'
+
+const MAX_CIPHERTEXT_BYTES = 64 * 1024
+const BITCHAT_HKDF_INFO = new TextEncoder().encode('nip44-v2')
+const EMPTY_SALT = new Uint8Array(0)
+const utf8Encoder = new TextEncoder()
+const utf8Decoder = new TextDecoder('utf-8', { fatal: true })
+
+export interface DecryptedDm {
+  id: string
+  senderPubkey: string
+  content: string
+  createdAt: number
+  protocol: DmProtocol
+  embeddedMessageId?: string
+  ackType?: 'delivered' | 'read'
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function base64UrlDecode(str: string): Uint8Array | null {
+  try {
+    const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4))
+    const b64 = str.replace(/-/g, '+').replace(/_/g, '/') + pad
+    const binary = atob(b64)
+    const out = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) {
+      out[i] = binary.charCodeAt(i)
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
+function deriveBitchatEnvelopeKey(
+  privateKey: Uint8Array,
+  peerPubkeyHex: string,
+  parityPrefix: '02' | '03'
+): Uint8Array {
+  const shared33 = secp256k1.getSharedSecret(privateKey, parityPrefix + peerPubkeyHex.toLowerCase(), true)
+  return hkdf(sha256, shared33, EMPTY_SALT, BITCHAT_HKDF_INFO, 32)
+}
+
+function encryptBitchatV2(plaintext: string, recipientPubkeyHex: string, senderSk: Uint8Array): string {
+  const key = deriveBitchatEnvelopeKey(senderSk, recipientPubkeyHex, '02')
+  const nonce24 = new Uint8Array(24)
+  crypto.getRandomValues(nonce24)
+  const ctAndTag = xchacha20poly1305(key, nonce24).encrypt(utf8Encoder.encode(plaintext))
+  const combined = new Uint8Array(24 + ctAndTag.length)
+  combined.set(nonce24, 0)
+  combined.set(ctAndTag, 24)
+  return `v2:${base64UrlEncode(combined)}`
+}
+
+function decryptBitchatV2(ciphertext: string, senderPubkeyHex: string, recipientSk: Uint8Array): string | null {
+  if (!ciphertext.startsWith('v2:') || ciphertext.length > MAX_CIPHERTEXT_BYTES) return null
+  const raw = base64UrlDecode(ciphertext.slice(3))
+  if (!raw || raw.length <= 40) return null
+
+  const nonce24 = raw.slice(0, 24)
+  const ctAndTag = raw.slice(24)
+
+  for (const prefix of ['02', '03'] as const) {
+    try {
+      const key = deriveBitchatEnvelopeKey(recipientSk, senderPubkeyHex, prefix)
+      const plainBytes = xchacha20poly1305(key, nonce24).decrypt(ctAndTag)
+      return utf8Decoder.decode(plainBytes)
+    } catch {
+      // Try alternate Y parity
+    }
+  }
+  return null
+}
+
+function randomizedBitchatTimestamp(): number {
+  const offset = Math.floor(Math.random() * 1800) - 900 // ±15 minutes
+  return Math.floor(Date.now() / 1000) + offset
+}
+
+/**
+ * Encodes a Bitchat `bitchat1:` binary packet carrying a GeoDM PrivateMessagePacket TLV.
+ * Returns null if content/messageID exceeds 255 UTF-8 bytes (1-byte TLV length limit).
+ */
+export function encodeBitchatEmbeddedPM(content: string, messageId: string): string | null {
+  const idBytes = utf8Encoder.encode(messageId)
+  const contentBytes = utf8Encoder.encode(content)
+  if (idBytes.length > 255 || contentBytes.length > 255) return null
+
+  // NoisePayloadType.privateMessage (0x01) + TLV(0x00, id) + TLV(0x01, content)
+  const payload = new Uint8Array(1 + 2 + idBytes.length + 2 + contentBytes.length)
+  let p = 0
+  payload[p++] = 0x01 // NoisePayloadType.privateMessage
+  payload[p++] = 0x00 // TLV messageID
+  payload[p++] = idBytes.length
+  payload.set(idBytes, p)
+  p += idBytes.length
+  payload[p++] = 0x01 // TLV content
+  payload[p++] = contentBytes.length
+  payload.set(contentBytes, p)
+
+  // BinaryProtocol v1 header (14 bytes) + 8-byte random unlinkable senderID + payload
+  const packet = new Uint8Array(14 + 8 + payload.length)
+  const view = new DataView(packet.buffer)
+  packet[0] = 0x01 // version 1
+  packet[1] = 0x11 // MessageType.noiseEncrypted
+  packet[2] = 0x07 // TTL
+  const tsMs = BigInt(Date.now())
+  view.setBigUint64(3, tsMs, false)
+  packet[11] = 0x00 // flags: no recipient, no sig, uncompressed
+  view.setUint16(12, payload.length, false)
+
+  const randomSender = new Uint8Array(8)
+  crypto.getRandomValues(randomSender)
+  packet.set(randomSender, 14)
+  packet.set(payload, 22)
+
+  return `bitchat1:${base64UrlEncode(packet)}`
+}
+
+interface DecodedBitchatPayload {
+  kind: 'pm' | 'delivered' | 'read'
+  messageId: string
+  content?: string
+}
+
+export function decodeBitchatEmbeddedPayload(rawContent: string): DecodedBitchatPayload | null {
+  if (!rawContent.startsWith('bitchat1:')) return null
+  const data = base64UrlDecode(rawContent.slice('bitchat1:'.length))
+  if (!data || data.length < 22) return null
+
+  const version = data[0]
+  if (version !== 1 && version !== 2) return null
+  const msgType = data[1]
+  if (msgType !== 0x11) return null // MessageType.noiseEncrypted
+
+  const flags = data[11]
+  const hasRecipient = (flags & 0x01) !== 0
+  const isCompressed = (flags & 0x04) !== 0
+  if (isCompressed) return null
+
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+  const headerSize = version === 2 ? 16 : 14
+  if (data.length < headerSize + 8) return null
+
+  const payloadLen = version === 2 ? view.getUint32(12, false) : view.getUint16(12, false)
+  const payloadOffset = headerSize + 8 + (hasRecipient ? 8 : 0)
+  if (payloadOffset + payloadLen > data.length || payloadLen < 2) return null
+
+  const payload = data.slice(payloadOffset, payloadOffset + payloadLen)
+  const noiseType = payload[0]
+
+  if (noiseType === 0x01) {
+    // PrivateMessagePacket TLV
+    let offset = 1
+    let messageId: string | null = null
+    let content: string | null = null
+    while (offset + 2 <= payload.length) {
+      const tlvType = payload[offset++]
+      const tlvLen = payload[offset++]
+      if (offset + tlvLen > payload.length) break
+      const slice = payload.slice(offset, offset + tlvLen)
+      offset += tlvLen
+      try {
+        if (tlvType === 0x00) messageId = utf8Decoder.decode(slice)
+        else if (tlvType === 0x01) content = utf8Decoder.decode(slice)
+      } catch {
+        return null
+      }
+    }
+    if (messageId !== null && content !== null) {
+      return { kind: 'pm', messageId, content }
+    }
+    return null
+  }
+
+  if (noiseType === 0x02 || noiseType === 0x03) {
+    try {
+      const messageId = utf8Decoder.decode(payload.slice(1))
+      return { kind: noiseType === 0x02 ? 'read' : 'delivered', messageId }
+    } catch {
+      return null
+    }
+  }
+
+  return null
+}
+
+/**
+ * Encrypt and wrap a DM in either Bitchat-native `v2:` format or standard NIP-17/NIP-59 format.
+ * Automatically falls back to NIP-17 when using a NIP-07 extension signer (no raw private key).
+ */
+export async function createEncryptedDmEvent(opts: {
+  content: string
+  recipientPubkey: string
+  signer: SigningKeyMaterial
+  protocol: DmProtocol
+  messageId?: string
+}): Promise<{ event: NostrEvent; protocol: DmProtocol }> {
+  const recipientPk = opts.recipientPubkey.toLowerCase()
+
+  // NIP-07 extension signer cannot derive raw Bitchat ECDH; use NIP-17 via window.nostr.nip44
+  if (opts.signer.mode === 'extension' || !opts.signer.secretKey) {
+    if (!window.nostr?.nip44?.encrypt || !window.nostr?.signEvent) {
+      throw new Error('NIP-07 extension does not support NIP-44 encryption. Switch to Auto or Local key for DMs.')
+    }
+    const rumor = {
+      pubkey: opts.signer.pubkey,
+      created_at: Math.floor(Date.now() / 1000),
+      kind: KIND_DM_RUMOR,
+      tags: [['p', recipientPk]],
+      content: opts.content,
+    }
+    const sealedContent = await window.nostr.nip44.encrypt(recipientPk, JSON.stringify(rumor))
+    const sealTemplate: EventTemplate = {
+      kind: KIND_SEAL,
+      created_at: Math.floor(Date.now() / 1000) - Math.floor(Math.random() * 172800),
+      tags: [],
+      content: sealedContent,
+    }
+    const signedSeal = await window.nostr.signEvent(sealTemplate)
+
+    const wrapSk = generateSecretKey()
+    const convKey = nip44.v2.utils.getConversationKey(wrapSk, recipientPk)
+    const wrappedContent = nip44.v2.encrypt(JSON.stringify(signedSeal), convKey)
+    const wrapEvent = finalizeEvent(
+      {
+        kind: KIND_GIFT_WRAP,
+        created_at: Math.floor(Date.now() / 1000) - Math.floor(Math.random() * 172800),
+        tags: [['p', recipientPk]],
+        content: wrappedContent,
+      },
+      wrapSk
+    )
+    return { event: wrapEvent, protocol: 'nip17' }
+  }
+
+  const sk = opts.signer.secretKey
+  const senderPk = getPublicKey(sk)
+
+  if (opts.protocol === 'bitchat') {
+    const msgId = opts.messageId ?? bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
+    const embedded = encodeBitchatEmbeddedPM(opts.content, msgId)
+    // If content > 255 bytes (exceeds 1-byte Bitchat TLV), send plain text inside v2 rumor or fall back to nip17
+    const innerContent = embedded ?? opts.content
+
+    const rumor = {
+      id: '',
+      pubkey: senderPk,
+      created_at: Math.floor(Date.now() / 1000),
+      kind: KIND_DM_RUMOR,
+      tags: [] as string[][],
+      content: innerContent,
+    }
+    const encryptedRumor = encryptBitchatV2(JSON.stringify(rumor), recipientPk, sk)
+    const seal = finalizeEvent(
+      {
+        kind: KIND_SEAL,
+        created_at: randomizedBitchatTimestamp(),
+        tags: [],
+        content: encryptedRumor,
+      },
+      sk
+    )
+
+    const wrapSk = generateSecretKey()
+    const encryptedSeal = encryptBitchatV2(JSON.stringify(seal), recipientPk, wrapSk)
+    const giftWrap = finalizeEvent(
+      {
+        kind: KIND_GIFT_WRAP,
+        created_at: randomizedBitchatTimestamp(),
+        tags: [['p', recipientPk]],
+        content: encryptedSeal,
+      },
+      wrapSk
+    )
+    return { event: giftWrap, protocol: 'bitchat' }
+  }
+
+  // Standard NIP-17 / NIP-59 gift wrap
+  const wrapEvent = nip59.wrapEvent(
+    {
+      kind: KIND_DM_RUMOR,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['p', recipientPk]],
+      content: opts.content,
+    },
+    sk,
+    recipientPk
+  )
+  return { event: wrapEvent, protocol: 'nip17' }
+}
+
+/**
+ * Auto-detecting inbound DM decryptor supporting BOTH Bitchat `v2:` envelopes and standard NIP-17/NIP-59.
+ */
+export async function decryptGiftWrapEvent(
+  giftWrap: NostrEvent,
+  recipient: SigningKeyMaterial
+): Promise<DecryptedDm | null> {
+  if (giftWrap.kind !== KIND_GIFT_WRAP) return null
+  if (!giftWrap.content || giftWrap.content.length > MAX_CIPHERTEXT_BYTES) return null
+
+  // 1. Bitchat proprietary `v2:` XChaCha20-Poly1305 envelope
+  if (giftWrap.content.startsWith('v2:')) {
+    if (!recipient.secretKey) return null
+    const sealJson = decryptBitchatV2(giftWrap.content, giftWrap.pubkey, recipient.secretKey)
+    if (!sealJson) return null
+
+    let seal: NostrEvent
+    try {
+      seal = JSON.parse(sealJson) as NostrEvent
+    } catch {
+      return null
+    }
+    if (!seal || seal.kind !== KIND_SEAL || !verifyEvent(seal)) return null
+
+    const rumorJson = decryptBitchatV2(seal.content, seal.pubkey, recipient.secretKey)
+    if (!rumorJson) return null
+
+    let rumor: { kind?: number; pubkey?: string; created_at?: number; content?: string }
+    try {
+      rumor = JSON.parse(rumorJson)
+    } catch {
+      return null
+    }
+    if (
+      rumor.kind !== KIND_DM_RUMOR ||
+      typeof rumor.pubkey !== 'string' ||
+      rumor.pubkey.toLowerCase() !== seal.pubkey.toLowerCase() ||
+      typeof rumor.content !== 'string'
+    ) {
+      return null
+    }
+
+    const decodedEmbedded = decodeBitchatEmbeddedPayload(rumor.content)
+    if (decodedEmbedded) {
+      if (decodedEmbedded.kind === 'delivered' || decodedEmbedded.kind === 'read') {
+        return {
+          id: giftWrap.id,
+          senderPubkey: seal.pubkey.toLowerCase(),
+          content: '',
+          createdAt: typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at,
+          protocol: 'bitchat',
+          embeddedMessageId: decodedEmbedded.messageId,
+          ackType: decodedEmbedded.kind,
+        }
+      }
+      return {
+        id: decodedEmbedded.messageId || giftWrap.id,
+        senderPubkey: seal.pubkey.toLowerCase(),
+        content: decodedEmbedded.content ?? '',
+        createdAt: typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at,
+        protocol: 'bitchat',
+        embeddedMessageId: decodedEmbedded.messageId,
+      }
+    }
+
+    return {
+      id: giftWrap.id,
+      senderPubkey: seal.pubkey.toLowerCase(),
+      content: rumor.content,
+      createdAt: typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at,
+      protocol: 'bitchat',
+    }
+  }
+
+  // 2. Standard NIP-17 / NIP-59 gift wrap
+  if (recipient.secretKey) {
+    try {
+      const rumor = nip59.unwrapEvent(giftWrap, recipient.secretKey)
+      if (!rumor || rumor.kind !== KIND_DM_RUMOR || typeof rumor.content !== 'string') return null
+      return {
+        id: rumor.id || giftWrap.id,
+        senderPubkey: rumor.pubkey.toLowerCase(),
+        content: rumor.content,
+        createdAt: rumor.created_at,
+        protocol: 'nip17',
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // 3. NIP-07 extension NIP-44 decrypt
+  if (recipient.mode === 'extension' && window.nostr?.nip44?.decrypt) {
+    try {
+      const sealJson = await window.nostr.nip44.decrypt(giftWrap.pubkey, giftWrap.content)
+      const seal = JSON.parse(sealJson) as NostrEvent
+      if (!seal || seal.kind !== KIND_SEAL || !verifyEvent(seal)) return null
+      const rumorJson = await window.nostr.nip44.decrypt(seal.pubkey, seal.content)
+      const rumor = JSON.parse(rumorJson) as {
+        id?: string
+        kind?: number
+        pubkey?: string
+        created_at?: number
+        content?: string
+      }
+      if (
+        rumor.kind !== KIND_DM_RUMOR ||
+        typeof rumor.pubkey !== 'string' ||
+        rumor.pubkey.toLowerCase() !== seal.pubkey.toLowerCase() ||
+        typeof rumor.content !== 'string'
+      ) {
+        return null
+      }
+      return {
+        id: rumor.id || giftWrap.id,
+        senderPubkey: seal.pubkey.toLowerCase(),
+        content: rumor.content,
+        createdAt: typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at,
+        protocol: 'nip17',
+      }
+    } catch {
+      return null
+    }
+  }
+
+  return null
+}

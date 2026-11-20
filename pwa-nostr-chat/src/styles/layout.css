@@ -1,0 +1,230 @@
+/* ==========================================================================
+   Agnostr Responsive 3-Pane Layout Architecture
+   Desktop (>= 1100px): Left Rail | Center Stage | Collapsible Right Inspector
+   Tablet (768–1099px): Left Rail | Center Stage (+ Right Slide-Over Drawer)
+   Mobile (< 768px):    Full 100dvh Center Stage (+ Left & Right Slide-Overs)
+   ========================================================================== */
+
+.ag-app {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  position: relative;
+}
+
+.ag-app.ag-panic-active {
+  animation: ag-panic-flash 650ms var(--ease-out);
+}
+
+/* --------------------------------------------------------------------------
+   Left Sidebar Rail
+   -------------------------------------------------------------------------- */
+.ag-sidebar {
+  width: var(--sidebar-w);
+  flex: 0 0 var(--sidebar-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-surface);
+  border-right: 1px solid var(--border-subtle);
+  overflow: hidden;
+  transition: width var(--dur-med) var(--ease-out),
+    flex-basis var(--dur-med) var(--ease-out),
+    transform var(--dur-med) var(--ease-out),
+    opacity var(--dur-fast) ease;
+  z-index: 20;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.ag-sidebar.collapsed {
+  width: 0;
+  flex-basis: 0;
+  border-right-color: transparent;
+  pointer-events: none;
+  opacity: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Center Stage (Header + Search + Stream + Composer)
+   -------------------------------------------------------------------------- */
+.ag-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background-color: var(--bg-canvas);
+  background-image: var(--ambient-glow);
+  background-repeat: no-repeat;
+  overflow: hidden;
+}
+
+.ag-main.dm-mode {
+  background-image: radial-gradient(
+    620px circle at 50% 0%,
+    rgba(167, 139, 250, 0.065),
+    transparent 70%
+  );
+}
+
+/* Header */
+.ag-header {
+  flex: 0 0 auto;
+  background-color: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border-subtle);
+  padding-top: env(safe-area-inset-top, 0px);
+  z-index: var(--z-sticky);
+}
+
+.ag-header-top {
+  min-height: var(--header-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.9rem;
+}
+
+.ag-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+/* Stream Container */
+.ag-stream-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ag-stream-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.75rem 0 1.25rem;
+  scroll-behavior: auto;
+  overscroll-behavior-y: contain;
+}
+
+.ag-stream-inner {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 1rem;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Composer Dock */
+.ag-composer-dock {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: var(--z-sticky);
+  background: linear-gradient(
+    to top,
+    var(--bg-canvas) 72%,
+    transparent
+  );
+  padding: 0.35rem 1rem max(0.75rem, env(safe-area-inset-bottom, 0px));
+}
+
+.ag-composer-inner {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  position: relative;
+}
+
+/* Mobile / Tablet Backdrop Scrim */
+.ag-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: var(--bg-overlay);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: var(--z-drawer-backdrop);
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+/* Mobile-only helpers */
+.ag-mobile-only {
+  display: none;
+}
+
+/* --------------------------------------------------------------------------
+   Tablet Breakpoint (< 1100px)
+   -------------------------------------------------------------------------- */
+@media (max-width: 1099px) {
+  :root {
+    --sidebar-w: 252px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Mobile Breakpoint (< 768px)
+   -------------------------------------------------------------------------- */
+@media (max-width: 767px) {
+  .ag-mobile-only {
+    display: inline-flex;
+  }
+
+  .ag-desktop-only {
+    display: none !important;
+  }
+
+  .ag-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(86vw, 310px);
+    flex: none;
+    z-index: var(--z-drawer);
+    box-shadow: var(--shadow-lg);
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .ag-sidebar.collapsed {
+    width: min(86vw, 310px);
+    transform: translateX(-104%);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .ag-header-top {
+    padding: 0.45rem 0.65rem;
+    gap: 0.45rem;
+    min-height: 52px;
+  }
+
+  .ag-stream-inner {
+    padding: 0 0.65rem;
+  }
+
+  .ag-composer-dock {
+    padding: 0.3rem 0.65rem max(0.65rem, env(safe-area-inset-bottom, 0px));
+  }
+}
