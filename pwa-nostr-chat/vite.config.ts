@@ -4,6 +4,7 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: '/Agnostr/',
   plugins: [
     react(),
     VitePWA({
@@ -12,18 +13,19 @@ export default defineConfig({
       manifest: {
         name: 'Agnostr',
         short_name: 'Agnostr',
-        start_url: '/',
+        start_url: '/Agnostr/',
+        scope: '/Agnostr/',
         display: 'standalone',
         background_color: '#111827',
         theme_color: '#111827',
         icons: [
           {
-            src: '/vite.svg',
+            src: 'vite.svg',
             sizes: '192x192',
             type: 'image/svg+xml'
           },
           {
-            src: '/vite.svg',
+            src: 'vite.svg',
             sizes: '512x512',
             type: 'image/svg+xml'
           }
