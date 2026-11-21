@@ -7,6 +7,7 @@ import {
   Download,
   Globe,
   Lock,
+  Map as MapIcon,
   Navigation,
   PanelLeft,
   PanelRight,
@@ -48,6 +49,7 @@ export interface ChannelHeaderProps {
   onLocateMe: () => void
   onInspectPeer: (peer: PeerInfo) => void
   onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
+  onExpandRadar?: () => void
   onExport?: (format: 'markdown' | 'json') => void
 }
 
@@ -66,6 +68,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   onLocateMe,
   onInspectPeer,
   onOpenServerSettings,
+  onExpandRadar,
   onExport,
 }) => {
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
@@ -299,6 +302,19 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
 
           {!isDm && !isServer && (
             <>
+              {onExpandRadar && (
+                <button
+                  type="button"
+                  className="ag-pill-btn"
+                  onClick={onExpandRadar}
+                  title="Open full-screen zoomable Geohash Radar Map"
+                  aria-label="Open full-screen Geohash Radar Map"
+                >
+                  <MapIcon size={13} style={{ color: 'var(--accent)' }} />
+                  <span className="ag-desktop-only">Radar</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 className={`ag-pill-btn ${inspectorOpen && inspectorTab === 'peers' ? 'active' : ''}`}

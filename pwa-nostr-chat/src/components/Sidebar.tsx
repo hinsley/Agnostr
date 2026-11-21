@@ -5,6 +5,7 @@ import {
   Crosshair,
   Globe,
   Lock,
+  Map as MapIcon,
   PanelLeftClose,
   Palette,
   Radio,
@@ -41,6 +42,7 @@ export interface SidebarProps {
   onOpenDm: (pubkey: string, nickname?: string) => void
   onOpenCommandPalette: () => void
   onOpenInspectorTab: (tab: InspectorTab) => void
+  onExpandRadar?: () => void
   onLocateMe: () => void
 }
 
@@ -52,6 +54,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenDm,
   onOpenCommandPalette,
   onOpenInspectorTab,
+  onExpandRadar,
   onLocateMe,
 }) => {
   const [freqDraft, setFreqDraft] = useState('')
@@ -141,6 +144,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <Crosshair size={15} />
           </button>
+          {onExpandRadar && (
+            <button
+              type="button"
+              className="ag-gps-mini-btn"
+              onClick={onExpandRadar}
+              title="Open Full-Screen Geohash Radar Map"
+              aria-label="Open Full-Screen Geohash Radar Map"
+            >
+              <MapIcon size={15} />
+            </button>
+          )}
         </form>
       </div>
 
@@ -156,10 +170,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <button
               type="button"
               className="mono"
-              style={{ fontSize: 10, color: 'var(--accent)' }}
-              onClick={() => onOpenInspectorTab('radar')}
+              style={{
+                fontSize: 10,
+                color: 'var(--accent)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 3,
+              }}
+              onClick={() => (onExpandRadar ? onExpandRadar() : onOpenInspectorTab('radar'))}
+              title="Open full-screen interactive Geohash Radar Map"
             >
-              RADAR →
+              <MapIcon size={11} />
+              <span>RADAR MAP</span>
             </button>
           </div>
           {topPulseRooms.length === 0 ? (

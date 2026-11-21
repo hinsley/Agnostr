@@ -410,3 +410,230 @@ export function formatCoords(coords: GeoCoords): string {
   const ew = coords.lon >= 0 ? 'E' : 'W'
   return `${Math.abs(coords.lat).toFixed(3)}°${ns} ${Math.abs(coords.lon).toFixed(3)}°${ew}`
 }
+
+export interface GeohashGridCell {
+  geohash: string
+  precision: number
+  bounds: GeoBounds
+  center: GeoCoords
+}
+
+function makeGridCell(geohash: string): GeohashGridCell {
+  const bounds = decodeBounds(geohash)
+  return {
+    geohash,
+    precision: geohash.length,
+    bounds,
+    center: {
+      lat: (bounds.latMin + bounds.latMax) / 2,
+      lon: (bounds.lonMin + bounds.lonMax) / 2,
+    },
+  }
+}
+
+/**
+ * Returns all 32 subdivided base32 child cells (`geohash + c`) with exact bounds and centers.
+ * Passing an empty string returns all 32 precision-1 world cells.
+ */
+export function getChildGeohashes(rawGeohash: string): GeohashGridCell[] {
+  const gh = normalizeGeohash(rawGeohash)
+  if (gh.length >= 12) return []
+  if (gh.length > 0 && !isValidGeohash(gh)) return []
+
+  const children: GeohashGridCell[] = []
+  for (let i = 0; i < BASE32_CHARS.length; i++) {
+    children.push(makeGridCell(gh + BASE32_CHARS[i]))
+  }
+  return children
+}
+
+/**
+ * Enumerates every geohash cell of the given precision overlapping `bounds`.
+ * Safely clamps latitude to Web Mercator `[-85, 85]`, handles antimeridian /
+ * Leaflet wrapped-world longitudes, deduplicates via Set, and caps at `maxCells`
+ * centered around the viewport so it never hangs at mismatched zoom/precision.
+ */
+export function getGeohashCellsInBounds(
+  bounds: GeoBounds,
+  precision: number,
+  maxCells = 180
+): GeohashGridCell[] {
+  const p = Math.max(1, Math.min(12, Math.floor(precision)))
+  const cap = Math.max(1, Math.min(500, Math.floor(maxCells)))
+
+  const rawLatMin = Math.max(-85, Math.min(85, Math.min(bounds.latMin, bounds.latMax)))
+  const rawLatMax = Math.max(-85, Math.min(85, Math.max(bounds.latMin, bounds.latMax)))
+  if (!Number.isFinite(rawLatMin) || !Number.isFinite(rawLatMax)) return []
+
+  const totalBits = p * 5
+  const lonBits = Math.ceil(totalBits / 2)
+  const latBits = Math.floor(totalBits / 2)
+  const maxCols = 2 ** lonBits
+  const maxRows = 2 ** latBits
+  const lonStep = 360 / maxCols
+  const latStep = 180 / maxRows
+  const eps = 1e-12
+
+  // Split longitude into 1 or 2 normalized ranges inside [-180, 180]
+  const lonRanges: Array<[number, number]> = []
+  if (!Number.isFinite(bounds.lonMin) || !Number.isFinite(bounds.lonMax)) return []
+
+  const lonSpan = bounds.lonMax - bounds.lonMin
+  if (lonSpan >= 359.999 || lonSpan <= -359.999) {
+    lonRanges.push([-180, 180])
+  } else if (bounds.lonMin <= bounds.lonMax) {
+    // Handle Leaflet longitudes outside [-180, 180] (wrapped world copies)
+    const startW = wrapLongitude(bounds.lonMin)
+    const endW = wrapLongitude(bounds.lonMax)
+    if (startW <= endW) {
+      lonRanges.push([startW, endW])
+    } else {
+      lonRanges.push([startW, 180])
+      lonRanges.push([-180, endW])
+    }
+  } else {
+    // Explicit antimeridian crossing (e.g. lonMin = 170, lonMax = -170)
+    lonRanges.push([Math.max(-180, Math.min(180, bounds.lonMin)), 180])
+    lonRanges.push([-180, Math.max(-180, Math.min(180, bounds.lonMax))])
+  }
+
+  let rowStart = Math.max(0, Math.min(maxRows - 1, Math.floor((rawLatMin + 90) / latStep)))
+  let rowEnd = Math.max(0, Math.min(maxRows - 1, Math.floor((rawLatMax + 90 - eps) / latStep)))
+  if (rowEnd < rowStart) rowEnd = rowStart
+
+  // Collect ordered column indices across the 1-2 lon ranges
+  const colSpans: Array<[number, number]> = []
+  let totalCols = 0
+  for (const [lMin, lMax] of lonRanges) {
+    const cStart = Math.max(0, Math.min(maxCols - 1, Math.floor((lMin + 180) / lonStep)))
+    const cEnd = Math.max(0, Math.min(maxCols - 1, Math.floor((lMax + 180 - eps) / lonStep)))
+    const clampedEnd = Math.max(cStart, cEnd)
+    colSpans.push([cStart, clampedEnd])
+    totalCols += clampedEnd - cStart + 1
+  }
+
+  const totalRows = rowEnd - rowStart + 1
+
+  // If total grid exceeds cap, take a centered window around the viewport center
+  if (totalRows * totalCols > cap) {
+    const aspect = Math.max(0.25, Math.min(4, totalCols / Math.max(1, totalRows)))
+    const cappedRows = Math.max(1, Math.min(totalRows, Math.floor(Math.sqrt(cap / aspect))))
+    const cappedCols = Math.max(1, Math.min(totalCols, Math.floor(cap / cappedRows)))
+
+    const centerRow = Math.floor((rowStart + rowEnd) / 2)
+    rowStart = Math.max(0, centerRow - Math.floor(cappedRows / 2))
+    rowEnd = Math.min(maxRows - 1, rowStart + cappedRows - 1)
+
+    const flatCols: number[] = []
+    for (const [cStart, cEnd] of colSpans) {
+      const spanLen = cEnd - cStart + 1
+      if (spanLen > cap * 2) {
+        // Huge range (e.g. precision 8 at world zoom): center directly on midpoint of bounds
+        const midLon = wrapLongitude((bounds.lonMin + bounds.lonMax) / 2)
+        const midCol = Math.max(0, Math.min(maxCols - 1, Math.floor((midLon + 180) / lonStep)))
+        const startC = Math.max(0, midCol - Math.floor(cappedCols / 2))
+        const endC = Math.min(maxCols - 1, startC + cappedCols - 1)
+        colSpans.length = 0
+        colSpans.push([startC, endC])
+        break
+      }
+      for (let c = cStart; c <= cEnd; c++) flatCols.push(c)
+    }
+
+    if (flatCols.length > cappedCols) {
+      const midIdx = Math.floor(flatCols.length / 2)
+      const sliceStart = Math.max(0, midIdx - Math.floor(cappedCols / 2))
+      const slice = flatCols.slice(sliceStart, sliceStart + cappedCols)
+      colSpans.length = 0
+      for (const c of slice) colSpans.push([c, c])
+    }
+  }
+
+  const seen = new Set<string>()
+  const cells: GeohashGridCell[] = []
+
+  for (let row = rowStart; row <= rowEnd; row++) {
+    const lat = -90 + (row + 0.5) * latStep
+    for (const [cStart, cEnd] of colSpans) {
+      for (let col = cStart; col <= cEnd; col++) {
+        if (cells.length >= cap) return cells
+        const lon = -180 + (col + 0.5) * lonStep
+        const gh = encodeGeohash(lat, lon, p)
+        if (seen.has(gh)) continue
+        seen.add(gh)
+        cells.push(makeGridCell(gh))
+      }
+    }
+  }
+
+  return cells
+}
+
+/**
+ * Smooth Leaflet zoom -> recommended geohash precision mapping so visible
+ * cells remain legible and comfortably tappable on both desktop and mobile.
+ */
+export function getRecommendedPrecisionForZoom(zoom: number): number {
+  const z = Math.floor(zoom)
+  if (z <= 2) return 1
+  if (z <= 4) return 2
+  if (z <= 6) return 3
+  if (z <= 9) return 4
+  if (z <= 11) return 5
+  if (z <= 14) return 6
+  if (z <= 16) return 7
+  return 8
+}
+
+/**
+ * Appropriate Leaflet zoom level to frame a geohash cell of the given precision.
+ */
+export function getZoomForPrecision(precision: number): number {
+  const p = Math.max(1, Math.min(8, Math.floor(precision)))
+  switch (p) {
+    case 1:
+      return 2
+    case 2:
+      return 4
+    case 3:
+      return 6
+    case 4:
+      return 9
+    case 5:
+      return 11
+    case 6:
+      return 13
+    case 7:
+      return 15
+    default:
+      return 17
+  }
+}
+
+function formatDistanceValue(km: number, unit: 'km' | 'm'): string {
+  if (unit === 'm') {
+    const meters = km * 1000
+    if (meters < 10) return meters.toFixed(1)
+    return Math.round(meters).toLocaleString('en-US')
+  }
+  if (km < 10) return km.toFixed(1)
+  if (km < 100) return km.toFixed(1).replace(/\.0$/, '')
+  return Math.round(km).toLocaleString('en-US')
+}
+
+/**
+ * Crisp human-readable geographic footprint for a geohash bounding box
+ * (accounting for latitude longitude-foreshortening via Haversine).
+ * Examples: "~4.9 × 3.9 km", "~153 × 121 m".
+ */
+export function formatCellDimensions(bounds: GeoBounds): string {
+  const centerLat = (bounds.latMin + bounds.latMax) / 2
+  const centerLon = (bounds.lonMin + bounds.lonMax) / 2
+  const heightKm = haversineKm(bounds.latMin, centerLon, bounds.latMax, centerLon)
+  const widthKm = haversineKm(centerLat, bounds.lonMin, centerLat, bounds.lonMax)
+
+  if (heightKm < 1 && widthKm < 1) {
+    return `~${formatDistanceValue(widthKm, 'm')} × ${formatDistanceValue(heightKm, 'm')} m`
+  }
+  return `~${formatDistanceValue(widthKm, 'km')} × ${formatDistanceValue(heightKm, 'km')} km`
+}

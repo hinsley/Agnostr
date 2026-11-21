@@ -30,6 +30,7 @@ export interface InspectorDrawerProps {
   onMentionPeer: (handle: string) => void
   onStartDm: (pubkey: string, nickname?: string) => void
   onTuneChannel: (geohash: string) => void
+  onExpandRadar?: () => void
   onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
   onLeftServer?: () => void
   onPlaySound?: (cue: SoundCue) => void
@@ -67,6 +68,7 @@ export function InspectorDrawer({
   onMentionPeer,
   onStartDm,
   onTuneChannel,
+  onExpandRadar,
   onOpenServerSettings,
   onLeftServer,
   onPlaySound,
@@ -203,6 +205,7 @@ export function InspectorDrawer({
               <GeoRadarPanel
                 engine={engine}
                 onTuneChannel={onTuneChannel}
+                onExpandRadar={onExpandRadar}
                 onPlaySound={onPlaySound}
               />
             ))}

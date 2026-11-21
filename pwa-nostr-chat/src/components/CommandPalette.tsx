@@ -7,6 +7,7 @@ import {
   Hash,
   Key,
   Lock,
+  Map as MapIcon,
   Palette,
   Plus,
   Radio,
@@ -51,6 +52,7 @@ export interface CommandPaletteProps {
   onTuneChannel: (geohash: string) => void
   onSelectServerChannel?: (serverId: string, channelId: string) => void
   onOpenServerHub?: (initialTab?: ServerHubTab) => void
+  onExpandRadar?: () => void
   onLocateMe: () => void
   onOpenInspectorTab: (tab: InspectorTab) => void
   onToggleSound: () => void
@@ -65,6 +67,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onTuneChannel,
   onSelectServerChannel,
   onOpenServerHub,
+  onExpandRadar,
   onLocateMe,
   onOpenInspectorTab,
   onToggleSound,
@@ -207,6 +210,23 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         run: () => {
           onClose()
           onLocateMe()
+        },
+      },
+      {
+        id: 'act-expand-radar',
+        group: 'Actions',
+        title: 'Open Full-Screen Geohash Radar',
+        subtitle: 'Interactive zoomable Leaflet map with live geohash zone grids & 32× sub-zones',
+        keywords: 'radar map fullscreen full-screen zoom geohash grid world explore expand',
+        badge: 'MAP',
+        icon: <MapIcon size={15} />,
+        run: () => {
+          onClose()
+          if (onExpandRadar) {
+            onExpandRadar()
+          } else {
+            onOpenInspectorTab('radar')
+          }
         },
       },
       {
@@ -392,6 +412,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     onTuneChannel,
     onSelectServerChannel,
     onOpenServerHub,
+    onExpandRadar,
     onClose,
     onLocateMe,
     onOpenInspectorTab,

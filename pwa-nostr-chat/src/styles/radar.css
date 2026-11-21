@@ -1,0 +1,986 @@
+/* ==========================================================================
+   Agnostr Interactive Zoomable Leaflet Tactical Geohash Radar
+   Supports compact docked mini-map + full-screen ExpandedRadarModal
+   Theme-adaptive across phosphor | amber | obsidian | daylight
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Leaflet Host & Theme-Matched Tactical Basemap Tinting
+   -------------------------------------------------------------------------- */
+.ag-radar-map-host {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  isolation: isolate;
+  background-color: var(--bg-canvas);
+  overflow: hidden;
+}
+
+.ag-radar-map-compact {
+  height: 224px;
+}
+
+.ag-radar-map-expanded {
+  width: 100%;
+  height: 100%;
+}
+
+.ag-radar-leaflet-canvas {
+  width: 100%;
+  height: 100%;
+  background-color: var(--bg-canvas) !important;
+  font-family: var(--font-sans) !important;
+}
+
+/* Subtle theme-matched basemap tinting on CARTO tiles */
+.ag-radar-map-host[data-map-theme='phosphor'] .leaflet-tile-pane {
+  filter: sepia(0.28) hue-rotate(95deg) saturate(1.22) brightness(0.92) contrast(1.06);
+}
+
+.ag-radar-map-host[data-map-theme='amber'] .leaflet-tile-pane {
+  filter: sepia(0.55) hue-rotate(-14deg) saturate(1.3) brightness(0.94) contrast(1.06);
+}
+
+.ag-radar-map-host[data-map-theme='obsidian'] .leaflet-tile-pane {
+  filter: sepia(0.22) hue-rotate(196deg) saturate(1.25) brightness(0.95) contrast(1.05);
+}
+
+.ag-radar-map-host[data-map-theme='daylight'] .leaflet-tile-pane {
+  filter: saturate(0.84) contrast(1.03) brightness(0.99);
+}
+
+/* Compact unobtrusive Leaflet attribution */
+.ag-radar-map-host .leaflet-control-attribution {
+  background: color-mix(in srgb, var(--bg-surface) 74%, transparent) !important;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: var(--text-muted) !important;
+  font-family: var(--font-mono);
+  font-size: 9px !important;
+  line-height: 1.3;
+  padding: 1px 6px !important;
+  border-radius: var(--radius-xs) 0 0 0;
+}
+
+.ag-radar-map-host .leaflet-control-attribution a {
+  color: var(--text-secondary) !important;
+}
+
+/* Keep attribution unobtrusively tucked in bottom-right corner on Expanded mode */
+.ag-radar-map-expanded .leaflet-bottom.leaflet-right {
+  bottom: 2px;
+  right: 4px;
+  opacity: 0.72;
+}
+
+/* --------------------------------------------------------------------------
+   Geohash Grid Rectangles, Sub-Zones, Pulse Zones & Focus Highlights
+   -------------------------------------------------------------------------- */
+.ag-gh-rect {
+  stroke: color-mix(in srgb, var(--accent) 40%, var(--border-strong));
+  stroke-opacity: 0.55;
+  fill: var(--accent);
+  fill-opacity: 0.025;
+  transition: fill-opacity 120ms ease, stroke-opacity 120ms ease;
+}
+
+.ag-gh-rect:hover {
+  stroke-opacity: 0.92;
+  fill-opacity: 0.11;
+}
+
+.ag-gh-rect-under-focus {
+  stroke-opacity: 0;
+  fill-opacity: 0;
+}
+
+[data-theme='daylight'] .ag-gh-rect {
+  stroke: rgba(13, 138, 82, 0.52);
+  stroke-opacity: 0.65;
+  fill: rgba(13, 138, 82, 0.04);
+}
+
+[data-theme='daylight'] .ag-gh-rect:hover {
+  fill-opacity: 0.14;
+}
+
+/* Sub-Zone 32× Base32 Drill-Down Cells */
+.ag-gh-sub-rect {
+  stroke: var(--accent-secondary);
+  stroke-opacity: 0.78;
+  fill: var(--accent-secondary);
+  fill-opacity: 0.06;
+  transition: fill-opacity 110ms ease;
+}
+
+.ag-gh-sub-rect:hover {
+  fill-opacity: 0.18;
+  stroke-opacity: 1;
+}
+
+.ag-gh-sub-rect.selected {
+  fill-opacity: 0.2;
+}
+
+/* Live Global Pulse Zones */
+.ag-gh-pulse-rect {
+  stroke: var(--status-ok);
+  stroke-opacity: 0.72;
+  fill: var(--status-ok);
+  fill-opacity: 0.13;
+}
+
+.ag-gh-pulse-rect:hover {
+  fill-opacity: 0.22;
+  stroke-opacity: 1;
+}
+
+.ag-gh-pulse-rect.active {
+  fill-opacity: 0.16;
+}
+
+/* Active Tuned Geohash Cell */
+.ag-gh-active-rect {
+  stroke: var(--accent);
+  stroke-opacity: 1;
+  fill: var(--accent);
+  fill-opacity: 0.18;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 55%, transparent));
+}
+
+/* Selected / Inspected Geohash Cell (distinct from active tuned cell) */
+.ag-gh-selected-rect {
+  stroke: var(--accent-secondary);
+  stroke-opacity: 1;
+  fill: var(--accent-secondary);
+  fill-opacity: 0.18;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent-secondary) 55%, transparent));
+}
+
+/* Teleport Dashed Vector Line */
+.ag-gh-teleport-line {
+  stroke: var(--accent-secondary);
+  stroke-opacity: 0.85;
+}
+
+/* Centered Geohash Zone Labels (Non-Cluttered DivIcons) */
+.ag-gh-label-host {
+  background: transparent !important;
+  border: none !important;
+  pointer-events: none;
+}
+
+.ag-gh-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(-50%, -50%);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--text-primary) 82%, transparent);
+  background-color: color-mix(in srgb, var(--bg-canvas) 62%, transparent);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+[data-theme='daylight'] .ag-gh-label {
+  color: #10251b;
+  background-color: rgba(255, 255, 255, 0.72);
+}
+
+.ag-gh-sub-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(-50%, -50%);
+  padding: 0 3px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--accent-secondary);
+  background-color: color-mix(in srgb, var(--bg-canvas) 74%, transparent);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+[data-theme='daylight'] .ag-gh-sub-label {
+  color: #0369a1;
+  background-color: rgba(255, 255, 255, 0.82);
+}
+
+.ag-gh-active-label,
+.ag-gh-selected-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(-50%, -50%);
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
+  pointer-events: none;
+}
+
+.ag-gh-active-label {
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  border: 1px solid color-mix(in srgb, var(--text-inverse) 25%, transparent);
+}
+
+.ag-gh-selected-label {
+  background-color: var(--accent-secondary);
+  color: #06131c;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+/* Global Pulse Sonar Beacons & GPS Beacon */
+.ag-gh-beacon-host {
+  background: transparent !important;
+  border: none !important;
+}
+
+.ag-gh-pulse-beacon {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.ag-gh-pulse-ring {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  border: 1.5px solid var(--status-ok);
+  animation: ag-radar-ping 2.4s var(--ease-out) infinite;
+}
+
+.ag-gh-pulse-core {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background-color: var(--status-ok);
+  border: 1.5px solid var(--bg-canvas);
+  box-shadow: 0 0 8px var(--status-ok);
+}
+
+.ag-gh-pulse-pill {
+  position: absolute;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-ok) 55%, transparent);
+  color: var(--text-primary);
+  font-size: 9.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
+  pointer-events: none;
+}
+
+.ag-gh-pulse-pill b {
+  color: var(--status-ok);
+  font-weight: 700;
+}
+
+.ag-gh-gps-beacon {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ag-gh-gps-halo {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-secondary-soft);
+  border: 1.5px solid var(--accent-secondary);
+  animation: ag-radar-ping 2.8s var(--ease-out) infinite;
+}
+
+.ag-gh-gps-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-secondary);
+  border: 2px solid var(--bg-canvas);
+}
+
+/* Desktop Hover Readout HUD inside Map */
+.ag-radar-hover-hud {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.22rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background-color: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--border-default);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  pointer-events: none;
+  box-shadow: var(--shadow-sm);
+}
+
+.ag-radar-map-expanded .ag-radar-hover-hud {
+  left: 14px;
+  bottom: 148px;
+}
+
+/* --------------------------------------------------------------------------
+   Compact Mini-Map Container (GeoRadarPanel)
+   -------------------------------------------------------------------------- */
+.ag-radar-meta-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  flex-shrink: 0;
+}
+
+.ag-radar-expand-head-btn {
+  gap: 0.28rem;
+}
+
+.ag-radar-compact-frame {
+  position: relative;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-canvas);
+}
+
+.ag-radar-compact-controls {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ag-radar-mini-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  background-color: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-sm);
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-radar-mini-btn:hover {
+  border-color: var(--border-accent);
+  color: var(--accent);
+  background-color: var(--bg-elevated);
+}
+
+.ag-radar-mini-btn-accent {
+  color: var(--accent);
+  border-color: var(--border-accent);
+}
+
+.ag-radar-compact-tune-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.35rem 0.45rem;
+  background-color: var(--bg-surface);
+  border-top: 1px solid var(--border-accent);
+}
+
+.ag-radar-compact-sel-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.26rem;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.ag-radar-compact-sel-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.24rem;
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Expanded Full-Screen Tactical Radar Modal
+   Desktop: 95vw × 92dvh crisp frame | Mobile (<768px): true 100vw × 100dvh
+   -------------------------------------------------------------------------- */
+.ag-radar-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  background-color: var(--bg-overlay);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-radar-modal {
+  position: relative;
+  width: min(95vw, 1380px);
+  height: 92dvh;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-canvas);
+  box-shadow: var(--shadow-lg);
+  animation: ag-scale-in var(--dur-med) var(--ease-spring);
+}
+
+/* Top Floating Tactical Bar */
+.ag-radar-top-bar {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  pointer-events: none;
+}
+
+.ag-radar-top-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  pointer-events: auto;
+}
+
+.ag-radar-search-form {
+  position: relative;
+  flex: 1 1 auto;
+  max-width: 390px;
+  display: flex;
+  align-items: center;
+  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+}
+
+.ag-radar-search-form:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md), 0 0 0 2px var(--accent-soft);
+}
+
+.ag-radar-search-icon {
+  position: absolute;
+  left: 0.72rem;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.ag-radar-search-input {
+  width: 100%;
+  height: 40px;
+  padding: 0 2.6rem 0 2.2rem;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.ag-radar-search-input:focus {
+  outline: none;
+}
+
+.ag-radar-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.ag-radar-search-go {
+  position: absolute;
+  right: 6px;
+  height: 28px;
+  padding: 0 0.52rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.ag-radar-search-err {
+  align-self: flex-start;
+  padding: 0.25rem 0.55rem;
+  border-radius: var(--radius-sm);
+  background-color: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+  border: 1px solid var(--status-danger);
+  color: var(--status-danger);
+  font-size: 11px;
+  pointer-events: auto;
+}
+
+.ag-radar-top-pill {
+  height: 40px;
+  padding: 0 0.72rem;
+  border-radius: var(--radius-md);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  box-shadow: var(--shadow-md);
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-radar-top-pill:hover,
+.ag-radar-top-pill.active {
+  border-color: var(--border-accent);
+  background-color: var(--bg-elevated);
+  color: var(--accent);
+}
+
+.ag-radar-close-btn {
+  margin-left: auto;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-md);
+  transition:
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-radar-close-btn:hover {
+  border-color: var(--status-danger);
+  color: var(--status-danger);
+  background-color: var(--bg-elevated);
+}
+
+/* Precision Selector Strip */
+.ag-radar-prec-bar {
+  align-self: flex-start;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.35rem 0.25rem 0.55rem;
+  border-radius: var(--radius-md);
+  background-color: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-sm);
+  pointer-events: auto;
+}
+
+.ag-radar-prec-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-radar-prec-pills {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.ag-radar-prec-pills::-webkit-scrollbar {
+  display: none;
+}
+
+.ag-radar-prec-pill {
+  height: 26px;
+  padding: 0 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: transparent;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-radar-prec-pill:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+.ag-radar-prec-pill.active {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+/* Live Global Pulse Quick-Fly Popover */
+.ag-radar-pulse-popover {
+  position: absolute;
+  top: 100px;
+  left: 12px;
+  width: min(310px, calc(100% - 76px));
+  max-height: 46dvh;
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  background-color: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: ag-scale-in var(--dur-fast) var(--ease-out);
+}
+
+.ag-radar-pulse-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-radar-pulse-pop-list {
+  overflow-y: auto;
+  padding: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ag-radar-pulse-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.46rem 0.52rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  transition: border-color var(--dur-fast) ease, background-color var(--dur-fast) ease;
+}
+
+.ag-radar-pulse-item:hover,
+.ag-radar-pulse-item.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-radar-pulse-item-main {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.ag-radar-pulse-item-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* Right Floating Touch Stack (Fat-Finger 44×44px Buttons) */
+.ag-radar-touch-stack {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ag-radar-fab {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-md);
+  transition:
+    color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-radar-fab:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--border-accent);
+  background-color: var(--bg-elevated);
+}
+
+.ag-radar-fab:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.ag-radar-fab.active {
+  color: var(--text-inverse);
+  background-color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: var(--accent-glow);
+}
+
+.ag-radar-fab.gps-ready {
+  color: var(--accent-secondary);
+  border-color: color-mix(in srgb, var(--accent-secondary) 52%, transparent);
+}
+
+/* Bottom Thumb-Friendly Inspect & Tune Card */
+.ag-radar-bottom-card {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  width: min(600px, calc(100% - 24px));
+  z-index: 13;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.78rem 0.9rem;
+  border-radius: var(--radius-lg);
+  background-color: color-mix(in srgb, var(--bg-surface) 93%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+}
+
+.ag-radar-inspect-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ag-radar-inspect-title {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  min-width: 0;
+}
+
+.ag-radar-inspect-hash {
+  font-size: var(--text-base);
+  font-weight: 700;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-radar-inspect-city {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ag-radar-inspect-badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+}
+
+.ag-radar-inspect-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.ag-radar-inspect-privacy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 11px;
+  color: var(--status-warn);
+}
+
+.ag-radar-inspect-actions {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 0.45rem;
+  padding-top: 0.15rem;
+}
+
+.ag-radar-inspect-actions .ag-btn {
+  height: 38px;
+}
+
+.ag-radar-tune-cta {
+  font-weight: 700;
+}
+
+/* --------------------------------------------------------------------------
+   Mobile Full-Screen Layout (< 768px)
+   True 100vw × 100dvh + safe-area insets + 16px iOS zoom guard
+   -------------------------------------------------------------------------- */
+@media (max-width: 767px) {
+  .ag-radar-modal-backdrop {
+    padding: 0;
+  }
+
+  .ag-radar-modal {
+    width: 100vw;
+    height: 100dvh;
+    border-radius: 0;
+    border: none;
+  }
+
+  .ag-radar-top-bar {
+    top: calc(10px + env(safe-area-inset-top, 0px));
+    left: 10px;
+    right: 10px;
+  }
+
+  .ag-radar-search-input {
+    font-size: 16px;
+    height: 42px;
+  }
+
+  .ag-radar-top-pill,
+  .ag-radar-close-btn {
+    height: 42px;
+  }
+
+  .ag-radar-close-btn {
+    width: 42px;
+  }
+
+  .ag-radar-prec-bar {
+    width: 100%;
+    gap: 0.25rem;
+    padding: 0.2rem 0.28rem 0.2rem 0.42rem;
+  }
+
+  .ag-radar-prec-pills {
+    flex: 1 1 auto;
+    justify-content: space-between;
+    gap: 0.14rem;
+  }
+
+  .ag-radar-prec-pill {
+    height: 26px;
+    padding: 0 0.34rem;
+    font-size: 10px;
+  }
+
+  .ag-radar-touch-stack {
+    right: 10px;
+    top: auto;
+    bottom: calc(204px + env(safe-area-inset-bottom, 0px));
+    transform: none;
+    gap: 6px;
+  }
+
+  .ag-radar-fab {
+    width: 44px;
+    height: 44px;
+  }
+
+  .ag-radar-pulse-popover {
+    top: calc(104px + env(safe-area-inset-top, 0px));
+    left: 10px;
+    width: calc(100% - 20px);
+    max-height: 40dvh;
+  }
+
+  .ag-radar-bottom-card {
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    width: calc(100% - 20px);
+    padding: 0.72rem 0.78rem;
+  }
+
+  .ag-radar-inspect-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ag-radar-tune-cta {
+    grid-column: 1 / -1;
+    height: 42px !important;
+  }
+
+  .ag-radar-hover-hud {
+    display: none;
+  }
+}

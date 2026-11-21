@@ -16,6 +16,7 @@ import CommandPalette from './components/CommandPalette'
 import ToastStack from './components/ToastStack'
 import InspectorDrawer from './components/InspectorDrawer'
 import PeerInspectorModal from './components/PeerInspectorModal'
+import ExpandedRadarModal from './components/ExpandedRadarModal'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#090C0A',
@@ -58,6 +59,7 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [searchMatchIdx, setSearchMatchIdx] = useState(0)
   const [inspectedPeer, setInspectedPeer] = useState<PeerInfo | null>(null)
+  const [radarExpanded, setRadarExpanded] = useState(false)
   const [serverHubState, setServerHubState] = useState<{ open: boolean; tab: ServerHubTab }>({
     open: false,
     tab: 'create',
@@ -211,6 +213,7 @@ export function App() {
       prevMasterPkRef.current !== engine.identity.masterPubkey
     ) {
       setServerSettingsState({ serverId: null, tab: 'overview' })
+      setRadarExpanded(false)
       setPanicFlash(true)
       const t = window.setTimeout(() => setPanicFlash(false), 700)
       prevMasterPkRef.current = engine.identity.masterPubkey
@@ -301,6 +304,8 @@ export function App() {
           setServerSettingsState({ serverId: null, tab: 'overview' })
         } else if (serverHubState.open) {
           closeServerHub()
+        } else if (radarExpanded) {
+          setRadarExpanded(false)
         } else if (inspectedPeer) {
           setInspectedPeer(null)
         } else if (searchOpen) {
@@ -320,6 +325,7 @@ export function App() {
     serverSettingsState.serverId,
     serverHubState.open,
     closeServerHub,
+    radarExpanded,
     inspectedPeer,
     searchOpen,
     inspectorOpen,
@@ -506,6 +512,17 @@ export function App() {
     }
   }, [])
 
+  const handleExpandRadar = useCallback(() => {
+    setRadarExpanded(true)
+    radioAudio.play('click')
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setSidebarOpen(false)
+    }
+    if (typeof window !== 'undefined' && window.innerWidth < 1100) {
+      setInspectorOpen(false)
+    }
+  }, [])
+
   const handleToggleSound = useCallback(() => {
     const next = !engine.settings.soundEnabled
     engine.updateSettings({ soundEnabled: next })
@@ -687,6 +704,7 @@ export function App() {
             onOpenDm={handleOpenDm}
             onOpenCommandPalette={() => setCmdkOpen(true)}
             onOpenInspectorTab={handleOpenInspectorTab}
+            onExpandRadar={handleExpandRadar}
             onLocateMe={() => void handleLocateMe()}
           />
         )}
@@ -716,6 +734,7 @@ export function App() {
           onLocateMe={() => void handleLocateMe()}
           onInspectPeer={setInspectedPeer}
           onOpenServerSettings={handleOpenServerSettings}
+          onExpandRadar={handleExpandRadar}
           onExport={handleExport}
         />
 
@@ -778,6 +797,7 @@ export function App() {
         onStartDm={handleOpenDm}
         onTuneChannel={handleTuneChannel}
         onOpenServerSettings={handleOpenServerSettings}
+        onExpandRadar={handleExpandRadar}
         onLeftServer={handleLeftServer}
         onPlaySound={playSound}
       />
@@ -789,6 +809,15 @@ export function App() {
         onClose={() => setInspectedPeer(null)}
         onStartDm={handleOpenDm}
         onMentionPeer={handleMentionPeer}
+      />
+
+      {/* Full-Screen Expandable Geohash Radar Map Modal */}
+      <ExpandedRadarModal
+        open={radarExpanded}
+        engine={engine}
+        onClose={() => setRadarExpanded(false)}
+        onTuneChannel={handleTuneChannel}
+        onPlaySound={playSound}
       />
 
       {/* Create / Join / Explore Servers Hub Modal */}
@@ -820,6 +849,7 @@ export function App() {
         onTuneChannel={handleTuneChannel}
         onSelectServerChannel={handleSelectServerChannel}
         onOpenServerHub={handleOpenServerHub}
+        onExpandRadar={handleExpandRadar}
         onLocateMe={() => void handleLocateMe()}
         onOpenInspectorTab={handleOpenInspectorTab}
         onToggleSound={handleToggleSound}
