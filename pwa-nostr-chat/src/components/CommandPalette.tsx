@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Circle,
   Compass,
   Crosshair,
   Download,
@@ -21,6 +22,7 @@ import {
   Server,
   Shield,
   ShieldCheck,
+  Square,
   StickyNote,
   Terminal,
   Users,
@@ -203,6 +205,29 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             onClose()
           },
         },
+        ...(activeCall.recordingSupported
+          ? [
+              {
+                id: 'act-call-record',
+                group: 'Actions',
+                title: activeCall.localRecording ? 'Stop Call Recording' : 'Start Call Recording',
+                subtitle: activeCall.localRecording
+                  ? `Stop and save ${activeCall.localRecordingMode ?? 'call'} recording`
+                  : 'Record call audio/video locally (shows live red dot to all participants)',
+                keywords: 'record recording rec start stop save download call audio video',
+                badge: activeCall.localRecording ? 'REC' : undefined,
+                icon: activeCall.localRecording ? (
+                  <Square size={14} fill="currentColor" style={{ color: 'var(--status-danger)' }} />
+                ) : (
+                  <Circle size={14} fill="currentColor" style={{ color: 'var(--status-danger)' }} />
+                ),
+                run: () => {
+                  void engine.calls.toggleRecording()
+                  onClose()
+                },
+              },
+            ]
+          : []),
         {
           id: 'act-call-leave',
           group: 'Actions',
@@ -649,8 +674,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                         className={`ag-badge ${
                           entry.badge === 'LIVE' || entry.badge === 'ON' || entry.badge === 'READY'
                             ? 'ok'
-                            : entry.badge === 'OFF'
-                              ? 'muted'
+                            : entry.badge === 'REC'
+                              ? 'danger'
+                              : entry.badge === 'OFF'
+                                ? 'muted'
                               : entry.badge === 'E2EE'
                                 ? 'dm'
                                 : entry.badge === 'NIP-29'

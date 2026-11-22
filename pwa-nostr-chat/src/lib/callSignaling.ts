@@ -64,6 +64,7 @@ export interface DirectCallSignalPayload {
   audioMuted?: boolean
   videoEnabled?: boolean
   screenSharing?: boolean
+  recording?: boolean
   reason?: string
   ts: number
 }
@@ -82,6 +83,7 @@ export interface RoomCallSignalPayload {
   audioMuted?: boolean
   videoEnabled?: boolean
   screenSharing?: boolean
+  recording?: boolean
   ts: number
 }
 
@@ -314,6 +316,7 @@ export function validateDirectSignalPayload(
     audioMuted: typeof raw.audioMuted === 'boolean' ? raw.audioMuted : undefined,
     videoEnabled: typeof raw.videoEnabled === 'boolean' ? raw.videoEnabled : undefined,
     screenSharing: typeof raw.screenSharing === 'boolean' ? raw.screenSharing : undefined,
+    recording: typeof raw.recording === 'boolean' ? raw.recording : undefined,
     reason: typeof raw.reason === 'string' ? raw.reason.trim().slice(0, 120) : undefined,
     ts: typeof raw.ts === 'number' && Number.isFinite(raw.ts) ? raw.ts : Date.now(),
   }
@@ -342,6 +345,7 @@ export function validateRoomSignalPayload(
     audioMuted: typeof raw.audioMuted === 'boolean' ? raw.audioMuted : undefined,
     videoEnabled: typeof raw.videoEnabled === 'boolean' ? raw.videoEnabled : undefined,
     screenSharing: typeof raw.screenSharing === 'boolean' ? raw.screenSharing : undefined,
+    recording: typeof raw.recording === 'boolean' ? raw.recording : undefined,
     ts: typeof raw.ts === 'number' && Number.isFinite(raw.ts) ? raw.ts : Date.now(),
   }
 }

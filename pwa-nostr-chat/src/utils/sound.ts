@@ -14,6 +14,8 @@ export type SoundCue =
   | 'ring'
   | 'call-join'
   | 'call-leave'
+  | 'rec-start'
+  | 'rec-stop'
 
 class RadioAudioEngine {
   private ctx: AudioContext | null = null
@@ -118,6 +120,17 @@ class RadioAudioEngine {
         // Clean descending comms disconnect cadence
         this.tone(ctx, t, 587.33, 440, 0.09, 0.045, 'sine')
         this.tone(ctx, t + 0.09, 392, 293.66, 0.14, 0.04, 'triangle')
+        break
+
+      case 'rec-start':
+        // Subtle crisp double-blip confirming call recording started
+        this.tone(ctx, t, 880, 880, 0.055, 0.036, 'sine')
+        this.tone(ctx, t + 0.075, 1174.66, 1174.66, 0.075, 0.04, 'sine')
+        break
+
+      case 'rec-stop':
+        // Subtle descending single-blip confirming call recording saved
+        this.tone(ctx, t, 987.77, 659.25, 0.095, 0.038, 'sine')
         break
     }
   }

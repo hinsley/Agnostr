@@ -34,6 +34,10 @@
   box-shadow: inset 0 -1px 0 var(--accent), 0 4px 16px -6px var(--accent-soft);
 }
 
+.ag-call-floating-bar.is-recording {
+  border-bottom-color: rgba(239, 68, 68, 0.6);
+}
+
 .ag-call-float-left {
   display: flex;
   align-items: center;
@@ -372,17 +376,108 @@
   border-color: var(--accent);
 }
 
-/* Tile Overlays (Top-Right Telemetry + Bottom-Left Identity) */
-.ag-call-tile-top {
+/* Tile Overlays (Top-Left Telemetry + Top-Right Recording Dot + Bottom-Left Identity) */
+@keyframes ag-rec-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.78;
+  }
+  75% {
+    transform: scale(2.15);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.15);
+    opacity: 0;
+  }
+}
+
+@keyframes ag-rec-blink {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.86);
+  }
+}
+
+.ag-call-tile-top,
+.ag-call-tile-net {
   position: absolute;
   top: 0.42rem;
-  right: 0.45rem;
+  left: 0.45rem;
+  right: auto;
   display: flex;
   align-items: center;
   gap: 0.28rem;
-  max-width: calc(100% - 0.9rem);
+  max-width: calc(100% - 2.3rem);
   z-index: 2;
   pointer-events: none;
+}
+
+.ag-call-rec-dot {
+  position: absolute;
+  top: 0.54rem;
+  right: 0.54rem;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  background-color: #ef4444;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.35),
+    0 0 12px rgba(239, 68, 68, 0.85);
+  z-index: 3;
+  pointer-events: auto;
+}
+
+.ag-call-rec-dot::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: var(--radius-full);
+  border: 2px solid #ef4444;
+  animation: ag-rec-pulse 1.5s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  pointer-events: none;
+}
+
+/* Header & Floating Bar Active Recording Pill */
+.ag-call-rec-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  padding: 0.14rem 0.5rem;
+  border-radius: var(--radius-full);
+  background-color: rgba(239, 68, 68, 0.16);
+  border: 1px solid rgba(239, 68, 68, 0.58);
+  color: #f87171;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.25;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 175px;
+}
+
+[data-theme='daylight'] .ag-call-rec-pill,
+[data-theme='paper'] .ag-call-rec-pill {
+  background-color: rgba(220, 38, 38, 0.12);
+  border-color: rgba(220, 38, 38, 0.45);
+  color: #b91c1c;
+}
+
+.ag-call-rec-pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background-color: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.85);
+  flex-shrink: 0;
+  animation: ag-rec-blink 1.2s ease-in-out infinite;
 }
 
 .ag-call-micro-pill {
@@ -522,6 +617,30 @@
   background-color: var(--accent-soft);
   border-color: var(--border-accent);
   color: var(--accent);
+}
+
+.ag-call-rec-icon {
+  color: #ef4444;
+}
+
+.ag-call-rec-btn.recording {
+  background-color: rgba(239, 68, 68, 0.18);
+  border-color: #ef4444;
+  color: #f87171;
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.34);
+}
+
+[data-theme='daylight'] .ag-call-rec-btn.recording,
+[data-theme='paper'] .ag-call-rec-btn.recording {
+  background-color: rgba(220, 38, 38, 0.14);
+  border-color: #dc2626;
+  color: #b91c1c;
+  box-shadow: 0 0 12px rgba(220, 38, 38, 0.24);
+}
+
+.ag-call-rec-btn.recording:hover:not(:disabled) {
+  background-color: rgba(239, 68, 68, 0.28);
+  border-color: #ef4444;
 }
 
 .ag-call-hangup-btn {
@@ -786,6 +905,16 @@
   color: var(--status-danger);
 }
 
+.ag-srv-voice-rec-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background-color: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.8);
+  flex-shrink: 0;
+  animation: ag-rec-blink 1.2s ease-in-out infinite;
+}
+
 .ag-srv-voice-actions {
   display: flex;
   align-items: center;
@@ -943,15 +1072,22 @@
   }
 
   .ag-call-controls {
+    flex-wrap: nowrap;
     gap: 0.4rem;
-    padding: 0.5rem 0.55rem;
+    padding: 0.48rem 0.5rem;
   }
 
   .ag-call-ctrl-btn {
     min-width: 44px;
     min-height: 44px;
     height: 44px;
-    padding: 0 0.72rem;
+    padding: 0 0.68rem;
+  }
+
+  .ag-call-rec-pill {
+    max-width: 132px;
+    font-size: 10px;
+    padding: 0.12rem 0.4rem;
   }
 
   .ag-incoming-call {
@@ -976,9 +1112,20 @@
   }
 }
 
-@media (max-width: 520px) {
+@media (max-width: 600px) {
+  .ag-call-head {
+    padding: 0.42rem 0.55rem;
+    gap: 0.4rem;
+  }
+
+  .ag-call-head-left {
+    gap: 0.34rem;
+  }
+
   .ag-call-ctrl-btn {
-    padding: 0 0.62rem;
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
   }
 
   .ag-call-ctrl-btn span {
@@ -986,9 +1133,12 @@
   }
 
   .ag-call-hangup-btn {
-    padding: 0 0.9rem;
+    width: 52px;
+    padding: 0;
   }
+}
 
+@media (max-width: 520px) {
   .ag-turn-cred-row {
     grid-template-columns: 1fr;
   }

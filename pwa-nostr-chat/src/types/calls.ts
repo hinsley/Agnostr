@@ -25,6 +25,7 @@ export interface CallParticipant {
   audioMuted: boolean
   videoEnabled: boolean
   screenSharing: boolean
+  isRecording: boolean
   isSpeaking: boolean
   /** Normalized live audio level 0..1 */
   audioLevel: number
@@ -49,6 +50,10 @@ export interface ActiveCallSession {
   localDeafened: boolean
   localCameraOn: boolean
   localScreenSharing: boolean
+  localRecording: boolean
+  localRecordingStartedAt: number | null
+  localRecordingMode: 'audio' | 'video' | null
+  recordingSupported: boolean
   screenShareSupported: boolean
   participants: CallParticipant[]
   maxParticipants: number
@@ -71,6 +76,7 @@ export interface RoomCallPresence {
   displayHandle: string
   hasVideo: boolean
   audioMuted: boolean
+  isRecording?: boolean
   lastSeenAt: number // unix ms
 }
 
@@ -98,5 +104,6 @@ export interface CallEngine {
   toggleDeafen: () => void
   toggleCamera: () => Promise<boolean>
   toggleScreenShare: () => Promise<boolean>
+  toggleRecording: () => Promise<void>
   getServerCallCount: (serverId: string) => number
 }

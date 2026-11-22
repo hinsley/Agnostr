@@ -13,6 +13,11 @@ import type { ToastLevel } from '../types/protocol.ts'
 import type { ServerSummary } from '../types/servers.ts'
 import { verifyEventCached } from '../lib/bitchatProtocol.ts'
 import {
+  CallRecorderController,
+  isCallRecordingSupported,
+  type CallRecordingMode,
+} from '../lib/callRecorder.ts'
+import {
   buildDirectCallSignalTemplate,
   buildRoomCallSignalTemplate,
   CALL_SIGNALING_RELAYS,
@@ -108,6 +113,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   rostersRef.current = serverCallRosters
 
   const meshRef = useRef<WebRtcMesh | null>(null)
+  const recorderRef = useRef<CallRecorderController | null>(null)
+  const recordingStartedAtRef = useRef<number | null>(null)
+  const recordingModeRef = useRef<CallRecordingMode | null>(null)
+  const remoteRecordingRef = useRef<Map<string, boolean>>(new Map())
   const seenEventIdsRef = useRef<Set<string>>(new Set())
   const lastLeaveTsByRoomPeerRef = useRef<Map<string, number>>(new Map())
   const lastPresenceTsByRoomPeerRef = useRef<Map<string, number>>(new Map())
@@ -145,6 +154,9 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     if (!mesh || !current) return
 
     const participants = mesh.getParticipantsSnapshot()
+    if (recorderRef.current?.isRecording()) {
+      recorderRef.current.syncParticipants(participants)
+    }
     const nextStatus =
       current.mode === 'dm' && current.status === 'connecting' && mesh.hasAnyConnectedPeer()
         ? 'active'
@@ -160,11 +172,32 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       localDeafened: mesh.getLocalDeafened(),
       localCameraOn: mesh.getLocalCameraOn(),
       localScreenSharing: mesh.getLocalScreenSharing(),
+      localRecording: mesh.getLocalRecording(),
+      localRecordingStartedAt: recordingStartedAtRef.current,
+      localRecordingMode: recordingModeRef.current,
+      recordingSupported: isCallRecordingSupported(),
       participants,
     }
     activeCallRef.current = updated
     setActiveCall(updated)
   }, [])
+
+  const notifyRemoteRecordingChange = useCallback(
+    (pubkey: string, nickname: string | undefined, nextRecording: boolean | undefined) => {
+      if (typeof nextRecording !== 'boolean') return
+      const pk = pubkey.toLowerCase()
+      const prev = remoteRecordingRef.current.get(pk) ?? false
+      if (prev === nextRecording) return
+      remoteRecordingRef.current.set(pk, nextRecording)
+      const handle = formatDisplayHandle(nickname || getPeerNicknameRef.current(pk), pk)
+      if (nextRecording) {
+        pushToastRef.current('warning', `${handle} started recording this call`)
+      } else {
+        pushToastRef.current('info', `${handle} stopped recording`)
+      }
+    },
+    []
+  )
 
   const clearRingTimers = useCallback(() => {
     if (outgoingRingTimerRef.current !== null) {
@@ -264,10 +297,22 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   }, [])
 
   const teardownActiveCall = useCallback(
-    (notifyNetwork: boolean) => {
+    (notifyNetwork: boolean, opts?: { abortRecording?: boolean }) => {
       const current = activeCallRef.current
+      const meshToDispose = meshRef.current
+      meshRef.current = null
       clearRingTimers()
       stopRoomHeartbeat()
+      remoteRecordingRef.current.clear()
+
+      const wasRecording = Boolean(recorderRef.current?.isRecording())
+      recordingStartedAtRef.current = null
+      recordingModeRef.current = null
+
+      if (wasRecording && !opts?.abortRecording && meshToDispose) {
+        // Broadcast recording: false before hanging up
+        meshToDispose.setLocalRecording(false)
+      }
 
       if (notifyNetwork && current) {
         const selfPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
@@ -294,13 +339,33 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         }
       }
 
-      if (meshRef.current) {
-        meshRef.current.dispose()
-        meshRef.current = null
-      }
-
       activeCallRef.current = null
       setActiveCall(null)
+
+      if (wasRecording && recorderRef.current) {
+        if (opts?.abortRecording) {
+          recorderRef.current.abort()
+          meshToDispose?.dispose()
+        } else {
+          const title = current?.title || 'call'
+          const activeRecorder = recorderRef.current
+          void activeRecorder
+            .stopAndDownload(title)
+            .then((res) => {
+              if (res) {
+                pushToastRef.current('success', 'Recording saved', `${res.filename} (${res.durationSec}s)`)
+              }
+            })
+            .catch(() => {
+              // Ignore finalize error during teardown
+            })
+            .finally(() => {
+              meshToDispose?.dispose()
+            })
+        }
+      } else {
+        meshToDispose?.dispose()
+      }
     },
     [clearRingTimers, stopRoomHeartbeat, identityManager, publishDirectSignal, publishRoomSignal, removeRosterMember]
   )
@@ -446,6 +511,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 audioMuted: mediaState.audioMuted,
                 videoEnabled: mediaState.videoEnabled,
                 screenSharing: mediaState.screenSharing,
+                recording: mediaState.recording,
                 ts: Date.now(),
               })
             } else if (sessionMeta.server) {
@@ -458,6 +524,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 displayHandle: formatDisplayHandle(nick, selfPk),
                 hasVideo: mediaState.videoEnabled || mediaState.screenSharing,
                 audioMuted: mediaState.audioMuted,
+                isRecording: mediaState.recording,
                 lastSeenAt: Date.now(),
               })
               void publishRoomSignal(sessionMeta.server, roomId, {
@@ -469,6 +536,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 audioMuted: mediaState.audioMuted,
                 videoEnabled: mediaState.videoEnabled,
                 screenSharing: mediaState.screenSharing,
+                recording: mediaState.recording,
                 ts: Date.now(),
               })
             }
@@ -476,8 +544,40 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
           onStateChange: () => {
             syncActiveCallFromMesh()
           },
-          onPeerConnected: () => {
+          onPeerConnected: (connectedPeerPk) => {
             syncActiveCallFromMesh()
+            // Sync current media & recording state to newly connected peer (late-joiner guarantee)
+            const activeMesh = meshRef.current
+            if (!activeMesh) return
+            const state = activeMesh.getLocalMediaState()
+            const nick = identityManager.getNickname()
+            if (sessionMeta.mode === 'dm') {
+              void publishDirectSignal(connectedPeerPk, {
+                v: 1,
+                action: 'media-state',
+                callId: sessionMeta.callId,
+                nickname: nick,
+                audioMuted: state.audioMuted,
+                videoEnabled: state.videoEnabled,
+                screenSharing: state.screenSharing,
+                recording: state.recording,
+                ts: Date.now(),
+              })
+            } else if (sessionMeta.server) {
+              const roomId = sessionMeta.roomId ?? DEFAULT_SERVER_VOICE_ROOM_ID
+              void publishRoomSignal(sessionMeta.server, roomId, {
+                v: 1,
+                action: 'media-state',
+                serverId: sessionMeta.server.id,
+                roomId,
+                nickname: nick,
+                audioMuted: state.audioMuted,
+                videoEnabled: state.videoEnabled,
+                screenSharing: state.screenSharing,
+                recording: state.recording,
+                ts: Date.now(),
+              })
+            }
           },
           onPeerFailed: () => {
             pushToastRef.current(
@@ -556,6 +656,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         localDeafened: mesh.getLocalDeafened(),
         localCameraOn: mesh.getLocalCameraOn(),
         localScreenSharing: mesh.getLocalScreenSharing(),
+        localRecording: false,
+        localRecordingStartedAt: null,
+        localRecordingMode: null,
+        recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
         participants: mesh.getParticipantsSnapshot(),
         maxParticipants: MAX_CALL_PARTICIPANTS,
@@ -647,6 +751,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         localDeafened: mesh.getLocalDeafened(),
         localCameraOn: mesh.getLocalCameraOn(),
         localScreenSharing: mesh.getLocalScreenSharing(),
+        localRecording: false,
+        localRecordingStartedAt: null,
+        localRecordingMode: null,
+        recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
         participants: mesh.getParticipantsSnapshot(),
         maxParticipants: MAX_CALL_PARTICIPANTS,
@@ -767,6 +875,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         localDeafened: mesh.getLocalDeafened(),
         localCameraOn: mesh.getLocalCameraOn(),
         localScreenSharing: mesh.getLocalScreenSharing(),
+        localRecording: false,
+        localRecordingStartedAt: null,
+        localRecordingMode: null,
+        recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
         participants: mesh.getParticipantsSnapshot(),
         maxParticipants: MAX_CALL_PARTICIPANTS,
@@ -782,6 +894,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         displayHandle: formatDisplayHandle(selfNick, selfPk),
         hasVideo: mesh.getLocalCameraOn(),
         audioMuted: mesh.getLocalMuted(),
+        isRecording: false,
         lastSeenAt: now,
       })
 
@@ -795,6 +908,15 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         }
         if (!mesh.canAddPeer(pk)) break
         mesh.connectToPeer(pk, peer.nickname)
+        mesh.updatePeerMetadata(pk, {
+          nickname: peer.nickname,
+          audioMuted: peer.audioMuted,
+          videoEnabled: peer.hasVideo,
+          isRecording: Boolean(peer.isRecording),
+        })
+        if (peer.isRecording) {
+          notifyRemoteRecordingChange(pk, peer.nickname, true)
+        }
       }
       syncActiveCallFromMesh()
 
@@ -804,6 +926,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         if (!m || activeCallRef.current?.serverId !== server.id) return
         const nick = identityManager.getNickname()
         const hasVid = m.getLocalCameraOn() || m.getLocalScreenSharing()
+        const isRec = m.getLocalRecording()
         upsertRosterMember({
           serverId: server.id,
           roomId,
@@ -812,6 +935,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
           displayHandle: formatDisplayHandle(nick, selfPk),
           hasVideo: hasVid,
           audioMuted: m.getLocalMuted(),
+          isRecording: isRec,
           lastSeenAt: Date.now(),
         })
         void publishRoomSignal(server, roomId, {
@@ -824,6 +948,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
           audioMuted: m.getLocalMuted(),
           videoEnabled: m.getLocalCameraOn(),
           screenSharing: m.getLocalScreenSharing(),
+          recording: isRec,
           ts: Date.now(),
         })
       }
@@ -838,6 +963,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     [
       createMeshForCall,
       identityManager,
+      notifyRemoteRecordingChange,
       publishRoomSignal,
       syncActiveCallFromMesh,
       teardownActiveCall,
@@ -941,7 +1067,9 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                   audioMuted: payload.audioMuted,
                   videoEnabled: payload.videoEnabled,
                   screenSharing: payload.screenSharing,
+                  isRecording: payload.recording,
                 })
+                notifyRemoteRecordingChange(sender, payload.nickname, payload.recording)
               }
               return
             }
@@ -1068,7 +1196,9 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 audioMuted: payload.audioMuted,
                 videoEnabled: payload.videoEnabled,
                 screenSharing: payload.screenSharing,
+                isRecording: payload.recording,
               })
+              notifyRemoteRecordingChange(sender, payload.nickname, payload.recording)
             }
           })()
         },
@@ -1078,7 +1208,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     return () => {
       unsub()
     }
-  }, [pool, masterPubkey, identityManager, publishDirectSignal, syncActiveCallFromMesh, teardownActiveCall])
+  }, [pool, masterPubkey, identityManager, notifyRemoteRecordingChange, publishDirectSignal, syncActiveCallFromMesh, teardownActiveCall])
 
   // Server Voice Lounge room presence & E2EE room signaling subscription across all joined servers
   const serverRoomTagsKey = useMemo(
@@ -1166,6 +1296,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               if (eventTs < lastPresenceTs) return
 
               removeRosterMember(srv.id, sender)
+              remoteRecordingRef.current.delete(sender)
               const active = activeCallRef.current
               if (active?.mode === 'server' && active.serverId === srv.id && active.roomId === roomId) {
                 meshRef.current?.removePeer(sender)
@@ -1194,6 +1325,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 displayHandle: formatDisplayHandle(nick, sender),
                 hasVideo: Boolean(payload.videoEnabled || payload.screenSharing || payload.media === 'video'),
                 audioMuted: Boolean(payload.audioMuted),
+                isRecording: Boolean(payload.recording),
                 lastSeenAt: Date.now(),
               })
 
@@ -1212,7 +1344,9 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                   audioMuted: payload.audioMuted,
                   videoEnabled: payload.videoEnabled,
                   screenSharing: payload.screenSharing,
+                  isRecording: payload.recording,
                 })
+                notifyRemoteRecordingChange(sender, nick, payload.recording)
 
                 // Immediately echo a throttled room-ping on room-join so newcomer sees us fast
                 if (payload.action === 'room-join' && Date.now() - lastRoomPongRef.current > 1500) {
@@ -1229,6 +1363,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                     audioMuted: mesh.getLocalMuted(),
                     videoEnabled: mesh.getLocalCameraOn(),
                     screenSharing: mesh.getLocalScreenSharing(),
+                    recording: mesh.getLocalRecording(),
                     ts: Date.now(),
                   })
                 }
@@ -1256,6 +1391,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 displayHandle: formatDisplayHandle(nick, sender),
                 hasVideo: Boolean(payload.videoEnabled || payload.screenSharing),
                 audioMuted: Boolean(payload.audioMuted),
+                isRecording: typeof payload.recording === 'boolean' ? payload.recording : existing?.isRecording,
                 lastSeenAt: Date.now(),
               })
               const active = activeCallRef.current
@@ -1265,7 +1401,9 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                   audioMuted: payload.audioMuted,
                   videoEnabled: payload.videoEnabled,
                   screenSharing: payload.screenSharing,
+                  isRecording: payload.recording,
                 })
+                notifyRemoteRecordingChange(sender, nick, payload.recording)
               }
               return
             }
@@ -1347,12 +1485,12 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   // Send room-leave / call-hangup and dispose tracks cleanly on page unload
   useEffect(() => {
     const handleUnload = () => {
-      teardownActiveCall(true)
+      teardownActiveCall(true, { abortRecording: true })
     }
     window.addEventListener('beforeunload', handleUnload)
     return () => {
       window.removeEventListener('beforeunload', handleUnload)
-      teardownActiveCall(false)
+      teardownActiveCall(false, { abortRecording: true })
     }
   }, [teardownActiveCall])
 
@@ -1374,6 +1512,77 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     if (!meshRef.current) return false
     return await meshRef.current.toggleScreenShare()
   }, [])
+
+  const toggleRecording = useCallback(async (): Promise<void> => {
+    const mesh = meshRef.current
+    const active = activeCallRef.current
+    if (!mesh || !active) return
+
+    if (!isCallRecordingSupported()) {
+      pushToastRef.current(
+        'warning',
+        'Recording unsupported',
+        'MediaRecorder or Web Audio API is unavailable in this browser.'
+      )
+      return
+    }
+
+    if (!recorderRef.current) {
+      recorderRef.current = new CallRecorderController()
+    }
+    const recorder = recorderRef.current
+
+    // Stop active recording & download file
+    if (recorder.isRecording()) {
+      recordingStartedAtRef.current = null
+      recordingModeRef.current = null
+      mesh.setLocalRecording(false)
+      syncActiveCallFromMesh()
+
+      const res = await recorder.stopAndDownload(active.title)
+      if (res) {
+        pushToastRef.current('success', 'Recording saved', `${res.filename} (${res.durationSec}s)`)
+      } else {
+        pushToastRef.current('warning', 'Recording empty', 'No media frames were captured before stopping.')
+      }
+      return
+    }
+
+    // Start new call recording
+    try {
+      const startInfo = recorder.start(mesh.getParticipantsSnapshot(), (errMsg) => {
+        recordingStartedAtRef.current = null
+        recordingModeRef.current = null
+        meshRef.current?.setLocalRecording(false)
+        syncActiveCallFromMesh()
+        if (errMsg) {
+          pushToastRef.current('error', 'Recording stopped unexpectedly', errMsg)
+        }
+      })
+      recordingStartedAtRef.current = startInfo.startedAt
+      recordingModeRef.current = startInfo.mode
+      mesh.setLocalRecording(true)
+      syncActiveCallFromMesh()
+      pushToastRef.current(
+        'info',
+        'Recording started',
+        startInfo.mode === 'video'
+          ? 'Capturing composite video + mixed call audio. All participants are notified.'
+          : 'Capturing mixed call audio. All participants are notified.'
+      )
+    } catch (err) {
+      recordingStartedAtRef.current = null
+      recordingModeRef.current = null
+      recorder.abort()
+      mesh.setLocalRecording(false)
+      syncActiveCallFromMesh()
+      pushToastRef.current(
+        'error',
+        'Unable to start recording',
+        err instanceof Error ? err.message : 'MediaRecorder failed to initialize.'
+      )
+    }
+  }, [syncActiveCallFromMesh])
 
   // Custom TURN/ICE server configuration
   const saveTurnConfigAction = useCallback((config: TurnServerConfig): boolean => {
@@ -1409,7 +1618,8 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   )
 
   const resetAllCalls = useCallback(() => {
-    teardownActiveCall(true)
+    recorderRef.current?.abort()
+    teardownActiveCall(true, { abortRecording: true })
     incomingCallRef.current = null
     setIncomingCall(null)
     rostersRef.current = {}
@@ -1420,6 +1630,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     lastLeaveTsByRoomPeerRef.current.clear()
     lastPresenceTsByRoomPeerRef.current.clear()
     endedCallIdsRef.current.clear()
+    remoteRecordingRef.current.clear()
   }, [teardownActiveCall])
 
   const calls: CallEngine = useMemo(
@@ -1440,6 +1651,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       toggleDeafen,
       toggleCamera,
       toggleScreenShare,
+      toggleRecording,
       getServerCallCount,
     }),
     [
@@ -1458,6 +1670,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       toggleDeafen,
       toggleCamera,
       toggleScreenShare,
+      toggleRecording,
       getServerCallCount,
     ]
   )

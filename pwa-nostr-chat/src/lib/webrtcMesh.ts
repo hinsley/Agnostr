@@ -65,6 +65,7 @@ export interface WebRtcMeshCallbacks {
     audioMuted: boolean
     videoEnabled: boolean
     screenSharing: boolean
+    recording: boolean
   }) => void
   onStateChange: () => void
   onPeerConnected?: (peerPubkey: string) => void
@@ -88,6 +89,7 @@ interface RemotePeerEntry {
   audioMuted: boolean
   videoEnabled: boolean
   screenSharing: boolean
+  isRecording: boolean
   isSpeaking: boolean
   audioLevel: number
   lastSpokeAt: number
@@ -144,6 +146,7 @@ export class WebRtcMesh {
 
   private localMuted = false
   private localDeafened = false
+  private localRecording = false
   private mutedBeforeDeafen = false
   private cameraBeforeScreen = false
   private localSpeaking = false
@@ -185,6 +188,33 @@ export class WebRtcMesh {
 
   getLocalScreenSharing(): boolean {
     return Boolean(this.localScreenTrack && this.localScreenTrack.readyState === 'live')
+  }
+
+  getLocalRecording(): boolean {
+    return this.localRecording
+  }
+
+  getLocalMediaState(): {
+    audioMuted: boolean
+    videoEnabled: boolean
+    screenSharing: boolean
+    recording: boolean
+  } {
+    const activeVideo = this.getActiveLocalVideoTrack()
+    return {
+      audioMuted: this.localMuted,
+      videoEnabled: Boolean(activeVideo && activeVideo.readyState === 'live' && activeVideo.enabled),
+      screenSharing: this.getLocalScreenSharing(),
+      recording: this.localRecording,
+    }
+  }
+
+  setLocalRecording(recording: boolean): void {
+    if (this.disposed) return
+    if (this.localRecording === recording) return
+    this.localRecording = recording
+    this.broadcastLocalMediaState()
+    this.emitState()
   }
 
   getParticipantCount(): number {
@@ -326,6 +356,7 @@ export class WebRtcMesh {
       audioMuted: false,
       videoEnabled: false,
       screenSharing: false,
+      isRecording: false,
       isSpeaking: false,
       audioLevel: 0,
       lastSpokeAt: 0,
@@ -432,6 +463,7 @@ export class WebRtcMesh {
       audioMuted?: boolean
       videoEnabled?: boolean
       screenSharing?: boolean
+      isRecording?: boolean
     }
   ): void {
     const entry = this.peers.get(peerPubkey.toLowerCase())
@@ -451,6 +483,10 @@ export class WebRtcMesh {
     }
     if (typeof patch.screenSharing === 'boolean' && entry.screenSharing !== patch.screenSharing) {
       entry.screenSharing = patch.screenSharing
+      changed = true
+    }
+    if (typeof patch.isRecording === 'boolean' && entry.isRecording !== patch.isRecording) {
+      entry.isRecording = patch.isRecording
       changed = true
     }
     if (changed) this.emitState()
@@ -688,6 +724,7 @@ export class WebRtcMesh {
       audioMuted: this.localMuted,
       videoEnabled: Boolean(activeVideo && activeVideo.readyState === 'live' && activeVideo.enabled),
       screenSharing: this.getLocalScreenSharing(),
+      isRecording: this.localRecording,
       isSpeaking: this.localSpeaking && !this.localMuted,
       audioLevel: this.localMuted ? 0 : this.localAudioLevel,
       iceState: 'connected',
@@ -709,6 +746,7 @@ export class WebRtcMesh {
         audioMuted: entry.audioMuted,
         videoEnabled: entry.videoEnabled && hasLiveRemoteVideo,
         screenSharing: entry.screenSharing && hasLiveRemoteVideo,
+        isRecording: entry.isRecording,
         isSpeaking: entry.isSpeaking && !entry.audioMuted,
         audioLevel: entry.audioMuted ? 0 : entry.audioLevel,
         iceState: entry.iceState,
@@ -1081,12 +1119,7 @@ export class WebRtcMesh {
   }
 
   private broadcastLocalMediaState(): void {
-    const activeVideo = this.getActiveLocalVideoTrack()
-    this.callbacks.onBroadcastMediaState({
-      audioMuted: this.localMuted,
-      videoEnabled: Boolean(activeVideo && activeVideo.readyState === 'live' && activeVideo.enabled),
-      screenSharing: this.getLocalScreenSharing(),
-    })
+    this.callbacks.onBroadcastMediaState(this.getLocalMediaState())
   }
 
   private emitState(): void {

@@ -138,6 +138,25 @@ export function App() {
     }
   }, [activeCallId])
 
+  // Play subtle rec-start / rec-stop cues when any participant starts or stops recording
+  const recordingCount = activeCall
+    ? activeCall.participants.filter((p) => p.isRecording).length
+    : 0
+  const prevRecRef = useRef<{ callId: string | null; count: number }>({
+    callId: activeCallId,
+    count: recordingCount,
+  })
+  useEffect(() => {
+    const prev = prevRecRef.current
+    prevRecRef.current = { callId: activeCallId, count: recordingCount }
+    if (!activeCallId || prev.callId !== activeCallId) return
+    if (recordingCount > prev.count) {
+      radioAudio.play('rec-start')
+    } else if (recordingCount < prev.count) {
+      radioAudio.play('rec-stop')
+    }
+  }, [activeCallId, recordingCount])
+
   const settingsServer: ServerSummary | null = useMemo(() => {
     if (!serverSettingsState.serverId) return null
     return engine.servers.joinedServers.find((s) => s.id === serverSettingsState.serverId) ?? null

@@ -100,6 +100,7 @@ export function ServerSidebar({
         hasVideo: p.videoEnabled || p.screenSharing,
         audioMuted: p.audioMuted,
         isSpeaking: p.isSpeaking,
+        isRecording: p.isRecording,
       }))
     : callRoster.map((r) => ({
         pubkey: r.pubkey,
@@ -107,6 +108,7 @@ export function ServerSidebar({
         hasVideo: r.hasVideo,
         audioMuted: r.audioMuted,
         isSpeaking: false,
+        isRecording: Boolean(r.isRecording),
       }))
   const rawVoiceCount = calls.getServerCallCount(server.id)
   const voiceCount = isInThisServerCall
@@ -484,6 +486,13 @@ export function ServerSidebar({
                       )}
                       {p.audioMuted && (
                         <MicOff size={11} className="ag-srv-voice-flag muted" aria-label="Muted" />
+                      )}
+                      {p.isRecording && (
+                        <span
+                          className="ag-srv-voice-rec-dot"
+                          title={`${p.displayHandle} is recording this call`}
+                          aria-label="Recording"
+                        />
                       )}
                     </span>
                   </div>
