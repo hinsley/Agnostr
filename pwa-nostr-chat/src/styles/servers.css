@@ -609,6 +609,14 @@
   color: var(--mesh-accent);
 }
 
+.ag-srv-mode-sub {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
 .ag-srv-mode-desc {
   font-size: 11.5px;
   font-weight: 500;
@@ -619,6 +627,86 @@
 
 .ag-srv-mode-card.active .ag-srv-mode-desc {
   color: var(--text-primary);
+}
+
+.ag-srv-saved-pill {
+  padding: 0.08rem 0.34rem;
+  border-radius: var(--radius-xs);
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1.35;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ag-srv-mode-card.active .ag-srv-saved-pill {
+  background-color: color-mix(in srgb, var(--bg-surface) 75%, transparent);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.ag-srv-saved-badge {
+  color: var(--text-secondary);
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+}
+
+.ag-srv-persistence-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0.42rem 0.6rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.ag-srv-persistence-bar svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.ag-srv-persistence-bar strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.ag-srv-history-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.52rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.ag-srv-history-row svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.ag-srv-history-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-srv-history-val {
+  color: var(--text-primary);
+  font-weight: 500;
 }
 
 /* Icon & Color Customizer */
@@ -1088,6 +1176,12 @@
     align-items: center;
     justify-content: space-between;
     padding: 0.62rem 0.75rem;
+  }
+
+  .ag-srv-mode-sub {
+    width: auto;
+    justify-content: flex-end;
+    gap: 0.42rem;
   }
 
   .ag-srv-customize-grid {

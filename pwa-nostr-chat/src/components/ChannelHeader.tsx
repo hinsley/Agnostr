@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Compass,
   Crosshair,
+  Database,
   Download,
   Globe,
   Lock,
@@ -22,6 +23,7 @@ import {
   Users,
   Volume2,
   VolumeX,
+  Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, InspectorTab, PeerInfo } from '../types/protocol'
 import type { ServerSettingsTab } from './ServerSettingsModal'
@@ -226,6 +228,13 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                       PUBLIC
                     </span>
                   )}
+                  <span
+                    className="ag-badge muted ag-hide-xs"
+                    title="Persistent history — messages are stored on relays, not ephemeral"
+                  >
+                    <Database size={9} />
+                    SAVED
+                  </span>
                 </div>
                 {(activeChannel.topic || activeServer.description) && (
                   <span className="ag-chan-sub">
@@ -281,6 +290,14 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                   LOCAL
                 </span>
               )}
+
+              <span
+                className="ag-badge muted ag-hide-xs"
+                title="Ephemeral kind:20000 — live RAM-only relay broadcast, not saved on relay disk"
+              >
+                <Zap size={9} />
+                EPHEMERAL
+              </span>
             </div>
           )}
         </div>

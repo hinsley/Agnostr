@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Command,
   Compass,
+  Database,
   Hash,
   Loader2,
   Lock,
@@ -176,6 +177,13 @@ export function ServerSidebar({
               ) : (
                 <span className="ag-badge ag-badge-accent">PUBLIC</span>
               )}
+              <span
+                className="ag-badge ag-srv-saved-badge"
+                title="Persistent history stored on relays — not ephemeral"
+              >
+                <Database size={9} />
+                <span>SAVED</span>
+              </span>
               {servers.myRole !== 'member' && (
                 <span className="ag-badge ag-badge-ok">
                   <ShieldCheck size={9} />

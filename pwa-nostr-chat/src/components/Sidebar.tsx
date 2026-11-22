@@ -94,7 +94,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <img src="./icon.svg" alt="Agnostr" className="ag-brand-logo" />
           <div className="ag-brand-text">
             <span className="ag-brand-name">AGNOSTR</span>
-            <span className="ag-brand-sub">Bitchat · Nostr Radio</span>
+            <span className="ag-brand-sub">Ephemeral Geo Radio</span>
           </div>
         </div>
         <button

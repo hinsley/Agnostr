@@ -4,6 +4,7 @@ import {
   Ban,
   Check,
   Copy,
+  Database,
   Hash,
   Lock,
   LogOut,
@@ -169,6 +170,13 @@ export function ServerInfoPanel({
               ) : (
                 <span className="ag-badge ag-badge-accent">PUBLIC</span>
               )}
+              <span
+                className="ag-badge ag-srv-saved-badge"
+                title="Persistent history stored on relays — not ephemeral"
+              >
+                <Database size={9} />
+                <span>SAVED</span>
+              </span>
               <span className="ag-badge ag-badge-muted">{myRole.toUpperCase()}</span>
             </div>
           </div>
@@ -267,6 +275,16 @@ export function ServerInfoPanel({
             </span>
           </div>
         )}
+
+        <div className="ag-srv-history-row">
+          <Database size={12} />
+          <span className="ag-srv-history-label mono">HISTORY</span>
+          <span className="ag-srv-history-val">
+            {activeServer.encrypted
+              ? 'Encrypted & saved on relays · Not ephemeral'
+              : 'Saved on relays · Not ephemeral'}
+          </span>
+        </div>
 
         <div className="ag-safety-notice">
           <ShieldAlert size={13} />

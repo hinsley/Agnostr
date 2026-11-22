@@ -3,6 +3,7 @@ import type { CSSProperties, FormEvent } from 'react'
 import {
   Check,
   Compass,
+  Database,
   Globe,
   Hash,
   Link2,
@@ -396,7 +397,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'virtual-e2ee'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-e2ee' ? 'active e2ee' : ''}`}
-                  title="End-to-end encrypted channels & voice memos with an invite-only key"
+                  title="Persistent — encrypted messages are stored on relays, not ephemeral"
                   onClick={() => {
                     setCreateMode('virtual-e2ee')
                     setIconDraft('🔐')
@@ -407,7 +408,10 @@ export function ServerHubModal({
                     <Lock size={14} />
                     <span>E2EE Private</span>
                   </div>
-                  <span className="ag-srv-mode-desc">Invite-only</span>
+                  <div className="ag-srv-mode-sub">
+                    <span className="ag-srv-mode-desc">Invite-only</span>
+                    <span className="ag-srv-saved-pill mono">SAVED</span>
+                  </div>
                 </button>
 
                 <button
@@ -415,7 +419,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'virtual-public'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-public' ? 'active' : ''}`}
-                  title="Multi-channel public server across standard Nostr relays"
+                  title="Persistent — public messages are stored on relays, not ephemeral"
                   onClick={() => {
                     setCreateMode('virtual-public')
                     setIconDraft('📡')
@@ -426,7 +430,10 @@ export function ServerHubModal({
                     <Globe size={14} />
                     <span>Instant Public</span>
                   </div>
-                  <span className="ag-srv-mode-desc">Open chat</span>
+                  <div className="ag-srv-mode-sub">
+                    <span className="ag-srv-mode-desc">Open chat</span>
+                    <span className="ag-srv-saved-pill mono">SAVED</span>
+                  </div>
                 </button>
 
                 <button
@@ -434,7 +441,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'nip29'}
                   className={`ag-srv-mode-card ${createMode === 'nip29' ? 'active nip29' : ''}`}
-                  title="Relay-enforced moderated community on a NIP-29 server"
+                  title="Persistent — messages are stored on the host NIP-29 relay, not ephemeral"
                   onClick={() => {
                     setCreateMode('nip29')
                     setIconDraft('🛰️')
@@ -445,8 +452,19 @@ export function ServerHubModal({
                     <Server size={14} />
                     <span>NIP-29 Relay</span>
                   </div>
-                  <span className="ag-srv-mode-desc">Moderated</span>
+                  <div className="ag-srv-mode-sub">
+                    <span className="ag-srv-mode-desc">Moderated</span>
+                    <span className="ag-srv-saved-pill mono">SAVED</span>
+                  </div>
                 </button>
+              </div>
+
+              <div className="ag-srv-persistence-bar">
+                <Database size={12} />
+                <span>
+                  <strong>History:</strong> Saved on relays (not ephemeral — use Geo Radio for
+                  ephemeral chat).
+                </span>
               </div>
 
               {/* Name & Description */}
@@ -717,6 +735,13 @@ export function ServerHubModal({
                         ) : (
                           <span className="ag-badge ag-badge-accent">PUBLIC SERVER</span>
                         )}
+                        <span
+                          className="ag-badge ag-srv-saved-badge"
+                          title="Persistent history stored on relays — not ephemeral"
+                        >
+                          <Database size={9} />
+                          <span>SAVED</span>
+                        </span>
                         {parsedInvite.channels && parsedInvite.channels.length > 0 && (
                           <span className="ag-badge ag-badge-muted">
                             {parsedInvite.channels.length}{' '}
