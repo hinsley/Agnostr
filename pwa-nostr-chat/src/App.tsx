@@ -2,21 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCw, WifiOff, X } from 'lucide-react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
 import { usePwa } from './hooks/usePwa'
-import type { GeoMessage, InspectorTab, PeerInfo, ThemeId } from './types/protocol'
+import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
 import type { ServerMessage, ServerSummary } from './types/servers'
 import { radioAudio, type SoundCue } from './utils/sound'
-import ServerRail from './components/ServerRail'
-import Sidebar from './components/Sidebar'
-import ServerSidebar from './components/ServerSidebar'
-import ServerHubModal, { type ServerHubTab } from './components/ServerHubModal'
-import ServerSettingsModal, { type ServerSettingsTab } from './components/ServerSettingsModal'
+import ConversationList, { type ListTab } from './components/ConversationList'
 import ChannelHeader from './components/ChannelHeader'
 import SearchBar from './components/SearchBar'
 import MessageStream from './components/MessageStream'
 import Composer from './components/Composer'
 import CommandPalette from './components/CommandPalette'
 import ToastStack from './components/ToastStack'
-import InspectorDrawer from './components/InspectorDrawer'
+import RoomInfoSheet from './components/RoomInfoSheet'
+import SettingsModal, { type SettingsTab } from './components/SettingsModal'
+import ServerHubModal, { type ServerHubTab } from './components/ServerHubModal'
+import ServerSettingsModal, { type ServerSettingsTab } from './components/ServerSettingsModal'
 import PeerInspectorModal from './components/PeerInspectorModal'
 import ExpandedRadarModal from './components/ExpandedRadarModal'
 import PwaInstallModal from './components/PwaInstallModal'
@@ -25,10 +24,10 @@ import IncomingCallBanner from './components/IncomingCallBanner'
 import ImageLightboxModal, { type LightboxImagePayload } from './components/ImageLightboxModal'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
-  phosphor: '#090C0A',
-  amber: '#0D0A07',
-  obsidian: '#09090F',
-  daylight: '#F4F5F2',
+  phosphor: '#0D1110',
+  obsidian: '#0B0D14',
+  amber: '#120F0C',
+  daylight: '#F5F7F9',
 }
 
 const ZERO_ARG_COMMANDS = new Set([
@@ -43,23 +42,17 @@ const ZERO_ARG_COMMANDS = new Set([
   '/strict',
 ])
 
-function getInitialViewportFlags() {
-  if (typeof window === 'undefined') {
-    return { sidebar: true, inspector: true }
-  }
-  return {
-    sidebar: window.innerWidth >= 768,
-    inspector: window.innerWidth >= 1100,
-  }
-}
-
 export function App() {
   const engine = useAgnostrEngine()
 
-  const initialFlags = useMemo(() => getInitialViewportFlags(), [])
-  const [sidebarOpen, setSidebarOpen] = useState(initialFlags.sidebar)
-  const [inspectorOpen, setInspectorOpen] = useState(initialFlags.inspector)
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('radar')
+  const [listTab, setListTab] = useState<ListTab>('radio')
+  const [mobileScreen, setMobileScreen] = useState<'list' | 'chat'>('chat')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [roomInfoOpen, setRoomInfoOpen] = useState(false)
+  const [settingsState, setSettingsState] = useState<{ open: boolean; tab?: SettingsTab }>({
+    open: false,
+    tab: undefined,
+  })
   const [cmdkOpen, setCmdkOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -287,6 +280,8 @@ export function App() {
       prevMasterPkRef.current !== engine.identity.masterPubkey
     ) {
       setServerSettingsState({ serverId: null, tab: 'overview' })
+      setSettingsState({ open: false, tab: undefined })
+      setRoomInfoOpen(false)
       setRadarExpanded(false)
       setInstallModalOpen(false)
       setCallExpanded(false)
@@ -366,12 +361,17 @@ export function App() {
       }
       if (mod && e.key.toLowerCase() === 'b') {
         e.preventDefault()
-        setSidebarOpen((v) => !v)
+        setSidebarCollapsed((v) => !v)
         return
       }
       if (mod && e.key.toLowerCase() === 'i') {
         e.preventDefault()
-        setInspectorOpen((v) => !v)
+        setRoomInfoOpen((v) => !v)
+        return
+      }
+      if (mod && e.key === ',') {
+        e.preventDefault()
+        setSettingsState((prev) => ({ open: !prev.open, tab: undefined }))
         return
       }
       if (e.key === 'Escape') {
@@ -379,6 +379,8 @@ export function App() {
           setCmdkOpen(false)
         } else if (lightboxImage) {
           setLightboxImage(null)
+        } else if (settingsState.open) {
+          setSettingsState((prev) => ({ ...prev, open: false }))
         } else if (serverSettingsState.serverId) {
           setServerSettingsState({ serverId: null, tab: 'overview' })
         } else if (serverHubState.open) {
@@ -391,13 +393,11 @@ export function App() {
           setCallExpanded(false)
         } else if (inspectedPeer) {
           setInspectedPeer(null)
+        } else if (roomInfoOpen) {
+          setRoomInfoOpen(false)
         } else if (searchOpen) {
           setSearchOpen(false)
           setSearchQuery('')
-        } else if (inspectorOpen && window.innerWidth < 1100) {
-          setInspectorOpen(false)
-        } else if (sidebarOpen && window.innerWidth < 768) {
-          setSidebarOpen(false)
         }
       }
     }
@@ -406,6 +406,7 @@ export function App() {
   }, [
     cmdkOpen,
     lightboxImage,
+    settingsState.open,
     serverSettingsState.serverId,
     serverHubState.open,
     closeServerHub,
@@ -413,97 +414,58 @@ export function App() {
     installModalOpen,
     callExpanded,
     inspectedPeer,
+    roomInfoOpen,
     searchOpen,
-    inspectorOpen,
-    sidebarOpen,
   ])
 
   const playSound = useCallback((cue: SoundCue) => {
     radioAudio.play(cue)
   }, [])
 
+  const handleOpenSettings = useCallback((tab?: SettingsTab) => {
+    setSettingsState({ open: true, tab })
+  }, [])
+
+  const handleMobileBack = useCallback(() => {
+    if (engine.activeView.type === 'dm') setListTab('dms')
+    else if (engine.activeView.type === 'server') setListTab('servers')
+    else setListTab('radio')
+    setMobileScreen('list')
+  }, [engine.activeView.type])
+
   const handleTuneChannel = useCallback(
     (geohash: string): boolean => {
       const ok = engine.tuneGeohash(geohash)
       if (ok) {
         radioAudio.play('tune')
-        if (typeof window !== 'undefined' && window.innerWidth < 768) {
-          setSidebarOpen(false)
-        }
-        if (typeof window !== 'undefined' && window.innerWidth < 1100) {
-          setInspectorOpen(false)
-        }
+        setListTab('radio')
+        setMobileScreen('chat')
+        setRoomInfoOpen(false)
       }
       return ok
     },
     [engine]
   )
 
-  const handleSelectGeoRadio = useCallback(() => {
-    engine.tuneGeohash(engine.activeGeohash)
-    if (typeof window !== 'undefined' && window.innerWidth >= 768) {
-      setSidebarOpen(true)
-    }
-  }, [engine])
-
-  const handleSelectDms = useCallback(() => {
-    if (engine.dmThreads.length > 0) {
-      const latest = engine.dmThreads[0]
-      engine.openDmThread(latest.peerPubkey, latest.peerNickname)
-      if (typeof window !== 'undefined' && window.innerWidth >= 768) {
-        setSidebarOpen(true)
-      }
-    } else {
-      engine.tuneGeohash(engine.activeGeohash)
-      setSidebarOpen(true)
-      engine.pushToast(
-        'info',
-        'No encrypted DMs yet',
-        'Click any peer handle or open the Peers tab to start an E2EE DM.'
-      )
-    }
-  }, [engine])
-
-  const handleSelectServer = useCallback(
-    (serverId: string) => {
-      engine.servers.selectServer(serverId)
-      if (typeof window !== 'undefined' && window.innerWidth >= 768) {
-        setSidebarOpen(true)
-      }
-    },
-    [engine.servers]
-  )
-
   const handleSelectServerChannel = useCallback(
     (serverId: string, channelId: string) => {
       engine.servers.selectChannel(serverId, channelId)
       radioAudio.play('tune')
-      if (typeof window !== 'undefined' && window.innerWidth < 768) {
-        setSidebarOpen(false)
-      }
-      if (typeof window !== 'undefined' && window.innerWidth < 1100) {
-        setInspectorOpen(false)
-      }
+      setListTab('servers')
+      setMobileScreen('chat')
+      setRoomInfoOpen(false)
     },
     [engine.servers]
   )
 
   const handleOpenServerHub = useCallback((initialTab: ServerHubTab = 'create') => {
     setServerHubState({ open: true, tab: initialTab })
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      setSidebarOpen(false)
-    }
   }, [])
 
   const handleOpenServerSettings = useCallback(
     (serverId: string, initialTab: ServerSettingsTab = 'overview') => {
       setServerSettingsState({ serverId, tab: initialTab })
-      if (typeof window !== 'undefined' && window.innerWidth < 768) {
-        setSidebarOpen(false)
-      }
-      if (typeof window !== 'undefined' && window.innerWidth < 1100) {
-        setInspectorOpen(false)
-      }
+      setRoomInfoOpen(false)
     },
     []
   )
@@ -512,16 +474,17 @@ export function App() {
     (server: ServerSummary) => {
       engine.servers.selectServer(server.id)
       closeServerHub()
-      if (typeof window !== 'undefined' && window.innerWidth < 768) {
-        setSidebarOpen(false)
-      }
+      setListTab('servers')
+      setMobileScreen('chat')
     },
     [engine.servers, closeServerHub]
   )
 
   const handleLeftServer = useCallback(() => {
     setServerSettingsState({ serverId: null, tab: 'overview' })
+    setRoomInfoOpen(false)
     engine.tuneGeohash(engine.activeGeohash)
+    setListTab('radio')
   }, [engine])
 
   const handleOpenDm = useCallback(
@@ -529,12 +492,9 @@ export function App() {
       engine.openDmThread(pubkey, nickname)
       radioAudio.play('click')
       setInspectedPeer(null)
-      if (typeof window !== 'undefined' && window.innerWidth < 768) {
-        setSidebarOpen(false)
-      }
-      if (typeof window !== 'undefined' && window.innerWidth < 1100) {
-        setInspectorOpen(false)
-      }
+      setRoomInfoOpen(false)
+      setListTab('dms')
+      setMobileScreen('chat')
     },
     [engine]
   )
@@ -543,9 +503,8 @@ export function App() {
     const clean = handle.startsWith('@') ? handle : `@${handle}`
     setExternalDraftToken({ id: Date.now(), text: `${clean} ` })
     setInspectedPeer(null)
-    if (typeof window !== 'undefined' && window.innerWidth < 1100) {
-      setInspectorOpen(false)
-    }
+    setRoomInfoOpen(false)
+    setMobileScreen('chat')
   }, [])
 
   const handleClickInlineMention = useCallback(
@@ -590,34 +549,15 @@ export function App() {
     [engine, activeChannel, handleMentionPeer]
   )
 
-  const handleOpenInspectorTab = useCallback((tab: InspectorTab) => {
-    setInspectorTab(tab)
-    setInspectorOpen(true)
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      setSidebarOpen(false)
-    }
-  }, [])
-
   const handleExpandRadar = useCallback(() => {
     setRadarExpanded(true)
+    setRoomInfoOpen(false)
     radioAudio.play('click')
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      setSidebarOpen(false)
-    }
-    if (typeof window !== 'undefined' && window.innerWidth < 1100) {
-      setInspectorOpen(false)
-    }
   }, [])
 
   const { pushToast } = engine
   const handleOpenInstall = useCallback(() => {
     radioAudio.play('click')
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      setSidebarOpen(false)
-    }
-    if (typeof window !== 'undefined' && window.innerWidth < 1100) {
-      setInspectorOpen(false)
-    }
     if (pwa.canPromptInstall) {
       void pwa.promptInstall().then((outcome) => {
         if (outcome === 'accepted') {
@@ -645,9 +585,8 @@ export function App() {
     const found = await engine.locateMe()
     if (found) {
       radioAudio.play('tune')
-      if (typeof window !== 'undefined' && window.innerWidth < 768) {
-        setSidebarOpen(false)
-      }
+      setListTab('radio')
+      setMobileScreen('chat')
     }
   }, [engine])
 
@@ -686,6 +625,7 @@ export function App() {
   const handleRunCommand = useCallback(
     (cmdLine: string) => {
       const normalized = cmdLine.trim().toLowerCase()
+      setMobileScreen('chat')
       if (ZERO_ARG_COMMANDS.has(normalized)) {
         void engine.sendInput(cmdLine)
         return
@@ -696,7 +636,8 @@ export function App() {
   )
 
   const handleExport = useCallback(
-    (format: 'markdown' | 'json') => {
+    (format: 'md' | 'json') => {
+      const engineFmt: 'markdown' | 'json' = format === 'json' ? 'json' : 'markdown'
       let file: { filename: string; content: string; mimeType: string }
       if (isServer && activeServer && activeChannel) {
         const slug = `${activeServer.name}-${activeChannel.name}`
@@ -732,7 +673,8 @@ export function App() {
             ...engine.servers.messages.map((m) => {
               const ts = new Date(m.createdAt * 1000).toISOString()
               const voice = m.voiceMemo ? ` [Voice memo: ${m.voiceMemo.url}]` : ''
-              return `- **${m.displayHandle}** (${ts}): ${m.content}${voice}`
+              const img = m.imageAttachment ? ` [Image: ${m.imageAttachment.url}]` : ''
+              return `- **${m.displayHandle}** (${ts}): ${m.content}${voice}${img}`
             }),
           ]
           file = {
@@ -742,7 +684,7 @@ export function App() {
           }
         }
       } else {
-        file = engine.exportTranscript(format)
+        file = engine.exportTranscript(engineFmt)
       }
 
       try {
@@ -757,105 +699,71 @@ export function App() {
         URL.revokeObjectURL(url)
         engine.pushToast('success', `Exported ${file.filename}`)
       } catch {
-        engine.pushToast('error', 'Failed to export transcript')
+        engine.pushToast('error', 'Failed to export chat')
       }
     },
     [engine, isServer, activeServer, activeChannel]
   )
 
   return (
-    <div className={`ag-app ${panicFlash ? 'ag-panic-active' : ''}`}>
-      {/* Mobile Left Navigation Scrim */}
-      {sidebarOpen && (
-        <div
-          className="ag-backdrop ag-mobile-only"
-          onClick={() => setSidebarOpen(false)}
-          aria-hidden="true"
-        />
-      )}
+    <div
+      className={`ag-app ${panicFlash ? 'ag-panic-active' : ''}`}
+      data-mobile-screen={mobileScreen}
+    >
+      {/* Left Pane (Desktop 320px) / Full-Screen Home List (Mobile <868px) */}
+      <ConversationList
+        engine={engine}
+        activeTab={listTab}
+        collapsed={sidebarCollapsed}
+        onTabChange={setListTab}
+        onTuneChannel={handleTuneChannel}
+        onOpenDm={handleOpenDm}
+        onSelectServerChannel={handleSelectServerChannel}
+        onOpenServerHub={handleOpenServerHub}
+        onOpenServerSettings={handleOpenServerSettings}
+        onOpenCommandPalette={() => setCmdkOpen(true)}
+        onExpandRadar={handleExpandRadar}
+        onOpenSettings={handleOpenSettings}
+        onLocateMe={() => void handleLocateMe()}
+        onFocusActiveCall={() => {
+          setMobileScreen('chat')
+          setCallExpanded(true)
+        }}
+        pwa={pwa}
+        onOpenInstall={handleOpenInstall}
+        onPlaySound={playSound}
+      />
 
-      {/* Left Workspace Rail + Channel / Server Sidebar Shell */}
-      <div className={`ag-nav-shell ${sidebarOpen ? '' : 'drawer-closed'}`}>
-        <ServerRail
-          mode={engine.activeView.type}
-          activeServerId={activeServer?.id ?? null}
-          joinedServers={engine.servers.joinedServers}
-          totalDmUnread={engine.totalDmUnread}
-          onSelectGeoRadio={handleSelectGeoRadio}
-          onSelectDms={handleSelectDms}
-          onSelectServer={handleSelectServer}
-          onOpenHub={handleOpenServerHub}
-          onPlaySound={playSound}
-        />
-
-        {isServer && activeServer && activeChannel ? (
-          <ServerSidebar
-            engine={engine}
-            servers={engine.servers}
-            server={activeServer}
-            activeChannelId={activeChannel.id}
-            open={sidebarOpen}
-            onClose={() => setSidebarOpen(false)}
-            onSelectChannel={handleSelectServerChannel}
-            onBackToGeoRadio={handleSelectGeoRadio}
-            onOpenCommandPalette={() => setCmdkOpen(true)}
-            onOpenInspectorTab={handleOpenInspectorTab}
-            onOpenHub={handleOpenServerHub}
-            onOpenSettings={handleOpenServerSettings}
-            onPlaySound={playSound}
-          />
-        ) : (
-          <Sidebar
-            engine={engine}
-            open={sidebarOpen}
-            onClose={() => setSidebarOpen(false)}
-            onTuneChannel={handleTuneChannel}
-            onOpenDm={handleOpenDm}
-            onOpenCommandPalette={() => setCmdkOpen(true)}
-            onOpenInspectorTab={handleOpenInspectorTab}
-            onExpandRadar={handleExpandRadar}
-            onLocateMe={() => void handleLocateMe()}
-            pwa={pwa}
-            onOpenInstall={handleOpenInstall}
-          />
-        )}
-      </div>
-
-      {/* Center Stage */}
+      {/* Main Chat Stage */}
       <main
         className={`ag-main ${isDm ? 'dm-mode' : isServerE2ee ? 'server-e2ee-mode' : ''}`}
       >
         <ChannelHeader
           engine={engine}
-          sidebarOpen={sidebarOpen}
-          inspectorOpen={inspectorOpen}
-          inspectorTab={inspectorTab}
+          sidebarCollapsed={sidebarCollapsed}
+          roomInfoOpen={roomInfoOpen}
           searchOpen={searchOpen}
-          onToggleSidebar={() => setSidebarOpen((v) => !v)}
-          onOpenInspectorTab={handleOpenInspectorTab}
-          onToggleInspector={() => setInspectorOpen((v) => !v)}
+          hasOtherUnread={totalUnreadBadge > 0}
+          onMobileBack={handleMobileBack}
+          onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+          onOpenRoomInfo={() => setRoomInfoOpen(true)}
+          onOpenTrustedSettings={() => handleOpenSettings('privacy')}
           onToggleSearch={() => {
             setSearchOpen((v) => {
               if (v) setSearchQuery('')
               return !v
             })
           }}
-          onToggleSound={handleToggleSound}
-          onTuneChannel={handleTuneChannel}
-          onLocateMe={() => void handleLocateMe()}
-          onInspectPeer={setInspectedPeer}
-          onOpenServerSettings={handleOpenServerSettings}
           onExpandRadar={handleExpandRadar}
           onFocusActiveCall={() => setCallExpanded(true)}
-          onExport={handleExport}
         />
 
         {/* Compact PWA Offline & Update-Ready Status Strips */}
         {pwa.isOffline && (
           <div className="ag-pwa-banner offline" role="status" aria-live="polite">
             <div className="ag-pwa-banner-left">
-              <WifiOff size={13} />
-              <span>Offline · Cached mode</span>
+              <WifiOff size={14} />
+              <span>Offline · Viewing cached messages</span>
             </div>
           </div>
         )}
@@ -863,7 +771,7 @@ export function App() {
         {pwa.updateAvailable && (
           <div className="ag-pwa-banner update" role="status" aria-live="polite">
             <div className="ag-pwa-banner-left">
-              <RefreshCw size={13} />
+              <RefreshCw size={14} />
               <span>New version ready</span>
             </div>
             <div className="ag-pwa-banner-actions">
@@ -881,13 +789,13 @@ export function App() {
                 title="Dismiss update notice"
                 aria-label="Dismiss update notice"
               >
-                <X size={13} />
+                <X size={14} />
               </button>
             </div>
           </div>
         )}
 
-        {/* Active P2P Voice & Video Call Stage (Docked, Compact Floating Bar, or Full-Screen Spotlight) */}
+        {/* Active P2P Voice & Video Call Stage */}
         {activeCall && (
           <CallStage
             calls={engine.calls}
@@ -930,12 +838,10 @@ export function App() {
           onReplyServer={handleReplyServer}
           onReactServer={handleReactServer}
           onInspectPeer={setInspectedPeer}
-          onStartDm={handleOpenDm}
           onTuneChannel={handleTuneChannel}
           onClickMention={handleClickInlineMention}
           onLocateMe={() => void handleLocateMe()}
-          onOpenRadar={() => handleOpenInspectorTab('radar')}
-          onRunHelpCommand={() => void engine.sendInput('/help')}
+          onExpandRadar={handleExpandRadar}
           onOpenServerSettings={handleOpenServerSettings}
           onOpenLightbox={setLightboxImage}
         />
@@ -947,21 +853,28 @@ export function App() {
         />
       </main>
 
-      {/* Right Tabbed Inspector Drawer (Geo Radar/Server | Peers | Notes | Relays | Identity) */}
-      <InspectorDrawer
+      {/* Clean Chat / Room / Server Info Slide-Over Sheet */}
+      <RoomInfoSheet
+        open={roomInfoOpen}
         engine={engine}
-        activeTab={inspectorTab}
-        onTabChange={setInspectorTab}
-        open={inspectorOpen}
-        onClose={() => setInspectorOpen(false)}
+        onClose={() => setRoomInfoOpen(false)}
         onInspectPeer={setInspectedPeer}
-        onMentionPeer={handleMentionPeer}
         onStartDm={handleOpenDm}
         onTuneChannel={handleTuneChannel}
-        onOpenServerSettings={handleOpenServerSettings}
         onExpandRadar={handleExpandRadar}
+        onOpenServerSettings={handleOpenServerSettings}
+        onExportTranscript={handleExport}
         onLeftServer={handleLeftServer}
+        onPlaySound={playSound}
+      />
+
+      {/* Unified Calm Settings Modal (Profile · Privacy & Trust · Appearance · Calls · Network) */}
+      <SettingsModal
+        open={settingsState.open}
+        engine={engine}
         pwa={pwa}
+        initialTab={settingsState.tab}
+        onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
         onOpenInstall={handleOpenInstall}
         onPlaySound={playSound}
       />
@@ -975,7 +888,7 @@ export function App() {
         onMentionPeer={handleMentionPeer}
       />
 
-      {/* Full-Screen Expandable Geohash Radar Map Modal */}
+      {/* Full-Screen Expandable Geohash Map Modal */}
       <ExpandedRadarModal
         open={radarExpanded}
         engine={engine}
@@ -1013,7 +926,7 @@ export function App() {
         onPlaySound={playSound}
       />
 
-      {/* Spotlight Command Palette (Cmd+K) */}
+      {/* Quick Switcher & Command Palette (Cmd+K) */}
       <CommandPalette
         open={cmdkOpen}
         engine={engine}
@@ -1023,7 +936,8 @@ export function App() {
         onOpenServerHub={handleOpenServerHub}
         onExpandRadar={handleExpandRadar}
         onLocateMe={() => void handleLocateMe()}
-        onOpenInspectorTab={handleOpenInspectorTab}
+        onOpenRoomInfo={() => setRoomInfoOpen(true)}
+        onOpenSettings={handleOpenSettings}
         onToggleSound={handleToggleSound}
         onRunCommand={handleRunCommand}
         onExport={handleExport}
@@ -1045,6 +959,8 @@ export function App() {
             const offer = engine.calls.incomingCall
             if (offer) {
               engine.openDmThread(offer.callerPubkey, offer.callerNickname)
+              setListTab('dms')
+              setMobileScreen('chat')
             }
             void engine.calls.acceptIncomingCall('audio')
           }}
@@ -1052,6 +968,8 @@ export function App() {
             const offer = engine.calls.incomingCall
             if (offer) {
               engine.openDmThread(offer.callerPubkey, offer.callerNickname)
+              setListTab('dms')
+              setMobileScreen('chat')
             }
             void engine.calls.acceptIncomingCall('video')
           }}
@@ -1062,7 +980,7 @@ export function App() {
         />
       )}
 
-      {/* Tactical Non-Blocking Notifications */}
+      {/* Non-Blocking Notifications */}
       <ToastStack toasts={engine.toasts} onDismiss={engine.dismissToast} />
     </div>
   )

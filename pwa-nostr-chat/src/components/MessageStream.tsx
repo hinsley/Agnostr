@@ -3,15 +3,12 @@ import type { CSSProperties } from 'react'
 import {
   ArrowDown,
   Crosshair,
-  Globe,
   Lock,
+  Map as MapIcon,
   Radio,
   Server,
   ShieldCheck,
-  Terminal,
-  Compass,
   UserPlus,
-  Users,
 } from 'lucide-react'
 import type { AgnostrEngine, GeoMessage, PeerInfo } from '../types/protocol'
 import type { ServerMessage } from '../types/servers'
@@ -79,12 +76,10 @@ export interface MessageStreamProps {
   onReplyServer?: (message: ServerMessage) => void
   onReactServer?: (message: ServerMessage, emoji: string) => void
   onInspectPeer: (peer: PeerInfo) => void
-  onStartDm: (pubkey: string, nickname?: string) => void
   onTuneChannel: (geohash: string) => void
   onClickMention: (mention: string) => void
   onLocateMe: () => void
-  onOpenRadar: () => void
-  onRunHelpCommand: () => void
+  onExpandRadar: () => void
   onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
   onOpenLightbox: (payload: LightboxImagePayload) => void
 }
@@ -98,12 +93,10 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   onReplyServer,
   onReactServer,
   onInspectPeer,
-  onStartDm,
   onTuneChannel,
   onClickMention,
   onLocateMe,
-  onOpenRadar,
-  onRunHelpCommand,
+  onExpandRadar,
   onOpenServerSettings,
   onOpenLightbox,
 }) => {
@@ -112,6 +105,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const stickToBottomRef = useRef(true)
   const [showJumpBtn, setShowJumpBtn] = useState(false)
   const [unseenBelow, setUnseenBelow] = useState(0)
+  const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null)
 
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
   const isServer =
@@ -121,6 +115,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const dmThread = engine.activeDmThread
   const activeServer = engine.servers.activeServer
   const activeChannel = engine.servers.activeChannel
+  const isEncryptedContext = Boolean(isDm || (isServer && activeServer?.encrypted))
   const streamKey = isDm
     ? `dm:${dmThread?.peerPubkey}`
     : isServer && activeServer && activeChannel
@@ -128,7 +123,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       : `ch:${engine.activeGeohash}`
 
   // Track which message IDs were already present when switching into a stream
-  // so only newly arriving live transmissions animate in.
   const initialIdsRef = useRef<{ key: string; ids: Set<string> }>({
     key: '',
     ids: new Set(),
@@ -144,7 +138,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     return map
   }, [isServer, engine.servers.messages])
 
-  // Normalize DM & Server messages into GeoMessage shape for unified high-craft rendering
+  // Normalize DM & Server messages into GeoMessage shape for unified bubble rendering
   const displayMessages: GeoMessage[] = useMemo(() => {
     if (isServer && activeChannel) {
       return engine.servers.messages.map((sm) => ({
@@ -154,7 +148,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         nickname: sm.nickname,
         displayHandle: sm.displayHandle,
         content: sm.decryptFailed
-          ? 'Unable to decrypt message — verify you have the latest E2EE server invite key.'
+          ? 'Unable to decrypt message — verify you have the latest server invite key.'
           : sm.content,
         createdAt: sm.createdAt,
         tags: sm.tags,
@@ -223,6 +217,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     stickToBottomRef.current = true
     setShowJumpBtn(false)
     setUnseenBelow(0)
+    setActiveActionMsgId(null)
     requestAnimationFrame(() => {
       bottomRef.current?.scrollIntoView({ block: 'end' })
     })
@@ -399,8 +394,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
             <ShieldCheck size={14} style={{ color: 'var(--status-ok)', flexShrink: 0 }} />
             <span>
               <strong>Trusted Peers Only</strong> · hiding{' '}
-              <span className="mono tabular">{hiddenCount}</span>{' '}
-              {hiddenCount === 1 ? 'message' : 'messages'} from untrusted peers
+              <span className="tabular">{hiddenCount}</span>{' '}
+              {hiddenCount === 1 ? 'message' : 'messages'}
             </span>
           </div>
           <button
@@ -417,6 +412,11 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         ref={scrollRef}
         className="ag-stream-scroll"
         onScroll={handleScroll}
+        onClick={(e) => {
+          if (activeActionMsgId && !(e.target as HTMLElement | null)?.closest('.ag-msg-row')) {
+            setActiveActionMsgId(null)
+          }
+        }}
         role="log"
         aria-live="polite"
         aria-relevant="additions"
@@ -424,34 +424,24 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         <div className="ag-stream-inner">
           {displayMessages.length === 0 ? (
             isDm && dmThread ? (
-              /* Encrypted DM Empty State */
+              /* Serene Encrypted DM Empty State */
               <div className="ag-empty-stage">
                 <img
                   src={identiconDataUrl(dmThread.peerPubkey)}
                   alt=""
-                  style={{ width: 64, height: 64, borderRadius: 16, boxShadow: 'var(--shadow-md)' }}
+                  className="ag-empty-avatar"
                 />
-                <div>
-                  <h2 className="ag-empty-title">{dmThread.peerDisplayHandle}</h2>
-                  <p className="ag-empty-sub" style={{ marginTop: 6 }}>
-                    Direct messages are end-to-end encrypted using{' '}
-                    <strong>
-                      {dmThread.protocol === 'bitchat'
-                        ? 'Bitchat v2 (XChaCha20-Poly1305)'
-                        : 'NIP-17 / NIP-59 Gift-Wrap'}
-                    </strong>{' '}
-                    and relayed privately over Nostr.
+                <div className="ag-empty-copy">
+                  <h2 className="ag-empty-title">{dmThread.peerNickname}</h2>
+                  <p className="ag-empty-sub">
+                    <Lock size={13} style={{ display: 'inline', verticalAlign: '-2px', marginRight: 5 }} />
+                    End-to-end encrypted direct messages. Only you and {dmThread.peerNickname} can
+                    read them.
                   </p>
-                </div>
-                <div className="ag-empty-telemetry">
-                  <span className="ag-badge dm">
-                    <Lock size={10} />
-                    ZERO-METADATA GIFT WRAP
-                  </span>
                 </div>
               </div>
             ) : isServer && activeServer && activeChannel ? (
-              /* Server Channel Empty State */
+              /* Serene Server Channel Empty State */
               <div className="ag-empty-stage">
                 <div
                   className="ag-srv-empty-emblem"
@@ -476,50 +466,15 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   )}
                 </div>
 
-                <div>
-                  <h2 className="ag-empty-title">
-                    Welcome to{' '}
-                    <span style={{ color: activeServer.accentColor || 'var(--accent)' }}>
-                      #{activeChannel.name}
-                    </span>
-                  </h2>
-                  <p className="ag-empty-sub" style={{ marginTop: 6 }}>
+                <div className="ag-empty-copy">
+                  <h2 className="ag-empty-title">#{activeChannel.name}</h2>
+                  <p className="ag-empty-sub">
                     {activeChannel.topic ||
                       activeServer.description ||
-                      (activeServer.kind === 'nip29'
-                        ? `NIP-29 relay-moderated community on ${activeServer.relayUrl?.replace(/^wss?:\/\//i, '') ?? 'relay'}.`
-                        : activeServer.encrypted
-                          ? 'Messages and Blossom voice memos in this private server are encrypted client-side with AES-256-GCM before leaving your device.'
-                          : `Public Nostr multi-channel server inside ${activeServer.name}. Send the first message or drop a voice memo!`)}
+                      (activeServer.encrypted
+                        ? `Private end-to-end encrypted channel in ${activeServer.name}.`
+                        : `Start the conversation in ${activeServer.name}.`)}
                   </p>
-                </div>
-
-                <div className="ag-empty-telemetry">
-                  {activeServer.kind === 'nip29' ? (
-                    <span className="ag-badge mesh">
-                      <Server size={10} />
-                      NIP-29 RELAY COMMUNITY
-                    </span>
-                  ) : activeServer.encrypted ? (
-                    <span className="ag-badge dm">
-                      <Lock size={10} />
-                      AES-256-GCM E2EE
-                    </span>
-                  ) : (
-                    <span className="ag-badge accent">
-                      <Globe size={10} />
-                      PUBLIC SERVER
-                    </span>
-                  )}
-                  <span className="ag-badge muted">
-                    <Users size={10} />
-                    {engine.servers.members.length}{' '}
-                    {engine.servers.members.length === 1 ? 'member' : 'members'}
-                  </span>
-                  <span className="ag-badge ok">
-                    <ShieldCheck size={10} />
-                    TRUSTED PEERS VOICE SHIELD
-                  </span>
                 </div>
 
                 <div className="ag-empty-actions">
@@ -528,8 +483,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     className="ag-cta-btn primary"
                     onClick={() => onOpenServerSettings?.(activeServer.id, 'overview')}
                   >
-                    <UserPlus size={14} />
-                    <span>Invite Peers</span>
+                    <UserPlus size={15} />
+                    <span>Invite People</span>
                   </button>
 
                   {activeServer.kind === 'nip29' &&
@@ -546,58 +501,33 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                           )
                         }
                       >
-                        <Server size={14} style={{ color: 'var(--mesh-accent)' }} />
+                        <Server size={15} />
                         <span>Join Community</span>
                       </button>
                     )}
-
-                  <button type="button" className="ag-cta-btn" onClick={onOpenRadar}>
-                    <Server size={14} style={{ color: 'var(--accent)' }} />
-                    <span>Server Info &amp; Members</span>
-                  </button>
                 </div>
               </div>
             ) : (
-              /* Tactical Geohash Radar Listening Empty State */
+              /* Serene Geohash Room Empty State */
               <div className="ag-empty-stage">
-                <div className="ag-radar-beacon" aria-hidden="true">
-                  <span className="ag-radar-ring" />
-                  <span className="ag-radar-ring" />
-                  <div className="ag-radar-core">
-                    <Radio size={22} />
-                  </div>
+                <div className="ag-empty-radio-icon" aria-hidden="true">
+                  <Radio size={26} />
                 </div>
 
-                <div>
+                <div className="ag-empty-copy">
                   <h2 className="ag-empty-title">
-                    Listening on <span style={{ color: 'var(--accent)' }}>#{engine.activeGeohash}</span>
+                    <span className="mono">#{engine.activeGeohash}</span>
+                    {engine.cell.nearestCity ? ` · ${engine.cell.nearestCity}` : ''}
                   </h2>
-                  <p className="ag-empty-sub" style={{ marginTop: 6 }}>
-                    {engine.cell.nearestCity ? `${engine.cell.nearestCity} · ` : ''}
-                    {engine.cell.label} frequency ({engine.cell.approxSizeLabel}). Bitchat geohash
-                    transmissions are ephemeral — say hello to broadcast live across{' '}
-                    {engine.connectedRelayCount} connected relays!
+                  <p className="ag-empty-sub">
+                    Messages here are live and ephemeral — say hello to start chatting nearby.
                   </p>
-                </div>
-
-                <div className="ag-empty-telemetry">
-                  <span className="ag-badge muted">
-                    {engine.cell.center.lat.toFixed(3)}°, {engine.cell.center.lon.toFixed(3)}°
-                  </span>
-                  <span className={`ag-badge ${engine.isTeleported ? 'warn' : 'ok'}`}>
-                    {engine.isTeleported ? 'TELEPORT MODE' : 'LOCAL GPS LOCK'}
-                  </span>
-                  {engine.cell.allowsPresence ? (
-                    <span className="ag-badge ok">PRESENCE ACTIVE</span>
-                  ) : (
-                    <span className="ag-badge muted">HIGH-PRECISION PRIVACY</span>
-                  )}
                 </div>
 
                 <div className="ag-empty-actions">
                   <button type="button" className="ag-cta-btn primary" onClick={onLocateMe}>
-                    <Crosshair size={14} />
-                    <span>Locate My Area (GPS)</span>
+                    <Crosshair size={15} />
+                    <span>Locate Me</span>
                   </button>
 
                   {hottestPulse ? (
@@ -606,23 +536,18 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       className="ag-cta-btn"
                       onClick={() => onTuneChannel(hottestPulse.geohash)}
                     >
-                      <Radio size={14} style={{ color: 'var(--status-ok)' }} />
+                      <Radio size={15} style={{ color: 'var(--status-ok)' }} />
                       <span>
-                        Tune Live #{hottestPulse.geohash}
-                        {hottestPulse.nearestCity ? ` (${hottestPulse.nearestCity})` : ''}
+                        Join #{hottestPulse.geohash}
+                        {hottestPulse.nearestCity ? ` · ${hottestPulse.nearestCity}` : ''}
                       </span>
                     </button>
                   ) : (
-                    <button type="button" className="ag-cta-btn" onClick={onOpenRadar}>
-                      <Compass size={14} style={{ color: 'var(--accent)' }} />
-                      <span>Open World Radar</span>
+                    <button type="button" className="ag-cta-btn" onClick={onExpandRadar}>
+                      <MapIcon size={15} />
+                      <span>Open Map</span>
                     </button>
                   )}
-
-                  <button type="button" className="ag-cta-btn" onClick={onRunHelpCommand}>
-                    <Terminal size={14} />
-                    <span>Slash Commands</span>
-                  </button>
                 </div>
               </div>
             )
@@ -665,7 +590,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
                   {showUnreadDivider && (
                     <div className="ag-unread-divider" role="separator">
-                      <span className="ag-unread-label">New Transmissions</span>
+                      <span className="ag-unread-label">New messages</span>
                     </div>
                   )}
 
@@ -675,21 +600,17 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     isLive={isLive}
                     isMentioned={isMentioned}
                     isSearchActive={activeSearchMessageId === msg.id}
+                    actionsRevealed={activeActionMsgId === msg.id}
                     highlightQuery={searchQuery}
                     showBridgeBadges={engine.settings.showBridgeBadges}
                     isDmMode={isDm}
-                    dmProtocolLabel={
-                      isDm && dmThread
-                        ? dmThread.protocol === 'bitchat'
-                          ? 'v2'
-                          : 'NIP-17'
-                        : undefined
-                    }
+                    isEncryptedContext={isEncryptedContext}
                     isSenderTrusted={engine.isTrusted(msg.pubkey)}
                     isSenderExplicitlyTrusted={!msg.isOwn && engine.isExplicitlyTrusted(msg.pubkey)}
                     fetchVoiceMemoBlob={engine.fetchVoiceMemoBlob}
                     fetchImageAttachmentBlob={engine.fetchImageAttachmentBlob}
                     onOpenLightbox={onOpenLightbox}
+                    onToggleActions={setActiveActionMsgId}
                     onTrustSender={handleTrustSender}
                     onBlockSender={handleBlockSender}
                     onReply={!isDm ? handleReplyUnified : undefined}
@@ -700,11 +621,10 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                         : undefined
                     }
                     onInspectAuthor={handleInspectAuthor}
-                    onStartDm={!isDm ? onStartDm : undefined}
                     onTuneGeohash={onTuneChannel}
                     onClickMention={onClickMention}
                     onJumpToMessage={handleJumpToMessage}
-                    onCopyText={() => engine.pushToast('info', 'Copied message text')}
+                    onCopyText={() => engine.pushToast('info', 'Copied to clipboard')}
                   />
                 </React.Fragment>
               )
@@ -716,10 +636,10 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
       {showJumpBtn && (
         <button type="button" className="ag-jump-latest" onClick={scrollToLatest}>
-          <ArrowDown size={14} />
+          <ArrowDown size={15} />
           <span>
             {unseenBelow > 0
-              ? `${unseenBelow} new message${unseenBelow === 1 ? '' : 's'}`
+              ? `${unseenBelow} new ${unseenBelow === 1 ? 'message' : 'messages'}`
               : 'Jump to latest'}
           </span>
         </button>

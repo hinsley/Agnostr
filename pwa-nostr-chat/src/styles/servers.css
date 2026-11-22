@@ -459,7 +459,7 @@
   flex-direction: column;
   background-color: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
   animation: ag-scale-in var(--dur-med) var(--ease-spring);

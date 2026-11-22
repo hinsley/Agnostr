@@ -13,9 +13,9 @@
   flex-direction: column;
   gap: 0.45rem;
   width: 100%;
-  max-width: 470px;
+  max-width: 440px;
   margin: 0.24rem 0 0.2rem;
-  padding: 0.65rem 0.78rem;
+  padding: 0.72rem 0.84rem;
   border-radius: var(--radius-md);
   background-color: var(--bg-surface);
   border: 1px dashed var(--border-strong);

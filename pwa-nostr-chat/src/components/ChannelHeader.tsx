@@ -1,35 +1,19 @@
-import React, { useEffect, useRef } from 'react'
+import React from 'react'
 import type { CSSProperties } from 'react'
 import {
   ArrowLeft,
-  Compass,
-  Crosshair,
-  Database,
-  Download,
-  Globe,
+  Info,
   Lock,
   Map as MapIcon,
-  Navigation,
   PanelLeft,
-  PanelRight,
   Phone,
+  Radio,
   Search,
-  Server,
-  Settings,
   ShieldCheck,
-  Star,
-  StickyNote,
-  User,
-  UserPlus,
-  Users,
   Video,
-  Volume2,
-  VolumeX,
-  Zap,
 } from 'lucide-react'
-import type { AgnostrEngine, InspectorTab, PeerInfo } from '../types/protocol'
-import type { ServerSettingsTab } from './ServerSettingsModal'
-import { identiconDataUrl, pubkeyToColor } from '../utils/identicon'
+import type { AgnostrEngine } from '../types/protocol'
+import { identiconDataUrl } from '../utils/identicon'
 
 function getServerMonogram(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean)
@@ -40,42 +24,32 @@ function getServerMonogram(name: string): string {
 
 export interface ChannelHeaderProps {
   engine: AgnostrEngine
-  sidebarOpen: boolean
-  inspectorOpen: boolean
-  inspectorTab: InspectorTab
+  sidebarCollapsed: boolean
+  roomInfoOpen: boolean
   searchOpen: boolean
+  hasOtherUnread?: boolean
+  onMobileBack: () => void
   onToggleSidebar: () => void
-  onOpenInspectorTab: (tab: InspectorTab) => void
-  onToggleInspector: () => void
+  onOpenRoomInfo: () => void
+  onOpenTrustedSettings: () => void
   onToggleSearch: () => void
-  onToggleSound: () => void
-  onTuneChannel: (geohash: string) => void
-  onLocateMe: () => void
-  onInspectPeer: (peer: PeerInfo) => void
-  onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
-  onExpandRadar?: () => void
+  onExpandRadar: () => void
   onFocusActiveCall?: () => void
-  onExport?: (format: 'markdown' | 'json') => void
 }
 
 export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   engine,
-  sidebarOpen,
-  inspectorOpen,
-  inspectorTab,
+  sidebarCollapsed,
+  roomInfoOpen,
   searchOpen,
+  hasOtherUnread = false,
+  onMobileBack,
   onToggleSidebar,
-  onOpenInspectorTab,
-  onToggleInspector,
+  onOpenRoomInfo,
+  onOpenTrustedSettings,
   onToggleSearch,
-  onToggleSound,
-  onTuneChannel,
-  onLocateMe,
-  onInspectPeer,
-  onOpenServerSettings,
   onExpandRadar,
   onFocusActiveCall,
-  onExport,
 }) => {
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
   const isServer =
@@ -85,8 +59,6 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   const dmThread = engine.activeDmThread
   const activeServer = engine.servers.activeServer
   const activeChannel = engine.servers.activeChannel
-  const pinned = engine.isChannelPinned(engine.activeGeohash)
-  const activeStepRef = useRef<HTMLButtonElement | null>(null)
 
   const activeCall = engine.calls.activeCall
   const dmPeerTrusted = Boolean(
@@ -108,6 +80,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   )
   const isServerCallFull =
     isServer && !inThisServerCall && serverCallCount >= engine.calls.maxParticipants
+  const isDisconnected = engine.connectedRelayCount === 0
 
   const handleDmCallClick = (media: 'audio' | 'video') => {
     if (!dmThread) return
@@ -119,7 +92,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
       engine.pushToast(
         'warning',
         `Trust ${dmThread.peerDisplayHandle} first`,
-        'P2P WebRTC calls share IP addresses directly. Open Inspect and trust this peer to unlock calls.'
+        'P2P calls connect directly. Open Chat Info and trust this person to unlock calls.'
       )
       return
     }
@@ -136,532 +109,290 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
       engine.pushToast(
         'warning',
         `Voice Lounge full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`,
-        'P2P mesh calls support up to 6 simultaneous participants.'
+        'Group calls support up to 6 participants at once.'
       )
       return
     }
     void engine.calls.joinServerCall(activeServer.id, 'audio')
   }
 
-  useEffect(() => {
-    if (!isDm && !isServer && activeStepRef.current) {
-      activeStepRef.current.scrollIntoView({
-        inline: 'nearest',
-        block: 'nearest',
-        behavior: 'smooth',
-      })
-    }
-  }, [engine.activeGeohash, isDm, isServer])
-
-  const relayStatusClass =
-    engine.connectedRelayCount === 0
-      ? 'danger'
-      : engine.connectedRelayCount < Math.max(2, Math.floor(engine.totalRelayCount / 3))
-        ? 'warn'
-        : 'ok'
-
-  // Determine deepest known local geohash if user has GPS lock & current cell is a prefix of it
-  const deeperLocalStep = (() => {
-    if (!engine.location.coords || isDm || isServer) return null
-    const nextLen = engine.cell.precision + 1
-    if (nextLen > 8) return null
-    const localAtNext = engine.location.localGeohashes[nextLen]
-    if (localAtNext && localAtNext.startsWith(engine.activeGeohash)) {
-      return localAtNext
-    }
-    return null
-  })()
+  const onlineSubtitle = engine.presence.isUncertainCount
+    ? 'Private precision · Ephemeral'
+    : `${engine.presence.onlineCount} online · Ephemeral`
 
   return (
     <header className="ag-header">
       <div className="ag-header-top">
         <div className="ag-header-left">
-          {!sidebarOpen && (
+          {/* Native Mobile Back Button (< 868px) */}
+          <button
+            type="button"
+            className="ag-circle-btn ag-mobile-back-btn ag-mobile-only"
+            onClick={onMobileBack}
+            aria-label="Back to conversations"
+          >
+            <ArrowLeft size={20} />
+            {hasOtherUnread && <span className="ag-back-unread-dot" aria-hidden="true" />}
+          </button>
+
+          {/* Desktop Expand Sidebar Button (only shown if collapsed with Cmd+B) */}
+          {sidebarCollapsed && (
             <button
               type="button"
-              className="ag-icon-btn"
+              className="ag-circle-btn ag-desktop-only"
               onClick={onToggleSidebar}
-              title="Open sidebar (Cmd+B)"
-              aria-label="Open sidebar"
+              title="Show conversations (Cmd+B)"
+              aria-label="Show conversations"
             >
               <PanelLeft size={18} />
             </button>
           )}
 
-          {isDm && dmThread ? (
-            <div className="ag-dm-header-peer">
-              <button
-                type="button"
-                className="ag-icon-btn"
-                onClick={() => onTuneChannel(engine.activeGeohash)}
-                title={`Back to #${engine.activeGeohash}`}
-                aria-label="Back to geohash channel"
-              >
-                <ArrowLeft size={16} />
-              </button>
-              <img
-                src={identiconDataUrl(dmThread.peerPubkey)}
-                alt=""
-                className="ag-avatar-sm"
-              />
-              <div className="ag-chan-meta">
-                <div className="ag-chan-title-line">
-                  <span
-                    className="ag-chan-name"
-                    style={{ color: pubkeyToColor(dmThread.peerPubkey), fontWeight: 700 }}
-                  >
-                    {dmThread.peerDisplayHandle}
-                  </span>
-                  {engine.isExplicitlyTrusted(dmThread.peerPubkey) && (
-                    <span
-                      className="ag-trusted-shield-icon"
-                      title={`Trusted peer — voice memos from ${dmThread.peerDisplayHandle} are unlocked`}
-                      aria-label="Trusted peer"
-                    >
-                      <ShieldCheck size={13} />
+          {/* Clickable Chat Identity Area -> Opens RoomInfoSheet */}
+          <button
+            type="button"
+            className="ag-header-identity"
+            onClick={onOpenRoomInfo}
+            aria-label="Open chat info"
+          >
+            {isDm && dmThread ? (
+              <>
+                <img
+                  src={identiconDataUrl(dmThread.peerPubkey)}
+                  alt=""
+                  className="ag-header-avatar-img"
+                />
+                <div className="ag-header-text">
+                  <div className="ag-header-title-row">
+                    <span className="ag-header-title truncate">{dmThread.peerNickname}</span>
+                    {dmPeerTrusted && (
+                      <ShieldCheck
+                        size={14}
+                        className="ag-trusted-shield-icon"
+                        aria-label="Trusted peer"
+                      />
+                    )}
+                  </div>
+                  <div className="ag-header-sub truncate">
+                    {isDisconnected && <span className="ag-offline-dot" aria-hidden="true" />}
+                    <span>
+                      {isDisconnected
+                        ? 'Offline · Encrypted DM'
+                        : dmPeerTrusted
+                          ? 'Encrypted DM · Trusted'
+                          : 'Encrypted DM'}
                     </span>
-                  )}
-                  <span className="ag-badge dm">
-                    <Lock size={10} />
-                    {dmThread.protocol === 'bitchat' ? 'BITCHAT v2' : 'NIP-17 E2EE'}
-                  </span>
+                  </div>
                 </div>
-                <span className="ag-chan-sub mono">
-                  End-to-end encrypted · {dmThread.messages.length}{' '}
-                  {dmThread.messages.length === 1 ? 'msg' : 'msgs'}
-                </span>
-              </div>
-            </div>
-          ) : isServer && activeServer && activeChannel ? (
-            <div className="ag-dm-header-peer">
-              <div
-                className="ag-srv-header-chip"
-                style={
-                  {
-                    '--srv-accent': activeServer.accentColor || 'var(--accent)',
-                  } as CSSProperties
-                }
-                aria-hidden="true"
-              >
-                {activeServer.picture && /^https?:\/\//i.test(activeServer.picture) ? (
-                  <img
-                    src={activeServer.picture}
-                    alt=""
-                    loading="lazy"
-                    referrerPolicy="no-referrer"
-                  />
-                ) : activeServer.icon?.trim() ? (
-                  <span>{activeServer.icon}</span>
-                ) : (
-                  <span className="mono">{getServerMonogram(activeServer.name)}</span>
-                )}
-              </div>
-              <div className="ag-chan-meta">
-                <div className="ag-chan-title-line">
-                  <span
-                    className="ag-chan-title-geo"
-                    title={`#${activeChannel.name} · ${activeServer.name}`}
-                  >
-                    <span
-                      className="hash"
-                      style={{ color: activeServer.accentColor || 'var(--accent)' }}
-                    >
-                      #
-                    </span>
-                    {activeChannel.name}
-                  </span>
-                  {!sidebarOpen && (
-                    <span className="ag-chan-city ag-chan-server-name ag-desktop-only">
-                      · {activeServer.name}
-                    </span>
-                  )}
-                  {activeServer.kind === 'nip29' ? (
-                    <span className="ag-badge mesh" title="NIP-29 Relay-Moderated Community">
-                      <Server size={9} />
-                      NIP-29
-                    </span>
-                  ) : activeServer.encrypted ? (
-                    <span
-                      className="ag-badge dm"
-                      title="End-to-end encrypted virtual server (AES-256-GCM)"
-                    >
-                      <Lock size={9} />
-                      E2EE
-                    </span>
+              </>
+            ) : isServer && activeServer && activeChannel ? (
+              <>
+                <div
+                  className="ag-header-avatar server"
+                  style={
+                    {
+                      '--srv-accent': activeServer.accentColor || 'var(--accent)',
+                    } as CSSProperties
+                  }
+                  aria-hidden="true"
+                >
+                  {activeServer.picture && /^https?:\/\//i.test(activeServer.picture) ? (
+                    <img
+                      src={activeServer.picture}
+                      alt=""
+                      loading="lazy"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : activeServer.icon?.trim() ? (
+                    <span>{activeServer.icon}</span>
                   ) : (
-                    <span className="ag-badge accent" title="Public Nostr virtual server">
-                      <Globe size={9} />
-                      PUBLIC
-                    </span>
+                    <span className="mono">{getServerMonogram(activeServer.name)}</span>
                   )}
-                  <span
-                    className="ag-badge muted ag-hide-xs"
-                    title="Persistent history — messages are stored on relays, not ephemeral"
-                  >
-                    <Database size={9} />
-                    SAVED
-                  </span>
                 </div>
-                {(activeChannel.topic || activeServer.description) && (
-                  <span className="ag-chan-sub">
-                    {activeChannel.topic || activeServer.description}
-                  </span>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="ag-chan-heading">
-              <div className="ag-chan-title-wrap">
-                <span className="ag-chan-title-geo">
-                  <span className="hash">#</span>
-                  {engine.activeGeohash}
-                </span>
-                {engine.cell.nearestCity && (
-                  <span className="ag-chan-city ag-desktop-only">
-                    {engine.cell.nearestCity}
-                  </span>
-                )}
-              </div>
+                <div className="ag-header-text">
+                  <div className="ag-header-title-row">
+                    <span className="ag-header-title truncate">#{activeChannel.name}</span>
+                    {activeServer.encrypted && (
+                      <Lock size={13} className="ag-header-lock-icon" aria-label="Encrypted" />
+                    )}
+                  </div>
+                  <div className="ag-header-sub truncate">
+                    {isDisconnected && <span className="ag-offline-dot" aria-hidden="true" />}
+                    <span>
+                      {isDisconnected
+                        ? `Offline · ${activeServer.name}`
+                        : `${activeServer.name} · Saved`}
+                    </span>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="ag-header-avatar radio" aria-hidden="true">
+                  <Radio size={18} />
+                </div>
+                <div className="ag-header-text">
+                  <div className="ag-header-title-row">
+                    <span className="ag-header-title truncate">
+                      <span className="mono">#{engine.activeGeohash}</span>
+                      {engine.cell.nearestCity && (
+                        <span className="ag-header-city"> · {engine.cell.nearestCity}</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="ag-header-sub truncate">
+                    {isDisconnected && <span className="ag-offline-dot" aria-hidden="true" />}
+                    <span>{isDisconnected ? 'Offline · Reconnecting…' : onlineSubtitle}</span>
+                  </div>
+                </div>
+              </>
+            )}
+          </button>
 
-              <button
-                type="button"
-                className={`ag-icon-btn ag-pin-btn ${pinned ? 'pinned' : ''}`}
-                style={{ height: 28, minWidth: 28 }}
-                onClick={() =>
-                  engine.togglePinChannel(
-                    engine.activeGeohash,
-                    engine.cell.nearestCity ?? undefined
-                  )
-                }
-                title={pinned ? 'Unpin frequency' : 'Pin frequency to sidebar'}
-                aria-label={pinned ? 'Unpin channel' : 'Pin channel'}
-              >
-                <Star size={14} fill={pinned ? 'currentColor' : 'none'} />
-              </button>
-
-              {engine.isTeleported ? (
-                <span
-                  className="ag-badge warn ag-desktop-only"
-                  title="Teleported away from GPS location (messages carry Bitchat teleport tag)"
-                >
-                  <Navigation size={10} />
-                  TELEPORT
-                </span>
-              ) : (
-                <span
-                  className="ag-badge ok ag-desktop-only"
-                  title="Matched to your physical GPS geohash (native local broadcast)"
-                >
-                  <Crosshair size={10} />
-                  LOCAL
-                </span>
-              )}
-
-              <span
-                className="ag-badge muted ag-hide-xs"
-                title="Ephemeral kind:20000 — live RAM-only relay broadcast, not saved on relay disk"
-              >
-                <Zap size={9} />
-                EPHEMERAL
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* Right Header Toolbar */}
-        <div className="ag-header-actions">
+          {/* Subtle Trusted Only Pill — shown ONLY when strict mode is enabled */}
           {engine.strictWhitelistMode && (
             <button
               type="button"
-              className={`ag-pill-btn ag-trusted-only-pill ${inspectorOpen && inspectorTab === 'identity' ? 'active' : ''}`}
-              onClick={() => onOpenInspectorTab('identity')}
-              title="Trusted Peers Only mode active — hiding messages from untrusted peers. Click to open Trusted Peers & Safety settings."
-              aria-label="Trusted Peers Only active — open Trusted Peers and Safety settings"
+              className="ag-trusted-only-pill"
+              onClick={onOpenTrustedSettings}
+              title="Trusted Peers Only mode is on — click to manage Privacy & Trust"
+              aria-label="Trusted Peers Only active"
             >
               <ShieldCheck size={13} />
-              <span className="mono">TRUSTED ONLY</span>
+              <span className="ag-hide-xs">Trusted only</span>
             </button>
           )}
+        </div>
 
-          {!isDm && !isServer && (
-            <>
-              {onExpandRadar && (
-                <button
-                  type="button"
-                  className="ag-pill-btn"
-                  onClick={onExpandRadar}
-                  title="Open full-screen zoomable Geohash Radar Map"
-                  aria-label="Open full-screen Geohash Radar Map"
-                >
-                  <MapIcon size={13} style={{ color: 'var(--accent)' }} />
-                  <span className="ag-desktop-only">Radar</span>
-                </button>
-              )}
-
-              <button
-                type="button"
-                className={`ag-pill-btn ${inspectorOpen && inspectorTab === 'peers' ? 'active' : ''}`}
-                onClick={() => onOpenInspectorTab('peers')}
-                title={
-                  engine.presence.isUncertainCount
-                    ? 'High-precision privacy mode: presence heartbeats paused; count uncertain'
-                    : `${engine.presence.onlineCount} active peers in #${engine.activeGeohash}`
-                }
-              >
-                <Users size={13} />
-                <span className="mono tabular">
-                  {engine.presence.isUncertainCount ? '?' : engine.presence.onlineCount}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                className={`ag-pill-btn ag-desktop-only ${inspectorOpen && inspectorTab === 'notes' ? 'active' : ''}`}
-                onClick={() => onOpenInspectorTab('notes')}
-                title="24h Location Dead-Drop Notes (/drop)"
-              >
-                <StickyNote size={13} />
-                <span className="mono tabular">{engine.locationNotes.length}</span>
-              </button>
-            </>
-          )}
-
-          {isServer && activeServer && (
+        {/* Right Header Toolbar — Strictly 3 Clean Circular Buttons */}
+        <div className="ag-header-actions">
+          {isDm && dmThread ? (
             <>
               <button
                 type="button"
-                className={`ag-pill-btn ${inThisServerCall ? 'active' : ''}`}
-                onClick={handleServerCallClick}
-                disabled={isServerCallFull}
-                title={
-                  inThisServerCall
-                    ? 'Focus active Server Voice & Video Lounge'
-                    : isServerCallFull
-                      ? `Voice Lounge full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
-                      : `Join Server Voice Lounge (${serverCallCount}/${engine.calls.maxParticipants})`
-                }
-                aria-label={
-                  inThisServerCall
-                    ? 'Focus active server call'
-                    : `Join server voice call (${serverCallCount} of ${engine.calls.maxParticipants})`
-                }
-              >
-                <Phone size={13} style={inThisServerCall || serverCallCount > 0 ? { color: 'var(--status-ok)' } : undefined} />
-                <span className="ag-desktop-only">
-                  {inThisServerCall ? 'In Call' : 'Call'}
-                </span>
-                <span className="mono tabular">
-                  {serverCallCount}/{engine.calls.maxParticipants}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                className="ag-pill-btn ag-hide-xs"
-                onClick={() => onOpenServerSettings?.(activeServer.id, 'overview')}
-                title={`Invite peers to ${activeServer.name}`}
-                aria-label={`Invite peers to ${activeServer.name}`}
-              >
-                <UserPlus size={13} />
-                {(!sidebarOpen || !inspectorOpen) && (
-                  <span className="ag-desktop-only">Invite</span>
-                )}
-              </button>
-
-              <button
-                type="button"
-                className="ag-icon-btn ag-hide-xs"
-                onClick={() => onOpenServerSettings?.(activeServer.id, 'overview')}
-                title="Server settings, channels & moderation"
-                aria-label="Server settings"
-              >
-                <Settings size={15} />
-              </button>
-
-              {onExport && (
-                <button
-                  type="button"
-                  className="ag-icon-btn ag-hide-xs"
-                  onClick={() => onExport('markdown')}
-                  title="Export channel transcript (Markdown)"
-                  aria-label="Export channel transcript"
-                >
-                  <Download size={15} />
-                </button>
-              )}
-            </>
-          )}
-
-          {isDm && dmThread && (
-            <>
-              <button
-                type="button"
-                className={`ag-icon-btn ${inThisDmCall ? 'active' : ''}`}
+                className={`ag-circle-btn ${inThisDmCall ? 'active-ok' : ''}`}
                 onClick={() => handleDmCallClick('audio')}
                 title={
                   inThisDmCall
                     ? 'Focus active voice call'
                     : dmPeerTrusted
-                      ? `Start E2EE P2P voice call with ${dmThread.peerDisplayHandle}`
-                      : `Trust ${dmThread.peerDisplayHandle} first — P2P calls share IP addresses directly`
+                      ? `Voice call ${dmThread.peerDisplayHandle}`
+                      : `Trust ${dmThread.peerDisplayHandle} first to unlock calls`
                 }
                 aria-label={inThisDmCall ? 'Focus active voice call' : 'Start voice call'}
               >
-                <Phone size={15} />
+                <Phone size={18} />
               </button>
 
               <button
                 type="button"
-                className={`ag-icon-btn ${inThisDmCall && activeCall?.mediaType === 'video' ? 'active' : ''}`}
+                className={`ag-circle-btn ${inThisDmCall && activeCall?.mediaType === 'video' ? 'active-ok' : ''}`}
                 onClick={() => handleDmCallClick('video')}
                 title={
                   inThisDmCall
                     ? 'Focus active video call'
                     : dmPeerTrusted
-                      ? `Start E2EE P2P video call with ${dmThread.peerDisplayHandle}`
-                      : `Trust ${dmThread.peerDisplayHandle} first — P2P calls share IP addresses directly`
+                      ? `Video call ${dmThread.peerDisplayHandle}`
+                      : `Trust ${dmThread.peerDisplayHandle} first to unlock calls`
                 }
                 aria-label={inThisDmCall ? 'Focus active video call' : 'Start video call'}
               >
-                <Video size={15} />
+                <Video size={18} />
               </button>
 
               <button
                 type="button"
-                className="ag-pill-btn"
-              onClick={() => {
-                const existing = engine.getPeerByPubkey(dmThread.peerPubkey)
-                onInspectPeer(
-                  existing ?? {
-                    pubkey: dmThread.peerPubkey,
-                    npub: dmThread.peerNpub,
-                    nickname: dmThread.peerNickname,
-                    displayHandle: dmThread.peerDisplayHandle,
-                    lastSeenAt: dmThread.lastMessageAt,
-                    isOnline: false,
-                    isSelf: false,
-                    isTeleported: false,
-                    isMeshBridge: false,
-                    isBlocked: engine.isPeerBlocked(dmThread.peerPubkey),
-                    isTrusted: engine.isTrusted(dmThread.peerPubkey),
-                    messageCount: dmThread.messages.length,
-                    channels: [engine.activeGeohash],
-                  }
-                )
-              }}
-            >
-              <User size={13} />
-              <span className="ag-desktop-only">Inspect</span>
-            </button>
+                className={`ag-circle-btn ${roomInfoOpen ? 'active' : ''}`}
+                onClick={onOpenRoomInfo}
+                title="Chat info (Cmd+I)"
+                aria-label="Chat info"
+              >
+                <Info size={18} />
+              </button>
+            </>
+          ) : isServer && activeServer ? (
+            <>
+              <button
+                type="button"
+                className={`ag-header-call-btn ${inThisServerCall || serverCallCount > 0 ? 'has-peers' : ''} ${inThisServerCall ? 'active-ok' : ''}`}
+                onClick={handleServerCallClick}
+                disabled={isServerCallFull}
+                title={
+                  inThisServerCall
+                    ? 'Focus active Voice Lounge'
+                    : isServerCallFull
+                      ? `Voice Lounge full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                      : `Join Voice Lounge (${serverCallCount}/${engine.calls.maxParticipants})`
+                }
+                aria-label={
+                  inThisServerCall
+                    ? 'Focus active voice call'
+                    : `Join voice call (${serverCallCount} of ${engine.calls.maxParticipants})`
+                }
+              >
+                <Phone size={17} />
+                {(serverCallCount > 0 || inThisServerCall) && (
+                  <span className="ag-header-call-count tabular">
+                    {serverCallCount}/{engine.calls.maxParticipants}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ${searchOpen ? 'active' : ''}`}
+                onClick={onToggleSearch}
+                title="Search messages (Cmd+F)"
+                aria-label="Search messages"
+              >
+                <Search size={18} />
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ${roomInfoOpen ? 'active' : ''}`}
+                onClick={onOpenRoomInfo}
+                title="Server info & members (Cmd+I)"
+                aria-label="Server info"
+              >
+                <Info size={18} />
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="ag-circle-btn"
+                onClick={onExpandRadar}
+                title="Open Full Map"
+                aria-label="Open Geohash Map"
+              >
+                <MapIcon size={18} />
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ${searchOpen ? 'active' : ''}`}
+                onClick={onToggleSearch}
+                title="Search messages (Cmd+F)"
+                aria-label="Search messages"
+              >
+                <Search size={18} />
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ${roomInfoOpen ? 'active' : ''}`}
+                onClick={onOpenRoomInfo}
+                title="Room info & people (Cmd+I)"
+                aria-label="Room info"
+              >
+                <Info size={18} />
+              </button>
             </>
           )}
-
-          <button
-            type="button"
-            className={`ag-icon-btn ${searchOpen ? 'active' : ''}`}
-            onClick={onToggleSearch}
-            title="Search stream (Cmd+F)"
-            aria-label="Search messages"
-          >
-            <Search size={16} />
-          </button>
-
-          <button
-            type="button"
-            className={`ag-icon-btn ag-hide-xs ${engine.settings.soundEnabled ? 'active' : ''}`}
-            onClick={onToggleSound}
-            title={engine.settings.soundEnabled ? 'Mute radio audio SFX' : 'Enable radio audio SFX'}
-            aria-label="Toggle radio sound effects"
-          >
-            {engine.settings.soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
-          </button>
-
-          <button
-            type="button"
-            className={`ag-pill-btn ag-relay-pill ${inspectorOpen && inspectorTab === 'relays' ? 'active' : ''}`}
-            onClick={() => onOpenInspectorTab('relays')}
-            title="Live Nostr Relay Telemetry"
-          >
-            <span className={`ag-led ${relayStatusClass}`} />
-            <span className="tabular">
-              {engine.connectedRelayCount}/{engine.totalRelayCount}
-            </span>
-            {engine.avgLatencyMs !== null && (
-              <span className="ag-desktop-only tabular" style={{ opacity: 0.72 }}>
-                {Math.round(engine.avgLatencyMs)}ms
-              </span>
-            )}
-          </button>
-
-          <button
-            type="button"
-            className={`ag-icon-btn ${inspectorOpen ? 'active' : ''}`}
-            onClick={onToggleInspector}
-            title="Toggle Inspector Drawer (Cmd+I)"
-            aria-label="Toggle right inspector"
-          >
-            <PanelRight size={17} />
-          </button>
         </div>
       </div>
-
-      {/* Geohash Precision Zoom Stepper Bar (Channel Mode Only) */}
-      {!isDm && !isServer && (
-        <div className="ag-geozoom-bar" role="navigation" aria-label="Geohash precision zoom">
-          <div className="ag-geozoom-steps">
-            <span className="ag-geozoom-label">
-              <Compass size={11} />
-              SCALE
-            </span>
-            {engine.cell.prefixChain.map((step) => {
-              const active = step.geohash === engine.activeGeohash
-              return (
-                <button
-                  key={step.geohash}
-                  ref={active ? activeStepRef : null}
-                  type="button"
-                  className={`ag-geo-step ${active ? 'active' : ''}`}
-                  onClick={() => onTuneChannel(step.geohash)}
-                  title={`${step.label} (${step.approxSizeLabel})`}
-                >
-                  <span>#{step.geohash}</span>
-                  <span className="ag-geo-step-tier">{step.label}</span>
-                </button>
-              )
-            })}
-            {deeperLocalStep && (
-              <button
-                type="button"
-                className="ag-geo-step"
-                onClick={() => onTuneChannel(deeperLocalStep)}
-                title={`Zoom in to local cell #${deeperLocalStep}`}
-                style={{ borderStyle: 'dashed', color: 'var(--accent)' }}
-              >
-                + #{deeperLocalStep}
-              </button>
-            )}
-          </div>
-
-          <div className="ag-geozoom-telemetry">
-            <span className="ag-geozoom-stat" title="Approximate geohash bounding footprint">
-              {engine.cell.approxSizeLabel}
-            </span>
-            <span className="ag-geozoom-stat ag-desktop-only" title="Geohash cell center coordinates">
-              {engine.cell.center.lat.toFixed(2)}°, {engine.cell.center.lon.toFixed(2)}°
-            </span>
-            <button
-              type="button"
-              className="ag-geo-step"
-              onClick={onLocateMe}
-              disabled={engine.location.status === 'locating'}
-              title="Lock onto your GPS location"
-            >
-              <Crosshair size={11} />
-              <span>{engine.location.status === 'locating' ? 'Locating…' : 'GPS'}</span>
-            </button>
-          </div>
-        </div>
-      )}
     </header>
   )
 }

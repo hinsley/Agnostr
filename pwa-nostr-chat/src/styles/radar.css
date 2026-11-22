@@ -458,7 +458,7 @@
   position: relative;
   width: min(95vw, 1380px);
   height: 92dvh;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   overflow: hidden;
   border: 1px solid var(--border-default);
   background-color: var(--bg-canvas);
@@ -492,11 +492,11 @@
   max-width: 390px;
   display: flex;
   align-items: center;
-  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  background-color: color-mix(in srgb, var(--bg-surface) 92%, transparent);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   box-shadow: var(--shadow-md);
   transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
 }

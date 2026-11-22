@@ -144,9 +144,7 @@
   max-height: 44dvh;
   min-height: 196px;
   border-bottom: 1px solid var(--border-subtle);
-  background:
-    var(--ambient-glow),
-    var(--bg-surface);
+  background-color: var(--bg-surface);
   box-shadow: var(--shadow-sm);
   position: relative;
   overflow: visible;
@@ -877,16 +875,16 @@
   left: 50%;
   right: auto;
   transform: translateX(-50%);
-  width: min(360px, calc(100vw - 1.5rem));
+  width: min(368px, calc(100vw - 1.5rem));
   z-index: calc(var(--z-toast) + 20);
-  background-color: var(--bg-elevated);
+  background-color: var(--bg-surface);
   border: 1px solid var(--border-accent);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg), var(--accent-glow);
-  padding: 0.8rem 0.85rem;
+  padding: 0.9rem 1rem;
   display: flex;
   flex-direction: column;
-  gap: 0.72rem;
+  gap: 0.78rem;
   animation: ag-incoming-enter var(--dur-med) var(--ease-spring);
 }
 

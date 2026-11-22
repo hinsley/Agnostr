@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Circle,
-  Compass,
   Crosshair,
   Download,
   Globe,
   Hash,
+  Info,
   Key,
   Lock,
   Map as MapIcon,
@@ -20,26 +20,26 @@ import {
   RotateCw,
   Search,
   Server,
+  Settings,
   Shield,
   ShieldCheck,
   Square,
-  StickyNote,
   Terminal,
-  Users,
   Volume2,
   Wifi,
 } from 'lucide-react'
-import type { AgnostrEngine, InspectorTab, ThemeId } from '../types/protocol'
+import type { AgnostrEngine, ThemeId } from '../types/protocol'
 import type { PwaState } from '../hooks/usePwa'
 import type { ServerHubTab } from './ServerHubModal'
+import type { SettingsTab } from './SettingsModal'
 
 const GEOHASH_REGEX = /^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$/i
 
 const THEMES: Array<{ id: ThemeId; name: string; desc: string }> = [
-  { id: 'phosphor', name: 'Bitchat Phosphor', desc: 'Deep obsidian pine & emerald radio signal' },
-  { id: 'amber', name: 'Shortwave Amber', desc: 'Vintage Nixie amber field transceiver' },
-  { id: 'obsidian', name: 'Midnight Obsidian', desc: 'Nocturnal indigo-cobalt precision dark' },
-  { id: 'daylight', name: 'Daylight Field', desc: 'High-contrast Swiss topo daylight clarity' },
+  { id: 'phosphor', name: 'Emerald Dark', desc: 'Calm deep slate with emerald accents' },
+  { id: 'obsidian', name: 'Midnight', desc: 'Refined nocturnal indigo-slate palette' },
+  { id: 'amber', name: 'Warm Dusk', desc: 'Cozy espresso dark with golden highlights' },
+  { id: 'daylight', name: 'Light', desc: 'Clean, airy daylight messaging theme' },
 ]
 
 interface PaletteEntry {
@@ -60,12 +60,13 @@ export interface CommandPaletteProps {
   onTuneChannel: (geohash: string) => void
   onSelectServerChannel?: (serverId: string, channelId: string) => void
   onOpenServerHub?: (initialTab?: ServerHubTab) => void
-  onExpandRadar?: () => void
+  onExpandRadar: () => void
   onLocateMe: () => void
-  onOpenInspectorTab: (tab: InspectorTab) => void
+  onOpenRoomInfo: () => void
+  onOpenSettings: (tab?: SettingsTab) => void
   onToggleSound: () => void
   onRunCommand: (cmdLine: string) => void
-  onExport: (format: 'markdown' | 'json') => void
+  onExport: (format: 'md' | 'json') => void
   pwa?: PwaState
   onOpenInstall?: () => void
 }
@@ -79,7 +80,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onOpenServerHub,
   onExpandRadar,
   onLocateMe,
-  onOpenInspectorTab,
+  onOpenRoomInfo,
+  onOpenSettings,
   onToggleSound,
   onRunCommand,
   onExport,
@@ -103,13 +105,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     const cleanHash = q.replace(/^#/, '')
     const list: PaletteEntry[] = []
 
-    // Direct tune option whenever query looks like a valid geohash
+    // Direct jump whenever query looks like a valid geohash
     if (cleanHash.length >= 1 && GEOHASH_REGEX.test(cleanHash)) {
       list.push({
         id: `direct-${cleanHash}`,
-        group: 'Tune Frequency',
-        title: `Tune to #${cleanHash}`,
-        subtitle: `Jump directly into geohash channel #${cleanHash}`,
+        group: 'Jump to Room',
+        title: `Open #${cleanHash}`,
+        subtitle: `Join geohash room #${cleanHash}`,
         keywords: cleanHash,
         badge: 'DIRECT',
         icon: <Hash size={15} />,
@@ -132,10 +134,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             (srv.kind === 'nip29'
               ? `NIP-29 · ${srv.relayUrl?.replace(/^wss?:\/\//i, '') ?? 'relay'}`
               : srv.encrypted
-                ? 'E2EE Private Server (AES-256-GCM)'
-                : 'Public Virtual Server'),
+                ? 'Private encrypted server'
+                : 'Public server'),
           keywords: `server channel ${srv.name} ${chan.name} #${chan.name} ${srv.kind} ${srv.encrypted ? 'e2ee encrypted private' : 'public'}`,
-          badge: srv.kind === 'nip29' ? 'NIP-29' : srv.encrypted ? 'E2EE' : 'SERVER',
+          badge: srv.kind === 'nip29' ? 'NIP-29' : srv.encrypted ? 'E2EE' : undefined,
           icon: srv.encrypted ? (
             <Lock size={15} style={{ color: 'var(--dm-accent)' }} />
           ) : (
@@ -153,14 +155,14 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       }
     }
 
-    // Live Global Pulse Rooms
+    // Live Active Rooms
     for (const room of engine.pulseRooms.slice(0, 8)) {
       list.push({
         id: `pulse-${room.geohash}`,
-        group: 'Live Global Pulse',
+        group: 'Live Active Rooms',
         title: `#${room.geohash}${room.nearestCity ? ` · ${room.nearestCity}` : ''}`,
-        subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'peer' : 'peers'} · ${room.messageCount} ${room.messageCount === 1 ? 'msg' : 'msgs'}${room.lastPreview ? ` · ${room.lastPreview}` : ''}`,
-        keywords: `pulse live ${room.geohash} ${room.nearestCity ?? ''}`,
+        subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'}${room.lastPreview ? ` · ${room.lastPreview}` : ''}`,
+        keywords: `live room radio ${room.geohash} ${room.nearestCity ?? ''}`,
         badge: 'LIVE',
         icon: <Radio size={15} style={{ color: 'var(--status-ok)' }} />,
         run: () => {
@@ -170,11 +172,11 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       })
     }
 
-    // Quick Cities
+    // Cities
     for (const city of engine.quickCities) {
       list.push({
         id: `city-${city.geohash}`,
-        group: 'Quick Frequencies',
+        group: 'Places',
         title: `${city.name} (#${city.geohash})`,
         subtitle: city.region,
         keywords: `${city.name} ${city.region} ${city.geohash}`,
@@ -186,17 +188,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       })
     }
 
-    // Tactical Actions
+    // Active Call Actions
     if (engine.calls.activeCall) {
       const activeCall = engine.calls.activeCall
       list.push(
         {
           id: 'act-call-mute',
           group: 'Actions',
-          title: 'Toggle Call Mute',
+          title: activeCall.localMuted ? 'Unmute Microphone' : 'Mute Microphone',
           subtitle: activeCall.localMuted
-            ? `Currently muted in ${activeCall.title} — click to unmute`
-            : `Mic live in ${activeCall.title} — click to mute`,
+            ? `Muted in ${activeCall.title}`
+            : `Live in ${activeCall.title}`,
           keywords: 'call mute unmute mic audio voice video toggle',
           badge: activeCall.localMuted ? 'MUTED' : 'LIVE',
           icon: activeCall.localMuted ? <MicOff size={15} /> : <Mic size={15} />,
@@ -213,7 +215,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 title: activeCall.localRecording ? 'Stop Call Recording' : 'Start Call Recording',
                 subtitle: activeCall.localRecording
                   ? `Stop and save ${activeCall.localRecordingMode ?? 'call'} recording`
-                  : 'Record call audio/video locally (shows live red dot to all participants)',
+                  : 'Record call locally (shows live indicator to participants)',
                 keywords: 'record recording rec start stop save download call audio video',
                 badge: activeCall.localRecording ? 'REC' : undefined,
                 icon: activeCall.localRecording ? (
@@ -232,9 +234,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           id: 'act-call-leave',
           group: 'Actions',
           title: 'Leave Active Call',
-          subtitle: `Hang up and disconnect from ${activeCall.title}`,
+          subtitle: `Disconnect from ${activeCall.title}`,
           keywords: 'leave hang up hangup end disconnect call voice video',
-          badge: 'CALL',
           icon: <PhoneOff size={15} style={{ color: 'var(--status-danger)' }} />,
           run: () => {
             engine.calls.leaveCall()
@@ -248,8 +249,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       list.push({
         id: 'act-call-join-server',
         group: 'Actions',
-        title: 'Join Server Voice Call',
-        subtitle: `Join P2P Voice & Video Lounge in ${srv.name} (${count}/${engine.calls.maxParticipants})`,
+        title: 'Join Voice Lounge',
+        subtitle: `${srv.name} (${count}/${engine.calls.maxParticipants})`,
         keywords: 'join server voice video call lounge webrtc p2p talk',
         badge: `${count}/${engine.calls.maxParticipants}`,
         icon: <Phone size={15} />,
@@ -264,10 +265,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       list.push({
         id: 'act-call-start-dm',
         group: 'Actions',
-        title: 'Start DM Voice Call',
+        title: `Voice Call ${dm.peerNickname}`,
         subtitle: trusted
-          ? `Call ${dm.peerDisplayHandle} via E2EE P2P WebRTC`
-          : `Trust ${dm.peerDisplayHandle} first (P2P calls share IP addresses)`,
+          ? 'Start an end-to-end encrypted P2P call'
+          : `Trust ${dm.peerDisplayHandle} first in Chat Info to unlock calls`,
         keywords: 'start dm voice video call phone webrtc p2p talk',
         badge: 'E2EE',
         icon: <Phone size={15} />,
@@ -277,7 +278,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             engine.pushToast(
               'warning',
               `Trust ${dm.peerDisplayHandle} first`,
-              'P2P WebRTC calls share IP addresses directly. Trust this peer in Inspect to unlock calls.'
+              'Open Chat Info and trust this person to unlock direct calls.'
             )
             return
           }
@@ -288,11 +289,47 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
     list.push(
       {
+        id: 'act-expand-radar',
+        group: 'Actions',
+        title: 'Open Full Map',
+        subtitle: 'Interactive zoomable geohash map & live rooms',
+        keywords: 'map radar fullscreen zoom geohash world explore',
+        icon: <MapIcon size={15} />,
+        run: () => {
+          onClose()
+          onExpandRadar()
+        },
+      },
+      {
+        id: 'act-room-info',
+        group: 'Actions',
+        title: 'Chat Info & People',
+        subtitle: 'View room details, people online, and precision zoom',
+        keywords: 'info people peers members room details precision zoom',
+        icon: <Info size={15} />,
+        run: () => {
+          onClose()
+          onOpenRoomInfo()
+        },
+      },
+      {
+        id: 'act-gps',
+        group: 'Actions',
+        title: 'Locate Me (GPS)',
+        subtitle: 'Join the local geohash room for your area',
+        keywords: 'gps location locate nearby physical local',
+        icon: <Crosshair size={15} />,
+        run: () => {
+          onClose()
+          onLocateMe()
+        },
+      },
+      {
         id: 'act-create-join-server',
         group: 'Actions',
-        title: 'Create / Join Server',
-        subtitle: 'Launch an Instant Public or E2EE Private server, or join via invite link',
-        keywords: 'create join server new invite discord room e2ee private public',
+        title: 'New or Join Server',
+        subtitle: 'Create a private encrypted server or join with an invite link',
+        keywords: 'create join server new invite e2ee private public',
         icon: <Plus size={15} />,
         run: () => {
           onClose()
@@ -302,9 +339,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       {
         id: 'act-browse-nip29',
         group: 'Actions',
-        title: 'Browse NIP-29 Communities',
-        subtitle: 'Explore live relay-moderated NIP-29 communities & public groups',
-        keywords: 'browse explore nip29 nip-29 communities groups relays servers',
+        title: 'Browse Communities',
+        subtitle: 'Explore public NIP-29 relay communities',
+        keywords: 'browse explore nip29 communities groups relays servers',
         icon: <Server size={15} />,
         run: () => {
           onClose()
@@ -312,102 +349,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         },
       },
       {
-        id: 'act-gps',
-        group: 'Actions',
-        title: 'GPS Locate Me',
-        subtitle: 'Lock onto your physical geohash cell (local mode)',
-        keywords: 'gps location locate nearby physical local',
-        icon: <Crosshair size={15} />,
-        run: () => {
-          onClose()
-          onLocateMe()
-        },
-      },
-      {
-        id: 'act-expand-radar',
-        group: 'Actions',
-        title: 'Open Full-Screen Geohash Radar',
-        subtitle: 'Interactive zoomable Leaflet map with live geohash zone grids & 32× sub-zones',
-        keywords: 'radar map fullscreen full-screen zoom geohash grid world explore expand',
-        badge: 'MAP',
-        icon: <MapIcon size={15} />,
-        run: () => {
-          onClose()
-          if (onExpandRadar) {
-            onExpandRadar()
-          } else {
-            onOpenInspectorTab('radar')
-          }
-        },
-      },
-      {
-        id: 'act-radar',
-        group: 'Actions',
-        title: 'Open World Geo Radar & Neighbor Compass',
-        subtitle: 'Interactive vector world map & 3×3 adjacent cell navigator',
-        keywords: 'map radar world neighbors compass geo',
-        icon: <Compass size={15} />,
-        run: () => {
-          onOpenInspectorTab('radar')
-          onClose()
-        },
-      },
-      {
-        id: 'act-peers',
-        group: 'Actions',
-        title: 'View Active Peers',
-        subtitle: `Inspect peers active in #${engine.activeGeohash}`,
-        keywords: 'peers users online who roster',
-        icon: <Users size={15} />,
-        run: () => {
-          onOpenInspectorTab('peers')
-          onClose()
-        },
-      },
-      {
-        id: 'act-notes',
-        group: 'Actions',
-        title: 'View 24h Location Dead-Drop Notes',
-        subtitle: 'Read or drop persistent 24h notes pinned to this geohash',
-        keywords: 'notes drop dead-drop pin 24h',
-        icon: <StickyNote size={15} />,
-        run: () => {
-          onOpenInspectorTab('notes')
-          onClose()
-        },
-      },
-      {
-        id: 'act-relays',
-        group: 'Actions',
-        title: 'Open Relay Telemetry',
-        subtitle: `${engine.connectedRelayCount}/${engine.totalRelayCount} relays online · latency sparklines`,
-        keywords: 'relays network websocket telemetry latency',
-        icon: <Wifi size={15} />,
-        run: () => {
-          onOpenInspectorTab('relays')
-          onClose()
-        },
-      },
-      {
-        id: 'act-sound',
-        group: 'Actions',
-        title: engine.settings.soundEnabled ? 'Mute Radio Audio SFX' : 'Enable Radio Audio SFX',
-        subtitle: 'Toggle Web Audio synthesized sonar & transceiver cues',
-        keywords: 'sound audio sfx mute sonar radio',
-        icon: <Volume2 size={15} />,
-        run: () => {
-          onToggleSound()
-          onClose()
-        },
-      },
-      {
         id: 'act-trusted-only',
         group: 'Actions',
         title: 'Toggle Trusted Peers Only',
         subtitle: engine.strictWhitelistMode
-          ? 'Currently ON — hiding text from untrusted peers (click to show all text)'
-          : 'Currently OFF — show all text (voice memos still require trusting sender)',
-        keywords: 'trust trusted peers only strict whitelist safety filter hide untrusted',
+          ? 'On — hiding text from untrusted peers'
+          : 'Off — showing all text (media & calls always require Trust)',
+        keywords: 'trust trusted peers only strict whitelist safety filter',
         badge: engine.strictWhitelistMode ? 'ON' : 'OFF',
         icon: <Shield size={15} />,
         run: () => {
@@ -416,34 +364,70 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         },
       },
       {
-        id: 'act-trusted-safety',
-        group: 'Actions',
-        title: 'Trusted Peers & Safety Settings',
-        subtitle: `${engine.trustedPubkeys.length} trusted ${engine.trustedPubkeys.length === 1 ? 'peer' : 'peers'} · manage trust list & Blossom voice servers`,
-        keywords: 'trusted peers safety settings whitelist media voice blossom servers security',
+        id: 'act-settings-privacy',
+        group: 'Settings',
+        title: 'Privacy & Trust Settings',
+        subtitle: `${engine.trustedPubkeys.length} trusted ${engine.trustedPubkeys.length === 1 ? 'peer' : 'peers'} · manage trust & blocked users`,
+        keywords: 'trusted peers privacy safety settings whitelist blocked',
         icon: <ShieldCheck size={15} />,
         run: () => {
-          onOpenInspectorTab('identity')
           onClose()
+          onOpenSettings('privacy')
         },
       },
       {
-        id: 'act-identity',
-        group: 'Actions',
-        title: 'Identity Studio & Panic Wipe',
-        subtitle: 'Manage NIP-07, nsec, per-geohash personas, or burn keys',
-        keywords: 'identity key nsec npub nip07 burn wipe panic settings',
+        id: 'act-settings-profile',
+        group: 'Settings',
+        title: 'Profile & Identity Settings',
+        subtitle: 'Nickname, keys, signer mode, and per-room privacy keys',
+        keywords: 'profile identity key nsec npub nip07 settings account',
         icon: <Key size={15} />,
         run: () => {
-          onOpenInspectorTab('identity')
+          onClose()
+          onOpenSettings('profile')
+        },
+      },
+      {
+        id: 'act-settings-calls',
+        group: 'Settings',
+        title: 'Calls & Recording Settings',
+        subtitle: 'Recording quality preset and custom TURN server',
+        keywords: 'calls recording quality video audio turn settings',
+        icon: <Settings size={15} />,
+        run: () => {
+          onClose()
+          onOpenSettings('calls')
+        },
+      },
+      {
+        id: 'act-settings-network',
+        group: 'Settings',
+        title: 'Network, Relays & Panic Wipe',
+        subtitle: `${engine.connectedRelayCount}/${engine.totalRelayCount} relays connected · Blossom servers · Panic Wipe`,
+        keywords: 'relays network blossom servers panic wipe burn app pwa',
+        icon: <Wifi size={15} />,
+        run: () => {
+          onClose()
+          onOpenSettings('network')
+        },
+      },
+      {
+        id: 'act-sound',
+        group: 'Actions',
+        title: engine.settings.soundEnabled ? 'Mute Sound Effects' : 'Enable Sound Effects',
+        subtitle: 'Toggle subtle message and call notification sounds',
+        keywords: 'sound audio sfx mute notifications',
+        icon: <Volume2 size={15} />,
+        run: () => {
+          onToggleSound()
           onClose()
         },
       },
       {
         id: 'act-rotate',
         group: 'Actions',
-        title: 'Rotate Ephemeral Identity',
-        subtitle: 'Generate a fresh anonymous keypair immediately',
+        title: 'Rotate Identity',
+        subtitle: 'Generate a fresh anonymous keypair right now',
         keywords: 'rotate identity fresh new key anon',
         icon: <RotateCw size={15} />,
         run: () => {
@@ -454,20 +438,20 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       {
         id: 'act-export-md',
         group: 'Actions',
-        title: 'Export Channel Transcript (Markdown)',
-        subtitle: `Download #${engine.activeGeohash} log as .md`,
+        title: 'Export Chat (Markdown)',
+        subtitle: 'Download current conversation as .md',
         keywords: 'export download transcript markdown backup',
         icon: <Download size={15} />,
         run: () => {
-          onExport('markdown')
+          onExport('md')
           onClose()
         },
       },
       {
         id: 'act-export-json',
         group: 'Actions',
-        title: 'Export Channel Transcript (JSON)',
-        subtitle: `Download #${engine.activeGeohash} raw events as .json`,
+        title: 'Export Chat (JSON)',
+        subtitle: 'Download current conversation as .json',
         keywords: 'export download transcript json',
         icon: <Download size={15} />,
         run: () => {
@@ -481,15 +465,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     if (pwa && !pwa.isInstalled && onOpenInstall) {
       list.push({
         id: 'act-pwa-install',
-        group: 'Actions',
-        title: 'Install Agnostr App (PWA)',
-        subtitle: pwa.canPromptInstall
-          ? 'Install Agnostr for full-screen standalone mode & offline cache'
-          : pwa.isIosSafari
-            ? 'Add to Home Screen via Safari Share menu'
-            : 'Install Agnostr as a standalone desktop or mobile app',
-        keywords: 'install pwa app home screen homescreen standalone offline download',
-        badge: pwa.canPromptInstall ? '1-TAP' : 'PWA',
+        group: 'App',
+        title: 'Install Agnostr App',
+        subtitle: 'Add to your home screen or dock for standalone mode',
+        keywords: 'install pwa app home screen standalone offline',
         icon: <Download size={15} />,
         run: () => {
           onClose()
@@ -501,12 +480,12 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     if (pwa) {
       list.push({
         id: 'act-pwa-check-update',
-        group: 'Actions',
-        title: pwa.updateAvailable ? 'Reload to Apply App Update' : 'Check for App Updates',
+        group: 'App',
+        title: pwa.updateAvailable ? 'Reload to Update App' : 'Check for Updates',
         subtitle: pwa.updateAvailable
-          ? 'A newer version of Agnostr is ready — reload now'
-          : 'Check Service Worker for the latest Agnostr release',
-        keywords: 'check update updates refresh reload pwa service worker version',
+          ? 'A newer version of Agnostr is ready'
+          : 'Check for the latest version',
+        keywords: 'check update updates refresh reload pwa version',
         badge: pwa.updateAvailable ? 'READY' : undefined,
         icon: <RefreshCw size={15} />,
         run: () => {
@@ -519,8 +498,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 found ? 'success' : 'info',
                 found ? 'Update ready' : 'Agnostr is up to date',
                 found
-                  ? 'Click Reload in the update bar to activate the new version.'
-                  : 'Running the latest cached build.'
+                  ? 'Tap Reload in the banner to switch to the new version.'
+                  : 'You are on the latest version.'
               )
             })
           }
@@ -532,8 +511,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     for (const theme of THEMES) {
       list.push({
         id: `theme-${theme.id}`,
-        group: 'Themes',
-        title: `Theme: ${theme.name}`,
+        group: 'Appearance',
+        title: theme.name,
         subtitle: theme.desc,
         keywords: `theme color appearance ${theme.id} ${theme.name}`,
         badge: engine.settings.theme === theme.id ? 'ACTIVE' : undefined,
@@ -577,7 +556,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     onExpandRadar,
     onClose,
     onLocateMe,
-    onOpenInspectorTab,
+    onOpenRoomInfo,
+    onOpenSettings,
     onToggleSound,
     onExport,
     onRunCommand,
@@ -593,8 +573,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   const clampedIdx = Math.min(selectedIdx, Math.max(0, entries.length - 1))
 
-  // Group entries while keeping flat index for keyboard nav
-  const groupedSections: Array<{ group: string; items: Array<{ entry: PaletteEntry; flatIdx: number }> }> = []
+  const groupedSections: Array<{
+    group: string
+    items: Array<{ entry: PaletteEntry; flatIdx: number }>
+  }> = []
   entries.forEach((entry, flatIdx) => {
     let sec = groupedSections.find((g) => g.group === entry.group)
     if (!sec) {
@@ -609,7 +591,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       className="ag-modal-scrim"
       role="dialog"
       aria-modal="true"
-      aria-label="Command Palette"
+      aria-label="Quick Switcher"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
@@ -640,15 +622,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 entries[clampedIdx]?.run()
               }
             }}
-            placeholder="Jump to server, #channel, #geohash, city, command, or action…"
+            placeholder="Search rooms, servers, #geohash, or actions…"
           />
           <kbd className="ag-kbd">ESC</kbd>
         </div>
 
         <div className="ag-cmdk-list">
           {entries.length === 0 ? (
-            <div className="ag-side-empty" style={{ padding: '1.2rem', textAlign: 'center' }}>
-              No matching frequencies or actions. Type any valid base32 geohash (e.g. <code>9q8y</code>) to tune directly.
+            <div className="ag-conv-empty" style={{ padding: '1.5rem' }}>
+              <p>
+                No matches. Type any geohash (like <code>9q8y</code>) to jump right in.
+              </p>
             </div>
           ) : (
             groupedSections.map((section) => (
@@ -678,11 +662,11 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                               ? 'danger'
                               : entry.badge === 'OFF'
                                 ? 'muted'
-                              : entry.badge === 'E2EE'
-                                ? 'dm'
-                                : entry.badge === 'NIP-29'
-                                  ? 'mesh'
-                                  : 'accent'
+                                : entry.badge === 'E2EE'
+                                  ? 'dm'
+                                  : entry.badge === 'NIP-29'
+                                    ? 'mesh'
+                                    : 'accent'
                         }`}
                       >
                         {entry.badge}
@@ -696,8 +680,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         </div>
 
         <div className="ag-cmdk-footer">
-          <span>↑↓ Navigate · ↵ Select</span>
-          <span>⌘K Palette · ⌘F Search · ⌘B Sidebar · ⌘I Inspector</span>
+          <span>↑↓ Navigate · ↵ Open</span>
+          <span>⌘K Search · ⌘F Find · ⌘I Info · ⌘, Settings</span>
         </div>
       </div>
     </div>

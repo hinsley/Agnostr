@@ -1,38 +1,43 @@
 /* ==========================================================================
-   Agnostr Design System Tokens
-   4 Curated Themes: phosphor | amber | obsidian | paper
+   Agnostr Modern Messaging Design System Tokens
+   4 Calm, High-Craft Themes:
+     phosphor (Emerald Dark, default) | obsidian (Midnight) |
+     amber (Warm Dusk)                | daylight (Light)
    ========================================================================== */
 
 :root {
-  /* Typography */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  /* Typography — Clean Sans Hierarchy (Mono strictly for #geohash, npub, code) */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
 
-  --text-2xs: 0.6875rem; /* 11px */
-  --text-xs: 0.75rem;    /* 12px */
-  --text-sm: 0.8125rem;  /* 13px */
-  --text-base: 0.9375rem;/* 15px */
-  --text-lg: 1.0625rem;  /* 17px */
-  --text-xl: 1.25rem;    /* 20px */
+  --text-2xs: 0.75rem;    /* 12px — unified minimum meta size */
+  --text-xs: 0.75rem;     /* 12px — timestamps, subtitles, badges */
+  --text-sm: 0.875rem;    /* 14px — UI controls, lists, headers */
+  --text-base: 0.9375rem; /* 15px — chat message body */
+  --text-lg: 1.0625rem;   /* 17px — modal & view titles */
+  --text-xl: 1.25rem;     /* 20px — display headings */
 
-  /* Layout Dimensions */
-  --sidebar-w: 272px;
-  --inspector-w: 324px;
+  /* Layout Dimensions (2-Pane Desktop + 2-Screen Mobile) */
+  --sidebar-w: 320px;
+  --inspector-w: 400px;
+  --sheet-w: 400px;
   --header-h: 56px;
+  --tabbar-h: 58px;
 
-  /* Radii */
-  --radius-xs: 4px;
-  --radius-sm: 7px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 18px;
+  /* Generous Modern Radii */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
+  --radius-bubble: 18px;
   --radius-full: 9999px;
 
   /* Motion */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
-  --dur-fast: 120ms;
-  --dur-med: 200ms;
+  --dur-fast: 130ms;
+  --dur-med: 220ms;
   --dur-slow: 320ms;
 
   /* Z-index Scale */
@@ -46,44 +51,60 @@
 }
 
 /* --------------------------------------------------------------------------
-   Theme 1: Bitchat Phosphor (Default)
-   Deep obsidian pine canvas, crisp phosphor emerald signal
+   Theme 1: Emerald Dark (`phosphor`, default)
+   Serene deep pine-slate canvas with refined emerald accents
    -------------------------------------------------------------------------- */
 :root,
 [data-theme='phosphor'] {
   color-scheme: dark;
-  --theme-meta-color: #090C0A;
+  --theme-meta-color: #0D1110;
 
-  --bg-canvas: #080B09;
-  --bg-surface: #0E1411;
-  --bg-elevated: #141D18;
-  --bg-subtle: #1A261F;
-  --bg-hover: rgba(34, 229, 132, 0.07);
-  --bg-active: rgba(34, 229, 132, 0.13);
-  --bg-glass: rgba(14, 20, 17, 0.84);
-  --bg-overlay: rgba(4, 7, 5, 0.72);
-  --bg-input: #0B100D;
+  --bg-canvas: #0D1110;
+  --bg-surface: #151A18;
+  --bg-elevated: #1D2421;
+  --bg-subtle: #242D29;
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(16, 185, 129, 0.14);
+  --bg-glass: rgba(13, 17, 16, 0.86);
+  --bg-overlay: rgba(5, 8, 7, 0.62);
+  --bg-input: #121715;
 
-  --border-subtle: rgba(134, 239, 172, 0.09);
-  --border-default: rgba(134, 239, 172, 0.15);
-  --border-strong: rgba(134, 239, 172, 0.28);
-  --border-accent: rgba(34, 229, 132, 0.48);
+  --border-subtle: rgba(255, 255, 255, 0.065);
+  --border-default: rgba(255, 255, 255, 0.105);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --border-accent: rgba(16, 185, 129, 0.45);
 
-  --text-primary: #EAF6EE;
-  --text-secondary: #92AD9D;
-  --text-muted: #5C7466;
-  --text-inverse: #06150D;
+  --text-primary: #F1F6F3;
+  --text-secondary: #98ABA0;
+  --text-muted: #687B70;
+  --text-inverse: #041710;
 
-  --accent: #22E584;
-  --accent-hover: #3BF096;
-  --accent-soft: rgba(34, 229, 132, 0.14);
-  --accent-glow: 0 0 22px rgba(34, 229, 132, 0.22);
+  --accent: #10B981;
+  --accent-hover: #34D399;
+  --accent-soft: rgba(16, 185, 129, 0.14);
+  --accent-glow: 0 4px 18px rgba(16, 185, 129, 0.22);
 
   --accent-secondary: #38BDF8;
   --accent-secondary-soft: rgba(56, 189, 248, 0.14);
 
-  --status-ok: #22E584;
-  --status-ok-soft: rgba(34, 229, 132, 0.14);
+  /* Modern Message Bubbles */
+  --bubble-own-bg: #0F3A2B;
+  --bubble-own-text: #ECFDF5;
+  --bubble-own-meta: rgba(167, 243, 208, 0.72);
+  --bubble-own-border: rgba(16, 185, 129, 0.22);
+
+  --bubble-own-dm-bg: #2E2252;
+  --bubble-own-dm-text: #F5F3FF;
+  --bubble-own-dm-meta: rgba(221, 214, 254, 0.72);
+  --bubble-own-dm-border: rgba(167, 139, 250, 0.26);
+
+  --bubble-other-bg: #1A211E;
+  --bubble-other-text: #F1F6F3;
+  --bubble-other-meta: #7F9388;
+  --bubble-other-border: rgba(255, 255, 255, 0.065);
+
+  --status-ok: #10B981;
+  --status-ok-soft: rgba(16, 185, 129, 0.14);
   --status-warn: #F59E0B;
   --status-warn-soft: rgba(245, 158, 11, 0.15);
   --status-danger: #F43F5E;
@@ -95,109 +116,67 @@
   --mesh-soft: rgba(56, 189, 248, 0.14);
 
   /* Adaptive pubkey handle HSL saturation/lightness */
-  --handle-s: 78%;
-  --handle-l: 68%;
-  --identicon-bg-l: 15%;
-
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.48);
-  --shadow-lg: 0 20px 54px rgba(0, 0, 0, 0.68);
-  --ambient-glow: radial-gradient(600px circle at 50% 0%, rgba(34, 229, 132, 0.055), transparent 70%);
-}
-
-/* --------------------------------------------------------------------------
-   Theme 2: Shortwave Amber
-   Warm vintage field transceiver / Nixie amber glow
-   -------------------------------------------------------------------------- */
-[data-theme='amber'] {
-  color-scheme: dark;
-  --theme-meta-color: #0D0A07;
-
-  --bg-canvas: #0C0906;
-  --bg-surface: #15100B;
-  --bg-elevated: #1E1610;
-  --bg-subtle: #281E15;
-  --bg-hover: rgba(245, 166, 35, 0.08);
-  --bg-active: rgba(245, 166, 35, 0.15);
-  --bg-glass: rgba(21, 16, 11, 0.86);
-  --bg-overlay: rgba(8, 5, 3, 0.74);
-  --bg-input: #100C08;
-
-  --border-subtle: rgba(251, 191, 36, 0.1);
-  --border-default: rgba(251, 191, 36, 0.17);
-  --border-strong: rgba(251, 191, 36, 0.32);
-  --border-accent: rgba(245, 166, 35, 0.52);
-
-  --text-primary: #FDF3E4;
-  --text-secondary: #BA9E7B;
-  --text-muted: #7C654B;
-  --text-inverse: #1C1104;
-
-  --accent: #F5A623;
-  --accent-hover: #FBBF3E;
-  --accent-soft: rgba(245, 166, 35, 0.16);
-  --accent-glow: 0 0 22px rgba(245, 166, 35, 0.24);
-
-  --accent-secondary: #FB7185;
-  --accent-secondary-soft: rgba(251, 113, 133, 0.15);
-
-  --status-ok: #4ADE80;
-  --status-ok-soft: rgba(74, 222, 128, 0.14);
-  --status-warn: #FBBF24;
-  --status-warn-soft: rgba(251, 191, 36, 0.16);
-  --status-danger: #FB7185;
-  --status-danger-soft: rgba(251, 113, 133, 0.16);
-
-  --dm-accent: #F472B6;
-  --dm-soft: rgba(244, 114, 182, 0.15);
-  --mesh-accent: #38BDF8;
-  --mesh-soft: rgba(56, 189, 248, 0.14);
-
-  --handle-s: 80%;
+  --handle-s: 70%;
   --handle-l: 70%;
   --identicon-bg-l: 16%;
 
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.38);
-  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.52);
-  --shadow-lg: 0 20px 54px rgba(0, 0, 0, 0.72);
-  --ambient-glow: radial-gradient(600px circle at 50% 0%, rgba(245, 166, 35, 0.065), transparent 70%);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.28);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.36);
+  --shadow-lg: 0 20px 54px rgba(0, 0, 0, 0.54);
+  --ambient-glow: none;
 }
 
 /* --------------------------------------------------------------------------
-   Theme 3: Midnight Obsidian
-   Sleek Linear/Raycast violet-cobalt nocturnal precision
+   Theme 2: Midnight (`obsidian`)
+   Refined indigo-slate nocturnal messaging palette
    -------------------------------------------------------------------------- */
 [data-theme='obsidian'] {
   color-scheme: dark;
-  --theme-meta-color: #09090F;
+  --theme-meta-color: #0B0D14;
 
-  --bg-canvas: #08090E;
-  --bg-surface: #10111A;
-  --bg-elevated: #171926;
-  --bg-subtle: #1F2233;
-  --bg-hover: rgba(129, 140, 248, 0.08);
-  --bg-active: rgba(129, 140, 248, 0.15);
-  --bg-glass: rgba(16, 17, 26, 0.85);
-  --bg-overlay: rgba(5, 6, 12, 0.74);
-  --bg-input: #0C0D14;
+  --bg-canvas: #0B0D14;
+  --bg-surface: #131622;
+  --bg-elevated: #1C2032;
+  --bg-subtle: #242A40;
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(99, 102, 241, 0.16);
+  --bg-glass: rgba(11, 13, 20, 0.86);
+  --bg-overlay: rgba(5, 6, 12, 0.64);
+  --bg-input: #10131F;
 
-  --border-subtle: rgba(165, 180, 252, 0.09);
-  --border-default: rgba(165, 180, 252, 0.15);
-  --border-strong: rgba(165, 180, 252, 0.28);
-  --border-accent: rgba(129, 140, 248, 0.5);
+  --border-subtle: rgba(255, 255, 255, 0.065);
+  --border-default: rgba(255, 255, 255, 0.11);
+  --border-strong: rgba(255, 255, 255, 0.19);
+  --border-accent: rgba(99, 102, 241, 0.5);
 
   --text-primary: #F1F5F9;
   --text-secondary: #94A3B8;
-  --text-muted: #5F6D85;
-  --text-inverse: #0B0D1C;
+  --text-muted: #64748B;
+  --text-inverse: #FFFFFF;
 
-  --accent: #818CF8;
-  --accent-hover: #9AA4FF;
-  --accent-soft: rgba(129, 140, 248, 0.16);
-  --accent-glow: 0 0 24px rgba(129, 140, 248, 0.25);
+  --accent: #6366F1;
+  --accent-hover: #818CF8;
+  --accent-soft: rgba(99, 102, 241, 0.16);
+  --accent-glow: 0 4px 18px rgba(99, 102, 241, 0.26);
 
   --accent-secondary: #2DD4BF;
   --accent-secondary-soft: rgba(45, 212, 191, 0.14);
+
+  /* Modern Message Bubbles */
+  --bubble-own-bg: #252B58;
+  --bubble-own-text: #EEF2FF;
+  --bubble-own-meta: rgba(199, 210, 254, 0.72);
+  --bubble-own-border: rgba(129, 140, 248, 0.26);
+
+  --bubble-own-dm-bg: #32245E;
+  --bubble-own-dm-text: #F5F3FF;
+  --bubble-own-dm-meta: rgba(221, 214, 254, 0.74);
+  --bubble-own-dm-border: rgba(192, 132, 252, 0.28);
+
+  --bubble-other-bg: #171B2B;
+  --bubble-other-text: #F1F5F9;
+  --bubble-other-meta: #7F8EA6;
+  --bubble-other-border: rgba(255, 255, 255, 0.065);
 
   --status-ok: #34D399;
   --status-ok-soft: rgba(52, 211, 153, 0.14);
@@ -211,55 +190,145 @@
   --mesh-accent: #2DD4BF;
   --mesh-soft: rgba(45, 212, 191, 0.14);
 
-  --handle-s: 78%;
-  --handle-l: 71%;
-  --identicon-bg-l: 16%;
+  --handle-s: 72%;
+  --handle-l: 72%;
+  --identicon-bg-l: 17%;
 
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.38);
-  --shadow-md: 0 8px 26px rgba(0, 0, 0, 0.52);
-  --shadow-lg: 0 20px 56px rgba(0, 0, 0, 0.72);
-  --ambient-glow: radial-gradient(600px circle at 50% 0%, rgba(129, 140, 248, 0.07), transparent 70%);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 8px 26px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 20px 56px rgba(0, 0, 0, 0.58);
+  --ambient-glow: none;
 }
 
 /* --------------------------------------------------------------------------
-   Theme 4: Daylight Field
-   High-contrast Swiss topographic map / daylight e-ink clarity
+   Theme 3: Warm Dusk (`amber`)
+   Cozy dark espresso canvas with soft golden amber highlights
+   -------------------------------------------------------------------------- */
+[data-theme='amber'] {
+  color-scheme: dark;
+  --theme-meta-color: #120F0C;
+
+  --bg-canvas: #120F0C;
+  --bg-surface: #1B1612;
+  --bg-elevated: #261F19;
+  --bg-subtle: #312820;
+  --bg-hover: rgba(255, 245, 230, 0.05);
+  --bg-active: rgba(245, 158, 11, 0.15);
+  --bg-glass: rgba(18, 15, 12, 0.86);
+  --bg-overlay: rgba(8, 5, 3, 0.64);
+  --bg-input: #17120E;
+
+  --border-subtle: rgba(255, 240, 220, 0.07);
+  --border-default: rgba(255, 240, 220, 0.115);
+  --border-strong: rgba(255, 240, 220, 0.2);
+  --border-accent: rgba(245, 158, 11, 0.48);
+
+  --text-primary: #FAF4EC;
+  --text-secondary: #B7A491;
+  --text-muted: #82705E;
+  --text-inverse: #1C1104;
+
+  --accent: #F59E0B;
+  --accent-hover: #FBBF24;
+  --accent-soft: rgba(245, 158, 11, 0.15);
+  --accent-glow: 0 4px 18px rgba(245, 158, 11, 0.22);
+
+  --accent-secondary: #FB7185;
+  --accent-secondary-soft: rgba(251, 113, 133, 0.15);
+
+  /* Modern Message Bubbles */
+  --bubble-own-bg: #3D2910;
+  --bubble-own-text: #FEF3C7;
+  --bubble-own-meta: rgba(253, 230, 138, 0.72);
+  --bubble-own-border: rgba(245, 158, 11, 0.26);
+
+  --bubble-own-dm-bg: #3D2036;
+  --bubble-own-dm-text: #FDF2F8;
+  --bubble-own-dm-meta: rgba(251, 207, 232, 0.72);
+  --bubble-own-dm-border: rgba(244, 114, 182, 0.26);
+
+  --bubble-other-bg: #221C16;
+  --bubble-other-text: #FAF4EC;
+  --bubble-other-meta: #9A8570;
+  --bubble-other-border: rgba(255, 240, 220, 0.07);
+
+  --status-ok: #34D399;
+  --status-ok-soft: rgba(52, 211, 153, 0.14);
+  --status-warn: #FBBF24;
+  --status-warn-soft: rgba(251, 191, 36, 0.16);
+  --status-danger: #FB7185;
+  --status-danger-soft: rgba(251, 113, 133, 0.16);
+
+  --dm-accent: #F472B6;
+  --dm-soft: rgba(244, 114, 182, 0.15);
+  --mesh-accent: #38BDF8;
+  --mesh-soft: rgba(56, 189, 248, 0.14);
+
+  --handle-s: 74%;
+  --handle-l: 70%;
+  --identicon-bg-l: 17%;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.42);
+  --shadow-lg: 0 20px 54px rgba(0, 0, 0, 0.58);
+  --ambient-glow: none;
+}
+
+/* --------------------------------------------------------------------------
+   Theme 4: Light (`daylight`)
+   Clean, airy iMessage / Signal daylight aesthetic
    -------------------------------------------------------------------------- */
 [data-theme='daylight'],
 [data-theme='paper'] {
   color-scheme: light;
-  --theme-meta-color: #F4F5F2;
+  --theme-meta-color: #F5F7F9;
 
-  --bg-canvas: #F3F5F1;
+  --bg-canvas: #F5F7F9;
   --bg-surface: #FFFFFF;
-  --bg-elevated: #FFFFFF;
-  --bg-subtle: #EAECE7;
-  --bg-hover: rgba(13, 138, 82, 0.06);
-  --bg-active: rgba(13, 138, 82, 0.12);
+  --bg-elevated: #EDF1F5;
+  --bg-subtle: #E3E8EE;
+  --bg-hover: rgba(15, 23, 42, 0.045);
+  --bg-active: rgba(5, 150, 105, 0.11);
   --bg-glass: rgba(255, 255, 255, 0.88);
-  --bg-overlay: rgba(15, 23, 20, 0.42);
-  --bg-input: #F8F9F7;
+  --bg-overlay: rgba(15, 23, 42, 0.36);
+  --bg-input: #F1F4F7;
 
-  --border-subtle: rgba(15, 23, 20, 0.08);
-  --border-default: rgba(15, 23, 20, 0.13);
-  --border-strong: rgba(15, 23, 20, 0.24);
-  --border-accent: rgba(13, 138, 82, 0.46);
+  --border-subtle: rgba(15, 23, 42, 0.075);
+  --border-default: rgba(15, 23, 42, 0.12);
+  --border-strong: rgba(15, 23, 42, 0.22);
+  --border-accent: rgba(5, 150, 105, 0.44);
 
-  --text-primary: #101A15;
-  --text-secondary: #485C52;
-  --text-muted: #788C82;
+  --text-primary: #0F172A;
+  --text-secondary: #475569;
+  --text-muted: #64748B;
   --text-inverse: #FFFFFF;
 
-  --accent: #0D8A52;
-  --accent-hover: #0A7344;
-  --accent-soft: rgba(13, 138, 82, 0.11);
-  --accent-glow: 0 0 18px rgba(13, 138, 82, 0.16);
+  --accent: #059669;
+  --accent-hover: #047857;
+  --accent-soft: rgba(5, 150, 105, 0.11);
+  --accent-glow: 0 4px 16px rgba(5, 150, 105, 0.16);
 
   --accent-secondary: #0284C7;
   --accent-secondary-soft: rgba(2, 132, 199, 0.11);
 
-  --status-ok: #0D8A52;
-  --status-ok-soft: rgba(13, 138, 82, 0.12);
+  /* Modern Message Bubbles */
+  --bubble-own-bg: #D1FAE5;
+  --bubble-own-text: #064E3B;
+  --bubble-own-meta: rgba(6, 78, 59, 0.62);
+  --bubble-own-border: rgba(5, 150, 105, 0.16);
+
+  --bubble-own-dm-bg: #EDE9FE;
+  --bubble-own-dm-text: #3B0764;
+  --bubble-own-dm-meta: rgba(76, 29, 149, 0.62);
+  --bubble-own-dm-border: rgba(124, 58, 237, 0.18);
+
+  --bubble-other-bg: #FFFFFF;
+  --bubble-other-text: #0F172A;
+  --bubble-other-meta: #64748B;
+  --bubble-other-border: rgba(15, 23, 42, 0.075);
+
+  --status-ok: #059669;
+  --status-ok-soft: rgba(5, 150, 105, 0.12);
   --status-warn: #D97706;
   --status-warn-soft: rgba(217, 119, 6, 0.12);
   --status-danger: #DC2626;
@@ -270,12 +339,12 @@
   --mesh-accent: #0284C7;
   --mesh-soft: rgba(2, 132, 199, 0.11);
 
-  --handle-s: 68%;
+  --handle-s: 66%;
   --handle-l: 36%;
-  --identicon-bg-l: 92%;
+  --identicon-bg-l: 93%;
 
-  --shadow-sm: 0 1px 4px rgba(15, 23, 20, 0.07);
-  --shadow-md: 0 6px 20px rgba(15, 23, 20, 0.11);
-  --shadow-lg: 0 18px 46px rgba(15, 23, 20, 0.18);
-  --ambient-glow: radial-gradient(600px circle at 50% 0%, rgba(13, 138, 82, 0.05), transparent 70%);
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.09);
+  --shadow-lg: 0 20px 50px rgba(15, 23, 42, 0.14);
+  --ambient-glow: none;
 }

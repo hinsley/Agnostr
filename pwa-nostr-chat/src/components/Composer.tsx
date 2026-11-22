@@ -1,13 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ArrowUp,
   CornerUpLeft,
-  Cpu,
   ImagePlus,
   Loader2,
   Lock,
   Mic,
-  Send,
-  Terminal,
   X,
 } from 'lucide-react'
 import type {
@@ -118,8 +116,7 @@ export const Composer: React.FC<ComposerProps> = ({
       ? `srv:${activeServer?.id ?? ''}:${activeChannel?.id ?? ''}`
       : `ch:${engine.activeGeohash}`
 
-  // Immediately tear down voice recorder & staged images (stops mic & revokes preview URLs)
-  // on Panic Wipe, key rotation, or switching target channel/DM/server so media never leaks across contexts.
+  // Tear down voice recorder & staged images on Panic Wipe, key rotation, or context switch
   const prevMasterPkRef = useRef(engine.identity.masterPubkey)
   const prevTargetKeyRef = useRef(activeTargetKey)
   useEffect(() => {
@@ -136,7 +133,7 @@ export const Composer: React.FC<ComposerProps> = ({
     }
   }, [engine.identity.masterPubkey, activeTargetKey, clearPendingImage])
 
-  // Handle external mention or snippet insertions (e.g., clicking "Mention" in PeerInspector)
+  // Handle external mention or snippet insertions
   useEffect(() => {
     if (!externalDraftToken) return
     if (externalDraftToken.text) {
@@ -159,12 +156,11 @@ export const Composer: React.FC<ComposerProps> = ({
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 140)}px`
+    el.style.height = `${Math.min(el.scrollHeight, 136)}px`
   }, [draft])
 
   // Compute slash-command or @mention autocomplete state
   const autocomplete: AutocompleteMode = useMemo(() => {
-    // Slash commands only in geohash channel mode (never leak private server text to geo commands)
     if (!isDm && !isServer && draft.startsWith('/') && !draft.includes('\n')) {
       const firstSpace = draft.indexOf(' ')
       if (firstSpace === -1) {
@@ -181,7 +177,6 @@ export const Composer: React.FC<ComposerProps> = ({
       }
     }
 
-    // @mention lookup before cursor (geohash peers OR server members)
     const beforeCursor = draft.slice(0, cursorPos)
     const mentionMatch = /(?:^|\s)@([a-zA-Z0-9_.-]{0,24})$/.exec(beforeCursor)
     if (mentionMatch && !isDm) {
@@ -194,7 +189,7 @@ export const Composer: React.FC<ComposerProps> = ({
               pubkey: m.pubkey,
               nickname: m.nickname,
               displayHandle: m.displayHandle,
-              subtitle: m.isFounder ? 'founder' : m.isAdmin ? 'admin' : m.roles[0] || 'member',
+              subtitle: m.isFounder ? 'Founder' : m.isAdmin ? 'Admin' : m.roles[0] || 'Member',
             }))
         : engine.peers
             .filter((p) => !p.isSelf && !p.isBlocked)
@@ -202,9 +197,7 @@ export const Composer: React.FC<ComposerProps> = ({
               pubkey: p.pubkey,
               nickname: p.nickname,
               displayHandle: p.displayHandle,
-              subtitle: p.isOnline
-                ? 'online'
-                : `${p.messageCount} ${p.messageCount === 1 ? 'msg' : 'msgs'}`,
+              subtitle: p.isOnline ? 'Online' : `${p.messageCount} msgs`,
             }))
 
       const candidates = pool
@@ -230,7 +223,6 @@ export const Composer: React.FC<ComposerProps> = ({
     return { type: 'none' }
   }, [draft, cursorPos, engine.commands, engine.peers, engine.servers.members, isDm, isServer])
 
-  // Keep selectedIndex clamped
   const acQuery = autocomplete.type === 'none' ? '' : autocomplete.query
   useEffect(() => {
     setSelectedIndex(0)
@@ -285,7 +277,6 @@ export const Composer: React.FC<ComposerProps> = ({
       try {
         const prepared = await prepareImageFile(file)
         if (contextEpochRef.current !== prepEpoch) {
-          // Context switched, Panic Wiped, cancelled, or unmounted mid-flight
           revokeImagePreviewUrl(prepared)
           return
         }
@@ -429,13 +420,11 @@ export const Composer: React.FC<ComposerProps> = ({
     if (ok) {
       onSent?.(isViolet)
     } else {
-      // Restore draft if sending failed
       setDraft(trimmed)
     }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Handle Autocomplete keyboard navigation
     if (autocomplete.type !== 'none') {
       const count = autocomplete.items.length
       if (e.key === 'ArrowDown') {
@@ -449,7 +438,6 @@ export const Composer: React.FC<ComposerProps> = ({
         return
       }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
-        // If user already typed an exact zero-arg command (like `/who`), Enter submits it directly
         if (
           e.key === 'Enter' &&
           autocomplete.type === 'command' &&
@@ -477,14 +465,12 @@ export const Composer: React.FC<ComposerProps> = ({
       }
     }
 
-    // Enter sends, Shift+Enter inserts newline
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       void handleSubmit()
       return
     }
 
-    // Recall previous sent message/command with ArrowUp when input is empty
     if (e.key === 'ArrowUp' && draft.length === 0 && history.length > 0) {
       e.preventDefault()
       const nextIdx = Math.min(historyIdx + 1, history.length - 1)
@@ -553,22 +539,18 @@ export const Composer: React.FC<ComposerProps> = ({
 
   const placeholder = !canSign
     ? engine.identity.signMode === 'extension'
-      ? 'No NIP-07 extension detected — switch to Auto in Identity tab…'
-      : 'Enter a valid nsec key in Identity tab to transmit…'
+      ? 'No NIP-07 extension — switch signer in Settings…'
+      : 'Enter a valid nsec key in Settings to send…'
     : pendingImage
-      ? isViolet
-        ? 'Add an optional encrypted caption… (Enter to send)'
-        : 'Add an optional caption… (Enter to send)'
+      ? 'Add a caption…'
       : isDm && dmThread
-        ? `Encrypted DM to ${dmThread.peerDisplayHandle}…`
-        : isServer && activeServer && activeChannel
-          ? isServerE2ee
-            ? `Encrypted message to #${activeChannel.name} in ${activeServer.name}…`
-            : `Message #${activeChannel.name} in ${activeServer.name}… (@ to mention)`
-          : `Transmit to #${engine.activeGeohash}… (/ for commands, @ to mention)`
+        ? `Message ${dmThread.peerNickname}…`
+        : isServer && activeChannel
+          ? `Message #${activeChannel.name}…`
+          : `Message #${engine.activeGeohash}…`
 
-  const hasTopBanner = Boolean(activeReply) || isDm || isServerE2ee
-  const hasBanner = hasTopBanner || Boolean(pendingImage && !voiceMode)
+  const hasContentToSend = draft.trim().length > 0 || pendingImage !== null
+  const hasTopBanner = Boolean(activeReply)
   const imagePhaseText =
     pendingImage && isSending && engine.voiceSendPhase !== 'idle'
       ? MEDIA_PHASE_LABEL[engine.voiceSendPhase]
@@ -595,7 +577,7 @@ export const Composer: React.FC<ComposerProps> = ({
 
         {dragActive && (
           <div className="ag-composer-drop-overlay" role="status">
-            <ImagePlus size={16} />
+            <ImagePlus size={18} />
             <span>
               {isViolet
                 ? 'Drop image to encrypt & send (EXIF stripped)'
@@ -603,12 +585,13 @@ export const Composer: React.FC<ComposerProps> = ({
             </span>
           </div>
         )}
+
         {/* Slash Command Autocomplete Popup */}
         {!voiceMode && autocomplete.type === 'command' && (
           <div className="ag-autocomplete-popup" role="listbox" aria-label="Slash commands">
             <div className="ag-ac-head">
-              <span>Slash Commands</span>
-              <span>Tab / Enter to complete</span>
+              <span>Commands</span>
+              <span>Tab or Enter</span>
             </div>
             {autocomplete.items.map((cmd, idx) => (
               <button
@@ -634,14 +617,12 @@ export const Composer: React.FC<ComposerProps> = ({
 
         {/* @Mention Peer Autocomplete Popup */}
         {!voiceMode && autocomplete.type === 'mention' && (
-          <div className="ag-autocomplete-popup" role="listbox" aria-label="Mention active peer">
+          <div className="ag-autocomplete-popup" role="listbox" aria-label="Mention someone">
             <div className="ag-ac-head">
               <span>
-                {isServer && activeServer
-                  ? `Members in ${activeServer.name}`
-                  : `Active Peers in #${engine.activeGeohash}`}
+                {isServer && activeServer ? activeServer.name : `#${engine.activeGeohash}`}
               </span>
-              <span>Tab / Enter to mention</span>
+              <span>Tab or Enter</span>
             </div>
             {autocomplete.items.map((peer, idx) => (
               <button
@@ -659,92 +640,42 @@ export const Composer: React.FC<ComposerProps> = ({
                   <img
                     src={identiconDataUrl(peer.pubkey)}
                     alt=""
-                    className="ag-avatar-sm"
-                    style={{ width: 22, height: 22, borderRadius: 6 }}
+                    className="ag-ac-avatar"
                   />
                   <span style={{ fontWeight: 600, color: pubkeyToColor(peer.pubkey) }}>
                     {peer.displayHandle}
                   </span>
                 </div>
-                <span className="ag-ac-desc mono">{peer.subtitle}</span>
+                <span className="ag-ac-desc">{peer.subtitle}</span>
               </button>
             ))}
           </div>
         )}
 
-        {/* Contextual Encrypted Server / DM Banner */}
-        {isServer && isServerE2ee && activeServer && activeChannel && (
+        {/* Contextual Reply Strip */}
+        {activeReply && !voiceMode && (
           <div
-            className={`ag-composer-banner dm ${activeReply || (pendingImage && !voiceMode) ? 'has-next-banner' : ''}`}
+            className={`ag-composer-reply-strip ${isViolet ? 'dm' : ''} ${pendingImage ? 'has-next' : ''}`}
           >
-            <div className="ag-composer-banner-left">
-              <Lock size={12} style={{ flexShrink: 0 }} />
-              <span className="mono truncate" style={{ fontSize: 11 }}>
-                E2EE Server · AES-256-GCM
-              </span>
-              <span
-                className="ag-badge dm ag-e2ee-voice-pill"
-                title="Voice memos & images in this E2EE server are encrypted client-side with AES-256-GCM before upload"
-              >
-                <Mic size={9} />
-                E2EE VOICE
-              </span>
-            </div>
-            <span className="mono ag-hide-xs" style={{ fontSize: 10.5, opacity: 0.85, flexShrink: 0 }}>
-              #{activeChannel.name}
-            </span>
-          </div>
-        )}
-
-        {/* Contextual Reply Banner (Geohash Channels & Servers) */}
-        {activeReply && (
-          <div
-            className={`ag-composer-banner ${isServerE2ee ? 'stacked' : ''} ${pendingImage && !voiceMode ? 'has-next-banner' : ''}`}
-          >
-            <div className="ag-composer-banner-left">
-              <CornerUpLeft size={13} style={{ color: isServerE2ee ? 'var(--dm-accent)' : 'var(--accent)', flexShrink: 0 }} />
-              <span className="truncate">
-                Replying to{' '}
-                <strong style={{ color: 'var(--text-primary)' }}>
-                  {activeReply.displayHandle}
-                </strong>
-                : {replyPreviewText}
-              </span>
+            <div className="ag-composer-reply-left">
+              <CornerUpLeft size={14} className="ag-composer-reply-icon" />
+              <div className="ag-composer-reply-text truncate">
+                <span className="ag-composer-reply-who">
+                  Replying to <strong>{activeReply.nickname}</strong>
+                </span>
+                <span className="ag-composer-reply-snippet truncate">{replyPreviewText}</span>
+              </div>
             </div>
             <button
               type="button"
-              className="ag-icon-btn"
-              style={{ height: 22, minWidth: 22 }}
+              className="ag-mini-circle-btn"
               onClick={() =>
                 isServer ? engine.servers.setReplyingTo(null) : engine.setReplyingTo(null)
               }
               aria-label="Cancel reply"
             >
-              <X size={13} />
+              <X size={14} />
             </button>
-          </div>
-        )}
-
-        {isDm && dmThread && (
-          <div
-            className={`ag-composer-banner dm ${pendingImage && !voiceMode ? 'has-next-banner' : ''}`}
-          >
-            <div className="ag-composer-banner-left">
-              <Lock size={12} style={{ flexShrink: 0 }} />
-              <span className="mono truncate" style={{ fontSize: 11 }}>
-                Encrypted ({dmThread.protocol === 'bitchat' ? 'Bitchat v2 XChaCha20' : 'NIP-17 Gift-Wrap'})
-              </span>
-              <span
-                className="ag-badge dm ag-e2ee-voice-pill"
-                title="DM voice memos & images are encrypted client-side with AES-256-GCM before Blossom upload"
-              >
-                <Mic size={9} />
-                E2EE VOICE
-              </span>
-            </div>
-            <span className="mono ag-hide-xs" style={{ fontSize: 10.5, opacity: 0.85, flexShrink: 0 }}>
-              {dmThread.peerDisplayHandle}
-            </span>
           </div>
         )}
 
@@ -769,14 +700,14 @@ export const Composer: React.FC<ComposerProps> = ({
                   {isViolet && (
                     <span
                       className="ag-badge dm"
-                      title="Image will be encrypted client-side with AES-256-GCM before Blossom upload"
+                      title="Encrypted with AES-256-GCM before upload"
                     >
-                      <Lock size={9} />
-                      E2EE IMAGE
+                      <Lock size={10} />
+                      E2EE
                     </span>
                   )}
                 </div>
-                <div className="ag-composer-img-sub mono tabular">
+                <div className="ag-composer-img-sub tabular">
                   <span>
                     {pendingImage.width}×{pendingImage.height} · {formatImageBytes(pendingImage.size)} · EXIF stripped
                   </span>
@@ -794,19 +725,19 @@ export const Composer: React.FC<ComposerProps> = ({
               className="ag-composer-img-discard"
               onClick={clearPendingImage}
               disabled={isSending}
-              title="Discard staged image (Esc)"
+              title="Discard image (Esc)"
               aria-label="Discard staged image"
             >
-              <X size={14} />
+              <X size={15} />
             </button>
           </div>
         )}
 
-        {/* Composer Input Capsule OR Tactical Voice Recorder Bar */}
+        {/* Rounded Pill Composer OR Voice Recorder Bar */}
         {voiceMode ? (
           <VoiceRecorderBar
             isDm={isViolet}
-            hasBanner={hasBanner}
+            hasBanner={false}
             sending={isSending}
             voiceSendPhase={engine.voiceSendPhase}
             onSend={handleSendVoiceMemo}
@@ -815,29 +746,35 @@ export const Composer: React.FC<ComposerProps> = ({
           />
         ) : (
           <form
-            className={`ag-composer-box ${hasBanner ? 'with-banner' : ''} ${isViolet ? 'dm' : ''}`}
+            className={`ag-composer-pill ${isViolet ? 'dm' : ''} ${activeReply || pendingImage ? 'with-strip' : ''}`}
             onSubmit={(e) => {
               e.preventDefault()
               void handleSubmit()
             }}
           >
-            {!isDm && !isServer && (
-              <button
-                type="button"
-                className="ag-icon-btn"
-                onClick={() => {
-                  setDraft((prev) => (prev.startsWith('/') ? prev : '/' + prev))
-                  setCursorPos(1)
-                  textareaRef.current?.focus()
-                }}
-                title="Insert slash command (/)"
-                aria-label="Insert slash command"
-                style={{ marginBottom: 2 }}
-              >
-                <Terminal size={16} />
-              </button>
-            )}
+            {/* Left Circular Image Picker Button */}
+            <button
+              type="button"
+              className={`ag-pill-attach-btn ${isViolet ? 'dm' : ''} ${pendingImage ? 'active' : ''}`}
+              disabled={!canSign || isSending || preparingImage}
+              onClick={() => fileInputRef.current?.click()}
+              title={
+                !canSign
+                  ? 'Configure a signing key in Settings to send images'
+                  : isViolet
+                    ? 'Attach encrypted image (EXIF stripped)'
+                    : 'Attach image (EXIF stripped)'
+              }
+              aria-label={isViolet ? 'Attach encrypted image' : 'Attach image'}
+            >
+              {preparingImage ? (
+                <Loader2 size={18} className="ag-spin" />
+              ) : (
+                <ImagePlus size={19} />
+              )}
+            </button>
 
+            {/* Smooth 16px Auto-Growing Input */}
             <textarea
               ref={textareaRef}
               className="ag-composer-input"
@@ -856,98 +793,46 @@ export const Composer: React.FC<ComposerProps> = ({
               aria-label={placeholder}
             />
 
-            <button
-              type="button"
-              className={`ag-img-btn ${isViolet ? 'dm' : ''} ${pendingImage ? 'active' : ''}`}
-              disabled={!canSign || isSending || preparingImage}
-              onClick={() => fileInputRef.current?.click()}
-              title={
-                !canSign
-                  ? 'Configure a signing key in Identity tab to send images'
-                  : isViolet
-                    ? 'Attach E2EE image (EXIF stripped, AES-256-GCM)'
-                    : 'Attach image (EXIF stripped, WebP compressed)'
-              }
-              aria-label={isViolet ? 'Attach encrypted image' : 'Attach image'}
-            >
-              {preparingImage ? (
-                <Loader2 size={16} className="ag-spin" />
-              ) : (
-                <ImagePlus size={16} />
-              )}
-            </button>
-
-            <button
-              type="button"
-              className={`ag-mic-btn ${isViolet ? 'dm' : ''}`}
-              disabled={!voiceSupported || !canSign || isSending || preparingImage}
-              onClick={() => {
-                clearPendingImage()
-                setVoiceMode(true)
-              }}
-              title={
-                !voiceSupported
-                  ? 'Voice memos require microphone & MediaRecorder support in this browser'
-                  : !canSign
-                    ? 'Configure a signing key in Identity tab to record voice memos'
-                    : isViolet
-                      ? 'Record E2EE voice memo (AES-256-GCM)'
-                      : isServer && activeChannel
-                        ? `Record voice memo for #${activeChannel.name}`
-                        : `Record voice memo to #${engine.activeGeohash}`
-              }
-              aria-label={isViolet ? 'Record encrypted voice memo' : 'Record voice memo'}
-            >
-              <Mic size={16} />
-            </button>
-
-            <button
-              type="submit"
-              className={`ag-send-btn ${isViolet ? 'dm' : ''}`}
-              disabled={(!draft.trim() && !pendingImage) || isSending || preparingImage || !canSign}
-              aria-label="Send message"
-            >
-              {isSending ? (
-                <Loader2 size={15} style={{ animation: 'ag-spin 1s linear infinite' }} />
-              ) : (
-                <Send size={15} />
-              )}
-              <span className="ag-desktop-only">
-                {imagePhaseText ?? (isSending ? 'TX…' : 'Send')}
-              </span>
-            </button>
+            {/* Right Smart Morphing Action: Mic when empty -> Accent Send ArrowUp when ready */}
+            {hasContentToSend || isSending ? (
+              <button
+                type="submit"
+                className={`ag-pill-send-btn ${isViolet ? 'dm' : ''}`}
+                disabled={!hasContentToSend || isSending || preparingImage || !canSign}
+                title={imagePhaseText ?? 'Send message'}
+                aria-label="Send message"
+              >
+                {isSending ? (
+                  <Loader2 size={18} className="ag-spin" />
+                ) : (
+                  <ArrowUp size={19} strokeWidth={2.4} />
+                )}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={`ag-pill-mic-btn ${isViolet ? 'dm' : ''}`}
+                disabled={!voiceSupported || !canSign || isSending || preparingImage}
+                onClick={() => {
+                  clearPendingImage()
+                  setVoiceMode(true)
+                }}
+                title={
+                  !voiceSupported
+                    ? 'Voice memos require microphone support in this browser'
+                    : !canSign
+                      ? 'Configure a signing key in Settings to record voice memos'
+                      : isViolet
+                        ? 'Record encrypted voice memo'
+                        : 'Record voice memo'
+                }
+                aria-label={isViolet ? 'Record encrypted voice memo' : 'Record voice memo'}
+              >
+                <Mic size={19} />
+              </button>
+            )}
           </form>
         )}
-
-        {/* Subtle Tactical Telemetry Footer */}
-        <div className="ag-composer-hint-row">
-          <span>
-            {voiceMode
-              ? isViolet
-                ? 'AES-256-GCM E2EE audio · Up to 1:30 · Esc to discard'
-                : 'Blossom voice memo · Up to 1:30 · Esc to discard'
-              : pendingImage
-                ? isViolet
-                  ? 'AES-256-GCM E2EE image · EXIF stripped · Enter to send · Esc to discard'
-                  : 'Blossom image · EXIF stripped · Enter to send · Esc to discard'
-                : isDm
-                  ? 'Enter to send encrypted DM · Paste/drop image · Mic for E2EE voice'
-                  : isServer && activeServer
-                    ? isServerE2ee
-                      ? 'Enter to send E2EE · Paste/drop image · Mic for voice · @ to mention · ⌘K'
-                      : `Enter to send to ${activeServer.name} · Paste/drop image · Mic for voice · ⌘K`
-                    : 'Enter to broadcast · Paste/drop image · Mic for voice · /trust · /strict · ⌘K'}
-          </span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.55rem' }}>
-            {engine.settings.powEnabled && !isDm && !(isServer && activeServer?.kind === 'nip29') && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                <Cpu size={10} />
-                NIP-13 {engine.settings.powTargetBits}b PoW
-              </span>
-            )}
-            {draft.length > 180 && <span className="tabular">{draft.length} chars</span>}
-          </span>
-        </div>
       </div>
     </div>
   )
