@@ -15,6 +15,7 @@ import type { ServerMessage } from '../types/servers'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { LightboxImagePayload } from './ImageLightboxModal'
 import { MessageItem } from './MessageItem'
+import { doesContentMentionUser } from '../lib/bitchatProtocol'
 import { identiconDataUrl, formatHandle } from '../utils/identicon'
 
 function getServerMonogram(name: string): string {
@@ -375,8 +376,59 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     return engine.pulseRooms.find((r) => r.geohash !== engine.activeGeohash) ?? null
   }, [engine.pulseRooms, engine.activeGeohash])
 
-  const ownNickLower = engine.identity.nickname.toLowerCase()
-  const ownPubkey = engine.identity.activePubkey
+  // Memoized list of known peer, member, self & author handles (including multi-word names with spaces)
+  // so inline `@John Doe` and `@John Doe#a1b2` highlight cleanly as one clickable chip.
+  const knownHandles = useMemo(() => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    const add = (raw?: string | null) => {
+      if (!raw) return
+      const clean = raw.trim().replace(/^@+/, '').trim()
+      if (!clean) return
+      const key = clean.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      out.push(clean)
+    }
+
+    add(engine.identity.activeDisplayHandle)
+    add(engine.identity.nickname)
+
+    if (isDm && dmThread) {
+      add(dmThread.peerDisplayHandle)
+      add(dmThread.peerNickname)
+    } else if (isServer) {
+      for (const m of engine.servers.members) {
+        add(m.displayHandle)
+        add(m.nickname)
+      }
+    } else {
+      for (const p of engine.peers) {
+        add(p.displayHandle)
+        add(p.nickname)
+      }
+    }
+
+    for (const msg of displayMessages) {
+      if (msg.isSystem) continue
+      add(msg.displayHandle)
+      add(msg.nickname)
+    }
+
+    return out
+  }, [
+    engine.identity.activeDisplayHandle,
+    engine.identity.nickname,
+    isDm,
+    dmThread,
+    isServer,
+    engine.servers.members,
+    engine.peers,
+    displayMessages,
+  ])
+
+  const ownNick = engine.identity.nickname
+  const ownPubkey = isServer ? engine.identity.masterPubkey : engine.identity.activePubkey
 
   const hiddenCount = isServer
     ? engine.servers.hiddenByTrustCount
@@ -576,9 +628,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
               const isMentioned =
                 !msg.isOwn &&
                 !msg.isSystem &&
-                (msg.mentions.includes(ownPubkey) ||
-                  (ownNickLower.length > 0 &&
-                    msg.content.toLowerCase().includes(`@${ownNickLower}`)))
+                doesContentMentionUser(msg.content, msg.mentions, ownNick, ownPubkey)
 
               return (
                 <React.Fragment key={msg.id}>
@@ -602,6 +652,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     isSearchActive={activeSearchMessageId === msg.id}
                     actionsRevealed={activeActionMsgId === msg.id}
                     highlightQuery={searchQuery}
+                    knownHandles={knownHandles}
                     showBridgeBadges={engine.settings.showBridgeBadges}
                     isDmMode={isDm}
                     isEncryptedContext={isEncryptedContext}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCw, WifiOff, X } from 'lucide-react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
 import { usePwa } from './hooks/usePwa'
+import { doesContentMentionUser } from './lib/bitchatProtocol'
 import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
 import type { ServerMessage, ServerSummary } from './types/servers'
 import { radioAudio, type SoundCue } from './utils/sound'
@@ -222,10 +223,12 @@ export function App() {
 
     const nowSec = Math.floor(Date.now() / 1000)
     if (!newest.isOwn && !newest.isSystem && nowSec - newest.createdAt <= 30) {
-      const nickLower = engine.identity.nickname.toLowerCase()
-      const mentionsUs =
-        newest.mentions.includes(engine.identity.activePubkey) ||
-        (nickLower.length > 0 && newest.content.toLowerCase().includes(`@${nickLower}`))
+      const mentionsUs = doesContentMentionUser(
+        newest.content,
+        newest.mentions,
+        engine.identity.nickname,
+        engine.identity.activePubkey
+      )
       radioAudio.play(mentionsUs ? 'mention' : 'receive')
     }
   }, [engine.messages, engine.activeGeohash, engine.identity.nickname, engine.identity.activePubkey])
@@ -249,10 +252,12 @@ export function App() {
 
     const nowSec = Math.floor(Date.now() / 1000)
     if (!newest.isOwn && !newest.isSystem && nowSec - newest.createdAt <= 30) {
-      const nickLower = engine.identity.nickname.toLowerCase()
-      const mentionsUs =
-        newest.mentions.includes(engine.identity.masterPubkey) ||
-        (nickLower.length > 0 && newest.content.toLowerCase().includes(`@${nickLower}`))
+      const mentionsUs = doesContentMentionUser(
+        newest.content,
+        newest.mentions,
+        engine.identity.nickname,
+        engine.identity.masterPubkey
+      )
       radioAudio.play(mentionsUs ? 'mention' : 'receive')
     }
   }, [
@@ -509,23 +514,35 @@ export function App() {
 
   const handleClickInlineMention = useCallback(
     (mention: string) => {
-      const lower = mention.toLowerCase()
-      const matched = engine.peers.find(
-        (p) =>
-          p.displayHandle.toLowerCase() === `@${lower}` ||
-          p.nickname.toLowerCase() === lower ||
-          p.displayHandle.toLowerCase().includes(lower)
-      )
+      const raw = mention.trim().replace(/^@+/, '').trim()
+      if (!raw) return
+      const lower = raw.toLowerCase()
+      const suffixMatch = /^(.*)#([0-9a-f]{4})$/i.exec(raw)
+      const targetName = (suffixMatch ? suffixMatch[1] : raw).trim().toLowerCase()
+      const targetSuffix = suffixMatch ? suffixMatch[2].toLowerCase() : null
+
+      const findBestMatch = <T extends { displayHandle: string; nickname: string; pubkey: string }>(
+        list: readonly T[]
+      ): T | undefined => {
+        return (
+          list.find((item) => item.displayHandle.toLowerCase() === `@${lower}`) ??
+          (targetSuffix
+            ? list.find(
+                (item) =>
+                  item.nickname.toLowerCase() === targetName &&
+                  item.pubkey.toLowerCase().endsWith(targetSuffix)
+              ) ?? list.find((item) => item.pubkey.toLowerCase().endsWith(targetSuffix))
+            : undefined) ??
+          list.find((item) => item.nickname.toLowerCase() === targetName)
+        )
+      }
+
+      const matched = findBestMatch(engine.peers)
       if (matched) {
         setInspectedPeer(matched)
         return
       }
-      const matchedMember = engine.servers.members.find(
-        (m) =>
-          m.displayHandle.toLowerCase() === `@${lower}` ||
-          m.nickname.toLowerCase() === lower ||
-          m.displayHandle.toLowerCase().includes(lower)
-      )
+      const matchedMember = findBestMatch(engine.servers.members)
       if (matchedMember) {
         setInspectedPeer({
           pubkey: matchedMember.pubkey,
@@ -544,9 +561,32 @@ export function App() {
         })
         return
       }
-      handleMentionPeer(mention)
+      const recentAuthor = isServer
+        ? findBestMatch(engine.servers.messages)
+        : findBestMatch(engine.messages)
+      if (recentAuthor) {
+        setInspectedPeer({
+          pubkey: recentAuthor.pubkey,
+          npub: recentAuthor.pubkey,
+          nickname: recentAuthor.nickname,
+          displayHandle: recentAuthor.displayHandle,
+          lastSeenAt: recentAuthor.createdAt,
+          isOnline: false,
+          isSelf:
+            recentAuthor.pubkey === engine.identity.activePubkey ||
+            recentAuthor.pubkey === engine.identity.masterPubkey,
+          isTeleported: false,
+          isMeshBridge: false,
+          isBlocked: engine.isPeerBlocked(recentAuthor.pubkey),
+          isTrusted: engine.isTrusted(recentAuthor.pubkey),
+          messageCount: 1,
+          channels: isServer && activeChannel ? [activeChannel.name] : [engine.activeGeohash],
+        })
+        return
+      }
+      handleMentionPeer(raw)
     },
-    [engine, activeChannel, handleMentionPeer]
+    [engine, isServer, activeChannel, handleMentionPeer]
   )
 
   const handleExpandRadar = useCallback(() => {

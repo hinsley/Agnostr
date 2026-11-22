@@ -178,8 +178,8 @@ export const Composer: React.FC<ComposerProps> = ({
     }
 
     const beforeCursor = draft.slice(0, cursorPos)
-    const mentionMatch = /(?:^|\s)@([a-zA-Z0-9_.-]{0,24})$/.exec(beforeCursor)
-    if (mentionMatch && !isDm) {
+    const mentionMatch = /(?:^|\s)@([^@\n]{0,32})$/.exec(beforeCursor)
+    if (mentionMatch && !isDm && !/^\s/.test(mentionMatch[1])) {
       const q = mentionMatch[1].toLowerCase()
       const startIdx = beforeCursor.length - mentionMatch[1].length - 1
       const pool: MentionCandidate[] = isServer

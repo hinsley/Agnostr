@@ -60,6 +60,7 @@ export interface MessageItemProps {
   isSearchActive: boolean
   actionsRevealed: boolean
   highlightQuery?: string
+  knownHandles?: readonly string[]
   showBridgeBadges: boolean
   isDmMode?: boolean
   isEncryptedContext?: boolean
@@ -90,6 +91,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     isSearchActive,
     actionsRevealed,
     highlightQuery,
+    knownHandles,
     showBridgeBadges,
     isDmMode = false,
     isEncryptedContext = false,
@@ -141,6 +143,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 onTuneGeohash={onTuneGeohash}
                 onClickMention={onClickMention}
                 highlightQuery={highlightQuery}
+                knownHandles={knownHandles}
               />
             </div>
           </div>
@@ -334,6 +337,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
               onTuneGeohash={onTuneGeohash}
               onClickMention={onClickMention}
               highlightQuery={highlightQuery}
+              knownHandles={knownHandles}
             />
           )}
 

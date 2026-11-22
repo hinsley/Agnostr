@@ -201,10 +201,97 @@ export async function mineNip13NonceTag(
   return null
 }
 
+const BITCHAT_TAGGED_MENTION_RE =
+  /(?:^|[\s([,"'“‘])@([^\s@#\n](?:[^@#\n]{0,30}[^\s@#\n])?#[0-9a-fA-F]{4})(?=$|[\s.,!?;:)\]}"'’])/g
+
+const SIMPLE_MENTION_RE =
+  /(?:^|[\s([,"'“‘])@([\p{L}\p{N}_.-]{1,32})(?=$|[\s.,!?;:)\]}"'’])/gu
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 export function extractMentions(content: string): string[] {
-  const matches = content.match(/@([A-Za-z0-9_.-]{1,32}(?:#[0-9a-fA-F]{4})?)/g)
-  if (!matches) return []
-  return Array.from(new Set(matches.map((m) => m.slice(1))))
+  if (!content || !content.includes('@')) return []
+  const found = new Set<string>()
+  const taggedRanges: Array<[number, number]> = []
+
+  // 1. Capture full Bitchat #xxxx-suffixed mentions first (supporting spaces & Unicode)
+  BITCHAT_TAGGED_MENTION_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = BITCHAT_TAGGED_MENTION_RE.exec(content)) !== null) {
+    const handle = match[1]
+    const atOffset = match[0].indexOf('@')
+    const start = match.index + atOffset
+    const end = start + 1 + handle.length
+    taggedRanges.push([start, end])
+    found.add(handle)
+  }
+
+  // 2. Capture single-word @handle mentions without fragmenting any #xxxx-suffixed mention
+  SIMPLE_MENTION_RE.lastIndex = 0
+  while ((match = SIMPLE_MENTION_RE.exec(content)) !== null) {
+    const atOffset = match[0].indexOf('@')
+    const start = match.index + atOffset
+    if (taggedRanges.some(([rStart, rEnd]) => start >= rStart && start < rEnd)) {
+      continue
+    }
+    found.add(match[1])
+  }
+
+  return Array.from(found)
+}
+
+export function doesContentMentionUser(
+  content: string,
+  mentions: readonly string[],
+  nickname: string,
+  pubkey: string
+): boolean {
+  const cleanNick = nickname.trim()
+  const nickLower = cleanNick.toLowerCase()
+  const pkLower = pubkey.trim().toLowerCase()
+  const suffix = pkLower.length >= 4 ? pkLower.slice(-4) : ''
+  const fullHandleLower = nickLower && suffix ? `${nickLower}#${suffix}` : ''
+
+  // 1. Check pre-extracted mentions / tagged pubkeys
+  for (const raw of mentions) {
+    const m = raw.trim().toLowerCase()
+    if (!m) continue
+    if (pkLower && m === pkLower) return true
+    const stripped = m.startsWith('@') ? m.slice(1) : m
+    if (fullHandleLower && stripped === fullHandleLower) return true
+    if (nickLower && stripped === nickLower) return true
+  }
+
+  if (!content || !cleanNick || !content.includes('@')) return false
+
+  // 2. Check explicit #xxxx-suffixed mentions in content (exact nick#last4 match)
+  //    and mask them out before checking bare @nickname mentions so `@John Doe#a1b2`
+  //    never false-matches `John` or `John Doe#ffff`.
+  let masked = ''
+  let cursor = 0
+  BITCHAT_TAGGED_MENTION_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = BITCHAT_TAGGED_MENTION_RE.exec(content)) !== null) {
+    const handle = match[1]
+    if (fullHandleLower && handle.toLowerCase() === fullHandleLower) {
+      return true
+    }
+    const atOffset = match[0].indexOf('@')
+    const start = match.index + atOffset
+    const end = start + 1 + handle.length
+    masked += content.slice(cursor, start) + ' '
+    cursor = end
+  }
+  masked += content.slice(cursor)
+
+  // 3. Boundary-aware bare @nickname match (supports spaces & Unicode)
+  const bareRe = new RegExp(
+    `(?:^|[\\s([,"'“‘])@${escapeRegExp(cleanNick)}(?=$|[\\s.,!?;:)\\]}"'’])`,
+    'i'
+  )
+  return bareRe.test(masked)
 }
 
 export function isEmoteContent(content: string): boolean {

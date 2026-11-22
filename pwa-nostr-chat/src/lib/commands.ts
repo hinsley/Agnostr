@@ -162,7 +162,7 @@ export interface CommandExecutionContext {
 }
 
 function resolvePeer(query: string, peers: PeerInfo[]): PeerInfo | null {
-  const clean = query.trim().replace(/^@/, '')
+  const clean = query.trim().replace(/^@/, '').replace(/\s+/g, ' ')
   if (!clean) return null
 
   const directPk = decodePubkeyInput(clean)
@@ -186,14 +186,68 @@ function resolvePeer(query: string, peers: PeerInfo[]): PeerInfo | null {
   }
 
   const lower = clean.toLowerCase()
+  const tagged = /^(.+)#([0-9a-f]{4})$/.exec(lower)
+  const taggedName = tagged?.[1]?.trim()
+  const taggedSuffix = tagged?.[2]
+
   return (
     peers.find((p) => p.displayHandle.toLowerCase() === `@${lower}`) ??
-    peers.find((p) => p.displayHandle.toLowerCase().slice(1) === lower) ??
-    peers.find((p) => p.nickname.toLowerCase() === lower) ??
+    peers.find((p) => p.displayHandle.replace(/^@/, '').toLowerCase() === lower) ??
+    peers.find((p) => p.nickname.trim().replace(/\s+/g, ' ').toLowerCase() === lower) ??
+    (taggedName && taggedSuffix
+      ? peers.find(
+          (p) =>
+            p.pubkey.toLowerCase().endsWith(taggedSuffix) &&
+            p.nickname.trim().replace(/\s+/g, ' ').toLowerCase() === taggedName
+        ) ?? peers.find((p) => p.pubkey.toLowerCase().endsWith(taggedSuffix))
+      : undefined) ??
     peers.find((p) => p.pubkey.endsWith(lower) && lower.length >= 4) ??
-    peers.find((p) => p.nickname.toLowerCase().startsWith(lower)) ??
+    peers.find((p) => p.nickname.trim().replace(/\s+/g, ' ').toLowerCase().startsWith(lower)) ??
     null
   )
+}
+
+function splitDmTargetAndBody(args: string, peers: PeerInfo[]): { targetToken: string; body: string } {
+  // 1. Match explicit Bitchat #xxxx-suffixed handle (with optional leading @ and spaces)
+  const taggedMatch = /^(@?[^\s@#\n](?:[^@#\n]{0,30}[^\s@#\n])?#[0-9a-fA-F]{4})(?:\s+([\s\S]*))?$/.exec(args)
+  if (taggedMatch) {
+    return {
+      targetToken: taggedMatch[1],
+      body: (taggedMatch[2] ?? '').trim(),
+    }
+  }
+
+  // 2. Match longest known peer displayHandle or multi-word nickname prefix
+  const hasAt = args.startsWith('@')
+  const rest = hasAt ? args.slice(1) : args
+  const restLower = rest.toLowerCase()
+  const candidates = new Set<string>()
+  for (const p of peers) {
+    const bareHandle = p.displayHandle.replace(/^@/, '').trim()
+    if (bareHandle) candidates.add(bareHandle)
+    const nick = p.nickname.trim()
+    if (nick) candidates.add(nick)
+  }
+  const sorted = Array.from(candidates).sort((a, b) => b.length - a.length)
+  for (const cand of sorted) {
+    const candLower = cand.toLowerCase()
+    if (restLower === candLower) {
+      return { targetToken: hasAt ? `@${cand}` : cand, body: '' }
+    }
+    if (restLower.startsWith(candLower) && /\s/.test(rest[cand.length] ?? '')) {
+      return {
+        targetToken: hasAt ? `@${cand}` : cand,
+        body: rest.slice(cand.length).trim(),
+      }
+    }
+  }
+
+  // 3. Fallback: first-space split (npub, hex pubkey, or single-word handle)
+  const firstSpace = args.indexOf(' ')
+  return {
+    targetToken: firstSpace === -1 ? args : args.slice(0, firstSpace),
+    body: firstSpace === -1 ? '' : args.slice(firstSpace + 1).trim(),
+  }
 }
 
 export async function executeSlashCommand(
@@ -211,10 +265,10 @@ export async function executeSlashCommand(
     case 'nick':
     case 'name': {
       if (!args) {
-        ctx.addSystemMessage(`Current handle: ${ctx.nickname}. Usage: /nick <new_handle>`)
+        ctx.addSystemMessage(`Current handle: ${ctx.nickname}. Usage: /nick <new handle>`)
         return true
       }
-      const next = args.replace(/\s+/g, '_').slice(0, 32)
+      const next = args.trim().replace(/\s+/g, ' ').slice(0, 32)
       ctx.setNickname(next)
       ctx.addSystemMessage(`Handle updated to @${next}`)
       return true
@@ -255,9 +309,7 @@ export async function executeSlashCommand(
         ctx.addSystemMessage('Usage: /m @handle [message]')
         return true
       }
-      const firstSpace = args.indexOf(' ')
-      const targetToken = firstSpace === -1 ? args : args.slice(0, firstSpace)
-      const body = firstSpace === -1 ? '' : args.slice(firstSpace + 1).trim()
+      const { targetToken, body } = splitDmTargetAndBody(args, ctx.peers)
       const peer = resolvePeer(targetToken, ctx.peers)
       if (!peer) {
         ctx.addSystemMessage(`Peer "${targetToken}" not found in #${ctx.activeGeohash} (or pass a full npub/hex).`)

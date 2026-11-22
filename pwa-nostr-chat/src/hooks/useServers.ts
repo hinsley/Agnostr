@@ -31,6 +31,7 @@ import {
 import { revokeImagePreviewUrl } from '../lib/imageProcessor.ts'
 import {
   clampTimestamp,
+  extractMentions,
   getTagValue,
   KIND_EPHEMERAL_REACTION,
   mineNip13NonceTag,
@@ -1260,7 +1261,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 }
               : undefined,
           reactions: [],
-          mentions: [],
+          mentions: extractMentions(text),
           voiceMemo: voiceAttachment,
           imageAttachment,
           deliveryStatus: 'sending',

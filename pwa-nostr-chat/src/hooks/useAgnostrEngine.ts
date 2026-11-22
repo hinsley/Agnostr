@@ -35,6 +35,7 @@ import {
   buildReactionTemplate,
   clearProtocolCaches,
   createSystemMessage,
+  doesContentMentionUser,
   extractGeohashTag,
   extractMentions,
   getTagValue,
@@ -697,8 +698,12 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (!gh || !(ev.content ?? '').trim()) return
 
           const mentions = extractMentions(ev.content)
-          const myNick = identityManager.getNickname().toLowerCase()
-          const mentionedMe = mentions.some((m) => m.toLowerCase().startsWith(myNick))
+          const myNick = identityManager.getNickname()
+          const geoPubkey = identityManager.getKeyMaterialForGeohash(gh).pubkey
+          const masterPubkey = identityManager.getMasterKeyMaterial().pubkey
+          const mentionedMe =
+            doesContentMentionUser(ev.content, mentions, myNick, geoPubkey) ||
+            (masterPubkey !== geoPubkey && doesContentMentionUser(ev.content, mentions, myNick, masterPubkey))
 
           setPinnedChannels((prev) =>
             prev.map((p) =>
