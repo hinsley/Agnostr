@@ -14,7 +14,6 @@ import {
   MonitorUp,
   PhoneOff,
   Radio,
-  SlidersHorizontal,
   Square,
   Users,
   Video,
@@ -551,44 +550,47 @@ export function CallStage({
           </button>
         )}
 
-        <button
-          type="button"
-          className={`ag-call-ctrl-btn ag-call-rec-btn ${
-            activeCall.localRecording ? 'recording' : ''
-          }`}
-          onClick={() => void handleToggleRecording()}
-          disabled={!activeCall.recordingSupported || togglingRec}
-          aria-pressed={activeCall.localRecording}
-          aria-label={
-            !activeCall.recordingSupported
-              ? 'Call recording is not supported in this browser'
-              : activeCall.localRecording
-                ? 'Stop recording call'
-                : 'Record call'
-          }
-          title={
-            !activeCall.recordingSupported
-              ? 'Call recording is not supported in this browser'
-              : activeCall.localRecording
-                ? `Stop recording${activeCall.localRecordingMode ? ` (${activeCall.localRecordingMode})` : ''}`
-                : 'Record call locally (shows red recording dot to all participants)'
-          }
+        <div
+          className={`ag-call-rec-split ${activeCall.localRecording ? 'recording' : ''} ${
+            isQualityPopoverVisible ? 'open' : ''
+          } ${!activeCall.recordingSupported ? 'disabled' : ''}`}
+          ref={qualityWrapRef}
         >
-          {activeCall.localRecording ? (
-            <Square size={15} fill="currentColor" />
-          ) : (
-            <Circle size={15} fill="currentColor" className="ag-call-rec-icon" />
-          )}
-          <span>{activeCall.localRecording ? 'Stop' : 'Record'}</span>
-        </button>
+          <button
+            type="button"
+            className="ag-call-rec-main"
+            onClick={() => void handleToggleRecording()}
+            disabled={!activeCall.recordingSupported || togglingRec}
+            aria-pressed={activeCall.localRecording}
+            aria-label={
+              !activeCall.recordingSupported
+                ? 'Call recording is not supported in this browser'
+                : activeCall.localRecording
+                  ? 'Stop recording call'
+                  : `Record call (${activeQualitySpec.label} ${activeQualitySpec.shortLabel})`
+            }
+            title={
+              !activeCall.recordingSupported
+                ? 'Call recording is not supported in this browser'
+                : activeCall.localRecording
+                  ? `Stop recording (${activeQualitySpec.shortLabel})`
+                  : `Record call locally at ${activeQualitySpec.label} (${activeQualitySpec.shortLabel} · ${activeQualitySpec.approxMbPerMin})`
+            }
+          >
+            {activeCall.localRecording ? (
+              <Square size={15} fill="currentColor" />
+            ) : (
+              <Circle size={15} fill="currentColor" className="ag-call-rec-icon" />
+            )}
+            <span className="ag-call-rec-text">
+              {activeCall.localRecording ? 'Stop' : 'Record'}
+            </span>
+          </button>
 
-        {activeCall.recordingSupported && (
-          <div className="ag-call-quality-wrap" ref={qualityWrapRef}>
+          {activeCall.recordingSupported && (
             <button
               type="button"
-              className={`ag-call-quality-btn ${isQualityPopoverVisible ? 'open' : ''} ${
-                activeCall.localRecording ? 'locked' : ''
-              }`}
+              className="ag-call-rec-caret"
               disabled={activeCall.localRecording}
               onClick={() => {
                 onPlaySound?.('click')
@@ -607,50 +609,49 @@ export function CallStage({
                   : `Recording quality: ${activeQualitySpec.label} (${activeQualitySpec.shortLabel} · ${activeQualitySpec.approxMbPerMin})`
               }
             >
-              <SlidersHorizontal size={13} className="ag-call-quality-icon" />
-              <span className="ag-call-quality-label mono">{activeQualitySpec.shortLabel}</span>
+              <span className="ag-call-rec-res mono">{activeQualitySpec.shortLabel}</span>
               <ChevronUp
                 size={12}
                 className={`ag-call-quality-chevron ${isQualityPopoverVisible ? 'open' : ''}`}
               />
             </button>
+          )}
 
-            {isQualityPopoverVisible && (
-              <div
-                className="ag-call-quality-menu"
-                role="listbox"
-                aria-label="Select call recording quality"
-              >
-                <div className="ag-call-quality-menu-head mono">RECORDING QUALITY</div>
-                {RECORDING_QUALITY_PRESETS.map((spec) => {
-                  const selected = spec.id === calls.recordingQuality
-                  return (
-                    <button
-                      key={spec.id}
-                      type="button"
-                      role="option"
-                      aria-selected={selected}
-                      className={`ag-call-quality-opt ${selected ? 'selected' : ''}`}
-                      onClick={() => {
-                        calls.setRecordingQuality(spec.id)
-                        onPlaySound?.('click')
-                        setQualityMenuOpen(false)
-                      }}
-                    >
-                      <span className="ag-call-quality-opt-main">
-                        <span className="ag-call-quality-opt-name">{spec.label}</span>
-                        <span className="ag-call-quality-opt-meta mono">
-                          {spec.shortLabel} · {spec.approxMbPerMin.replace('/min', '/m')}
-                        </span>
+          {isQualityPopoverVisible && (
+            <div
+              className="ag-call-quality-menu"
+              role="listbox"
+              aria-label="Select call recording quality"
+            >
+              <div className="ag-call-quality-menu-head mono">RECORDING QUALITY</div>
+              {RECORDING_QUALITY_PRESETS.map((spec) => {
+                const selected = spec.id === calls.recordingQuality
+                return (
+                  <button
+                    key={spec.id}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    className={`ag-call-quality-opt ${selected ? 'selected' : ''}`}
+                    onClick={() => {
+                      calls.setRecordingQuality(spec.id)
+                      onPlaySound?.('click')
+                      setQualityMenuOpen(false)
+                    }}
+                  >
+                    <span className="ag-call-quality-opt-main">
+                      <span className="ag-call-quality-opt-name">{spec.label}</span>
+                      <span className="ag-call-quality-opt-meta mono">
+                        {spec.shortLabel} · {spec.approxMbPerMin.replace('/min', '/m')}
                       </span>
-                      {selected && <Check size={13} className="ag-call-quality-check" />}
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        )}
+                    </span>
+                    {selected && <Check size={13} className="ag-call-quality-check" />}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
 
         <button
           type="button"
