@@ -630,6 +630,13 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 !msg.isSystem &&
                 doesContentMentionUser(msg.content, msg.mentions, ownNick, ownPubkey)
 
+              const voiceMemoKey = msg.voiceMemo
+                ? msg.voiceMemo.sha256 || msg.voiceMemo.url || msg.id
+                : ''
+              const memoTranscript = voiceMemoKey
+                ? engine.transcription.memoTranscripts[voiceMemoKey]
+                : undefined
+
               return (
                 <React.Fragment key={msg.id}>
                   {showDateDivider && (
@@ -660,6 +667,11 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     isSenderExplicitlyTrusted={!msg.isOwn && engine.isExplicitlyTrusted(msg.pubkey)}
                     fetchVoiceMemoBlob={engine.fetchVoiceMemoBlob}
                     fetchImageAttachmentBlob={engine.fetchImageAttachmentBlob}
+                    memoTranscript={memoTranscript}
+                    transcriptionModelStatus={engine.transcription.modelStatus}
+                    transcriptionDownloadProgress={engine.transcription.downloadProgress}
+                    activeTranscriptionModelLabel={engine.transcription.activeModel.label}
+                    onTranscribeMemo={engine.transcription.transcribeVoiceMemo}
                     onOpenLightbox={onOpenLightbox}
                     onToggleActions={setActiveActionMsgId}
                     onTrustSender={handleTrustSender}

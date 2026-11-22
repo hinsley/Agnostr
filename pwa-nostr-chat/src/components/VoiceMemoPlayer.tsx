@@ -2,6 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   Ban,
+  Captions,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
   Loader2,
   Lock,
   Pause,
@@ -12,16 +17,30 @@ import {
   User,
 } from 'lucide-react'
 import type { VoiceMemoAttachment } from '../types/protocol'
+import type {
+  MemoTranscriptState,
+  TranscriptionModelStatus,
+} from '../types/transcription'
 import { formatVoiceDuration, WAVEFORM_BARS } from '../lib/voiceRecorder'
 
 export interface VoiceMemoPlayerProps {
   memo: VoiceMemoAttachment
+  memoKey?: string
   senderPubkey: string
   senderNickname: string
   senderDisplayHandle: string
   isTrusted: boolean
   isDmMode?: boolean
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
+  memoTranscript?: MemoTranscriptState
+  transcriptionModelStatus?: TranscriptionModelStatus
+  transcriptionDownloadProgress?: number
+  activeTranscriptionModelLabel?: string
+  onTranscribeMemo?: (
+    memoKey: string,
+    memo: VoiceMemoAttachment,
+    senderPubkey: string
+  ) => Promise<void> | void
   onTrustSender: (pubkey: string, nickname: string) => void
   onInspectSender: (pubkey: string, nickname: string) => void
   onBlockSender: (pubkey: string, displayHandle: string) => void
@@ -197,16 +216,32 @@ const ShieldedVoiceCard: React.FC<ShieldedVoiceCardProps> = ({
    -------------------------------------------------------------------------- */
 interface TrustedVoicePlayerProps {
   memo: VoiceMemoAttachment
+  memoKey: string
   senderPubkey: string
   isDmMode?: boolean
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
+  memoTranscript?: MemoTranscriptState
+  transcriptionModelStatus?: TranscriptionModelStatus
+  transcriptionDownloadProgress?: number
+  activeTranscriptionModelLabel?: string
+  onTranscribeMemo?: (
+    memoKey: string,
+    memo: VoiceMemoAttachment,
+    senderPubkey: string
+  ) => Promise<void> | void
 }
 
 const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
   memo,
+  memoKey,
   senderPubkey,
   isDmMode = false,
   fetchVoiceMemoBlob,
+  memoTranscript,
+  transcriptionModelStatus,
+  transcriptionDownloadProgress = 0,
+  activeTranscriptionModelLabel = 'Moonshine Base',
+  onTranscribeMemo,
 }) => {
   const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [blobUrl, setBlobUrl] = useState<string | null>(null)
@@ -215,6 +250,8 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(memo.durationSec > 0 ? memo.durationSec : 0)
   const [speedIdx, setSpeedIdx] = useState(0)
+  const [transcriptOpen, setTranscriptOpen] = useState(true)
+  const [copiedTranscript, setCopiedTranscript] = useState(false)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const waveRef = useRef<HTMLDivElement | null>(null)
@@ -362,6 +399,32 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
   const cycleSpeed = () => {
     setSpeedIdx((i) => (i + 1) % SPEED_STEPS.length)
   }
+
+  const handleTranscribeClick = () => {
+    if (!onTranscribeMemo) return
+    if (memoTranscript?.status === 'done') {
+      setTranscriptOpen((open) => !open)
+      return
+    }
+    if (memoTranscript?.status === 'loading') return
+    setTranscriptOpen(true)
+    void onTranscribeMemo(memoKey, memo, senderPubkey)
+  }
+
+  const handleCopyTranscript = () => {
+    const text = memoTranscript?.text?.trim()
+    if (!text) return
+    navigator.clipboard?.writeText(text).catch(() => {})
+    setCopiedTranscript(true)
+    window.setTimeout(() => setCopiedTranscript(false), 1400)
+  }
+
+  const isTranscribing = memoTranscript?.status === 'loading'
+  const isDownloadingModel = isTranscribing && transcriptionModelStatus === 'downloading'
+  const downloadPct = Math.max(0, Math.min(100, Math.round(transcriptionDownloadProgress)))
+  const hasTranscript = memoTranscript?.status === 'done'
+  const hasTranscriptError = memoTranscript?.status === 'error'
+  const transcriptModelLabel = memoTranscript?.modelLabel || activeTranscriptionModelLabel
 
   const effectiveDuration = duration > 0 ? duration : memo.durationSec
   const progressRatio =
@@ -535,10 +598,153 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
                   E2EE
                 </span>
               )}
+
+              {onTranscribeMemo && (
+                <button
+                  type="button"
+                  className={`ag-voice-transcribe-btn ${isViolet ? 'dm' : ''} ${hasTranscript && transcriptOpen ? 'active' : ''}`}
+                  onClick={handleTranscribeClick}
+                  disabled={isTranscribing}
+                  title={
+                    isTranscribing
+                      ? isDownloadingModel
+                        ? `Loading ${activeTranscriptionModelLabel} (${downloadPct}%)`
+                        : 'Transcribing locally in your browser…'
+                      : hasTranscript
+                        ? transcriptOpen
+                          ? 'Hide transcript'
+                          : 'Show transcript'
+                        : `Transcribe locally with ${activeTranscriptionModelLabel}`
+                  }
+                  aria-label={
+                    hasTranscript
+                      ? transcriptOpen
+                        ? 'Hide voice memo transcript'
+                        : 'Show voice memo transcript'
+                      : 'Transcribe voice memo locally'
+                  }
+                  aria-expanded={hasTranscript ? transcriptOpen : undefined}
+                >
+                  {isTranscribing ? (
+                    <Loader2 size={11} className="ag-spin" />
+                  ) : (
+                    <Captions size={12} />
+                  )}
+                  <span>
+                    {isTranscribing
+                      ? isDownloadingModel
+                        ? `${downloadPct}%`
+                        : 'Working…'
+                      : hasTranscript
+                        ? transcriptOpen
+                          ? 'Hide'
+                          : 'Transcript'
+                        : 'Transcribe'}
+                  </span>
+                  {hasTranscript &&
+                    (transcriptOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />)}
+                </button>
+              )}
             </div>
           </div>
         </div>
       </div>
+
+      {/* Live Model Download / On-Device Transcription Progress */}
+      {isTranscribing && (
+        <div
+          className={`ag-voice-transcribe-status ${isViolet ? 'dm' : ''}`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="ag-voice-transcribe-status-row">
+            <Loader2 size={12} className="ag-spin" />
+            <span className="truncate">
+              {isDownloadingModel
+                ? `Loading ${activeTranscriptionModelLabel} · ${downloadPct}%`
+                : `Transcribing locally…`}
+            </span>
+          </div>
+          {isDownloadingModel && (
+            <div className="ag-voice-transcribe-progress" aria-hidden="true">
+              <div
+                className="ag-voice-transcribe-fill"
+                style={{ width: `${Math.max(4, downloadPct)}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Selectable Local Transcript Box */}
+      {hasTranscript && transcriptOpen && (
+        <div
+          className={`ag-voice-transcript-box ${isViolet ? 'dm' : ''}`}
+          role="region"
+          aria-label="Voice memo transcript"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="ag-voice-transcript-head">
+            <span className="ag-voice-transcript-model truncate">
+              <Captions size={11} />
+              <span>{transcriptModelLabel}</span>
+              <span className="ag-voice-transcript-local">· On-device</span>
+            </span>
+            <div className="ag-voice-transcript-actions">
+              {memoTranscript.text?.trim() && (
+                <button
+                  type="button"
+                  className="ag-voice-transcript-act"
+                  onClick={handleCopyTranscript}
+                  title={copiedTranscript ? 'Copied transcript' : 'Copy transcript'}
+                  aria-label="Copy transcript"
+                >
+                  {copiedTranscript ? <Check size={12} /> : <Copy size={12} />}
+                  <span>{copiedTranscript ? 'Copied' : 'Copy'}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className="ag-voice-transcript-act"
+                onClick={() => setTranscriptOpen(false)}
+                title="Hide transcript"
+                aria-label="Hide transcript"
+              >
+                <ChevronUp size={12} />
+              </button>
+            </div>
+          </div>
+
+          {memoTranscript.text?.trim() ? (
+            <p className="ag-voice-transcript-text">{memoTranscript.text.trim()}</p>
+          ) : (
+            <p className="ag-voice-transcript-empty">No speech detected in this clip.</p>
+          )}
+        </div>
+      )}
+
+      {/* Transcription Error Row */}
+      {hasTranscriptError && (
+        <div className="ag-voice-error-row" role="alert">
+          <div className="ag-voice-error-msg">
+            <AlertCircle size={13} style={{ flexShrink: 0 }} />
+            <span>{memoTranscript.error || 'Unable to transcribe voice memo.'}</span>
+          </div>
+          {onTranscribeMemo && (
+            <button
+              type="button"
+              className="ag-voice-retry-btn"
+              onClick={() => {
+                setTranscriptOpen(true)
+                void onTranscribeMemo(memoKey, memo, senderPubkey)
+              }}
+            >
+              <RotateCw size={12} />
+              <span>Retry</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {status === 'error' && (
         <div className="ag-voice-error-row" role="alert">
@@ -580,9 +786,15 @@ export const VoiceMemoPlayer: React.FC<VoiceMemoPlayerProps> = React.memo((props
   return (
     <TrustedVoicePlayer
       memo={props.memo}
+      memoKey={props.memoKey || props.memo.sha256 || props.memo.url}
       senderPubkey={props.senderPubkey}
       isDmMode={props.isDmMode}
       fetchVoiceMemoBlob={props.fetchVoiceMemoBlob}
+      memoTranscript={props.memoTranscript}
+      transcriptionModelStatus={props.transcriptionModelStatus}
+      transcriptionDownloadProgress={props.transcriptionDownloadProgress}
+      activeTranscriptionModelLabel={props.activeTranscriptionModelLabel}
+      onTranscribeMemo={props.onTranscribeMemo}
     />
   )
 })

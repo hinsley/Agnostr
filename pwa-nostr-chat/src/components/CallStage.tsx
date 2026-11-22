@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  AlertCircle,
+  Captions,
   Check,
   ChevronUp,
   Circle,
+  Copy,
+  Download,
+  FileText,
   HeadphoneOff,
   Headphones,
+  Loader2,
   Lock,
   Maximize2,
   Mic,
@@ -15,9 +21,11 @@ import {
   PhoneOff,
   Radio,
   Square,
+  Trash2,
   Users,
   Video,
   VideoOff,
+  X,
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol.ts'
 import type { CallEngine, CallParticipant, PeerIceConnectionState } from '../types/calls.ts'
@@ -58,6 +66,18 @@ function formatRecordingBytes(bytes: number): string {
     return `${(safe / (1024 * 1024)).toFixed(1)} MB`
   }
   return `${(safe / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function formatCaptionClock(unixMs: number): string {
+  try {
+    return new Date(unixMs).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  } catch {
+    return ''
+  }
 }
 
 function iceLedClass(state: PeerIceConnectionState): string {
@@ -219,16 +239,21 @@ function ParticipantTile({
 
 export function CallStage({
   calls,
+  engine,
   expanded,
   compactFloating = false,
   onToggleExpand,
   onPlaySound,
 }: CallStageProps) {
   const { activeCall } = calls
+  const { transcription } = engine
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [togglingRec, setTogglingRec] = useState(false)
   const [qualityMenuOpen, setQualityMenuOpen] = useState(false)
+  const [transcriptOpen, setTranscriptOpen] = useState(false)
+  const [copiedTranscript, setCopiedTranscript] = useState(false)
   const qualityWrapRef = useRef<HTMLDivElement | null>(null)
+  const transcriptListRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!activeCall) return
@@ -236,6 +261,13 @@ export function CallStage({
     const id = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => window.clearInterval(id)
   }, [activeCall])
+
+  useEffect(() => {
+    if (!transcriptOpen) return
+    const el = transcriptListRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [transcriptOpen, transcription.liveCaptions.length])
 
   const isQualityPopoverVisible =
     qualityMenuOpen && Boolean(activeCall) && !activeCall?.localRecording
@@ -252,12 +284,14 @@ export function CallStage({
   }, [isQualityPopoverVisible])
 
   useEffect(() => {
-    if (!activeCall || (!expanded && !isQualityPopoverVisible)) return
+    if (!activeCall || (!expanded && !isQualityPopoverVisible && !transcriptOpen)) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
         if (isQualityPopoverVisible) {
           setQualityMenuOpen(false)
+        } else if (transcriptOpen) {
+          setTranscriptOpen(false)
         } else if (expanded) {
           onToggleExpand()
         }
@@ -265,7 +299,7 @@ export function CallStage({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [expanded, activeCall, isQualityPopoverVisible, onToggleExpand])
+  }, [expanded, activeCall, isQualityPopoverVisible, transcriptOpen, onToggleExpand])
 
   if (!activeCall) return null
 
@@ -397,6 +431,12 @@ export function CallStage({
               {count}/{activeCall.maxParticipants} · {statusText}
             </span>
             {recBadge}
+            {transcription.liveCaptionsEnabled && (
+              <span className="ag-badge ag-badge-accent mono ag-hide-xs" title="Live captions active">
+                <Captions size={10} />
+                <span>CC</span>
+              </span>
+            )}
             {activeSpeaker && (
               <span className="ag-call-float-speaker truncate ag-hide-xs">
                 <Radio size={10} />
@@ -443,6 +483,41 @@ export function CallStage({
     )
   }
 
+  const showTranscriptTrigger =
+    transcription.liveCaptionsEnabled || transcription.liveCaptions.length > 0
+  const recentCaptions = transcription.liveCaptionsEnabled
+    ? transcription.liveCaptions.slice(-3).filter((entry) => nowMs - entry.timestamp < 24_000)
+    : []
+
+  const handleCopyTranscript = async () => {
+    const { content } = transcription.exportCallTranscriptMarkdown()
+    if (!content.trim()) return
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopiedTranscript(true)
+      onPlaySound?.('click')
+      engine.pushToast('success', 'Copied call transcript')
+      window.setTimeout(() => setCopiedTranscript(false), 1800)
+    } catch {
+      engine.pushToast('error', 'Failed to copy transcript')
+    }
+  }
+
+  const handleDownloadTranscript = () => {
+    const { filename, content, mimeType } = transcription.exportCallTranscriptMarkdown()
+    const blob = new Blob([content], { type: mimeType })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    onPlaySound?.('click')
+    engine.pushToast('success', `Saved ${filename}`)
+  }
+
   const stageContent = (
     <section
       className={`ag-call-stage ${expanded ? 'ag-call-stage-expanded' : 'ag-call-stage-docked'}`}
@@ -473,29 +548,197 @@ export function CallStage({
           {recBadge}
         </div>
 
-        <button
-          type="button"
-          className="ag-icon-btn-sm"
-          onClick={() => {
-            onPlaySound?.('click')
-            onToggleExpand()
-          }}
-          title={expanded ? 'Minimize call stage (Esc)' : 'Full-screen spotlight'}
-          aria-label={expanded ? 'Minimize call stage' : 'Expand call stage'}
-        >
-          {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-        </button>
+        <div className="ag-call-head-actions">
+          {showTranscriptTrigger && (
+            <button
+              type="button"
+              className={`ag-call-head-btn ${transcriptOpen ? 'active' : ''}`}
+              onClick={() => {
+                onPlaySound?.('click')
+                setTranscriptOpen((v) => !v)
+              }}
+              aria-pressed={transcriptOpen}
+              title={transcriptOpen ? 'Hide call transcript' : 'Show call transcript'}
+              aria-label={transcriptOpen ? 'Hide call transcript' : 'Show call transcript'}
+            >
+              <FileText size={14} />
+              <span className="ag-hide-xs">Transcript</span>
+              {transcription.liveCaptions.length > 0 && (
+                <span className="ag-call-head-btn-count mono">
+                  {transcription.liveCaptions.length}
+                </span>
+              )}
+            </button>
+          )}
+          <button
+            type="button"
+            className="ag-icon-btn-sm"
+            onClick={() => {
+              onPlaySound?.('click')
+              onToggleExpand()
+            }}
+            title={expanded ? 'Minimize call stage (Esc)' : 'Full-screen spotlight'}
+            aria-label={expanded ? 'Minimize call stage' : 'Expand call stage'}
+          >
+            {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          </button>
+        </div>
       </div>
 
-      {/* Responsive 1–6 Participant Tile Grid */}
-      <div className="ag-call-grid" data-count={count}>
-        {activeCall.participants.map((participant) => (
-          <ParticipantTile
-            key={participant.pubkey}
-            participant={participant}
-            compact={!expanded && count > 2}
-          />
-        ))}
+      {/* Main Stage Body: Participant Grid + Live Captions Overlay + Optional Transcript Panel */}
+      <div className={`ag-call-stage-body ${transcriptOpen ? 'with-transcript' : ''}`}>
+        <div className="ag-call-stage-main">
+          {/* Responsive 1–6 Participant Tile Grid */}
+          <div className="ag-call-grid" data-count={count}>
+            {activeCall.participants.map((participant) => (
+              <ParticipantTile
+                key={participant.pubkey}
+                participant={participant}
+                compact={!expanded && count > 2}
+              />
+            ))}
+          </div>
+
+          {/* Live Captions & Model Download Progress Overlay */}
+          {transcription.liveCaptionsEnabled && (
+            <div className="ag-call-cc-dock">
+              {transcription.modelStatus === 'downloading' && (
+                <div className="ag-call-cc-status mono" role="status">
+                  <Loader2 size={12} className="ag-spin" />
+                  <span>
+                    Loading {transcription.activeModel.label} ·{' '}
+                    {Math.round(transcription.downloadProgress)}%
+                  </span>
+                </div>
+              )}
+
+              {transcription.modelStatus === 'error' && transcription.modelError && (
+                <div className="ag-call-cc-status error" role="alert">
+                  <AlertCircle size={12} />
+                  <span className="truncate">{transcription.modelError}</span>
+                </div>
+              )}
+
+              {recentCaptions.length > 0 && (
+                <div
+                  className="ag-call-cc-overlay"
+                  role="log"
+                  aria-live="polite"
+                  aria-label="Live call captions"
+                >
+                  {recentCaptions.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className={`ag-call-cc-line ${
+                        nowMs - entry.timestamp >= 12_000 ? 'fading' : ''
+                      }`}
+                    >
+                      <span
+                        className="ag-call-cc-speaker"
+                        style={{ color: pubkeyToColor(entry.pubkey) }}
+                      >
+                        {entry.nickname ? `@${entry.nickname}` : entry.displayHandle}
+                      </span>
+                      <span className="ag-call-cc-text">{entry.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Speaker-Attributed Call Transcript Panel */}
+        {transcriptOpen && (
+          <aside className="ag-call-transcript-pane" aria-label="Call transcript">
+            <div className="ag-call-transcript-head">
+              <div className="ag-call-transcript-title-wrap">
+                <span className="ag-call-transcript-title">Transcript</span>
+                <span className="ag-call-transcript-model mono truncate">
+                  {transcription.activeModel.label}
+                </span>
+              </div>
+              <div className="ag-call-transcript-actions">
+                <button
+                  type="button"
+                  className="ag-icon-btn-xs"
+                  disabled={transcription.liveCaptions.length === 0}
+                  onClick={() => void handleCopyTranscript()}
+                  title="Copy transcript"
+                  aria-label="Copy transcript"
+                >
+                  {copiedTranscript ? (
+                    <Check size={13} className="ag-tone-ok" />
+                  ) : (
+                    <Copy size={13} />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="ag-icon-btn-xs"
+                  disabled={transcription.liveCaptions.length === 0}
+                  onClick={handleDownloadTranscript}
+                  title="Download Markdown (.md)"
+                  aria-label="Download transcript as Markdown"
+                >
+                  <Download size={13} />
+                </button>
+                {transcription.liveCaptions.length > 0 && (
+                  <button
+                    type="button"
+                    className="ag-icon-btn-xs ag-icon-btn-danger"
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      transcription.clearCallTranscript()
+                    }}
+                    title="Clear transcript"
+                    aria-label="Clear call transcript"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="ag-icon-btn-xs"
+                  onClick={() => setTranscriptOpen(false)}
+                  title="Close transcript"
+                  aria-label="Close transcript"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            </div>
+
+            <div className="ag-call-transcript-list" ref={transcriptListRef}>
+              {transcription.liveCaptions.length === 0 ? (
+                <div className="ag-call-transcript-empty">
+                  {transcription.modelStatus === 'downloading'
+                    ? `Loading ${transcription.activeModel.label} (${Math.round(transcription.downloadProgress)}%)…`
+                    : transcription.liveCaptionsEnabled
+                      ? 'Listening locally for speech…'
+                      : 'Enable CC to transcribe call speech on your device.'}
+                </div>
+              ) : (
+                transcription.liveCaptions.map((entry) => (
+                  <div key={entry.id} className="ag-call-transcript-row">
+                    <div className="ag-call-transcript-meta">
+                      <span
+                        className="ag-call-transcript-speaker truncate"
+                        style={{ color: pubkeyToColor(entry.pubkey) }}
+                      >
+                        {entry.displayHandle}
+                      </span>
+                      <span className="ag-call-transcript-time mono">
+                        {formatCaptionClock(entry.timestamp)}
+                      </span>
+                    </div>
+                    <p className="ag-call-transcript-text">{entry.text}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </aside>
+        )}
       </div>
 
       {/* Tactical Control Dock */}
@@ -549,6 +792,29 @@ export function CallStage({
             <span>{activeCall.localScreenSharing ? 'Stop Share' : 'Share'}</span>
           </button>
         )}
+
+        <button
+          type="button"
+          className={`ag-call-ctrl-btn ag-call-cc-btn ${
+            transcription.liveCaptionsEnabled ? 'active-accent' : ''
+          }`}
+          onClick={() => {
+            onPlaySound?.('click')
+            transcription.toggleLiveCaptions()
+          }}
+          aria-pressed={transcription.liveCaptionsEnabled}
+          aria-label={
+            transcription.liveCaptionsEnabled ? 'Disable live captions' : 'Enable live captions'
+          }
+          title={
+            transcription.liveCaptionsEnabled
+              ? `Live captions ON (${transcription.activeModel.label}) — click to turn off`
+              : `Live on-device captions (${transcription.activeModel.label})`
+          }
+        >
+          <Captions size={17} />
+          <span>CC</span>
+        </button>
 
         <div
           className={`ag-call-rec-split ${activeCall.localRecording ? 'recording' : ''} ${

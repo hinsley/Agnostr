@@ -124,6 +124,7 @@ import { useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
 import { useServers } from './useServers.ts'
 import { useToasts } from './useToasts.ts'
+import { useTranscription } from './useTranscription.ts'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#090c0a',
@@ -1517,6 +1518,16 @@ export function useAgnostrEngine(): AgnostrEngine {
     []
   )
 
+  // Client-side local voice transcription (Voice Memos + Live Per-Speaker Call Captions)
+  const {
+    transcription: transcriptionEngine,
+    resetAllTranscription,
+  } = useTranscription({
+    activeCall: callsEngine.activeCall,
+    fetchVoiceMemoBlob,
+    pushToast,
+  })
+
   const sendImageAttachment = useCallback(
     async (image: PreparedImage, caption?: string): Promise<boolean> => {
       if (!pool || image.size <= 0) return false
@@ -1812,6 +1823,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   const panicWipe = useCallback(() => {
     trustedSetRef.current = new Set()
     blockedSetRef.current = new Set()
+    resetAllTranscription()
     resetAllCalls()
     pool?.closeAll()
     voiceCacheRef.current?.revokeAll()
@@ -1847,7 +1859,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     clearToasts()
     pushToast('warning', 'Panic Wipe Complete', 'All local keys, caches, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.')
-  }, [pool, presenceTracker, clearPulse, clearAllDms, resetAllServers, resetAllCalls, resetLocation, identityManager, clearToasts, pushToast])
+  }, [pool, presenceTracker, clearPulse, clearAllDms, resetAllServers, resetAllCalls, resetAllTranscription, resetLocation, identityManager, clearToasts, pushToast])
 
   // Unified composer submit (commands, DMs, public messages)
   const addSystemMessage = useCallback(
@@ -2041,6 +2053,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     servers: serversEngine,
     calls: callsEngine,
+    transcription: transcriptionEngine,
 
     commands: SLASH_COMMANDS,
     exportTranscript,

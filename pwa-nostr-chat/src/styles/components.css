@@ -2768,8 +2768,8 @@
 .ag-voice-player {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  width: min(380px, 100%);
+  gap: 7px;
+  width: min(440px, 100%);
   padding: 8px 10px;
   border-radius: var(--radius-md);
   background-color: var(--bg-surface);
@@ -2837,6 +2837,189 @@
   background-color: var(--accent-soft);
   border-color: var(--border-accent);
   color: var(--accent);
+}
+
+/* On-Demand Voice Memo Transcribe Trigger & Selectable Local Transcript Box */
+.ag-voice-transcribe-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-voice-transcribe-btn:hover:not(:disabled) {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-voice-transcribe-btn.dm:hover:not(:disabled) {
+  color: var(--dm-accent);
+  background-color: var(--dm-soft);
+  border-color: var(--dm-accent);
+}
+
+.ag-voice-transcribe-btn.active {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-voice-transcribe-btn.dm.active {
+  color: var(--dm-accent);
+  background-color: var(--dm-soft);
+  border-color: var(--dm-accent);
+}
+
+.ag-voice-transcribe-status {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.ag-voice-transcribe-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ag-voice-transcribe-status-row svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-voice-transcribe-status.dm .ag-voice-transcribe-status-row svg {
+  color: var(--dm-accent);
+}
+
+.ag-voice-transcribe-progress {
+  width: 100%;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-subtle);
+  overflow: hidden;
+}
+
+.ag-voice-transcribe-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  transition: width 160ms ease;
+}
+
+.ag-voice-transcribe-status.dm .ag-voice-transcribe-fill {
+  background-color: var(--dm-accent);
+}
+
+.ag-voice-transcript-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-left: 2.5px solid var(--accent);
+  user-select: text;
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-voice-transcript-box.dm {
+  border-left-color: var(--dm-accent);
+}
+
+.ag-voice-transcript-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ag-voice-transcript-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.ag-voice-transcript-model svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-voice-transcript-box.dm .ag-voice-transcript-model svg {
+  color: var(--dm-accent);
+}
+
+.ag-voice-transcript-local {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.ag-voice-transcript-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.ag-voice-transcript-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: transparent;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-voice-transcript-act:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-voice-transcript-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.48;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ag-voice-transcript-empty {
+  margin: 0;
+  font-size: 12.5px;
+  font-style: italic;
+  color: var(--text-muted);
 }
 
 .ag-voice-error-row {
@@ -3329,6 +3512,12 @@
   .ag-composer-send-btn {
     width: 38px;
     height: 38px;
+  }
+
+  .ag-voice-transcribe-btn,
+  .ag-voice-transcript-act {
+    height: 28px;
+    padding: 0 9px;
   }
 
   .ag-cmdk-footer {

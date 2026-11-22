@@ -5,6 +5,9 @@ import { VitePWA } from 'vite-plugin-pwa'
 // https://vite.dev/config/
 export default defineConfig({
   base: '/Agnostr/',
+  worker: {
+    format: 'es',
+  },
   plugins: [
     react(),
     VitePWA({
@@ -90,6 +93,7 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,webmanifest,woff2}'],
+        globIgnores: ['**/transformers.web-*.js', '**/ort-wasm-*.wasm'],
         navigateFallback: '/Agnostr/index.html',
         cleanupOutdatedCaches: true,
         runtimeCaching: [

@@ -1,5 +1,6 @@
 import type { CallEngine } from './calls.ts'
 import type { ServersEngine } from './servers.ts'
+import type { TranscriptionEngine } from './transcription.ts'
 
 export type ThemeId = 'phosphor' | 'amber' | 'obsidian' | 'daylight'
 
@@ -461,6 +462,9 @@ export interface AgnostrEngine {
 
   // P2P WebRTC Voice & Video Calls (1-on-1 DM Calls + Server Group Calls up to 6)
   calls: CallEngine
+
+  // On-device local voice transcription (Voice Memos + Live Call Captions)
+  transcription: TranscriptionEngine
 
   // Commands, export & notifications
   commands: SlashCommandDef[]

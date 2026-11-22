@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Captions,
   Circle,
   Crosshair,
   Download,
@@ -231,6 +232,21 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             ]
           : []),
         {
+          id: 'act-call-captions',
+          group: 'Actions',
+          title: 'Toggle Live Call Captions (CC)',
+          subtitle: engine.transcription.liveCaptionsEnabled
+            ? `On — transcribing speakers locally (${engine.transcription.activeModel.label})`
+            : `Off — transcribe speakers locally on-device (${engine.transcription.activeModel.label})`,
+          keywords: 'toggle live call captions cc subtitles transcribe transcript moonshine speech',
+          badge: engine.transcription.liveCaptionsEnabled ? 'ON' : 'CC',
+          icon: <Captions size={15} />,
+          run: () => {
+            engine.transcription.toggleLiveCaptions()
+            onClose()
+          },
+        },
+        {
           id: 'act-call-leave',
           group: 'Actions',
           title: 'Leave Active Call',
@@ -390,9 +406,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       {
         id: 'act-settings-calls',
         group: 'Settings',
-        title: 'Calls & Recording Settings',
-        subtitle: 'Recording quality preset and custom TURN server',
-        keywords: 'calls recording quality video audio turn settings',
+        title: 'Calls, Recording & Transcription Settings',
+        subtitle: `Recording quality, TURN server & local ${engine.transcription.activeModel.label} transcription`,
+        keywords: 'calls recording quality video audio turn transcription captions moonshine model settings',
         icon: <Settings size={15} />,
         run: () => {
           onClose()

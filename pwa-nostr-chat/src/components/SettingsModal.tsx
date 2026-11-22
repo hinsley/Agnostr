@@ -111,7 +111,7 @@ const NAV_ITEMS: readonly {
   { id: 'profile', label: 'Profile', subtitle: 'Name, keys & signer' },
   { id: 'privacy', label: 'Privacy & Trust', subtitle: 'Trusted peers & blocks' },
   { id: 'appearance', label: 'Appearance', subtitle: 'Theme & sound effects' },
-  { id: 'calls', label: 'Calls & Recording', subtitle: 'Quality & TURN server' },
+  { id: 'calls', label: 'Calls & Recording', subtitle: 'Quality, captions & TURN' },
   { id: 'network', label: 'Network & App', subtitle: 'Relays, Blossom & PWA' },
 ]
 
@@ -169,13 +169,18 @@ export function SettingsModal({
   const [trustLabelDraft, setTrustLabelDraft] = useState('')
   const [trustFeedback, setTrustFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
 
-  // Calls TURN drafts
+  // Calls TURN & Transcription drafts
   const [turnUrlDraft, setTurnUrlDraft] = useState(() => engine.calls.turnConfig?.url ?? '')
   const [turnUserDraft, setTurnUserDraft] = useState(() => engine.calls.turnConfig?.username ?? '')
   const [turnCredDraft, setTurnCredDraft] = useState(
     () => engine.calls.turnConfig?.credential ?? '',
   )
   const [turnFeedback, setTurnFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [showAddModel, setShowAddModel] = useState(false)
+  const [modelIdDraft, setModelIdDraft] = useState('')
+  const [modelLabelDraft, setModelLabelDraft] = useState('')
+  const [modelFeedback, setModelFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [clearingModelCache, setClearingModelCache] = useState(false)
 
   // Network drafts
   const [relayDraft, setRelayDraft] = useState('')
@@ -290,6 +295,10 @@ export function SettingsModal({
         setTurnUserDraft('')
         setTurnCredDraft('')
         setTurnFeedback(null)
+        setShowAddModel(false)
+        setModelIdDraft('')
+        setModelLabelDraft('')
+        setModelFeedback(null)
         setRelayDraft('')
         setRelayError(null)
         setBlossomDraft('')
@@ -390,6 +399,37 @@ export function SettingsModal({
     setTurnCredDraft('')
     setTurnFeedback({ ok: true, msg: 'Reverted to default STUN' })
     onPlaySound?.('click')
+  }
+
+  const handleAddTranscriptionModel = (e: FormEvent) => {
+    e.preventDefault()
+    const hfId = modelIdDraft.trim()
+    if (!hfId) return
+    const ok = engine.transcription.addCustomModel(hfId, modelLabelDraft.trim() || undefined)
+    if (ok) {
+      setModelIdDraft('')
+      setModelLabelDraft('')
+      setShowAddModel(false)
+      setModelFeedback({ ok: true, msg: 'Added custom Hugging Face ONNX model' })
+      onPlaySound?.('click')
+    } else {
+      setModelFeedback({
+        ok: false,
+        msg: 'Enter a valid org/model-name Hugging Face repo ID',
+      })
+    }
+  }
+
+  const handleClearModelCache = async () => {
+    if (clearingModelCache) return
+    setClearingModelCache(true)
+    onPlaySound?.('click')
+    try {
+      await engine.transcription.clearModelCache()
+      setModelFeedback({ ok: true, msg: 'Cleared cached model weights' })
+    } finally {
+      setClearingModelCache(false)
+    }
   }
 
   const handleAddRelay = (e: FormEvent) => {
@@ -906,6 +946,28 @@ export function SettingsModal({
 
   const renderCallsTab = () => {
     const recSpec = getRecordingQualitySpec(engine.calls.recordingQuality)
+    const { transcription } = engine
+    const isDownloadingModel = transcription.modelStatus === 'downloading'
+    const statusBadge =
+      transcription.modelStatus === 'ready'
+        ? {
+            cls: 'ag-badge-accent',
+            text:
+              transcription.runtimeDevice === 'webgpu'
+                ? 'Ready · WebGPU'
+                : transcription.runtimeDevice === 'wasm'
+                  ? 'Ready · WASM'
+                  : 'Ready',
+          }
+        : transcription.modelStatus === 'downloading'
+          ? {
+              cls: 'ag-badge-warn',
+              text: `Loading ${Math.round(transcription.downloadProgress)}%`,
+            }
+          : transcription.modelStatus === 'error'
+            ? { cls: 'ag-badge-danger', text: 'Error' }
+            : { cls: 'ag-badge-muted', text: 'On-demand' }
+
     return (
       <div className="ag-set-pane-stack">
         {/* Recording Quality */}
@@ -944,6 +1006,191 @@ export function SettingsModal({
             {recSpec.width}×{recSpec.height} · {recSpec.fps}fps · {recSpec.approxMbPerMin}
             {engine.calls.activeCall?.localRecording ? ' · applies to next recording' : ''}
           </p>
+        </div>
+
+        {/* On-Device Transcription (Multi-Model) */}
+        <div className="ag-set-group">
+          <div className="ag-set-label-row">
+            <span className="ag-set-label">On-Device Transcription</span>
+            <span className={`ag-badge ${statusBadge.cls}`}>{statusBadge.text}</span>
+          </div>
+
+          <p className="ag-set-helper">
+            100% local in your browser — audio never leaves your device.
+          </p>
+
+          <div
+            className="ag-set-model-list"
+            role="radiogroup"
+            aria-label="Local speech transcription model"
+          >
+            {transcription.models.map((model) => {
+              const selected = model.id === transcription.activeModelId
+              return (
+                <div
+                  key={model.id}
+                  className={`ag-set-model-row ${selected ? 'active' : ''}`}
+                >
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    className="ag-set-model-main"
+                    onClick={() => {
+                      transcription.setActiveModelId(model.id)
+                      setModelFeedback(null)
+                      onPlaySound?.('click')
+                    }}
+                  >
+                    <span className={`ag-set-model-radio ${selected ? 'checked' : ''}`}>
+                      {selected && <Check size={11} />}
+                    </span>
+                    <span className="ag-set-model-copy">
+                      <span className="ag-set-model-title-row">
+                        <span className="ag-set-model-name truncate">{model.label}</span>
+                        <span className="ag-set-model-meta mono">
+                          {model.sizeHint} · {model.languages}
+                        </span>
+                      </span>
+                      <span className="ag-set-model-repo mono truncate" title={model.hfModelId}>
+                        {model.hfModelId}
+                      </span>
+                    </span>
+                  </button>
+
+                  {!model.isBuiltIn && (
+                    <button
+                      type="button"
+                      className="ag-icon-btn-xs ag-icon-btn-danger"
+                      onClick={() => {
+                        transcription.removeCustomModel(model.id)
+                        onPlaySound?.('click')
+                      }}
+                      title={`Remove ${model.label}`}
+                      aria-label={`Remove ${model.label}`}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          {isDownloadingModel && (
+            <div className="ag-set-progress-wrap" role="progressbar" aria-valuenow={Math.round(transcription.downloadProgress)} aria-valuemin={0} aria-valuemax={100}>
+              <div className="ag-set-progress-head mono">
+                <span className="truncate">
+                  {transcription.downloadFile
+                    ? `Downloading ${transcription.downloadFile}`
+                    : `Loading ${transcription.activeModel.label}…`}
+                </span>
+                <span>{Math.round(transcription.downloadProgress)}%</span>
+              </div>
+              <div className="ag-set-progress-track">
+                <span
+                  className="ag-set-progress-fill"
+                  style={{ width: `${Math.max(4, Math.min(100, transcription.downloadProgress))}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {transcription.modelStatus === 'error' && transcription.modelError && (
+            <p className="ag-field-hint ag-field-hint-danger">{transcription.modelError}</p>
+          )}
+
+          <div className="ag-set-model-actions">
+            <button
+              type="button"
+              className="ag-btn ag-btn-primary ag-btn-sm"
+              disabled={isDownloadingModel}
+              onClick={() => {
+                onPlaySound?.('click')
+                setModelFeedback(null)
+                void transcription.preloadModel()
+              }}
+            >
+              {isDownloadingModel ? (
+                <Loader2 size={13} className="ag-spin" />
+              ) : (
+                <Download size={13} />
+              )}
+              <span>
+                {isDownloadingModel
+                  ? `Loading ${Math.round(transcription.downloadProgress)}%`
+                  : transcription.modelStatus === 'ready'
+                    ? 'Model Ready'
+                    : 'Preload Model'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className="ag-btn ag-btn-secondary ag-btn-sm"
+              disabled={isDownloadingModel || clearingModelCache}
+              onClick={() => void handleClearModelCache()}
+            >
+              <Trash2 size={13} />
+              <span>{clearingModelCache ? 'Clearing…' : 'Clear Model Cache'}</span>
+            </button>
+
+            <button
+              type="button"
+              className="ag-btn ag-btn-ghost ag-btn-sm"
+              onClick={() => {
+                setShowAddModel((v) => !v)
+                setModelFeedback(null)
+              }}
+            >
+              {showAddModel ? <X size={13} /> : <Plus size={13} />}
+              <span>{showAddModel ? 'Cancel' : 'Add Model'}</span>
+            </button>
+          </div>
+
+          {showAddModel && (
+            <form className="ag-set-subform" onSubmit={handleAddTranscriptionModel}>
+              <input
+                type="text"
+                className="ag-input mono"
+                placeholder="Hugging Face ONNX repo (e.g. onnx-community/whisper-tiny.en)"
+                value={modelIdDraft}
+                onChange={(e) => {
+                  setModelIdDraft(e.target.value)
+                  if (modelFeedback) setModelFeedback(null)
+                }}
+                aria-label="Hugging Face ONNX model ID"
+              />
+              <div className="ag-set-inline-row">
+                <input
+                  type="text"
+                  maxLength={32}
+                  className="ag-input"
+                  placeholder="Display label (optional)"
+                  value={modelLabelDraft}
+                  onChange={(e) => setModelLabelDraft(e.target.value)}
+                  aria-label="Custom model display label"
+                />
+                <button
+                  type="submit"
+                  className="ag-btn ag-btn-primary ag-btn-sm"
+                  disabled={!modelIdDraft.trim()}
+                >
+                  Add
+                </button>
+              </div>
+            </form>
+          )}
+
+          {modelFeedback && (
+            <p
+              className={`ag-field-hint ${
+                modelFeedback.ok ? 'ag-field-hint-ok' : 'ag-field-hint-danger'
+              }`}
+            >
+              {modelFeedback.msg}
+            </p>
+          )}
         </div>
 
         {/* Custom TURN Server */}

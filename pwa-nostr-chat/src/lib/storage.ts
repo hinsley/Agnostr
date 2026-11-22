@@ -9,11 +9,17 @@ import type {
   TrustedPeerEntry,
 } from '../types/protocol.ts'
 import type { ServerMessage, ServerSummary } from '../types/servers.ts'
+import type { PersistedTranscriptionConfig, TranscriptionModelSpec } from '../types/transcription.ts'
 import { DEFAULT_BLOSSOM_SERVERS, normalizeBlossomServerUrl } from './blossom.ts'
 import { DEFAULT_RECORDING_QUALITY, isValidRecordingQuality } from './callRecorder.ts'
 import type { GeoRelayEntry } from './geoRelays.ts'
 import { DEFAULT_GEOHASH, isValidGeohash, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe } from './identity.ts'
+import {
+  DEFAULT_TRANSCRIPTION_MODEL_ID,
+  mergeTranscriptionModels,
+  resolveActiveTranscriptionModel,
+} from './transcriptionModels.ts'
 
 const PREFIX = 'agnostr:v2:'
 const MAX_MESSAGES_PER_CHANNEL = 250
@@ -31,6 +37,7 @@ const KEYS = {
   blossomServers: `${PREFIX}blossom_servers`,
   iceServers: `${PREFIX}ice_servers`,
   recordingQuality: `${PREFIX}recording_quality`,
+  transcription: `${PREFIX}transcription`,
   servers: `${PREFIX}servers`,
   serverMsgChannel: (serverId: string, channelId: string) => `${PREFIX}smsgs:${serverId}:${channelId}`,
   customRelays: `${PREFIX}custom_relays`,
@@ -284,6 +291,38 @@ export function loadRecordingQuality(): RecordingQualityPreset {
 export function saveRecordingQuality(quality: RecordingQualityPreset): void {
   if (!isValidRecordingQuality(quality)) return
   safeSet(KEYS.recordingQuality, quality)
+}
+
+export function loadTranscriptionConfig(): PersistedTranscriptionConfig {
+  const parsed = safeJsonParse<Partial<PersistedTranscriptionConfig> | null>(
+    safeGet(KEYS.transcription),
+    null
+  )
+  const rawCustom = Array.isArray(parsed?.customModels)
+    ? (parsed.customModels as TranscriptionModelSpec[])
+    : []
+  const merged = mergeTranscriptionModels(rawCustom)
+  const customModels = merged.filter((m) => !m.isBuiltIn)
+  const requestedId =
+    typeof parsed?.activeModelId === 'string' && parsed.activeModelId.trim()
+      ? parsed.activeModelId.trim()
+      : DEFAULT_TRANSCRIPTION_MODEL_ID
+  const active = resolveActiveTranscriptionModel(merged, requestedId)
+  return {
+    activeModelId: active.id,
+    customModels,
+  }
+}
+
+export function saveTranscriptionConfig(config: PersistedTranscriptionConfig): void {
+  const customOnly = config.customModels.filter((m) => !m.isBuiltIn).slice(0, 12)
+  safeSet(
+    KEYS.transcription,
+    JSON.stringify({
+      activeModelId: config.activeModelId,
+      customModels: customOnly,
+    })
+  )
 }
 
 export function loadJoinedServers(): ServerSummary[] {

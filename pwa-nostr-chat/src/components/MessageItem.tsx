@@ -12,6 +12,10 @@ import {
   Trash2,
 } from 'lucide-react'
 import type { GeoMessage, ImageAttachment, VoiceMemoAttachment } from '../types/protocol'
+import type {
+  MemoTranscriptState,
+  TranscriptionModelStatus,
+} from '../types/transcription'
 import { identiconDataUrl, pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
@@ -68,6 +72,15 @@ export interface MessageItemProps {
   isSenderExplicitlyTrusted: boolean
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
   fetchImageAttachmentBlob: (image: ImageAttachment, senderPubkey: string) => Promise<string>
+  memoTranscript?: MemoTranscriptState
+  transcriptionModelStatus?: TranscriptionModelStatus
+  transcriptionDownloadProgress?: number
+  activeTranscriptionModelLabel?: string
+  onTranscribeMemo?: (
+    memoKey: string,
+    memo: VoiceMemoAttachment,
+    senderPubkey: string
+  ) => Promise<void> | void
   onOpenLightbox: (payload: LightboxImagePayload) => void
   onToggleActions: (messageId: string | null) => void
   onTrustSender: (pubkey: string, nickname: string) => void
@@ -99,6 +112,11 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     isSenderExplicitlyTrusted,
     fetchVoiceMemoBlob,
     fetchImageAttachmentBlob,
+    memoTranscript,
+    transcriptionModelStatus,
+    transcriptionDownloadProgress,
+    activeTranscriptionModelLabel,
+    onTranscribeMemo,
     onOpenLightbox,
     onToggleActions,
     onTrustSender,
@@ -346,12 +364,18 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             <div className="ag-msg-media-slot">
               <VoiceMemoPlayer
                 memo={message.voiceMemo}
+                memoKey={message.voiceMemo.sha256 || message.voiceMemo.url || message.id}
                 senderPubkey={message.pubkey}
                 senderNickname={handle.base}
                 senderDisplayHandle={handle.full}
                 isTrusted={isSenderTrusted}
                 isDmMode={isEncryptedContext}
                 fetchVoiceMemoBlob={fetchVoiceMemoBlob}
+                memoTranscript={memoTranscript}
+                transcriptionModelStatus={transcriptionModelStatus}
+                transcriptionDownloadProgress={transcriptionDownloadProgress}
+                activeTranscriptionModelLabel={activeTranscriptionModelLabel}
+                onTranscribeMemo={onTranscribeMemo}
                 onTrustSender={onTrustSender}
                 onInspectSender={(pk, nick) => onInspectAuthor?.(pk, nick)}
                 onBlockSender={onBlockSender}
