@@ -33,6 +33,10 @@ import {
 } from 'lucide-react'
 import type { AgnostrEngine, SignMode, ThemeId } from '../types/protocol.ts'
 import type { PwaState } from '../hooks/usePwa.ts'
+import {
+  RECORDING_QUALITY_PRESETS,
+  getRecordingQualitySpec,
+} from '../lib/callRecorder.ts'
 import { radioAudio, type SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 
@@ -756,12 +760,12 @@ export function IdentitySettingsPanel({
         {blossomError && <p className="ag-field-hint ag-field-hint-danger">{blossomError}</p>}
       </section>
 
-      {/* Voice & Video (TURN / ICE) */}
-      <section className="ag-panel-card" aria-label="Voice and video TURN ICE settings">
+      {/* Voice, Video & Recording */}
+      <section className="ag-panel-card" aria-label="Voice, video and call recording settings">
         <div className="ag-panel-card-head">
           <div className="ag-panel-card-title">
             <PhoneCall size={13} />
-            <span>VOICE &amp; VIDEO (TURN / ICE)</span>
+            <span>VOICE, VIDEO &amp; RECORDING</span>
           </div>
           <span
             className={`ag-badge ${engine.calls.turnConfig ? 'ag-badge-ok' : 'ag-badge-muted'}`}
@@ -769,6 +773,52 @@ export function IdentitySettingsPanel({
             {engine.calls.turnConfig ? 'CUSTOM TURN' : 'STUN ONLY'}
           </span>
         </div>
+
+        {/* Call Recording Quality Selector */}
+        {(() => {
+          const recSpec = getRecordingQualitySpec(engine.calls.recordingQuality)
+          return (
+            <div className="ag-rec-quality-block">
+              <div className="ag-rec-quality-head">
+                <span className="ag-field-label">Recording Quality</span>
+                <span className="ag-badge ag-badge-accent mono">{recSpec.shortLabel}</span>
+              </div>
+
+              <div
+                className="ag-segmented ag-rec-quality-seg"
+                role="radiogroup"
+                aria-label="Call recording quality preset"
+              >
+                {RECORDING_QUALITY_PRESETS.map((preset) => {
+                  const active = engine.calls.recordingQuality === preset.id
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      className={active ? 'active' : ''}
+                      onClick={() => {
+                        engine.calls.setRecordingQuality(preset.id)
+                        onPlaySound?.('click')
+                      }}
+                      title={`${preset.label}: ${preset.width}×${preset.height} · ${preset.fps}fps · ${preset.approxMbPerMin}`}
+                    >
+                      {preset.label}
+                    </button>
+                  )
+                })}
+              </div>
+
+              <p className="ag-rec-quality-spec mono">
+                {recSpec.width}×{recSpec.height} · {recSpec.fps}fps · {recSpec.approxMbPerMin}
+                {engine.calls.activeCall?.localRecording ? ' · applies next' : ''}
+              </p>
+            </div>
+          )
+        })()}
+
+        <div className="ag-rec-quality-divider" aria-hidden="true" />
 
         <p className="ag-turn-note">
           Calls connect peer-to-peer (WebRTC) and share your IP with call peers. Add a TURN server

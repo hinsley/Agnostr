@@ -1,4 +1,4 @@
-import type { TurnServerConfig } from '../types/calls.ts'
+import type { RecordingQualityPreset, TurnServerConfig } from '../types/calls.ts'
 import type {
   AppSettings,
   DmThread,
@@ -10,6 +10,7 @@ import type {
 } from '../types/protocol.ts'
 import type { ServerMessage, ServerSummary } from '../types/servers.ts'
 import { DEFAULT_BLOSSOM_SERVERS, normalizeBlossomServerUrl } from './blossom.ts'
+import { DEFAULT_RECORDING_QUALITY, isValidRecordingQuality } from './callRecorder.ts'
 import type { GeoRelayEntry } from './geoRelays.ts'
 import { DEFAULT_GEOHASH, isValidGeohash, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe } from './identity.ts'
@@ -29,6 +30,7 @@ const KEYS = {
   trusted: `${PREFIX}trusted`,
   blossomServers: `${PREFIX}blossom_servers`,
   iceServers: `${PREFIX}ice_servers`,
+  recordingQuality: `${PREFIX}recording_quality`,
   servers: `${PREFIX}servers`,
   serverMsgChannel: (serverId: string, channelId: string) => `${PREFIX}smsgs:${serverId}:${channelId}`,
   customRelays: `${PREFIX}custom_relays`,
@@ -272,6 +274,16 @@ export function saveTurnConfig(config: TurnServerConfig | null): void {
       credential: config.credential?.trim() || undefined,
     })
   )
+}
+
+export function loadRecordingQuality(): RecordingQualityPreset {
+  const raw = safeGet(KEYS.recordingQuality)
+  return isValidRecordingQuality(raw) ? raw : DEFAULT_RECORDING_QUALITY
+}
+
+export function saveRecordingQuality(quality: RecordingQualityPreset): void {
+  if (!isValidRecordingQuality(quality)) return
+  safeSet(KEYS.recordingQuality, quality)
 }
 
 export function loadJoinedServers(): ServerSummary[] {

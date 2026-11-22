@@ -149,7 +149,8 @@
     var(--bg-surface);
   box-shadow: var(--shadow-sm);
   position: relative;
-  z-index: var(--z-sticky);
+  overflow: visible;
+  z-index: calc(var(--z-sticky) + 2);
 }
 
 .ag-call-modal-backdrop {
@@ -557,6 +558,8 @@
    Tactical Control Dock
    -------------------------------------------------------------------------- */
 .ag-call-controls {
+  position: relative;
+  z-index: 4;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -641,6 +644,147 @@
 .ag-call-rec-btn.recording:hover:not(:disabled) {
   background-color: rgba(239, 68, 68, 0.28);
   border-color: #ef4444;
+}
+
+/* Recording Quality Pill & Upward Selector Menu */
+.ag-call-quality-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.ag-call-quality-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  height: 38px;
+  padding: 0 0.65rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-call-quality-btn:hover:not(:disabled) {
+  background-color: var(--bg-subtle);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.ag-call-quality-btn.open {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+
+.ag-call-quality-btn.locked {
+  opacity: 0.65;
+  border-style: dashed;
+}
+
+.ag-call-quality-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.ag-call-quality-chevron {
+  transition: transform var(--dur-fast) ease;
+  opacity: 0.75;
+}
+
+.ag-call-quality-chevron.open {
+  transform: rotate(180deg);
+}
+
+.ag-call-quality-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  min-width: 228px;
+  padding: 0.34rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+  z-index: var(--z-popover);
+  animation: ag-scale-in var(--dur-fast) var(--ease-out);
+}
+
+.ag-call-quality-menu-head {
+  padding: 0.2rem 0.5rem 0.28rem;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 0.12rem;
+}
+
+.ag-call-quality-opt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.42rem 0.52rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  color: var(--text-primary);
+  text-align: left;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-call-quality-opt:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-call-quality-opt.selected {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+
+.ag-call-quality-opt-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0.42rem;
+  min-width: 0;
+}
+
+.ag-call-quality-opt-name {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ag-call-quality-opt-meta {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.ag-call-quality-opt.selected .ag-call-quality-opt-meta {
+  color: var(--accent);
+  opacity: 0.9;
+}
+
+.ag-call-quality-check {
+  flex-shrink: 0;
+  color: var(--accent);
 }
 
 .ag-call-hangup-btn {
@@ -1073,15 +1217,21 @@
 
   .ag-call-controls {
     flex-wrap: nowrap;
-    gap: 0.4rem;
-    padding: 0.48rem 0.5rem;
+    gap: 0.36rem;
+    padding: 0.46rem 0.45rem;
   }
 
   .ag-call-ctrl-btn {
     min-width: 44px;
     min-height: 44px;
     height: 44px;
-    padding: 0 0.68rem;
+    padding: 0 0.64rem;
+  }
+
+  .ag-call-quality-btn {
+    min-height: 44px;
+    height: 44px;
+    padding: 0 0.55rem;
   }
 
   .ag-call-rec-pill {
@@ -1122,6 +1272,11 @@
     gap: 0.34rem;
   }
 
+  .ag-call-controls {
+    gap: 0.3rem;
+    padding: 0.45rem 0.4rem;
+  }
+
   .ag-call-ctrl-btn {
     width: 44px;
     min-width: 44px;
@@ -1132,8 +1287,21 @@
     display: none;
   }
 
+  .ag-call-quality-btn {
+    min-width: 50px;
+    height: 44px;
+    padding: 0 0.36rem;
+    gap: 0;
+    font-size: 10.5px;
+  }
+
+  .ag-call-quality-icon,
+  .ag-call-quality-chevron {
+    display: none;
+  }
+
   .ag-call-hangup-btn {
-    width: 52px;
+    width: 46px;
     padding: 0;
   }
 }

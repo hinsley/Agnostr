@@ -7,6 +7,20 @@ export type CallMediaType = 'audio' | 'video'
 
 export type CallStatus = 'idle' | 'ringing-out' | 'connecting' | 'active'
 
+export type RecordingQualityPreset = 'saver' | 'standard' | 'high' | 'ultra'
+
+export interface RecordingQualitySpec {
+  id: RecordingQualityPreset
+  label: string
+  shortLabel: string
+  width: number
+  height: number
+  fps: number
+  videoBitsPerSecond: number
+  audioBitsPerSecond: number
+  approxMbPerMin: string
+}
+
 export type PeerIceConnectionState =
   | 'new'
   | 'checking'
@@ -53,6 +67,7 @@ export interface ActiveCallSession {
   localRecording: boolean
   localRecordingStartedAt: number | null
   localRecordingMode: 'audio' | 'video' | null
+  localRecordingQuality: RecordingQualityPreset | null
   localRecordingBytes: number
   recordingSupported: boolean
   screenShareSupported: boolean
@@ -93,6 +108,8 @@ export interface CallEngine {
   /** Map of serverId -> active participants in that server's Voice & Video Lounge */
   serverCallRosters: Record<string, RoomCallPresence[]>
   maxParticipants: number
+  recordingQuality: RecordingQualityPreset
+  setRecordingQuality: (quality: RecordingQualityPreset) => void
   turnConfig: TurnServerConfig | null
   saveTurnConfig: (config: TurnServerConfig) => boolean
   clearTurnConfig: () => void

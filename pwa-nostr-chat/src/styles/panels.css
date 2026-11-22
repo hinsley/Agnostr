@@ -2471,6 +2471,43 @@
   flex-shrink: 0;
 }
 
+/* Call Recording Quality Preset Block (Identity & Settings Panel) */
+.ag-rec-quality-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+}
+
+.ag-rec-quality-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.ag-rec-quality-head .ag-field-label {
+  margin-bottom: 0;
+}
+
+.ag-rec-quality-seg button {
+  padding: 0.32rem 0.25rem;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ag-rec-quality-spec {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.ag-rec-quality-divider {
+  height: 1px;
+  background-color: var(--border-subtle);
+  margin: 0.1rem 0;
+}
+
 /* --------------------------------------------------------------------------
    Responsive Slide-Over Drawer (Tablet & Mobile < 1100px)
    -------------------------------------------------------------------------- */

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  Check,
+  ChevronUp,
   Circle,
   HeadphoneOff,
   Headphones,
@@ -12,6 +14,7 @@ import {
   MonitorUp,
   PhoneOff,
   Radio,
+  SlidersHorizontal,
   Square,
   Users,
   Video,
@@ -19,6 +22,10 @@ import {
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol.ts'
 import type { CallEngine, CallParticipant, PeerIceConnectionState } from '../types/calls.ts'
+import {
+  RECORDING_QUALITY_PRESETS,
+  getRecordingQualitySpec,
+} from '../lib/callRecorder.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
 
@@ -221,6 +228,8 @@ export function CallStage({
   const { activeCall } = calls
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [togglingRec, setTogglingRec] = useState(false)
+  const [qualityMenuOpen, setQualityMenuOpen] = useState(false)
+  const qualityWrapRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!activeCall) return
@@ -229,17 +238,35 @@ export function CallStage({
     return () => window.clearInterval(id)
   }, [activeCall])
 
+  const isQualityPopoverVisible =
+    qualityMenuOpen && Boolean(activeCall) && !activeCall?.localRecording
+
   useEffect(() => {
-    if (!expanded || !activeCall) return
+    if (!isQualityPopoverVisible) return
+    const onPointerDown = (e: PointerEvent) => {
+      if (qualityWrapRef.current && !qualityWrapRef.current.contains(e.target as Node)) {
+        setQualityMenuOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [isQualityPopoverVisible])
+
+  useEffect(() => {
+    if (!activeCall || (!expanded && !isQualityPopoverVisible)) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
-        onToggleExpand()
+        if (isQualityPopoverVisible) {
+          setQualityMenuOpen(false)
+        } else if (expanded) {
+          onToggleExpand()
+        }
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [expanded, activeCall, onToggleExpand])
+  }, [expanded, activeCall, isQualityPopoverVisible, onToggleExpand])
 
   if (!activeCall) return null
 
@@ -306,8 +333,14 @@ export function CallStage({
     void calls.toggleScreenShare()
   }
 
+  const effectiveQuality = activeCall.localRecording
+    ? (activeCall.localRecordingQuality ?? calls.recordingQuality)
+    : calls.recordingQuality
+  const activeQualitySpec = getRecordingQualitySpec(effectiveQuality)
+
   const handleToggleRecording = async () => {
     if (!activeCall.recordingSupported || togglingRec) return
+    setQualityMenuOpen(false)
     setTogglingRec(true)
     try {
       await calls.toggleRecording()
@@ -548,6 +581,76 @@ export function CallStage({
           )}
           <span>{activeCall.localRecording ? 'Stop' : 'Record'}</span>
         </button>
+
+        {activeCall.recordingSupported && (
+          <div className="ag-call-quality-wrap" ref={qualityWrapRef}>
+            <button
+              type="button"
+              className={`ag-call-quality-btn ${isQualityPopoverVisible ? 'open' : ''} ${
+                activeCall.localRecording ? 'locked' : ''
+              }`}
+              disabled={activeCall.localRecording}
+              onClick={() => {
+                onPlaySound?.('click')
+                setQualityMenuOpen((v) => !v)
+              }}
+              aria-haspopup="listbox"
+              aria-expanded={isQualityPopoverVisible}
+              aria-label={
+                activeCall.localRecording
+                  ? `Recording at ${activeQualitySpec.shortLabel} — stop to change quality`
+                  : `Recording quality: ${activeQualitySpec.label} (${activeQualitySpec.shortLabel})`
+              }
+              title={
+                activeCall.localRecording
+                  ? `Recording at ${activeQualitySpec.shortLabel} — stop to change quality`
+                  : `Recording quality: ${activeQualitySpec.label} (${activeQualitySpec.shortLabel} · ${activeQualitySpec.approxMbPerMin})`
+              }
+            >
+              <SlidersHorizontal size={13} className="ag-call-quality-icon" />
+              <span className="ag-call-quality-label mono">{activeQualitySpec.shortLabel}</span>
+              <ChevronUp
+                size={12}
+                className={`ag-call-quality-chevron ${isQualityPopoverVisible ? 'open' : ''}`}
+              />
+            </button>
+
+            {isQualityPopoverVisible && (
+              <div
+                className="ag-call-quality-menu"
+                role="listbox"
+                aria-label="Select call recording quality"
+              >
+                <div className="ag-call-quality-menu-head mono">RECORDING QUALITY</div>
+                {RECORDING_QUALITY_PRESETS.map((spec) => {
+                  const selected = spec.id === calls.recordingQuality
+                  return (
+                    <button
+                      key={spec.id}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      className={`ag-call-quality-opt ${selected ? 'selected' : ''}`}
+                      onClick={() => {
+                        calls.setRecordingQuality(spec.id)
+                        onPlaySound?.('click')
+                        setQualityMenuOpen(false)
+                      }}
+                    >
+                      <span className="ag-call-quality-opt-main">
+                        <span className="ag-call-quality-opt-name">{spec.label}</span>
+                        <span className="ag-call-quality-opt-meta mono">
+                          {spec.shortLabel} · {spec.approxMbPerMin.replace('/min', '/m')}
+                        </span>
+                      </span>
+                      {selected && <Check size={13} className="ag-call-quality-check" />}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         <button
           type="button"

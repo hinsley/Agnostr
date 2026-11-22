@@ -1,14 +1,77 @@
-import type { CallParticipant } from '../types/calls.ts'
+import type {
+  CallParticipant,
+  RecordingQualityPreset,
+  RecordingQualitySpec,
+} from '../types/calls.ts'
 
 export type CallRecordingMode = 'audio' | 'video'
 
+export const DEFAULT_RECORDING_QUALITY: RecordingQualityPreset = 'standard'
+
+export const RECORDING_QUALITY_PRESETS: readonly RecordingQualitySpec[] = [
+  {
+    id: 'saver',
+    label: 'Saver',
+    shortLabel: '360p',
+    width: 640,
+    height: 360,
+    fps: 15,
+    videoBitsPerSecond: 450_000,
+    audioBitsPerSecond: 48_000,
+    approxMbPerMin: '~4 MB/min',
+  },
+  {
+    id: 'standard',
+    label: 'Standard',
+    shortLabel: '720p',
+    width: 1280,
+    height: 720,
+    fps: 24,
+    videoBitsPerSecond: 1_500_000,
+    audioBitsPerSecond: 96_000,
+    approxMbPerMin: '~12 MB/min',
+  },
+  {
+    id: 'high',
+    label: 'High',
+    shortLabel: '1080p',
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    videoBitsPerSecond: 4_000_000,
+    audioBitsPerSecond: 128_000,
+    approxMbPerMin: '~30 MB/min',
+  },
+  {
+    id: 'ultra',
+    label: 'Ultra',
+    shortLabel: '1080p+',
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    videoBitsPerSecond: 8_000_000,
+    audioBitsPerSecond: 192_000,
+    approxMbPerMin: '~60 MB/min',
+  },
+]
+
+export function isValidRecordingQuality(raw: unknown): raw is RecordingQualityPreset {
+  return raw === 'saver' || raw === 'standard' || raw === 'high' || raw === 'ultra'
+}
+
+export function getRecordingQualitySpec(preset: RecordingQualityPreset): RecordingQualitySpec {
+  return RECORDING_QUALITY_PRESETS.find((p) => p.id === preset) ?? RECORDING_QUALITY_PRESETS[1]
+}
+
 export interface CallRecordingStartOptions {
+  quality?: RecordingQualityPreset
   onUnexpectedStop?: (errorMessage?: string) => void
   onBytesChange?: (bytes: number) => void
 }
 
 export interface CallRecordingStartResult {
   mode: CallRecordingMode
+  quality: RecordingQualityPreset
   startedAt: number
   mimeType: string
 }
@@ -19,10 +82,6 @@ export interface CallRecordingStopResult {
   durationSec: number
   mode: CallRecordingMode
 }
-
-const CANVAS_WIDTH = 1280
-const CANVAS_HEIGHT = 720
-const CANVAS_FPS = 24
 
 const VIDEO_MIME_CANDIDATES: readonly string[] = [
   'video/webm;codecs=vp9,opus',
@@ -180,6 +239,7 @@ export class CallRecorderController {
   private recordedBytes = 0
   private onBytesChange: ((bytes: number) => void) | null = null
   private latestParticipants: CallParticipant[] = []
+  private qualitySpec: RecordingQualitySpec = getRecordingQualitySpec(DEFAULT_RECORDING_QUALITY)
   private mode: CallRecordingMode | null = null
   private mimeType = ''
   private startedAt = 0
@@ -193,6 +253,10 @@ export class CallRecorderController {
 
   getMode(): CallRecordingMode | null {
     return this.mode
+  }
+
+  getQuality(): RecordingQualityPreset | null {
+    return this.active ? this.qualitySpec.id : null
   }
 
   getStartedAt(): number | null {
@@ -210,6 +274,7 @@ export class CallRecorderController {
     if (this.active) {
       return {
         mode: this.mode ?? 'video',
+        quality: this.qualitySpec.id,
         startedAt: this.startedAt,
         mimeType: this.mimeType,
       }
@@ -224,6 +289,8 @@ export class CallRecorderController {
       throw new Error('Web Audio API unavailable for call recording.')
     }
 
+    const spec = getRecordingQualitySpec(options?.quality ?? DEFAULT_RECORDING_QUALITY)
+    this.qualitySpec = spec
     this.aborted = false
     this.stopping = false
     this.chunks = []
@@ -251,22 +318,21 @@ export class CallRecorderController {
     this.silenceOsc = osc
     this.silenceGain = gain
 
-    // 2. Always record with the 1280x720 canvas compositor + mixed audio whenever video
+    // 2. Always record with the offscreen canvas compositor + mixed audio whenever video
     // MediaRecorder is supported so voice-only participants seamlessly appear on video if
-    // they enable camera or screen share mid-recording! Fall back to audio-only ONLY when
-    // the browser has no video MediaRecorder / canvas.captureStream support.
+    // they enable camera or screen share mid-recording!
     let chosenMode: CallRecordingMode = canRecordVideoCanvas() ? 'video' : 'audio'
     let combinedStream: MediaStream
 
     if (chosenMode === 'video' && typeof document !== 'undefined') {
       const canvas = document.createElement('canvas')
-      canvas.width = CANVAS_WIDTH
-      canvas.height = CANVAS_HEIGHT
+      canvas.width = spec.width
+      canvas.height = spec.height
       const c2d = canvas.getContext('2d')
 
       if (c2d && typeof canvas.captureStream === 'function') {
         this.canvasCtx = c2d
-        this.canvasStream = canvas.captureStream(CANVAS_FPS)
+        this.canvasStream = canvas.captureStream(spec.fps)
         this.ensureVideoHostElement()
         const tracks: MediaStreamTrack[] = [
           ...this.canvasStream.getVideoTracks(),
@@ -288,18 +354,19 @@ export class CallRecorderController {
 
     if (chosenMode === 'video') {
       this.drawCompositeFrame()
+      const frameIntervalMs = Math.max(16, Math.round(1000 / spec.fps))
       this.drawTimer = window.setInterval(() => {
         this.drawCompositeFrame()
-      }, Math.round(1000 / CANVAS_FPS))
+      }, frameIntervalMs)
     }
 
-    // 3. Instantiate MediaRecorder with best supported codec
+    // 3. Instantiate MediaRecorder with preset bitrates & best supported codec
     const pickedMime = pickSupportedMime(chosenMode)
     const recorderOpts: MediaRecorderOptions = {
-      audioBitsPerSecond: 64_000,
+      audioBitsPerSecond: spec.audioBitsPerSecond,
     }
     if (chosenMode === 'video') {
-      recorderOpts.videoBitsPerSecond = 1_500_000
+      recorderOpts.videoBitsPerSecond = spec.videoBitsPerSecond
     }
     if (pickedMime) {
       recorderOpts.mimeType = pickedMime
@@ -309,8 +376,13 @@ export class CallRecorderController {
     try {
       recorder = new MediaRecorder(combinedStream, recorderOpts)
     } catch {
-      // Fallback without explicit bitrate/mime options
-      recorder = new MediaRecorder(combinedStream)
+      try {
+        recorder = pickedMime
+          ? new MediaRecorder(combinedStream, { mimeType: pickedMime })
+          : new MediaRecorder(combinedStream)
+      } catch {
+        recorder = new MediaRecorder(combinedStream)
+      }
     }
 
     this.mimeType =
@@ -338,6 +410,7 @@ export class CallRecorderController {
 
     return {
       mode: chosenMode,
+      quality: spec.id,
       startedAt: this.startedAt,
       mimeType: this.mimeType,
     }
@@ -352,11 +425,8 @@ export class CallRecorderController {
       const pk = p.pubkey.toLowerCase()
       activePubkeys.add(pk)
 
-      // Attach addtrack/removetrack listeners so mid-call track additions on existing
-      // MediaStream instances are captured immediately even without a React render.
       this.syncStreamListener(pk, p.stream)
 
-      // Sync audio track by live track ID into Web Audio mixer
       const audioTrack = pickActiveAudioTrack(p)
       const existingAudio = this.audioSources.get(pk)
       if (audioTrack) {
@@ -385,7 +455,6 @@ export class CallRecorderController {
         this.audioSources.delete(pk)
       }
 
-      // Sync video element by live video track ID for canvas compositor
       if (this.mode === 'video' && typeof document !== 'undefined') {
         const videoTrack = pickActiveVideoTrack(p)
         const existingVideo = this.videoElements.get(pk)
@@ -406,7 +475,6 @@ export class CallRecorderController {
       }
     }
 
-    // Remove departed participants from audio mixer, video map, and stream listeners
     for (const [pk, binding] of Array.from(this.audioSources.entries())) {
       if (!activePubkeys.has(pk)) {
         try {
@@ -614,20 +682,24 @@ export class CallRecorderController {
     const ctx = this.canvasCtx
     if (!ctx) return
 
-    // Catch any mid-call track unmute/addTrack immediately before rendering this frame
     this.reconcileTracksBeforeDraw()
 
+    const canvasW = this.qualitySpec.width
+    const canvasH = this.qualitySpec.height
+    const s = canvasH / 720
+
     ctx.fillStyle = '#090C0A'
-    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
+    ctx.fillRect(0, 0, canvasW, canvasH)
 
     const list = this.latestParticipants.slice(0, 6)
     if (list.length === 0) return
 
-    const pad = 16
-    const gap = 12
+    const pad = Math.max(8, Math.round(16 * s))
+    const gap = Math.max(6, Math.round(12 * s))
+    const tileRadius = Math.max(7, Math.round(14 * s))
     const { cols, rows } = getGridDimensions(list.length)
-    const tileW = Math.floor((CANVAS_WIDTH - pad * 2 - gap * (cols - 1)) / cols)
-    const tileH = Math.floor((CANVAS_HEIGHT - pad * 2 - gap * (rows - 1)) / rows)
+    const tileW = Math.floor((canvasW - pad * 2 - gap * (cols - 1)) / cols)
+    const tileH = Math.floor((canvasH - pad * 2 - gap * (rows - 1)) / rows)
 
     list.forEach((p, idx) => {
       const col = idx % cols
@@ -636,7 +708,7 @@ export class CallRecorderController {
       const y = pad + row * (tileH + gap)
 
       ctx.save()
-      drawRoundedRect(ctx, x, y, tileW, tileH, 14)
+      drawRoundedRect(ctx, x, y, tileW, tileH, tileRadius)
       ctx.clip()
 
       // Tile base background
@@ -653,7 +725,6 @@ export class CallRecorderController {
         const vw = vid.videoWidth
         const vh = vid.videoHeight
         if (p.screenSharing) {
-          // Contain-fit screen shares so shared text stays fully readable
           const scale = Math.min(tileW / vw, tileH / vh)
           const dw = vw * scale
           const dh = vh * scale
@@ -661,7 +732,6 @@ export class CallRecorderController {
           const dy = y + (tileH - dh) / 2
           ctx.drawImage(vid, dx, dy, dw, dh)
         } else {
-          // Cover-fit camera tiles cleanly
           const scale = Math.max(tileW / vw, tileH / vh)
           const dw = vw * scale
           const dh = vh * scale
@@ -672,49 +742,54 @@ export class CallRecorderController {
       } else {
         // Audio-only tile monogram
         const cx = x + tileW / 2
-        const cy = y + tileH / 2 - 8
+        const cy = y + tileH / 2 - Math.round(8 * s)
         const radius = Math.min(tileW, tileH) * 0.17
         ctx.beginPath()
         ctx.arc(cx, cy, radius, 0, Math.PI * 2)
         ctx.fillStyle = p.isSpeaking ? 'rgba(34, 229, 132, 0.18)' : 'rgba(255, 255, 255, 0.06)'
         ctx.fill()
-        ctx.lineWidth = p.isSpeaking ? 3 : 1.5
+        ctx.lineWidth = p.isSpeaking ? Math.max(2, 3 * s) : Math.max(1, 1.5 * s)
         ctx.strokeStyle = p.isSpeaking ? '#22E584' : 'rgba(255, 255, 255, 0.18)'
         ctx.stroke()
 
         const initials = (p.nickname || 'AN').slice(0, 2).toUpperCase()
         ctx.fillStyle = '#E6F2EB'
-        ctx.font = `700 ${Math.max(18, Math.round(radius * 0.72))}px "JetBrains Mono", monospace`
+        ctx.font = `700 ${Math.max(12, Math.round(radius * 0.72))}px "JetBrains Mono", monospace`
         ctx.textAlign = 'center'
         ctx.textBaseline = 'middle'
         ctx.fillText(initials, cx, cy + 1)
       }
 
-      // Bottom-left handle badge
+      // Bottom-left handle badge (proportionally scaled to preset height)
       const labelParts = [p.displayHandle]
       if (p.isSelf) labelParts.push('YOU')
       if (p.audioMuted) labelParts.push('MUTED')
       if (p.screenSharing) labelParts.push('SCREEN')
       const labelText = labelParts.join(' · ')
-      ctx.font = '600 13px "JetBrains Mono", monospace'
+      const labelFontPx = Math.max(9, Math.round(13 * s))
+      ctx.font = `600 ${labelFontPx}px "JetBrains Mono", monospace`
       const textWidth = ctx.measureText(labelText).width
-      const pillW = Math.min(tileW - 24, textWidth + 20)
-      const pillH = 26
-      const pillX = x + 12
-      const pillY = y + tileH - pillH - 12
+      const pillPadX = Math.max(6, Math.round(10 * s))
+      const pillInset = Math.max(6, Math.round(12 * s))
+      const pillW = Math.min(tileW - pillInset * 2, textWidth + pillPadX * 2)
+      const pillH = Math.max(16, Math.round(26 * s))
+      const pillX = x + pillInset
+      const pillY = y + tileH - pillH - pillInset
 
-      drawRoundedRect(ctx, pillX, pillY, pillW, pillH, 7)
+      drawRoundedRect(ctx, pillX, pillY, pillW, pillH, Math.max(4, Math.round(7 * s)))
       ctx.fillStyle = 'rgba(9, 12, 10, 0.78)'
       ctx.fill()
       ctx.fillStyle = '#E6F2EB'
       ctx.textAlign = 'left'
       ctx.textBaseline = 'middle'
-      ctx.fillText(labelText, pillX + 10, pillY + pillH / 2 + 0.5, pillW - 18)
+      ctx.fillText(labelText, pillX + pillPadX, pillY + pillH / 2 + 0.5, pillW - pillPadX * 2)
 
       // Top-right crimson recording dot on recording participants
       if (p.isRecording) {
+        const dotOffset = Math.max(10, Math.round(18 * s))
+        const dotRadius = Math.max(3.5, 6 * s)
         ctx.beginPath()
-        ctx.arc(x + tileW - 18, y + 18, 6, 0, Math.PI * 2)
+        ctx.arc(x + tileW - dotOffset, y + dotOffset, dotRadius, 0, Math.PI * 2)
         ctx.fillStyle = '#EF4444'
         ctx.fill()
       }
@@ -722,25 +797,28 @@ export class CallRecorderController {
       ctx.restore()
 
       // Outer tile border (glows green when speaking)
-      drawRoundedRect(ctx, x, y, tileW, tileH, 14)
-      ctx.lineWidth = p.isSpeaking ? 3 : 1
+      drawRoundedRect(ctx, x, y, tileW, tileH, tileRadius)
+      ctx.lineWidth = p.isSpeaking ? Math.max(2, 3 * s) : Math.max(1, s)
       ctx.strokeStyle = p.isSpeaking ? '#22E584' : 'rgba(255, 255, 255, 0.14)'
       ctx.stroke()
     })
 
     // Subtle REC timer stamp top-right of canvas
     const stampText = `● REC · ${formatTimerLabel(Date.now() - this.startedAt)}`
-    ctx.font = '700 13px "JetBrains Mono", monospace'
-    const sw = ctx.measureText(stampText).width + 20
-    const sx = CANVAS_WIDTH - sw - 22
-    const sy = 22
-    drawRoundedRect(ctx, sx, sy, sw, 26, 13)
+    const stampFontPx = Math.max(9, Math.round(13 * s))
+    ctx.font = `700 ${stampFontPx}px "JetBrains Mono", monospace`
+    const sw = ctx.measureText(stampText).width + Math.max(12, Math.round(20 * s))
+    const sh = Math.max(16, Math.round(26 * s))
+    const stampInset = Math.max(11, Math.round(22 * s))
+    const sx = canvasW - sw - stampInset
+    const sy = stampInset
+    drawRoundedRect(ctx, sx, sy, sw, sh, Math.round(sh / 2))
     ctx.fillStyle = 'rgba(127, 29, 29, 0.85)'
     ctx.fill()
     ctx.fillStyle = '#FEE2E2'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(stampText, sx + sw / 2, sy + 13.5)
+    ctx.fillText(stampText, sx + sw / 2, sy + sh / 2 + 0.5)
   }
 
   private cleanupVideoElement(el: HTMLVideoElement): void {

@@ -6,6 +6,7 @@ import {
   type CallEngine,
   type CallMediaType,
   type IncomingCallOffer,
+  type RecordingQualityPreset,
   type RoomCallPresence,
   type TurnServerConfig,
 } from '../types/calls.ts'
@@ -14,7 +15,10 @@ import type { ServerSummary } from '../types/servers.ts'
 import { verifyEventCached } from '../lib/bitchatProtocol.ts'
 import {
   CallRecorderController,
+  DEFAULT_RECORDING_QUALITY,
+  getRecordingQualitySpec,
   isCallRecordingSupported,
+  isValidRecordingQuality,
   type CallRecordingMode,
 } from '../lib/callRecorder.ts'
 import {
@@ -36,7 +40,13 @@ import {
 } from '../lib/callSignaling.ts'
 import { formatDisplayHandle, type IdentityManager } from '../lib/identity.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
-import { loadTurnConfig, normalizeTurnUrl, saveTurnConfig as persistTurnConfig } from '../lib/storage.ts'
+import {
+  loadRecordingQuality,
+  loadTurnConfig,
+  normalizeTurnUrl,
+  saveRecordingQuality as persistRecordingQuality,
+  saveTurnConfig as persistTurnConfig,
+} from '../lib/storage.ts'
 import { isScreenShareSupported, WebRtcMesh } from '../lib/webrtcMesh.ts'
 
 const RING_TIMEOUT_MS = 45_000
@@ -78,6 +88,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const [incomingCall, setIncomingCall] = useState<IncomingCallOffer | null>(null)
   const [serverCallRosters, setServerCallRosters] = useState<Record<string, RoomCallPresence[]>>({})
   const [turnConfig, setTurnConfig] = useState<TurnServerConfig | null>(() => loadTurnConfig())
+  const [recordingQuality, setRecordingQualityState] = useState<RecordingQualityPreset>(() => loadRecordingQuality())
 
   const poolRef = useRef<RelayPool | null>(pool)
   poolRef.current = pool
@@ -103,6 +114,9 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const turnConfigRef = useRef<TurnServerConfig | null>(turnConfig)
   turnConfigRef.current = turnConfig
 
+  const recordingQualityRef = useRef<RecordingQualityPreset>(recordingQuality)
+  recordingQualityRef.current = recordingQuality
+
   const activeCallRef = useRef<ActiveCallSession | null>(activeCall)
   activeCallRef.current = activeCall
 
@@ -116,6 +130,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const recorderRef = useRef<CallRecorderController | null>(null)
   const recordingStartedAtRef = useRef<number | null>(null)
   const recordingModeRef = useRef<CallRecordingMode | null>(null)
+  const recordingQualityActiveRef = useRef<RecordingQualityPreset | null>(null)
   const recordingBytesRef = useRef<number>(0)
   const remoteRecordingRef = useRef<Map<string, boolean>>(new Map())
   const seenEventIdsRef = useRef<Set<string>>(new Set())
@@ -176,6 +191,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       localRecording: mesh.getLocalRecording(),
       localRecordingStartedAt: recordingStartedAtRef.current,
       localRecordingMode: recordingModeRef.current,
+      localRecordingQuality: recordingQualityActiveRef.current,
       localRecordingBytes: recordingBytesRef.current,
       recordingSupported: isCallRecordingSupported(),
       participants,
@@ -310,6 +326,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       const wasRecording = Boolean(recorderRef.current?.isRecording())
       recordingStartedAtRef.current = null
       recordingModeRef.current = null
+      recordingQualityActiveRef.current = null
       recordingBytesRef.current = 0
 
       if (wasRecording && !opts?.abortRecording && meshToDispose) {
@@ -662,6 +679,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         localRecording: false,
         localRecordingStartedAt: null,
         localRecordingMode: null,
+        localRecordingQuality: null,
         localRecordingBytes: 0,
         recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
@@ -758,6 +776,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         localRecording: false,
         localRecordingStartedAt: null,
         localRecordingMode: null,
+        localRecordingQuality: null,
         localRecordingBytes: 0,
         recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
@@ -883,6 +902,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         localRecording: false,
         localRecordingStartedAt: null,
         localRecordingMode: null,
+        localRecordingQuality: null,
         localRecordingBytes: 0,
         recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
@@ -1519,6 +1539,22 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     return await meshRef.current.toggleScreenShare()
   }, [])
 
+  const setRecordingQuality = useCallback((quality: RecordingQualityPreset) => {
+    if (!isValidRecordingQuality(quality)) return
+    const changed = recordingQualityRef.current !== quality
+    persistRecordingQuality(quality)
+    recordingQualityRef.current = quality
+    setRecordingQualityState(quality)
+    if (changed && recorderRef.current?.isRecording()) {
+      const spec = getRecordingQualitySpec(quality)
+      pushToastRef.current(
+        'info',
+        `Recording quality set to ${spec.label} (${spec.shortLabel})`,
+        'Applies to your next recording.'
+      )
+    }
+  }, [])
+
   const toggleRecording = useCallback(async (): Promise<void> => {
     const mesh = meshRef.current
     const active = activeCallRef.current
@@ -1542,6 +1578,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     if (recorder.isRecording()) {
       recordingStartedAtRef.current = null
       recordingModeRef.current = null
+      recordingQualityActiveRef.current = null
       recordingBytesRef.current = 0
       mesh.setLocalRecording(false)
       syncActiveCallFromMesh()
@@ -1559,6 +1596,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     try {
       recordingBytesRef.current = 0
       const startInfo = recorder.start(mesh.getParticipantsSnapshot(), {
+        quality: recordingQualityRef.current,
         onBytesChange: (bytes) => {
           recordingBytesRef.current = bytes
           const cur = activeCallRef.current
@@ -1571,6 +1609,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         onUnexpectedStop: (errMsg) => {
           recordingStartedAtRef.current = null
           recordingModeRef.current = null
+          recordingQualityActiveRef.current = null
           recordingBytesRef.current = 0
           meshRef.current?.setLocalRecording(false)
           syncActiveCallFromMesh()
@@ -1581,18 +1620,21 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       })
       recordingStartedAtRef.current = startInfo.startedAt
       recordingModeRef.current = startInfo.mode
+      recordingQualityActiveRef.current = startInfo.quality
       mesh.setLocalRecording(true)
       syncActiveCallFromMesh()
+      const spec = getRecordingQualitySpec(startInfo.quality)
       pushToastRef.current(
         'info',
-        'Recording started',
+        `Recording started (${spec.label} · ${spec.shortLabel})`,
         startInfo.mode === 'video'
-          ? 'Capturing composite video + mixed call audio. All participants are notified.'
-          : 'Capturing mixed call audio. All participants are notified.'
+          ? `Capturing ${spec.width}×${spec.height} @ ${spec.fps}fps (${spec.approxMbPerMin}) + mixed audio. All participants are notified.`
+          : `Capturing mixed call audio (${Math.round(spec.audioBitsPerSecond / 1000)} kbps). All participants are notified.`
       )
     } catch (err) {
       recordingStartedAtRef.current = null
       recordingModeRef.current = null
+      recordingQualityActiveRef.current = null
       recordingBytesRef.current = 0
       recorder.abort()
       mesh.setLocalRecording(false)
@@ -1640,6 +1682,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
   const resetAllCalls = useCallback(() => {
     recordingBytesRef.current = 0
+    recordingQualityActiveRef.current = null
     recorderRef.current?.abort()
     teardownActiveCall(true, { abortRecording: true })
     incomingCallRef.current = null
@@ -1648,6 +1691,8 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     setServerCallRosters({})
     turnConfigRef.current = null
     setTurnConfig(null)
+    recordingQualityRef.current = DEFAULT_RECORDING_QUALITY
+    setRecordingQualityState(DEFAULT_RECORDING_QUALITY)
     seenEventIdsRef.current.clear()
     lastLeaveTsByRoomPeerRef.current.clear()
     lastPresenceTsByRoomPeerRef.current.clear()
@@ -1661,6 +1706,8 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       incomingCall,
       serverCallRosters,
       maxParticipants: MAX_CALL_PARTICIPANTS,
+      recordingQuality,
+      setRecordingQuality,
       turnConfig,
       saveTurnConfig: saveTurnConfigAction,
       clearTurnConfig: clearTurnConfigAction,
@@ -1680,6 +1727,8 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       activeCall,
       incomingCall,
       serverCallRosters,
+      recordingQuality,
+      setRecordingQuality,
       turnConfig,
       saveTurnConfigAction,
       clearTurnConfigAction,
