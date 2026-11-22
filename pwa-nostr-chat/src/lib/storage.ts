@@ -16,6 +16,7 @@ import type { GeoRelayEntry } from './geoRelays.ts'
 import { DEFAULT_GEOHASH, isValidGeohash, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe } from './identity.ts'
 import {
+  DEFAULT_AUTO_TRANSCRIBE,
   DEFAULT_TRANSCRIPTION_MODEL_ID,
   mergeTranscriptionModels,
   resolveActiveTranscriptionModel,
@@ -308,8 +309,13 @@ export function loadTranscriptionConfig(): PersistedTranscriptionConfig {
       ? parsed.activeModelId.trim()
       : DEFAULT_TRANSCRIPTION_MODEL_ID
   const active = resolveActiveTranscriptionModel(merged, requestedId)
+  const autoTranscribe =
+    typeof parsed?.autoTranscribe === 'boolean'
+      ? parsed.autoTranscribe
+      : DEFAULT_AUTO_TRANSCRIBE
   return {
     activeModelId: active.id,
+    autoTranscribe,
     customModels,
   }
 }
@@ -320,6 +326,7 @@ export function saveTranscriptionConfig(config: PersistedTranscriptionConfig): v
     KEYS.transcription,
     JSON.stringify({
       activeModelId: config.activeModelId,
+      autoTranscribe: config.autoTranscribe,
       customModels: customOnly,
     })
   )

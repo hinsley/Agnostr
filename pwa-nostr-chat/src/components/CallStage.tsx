@@ -605,7 +605,7 @@ export function CallStage({
               {transcription.modelStatus === 'downloading' && (
                 <div className="ag-call-cc-status mono" role="status">
                   <Loader2 size={12} className="ag-spin" />
-                  <span>
+                  <span className="truncate">
                     Loading {transcription.activeModel.label} ·{' '}
                     {Math.round(transcription.downloadProgress)}%
                   </span>
@@ -804,12 +804,18 @@ export function CallStage({
           }}
           aria-pressed={transcription.liveCaptionsEnabled}
           aria-label={
-            transcription.liveCaptionsEnabled ? 'Disable live captions' : 'Enable live captions'
+            transcription.liveCaptionsEnabled
+              ? transcription.modelStatus === 'downloading'
+                ? `Loading ${transcription.activeModel.label} (${Math.round(transcription.downloadProgress)}%) — click to disable live captions`
+                : `Disable live captions (${transcription.activeModel.label})`
+              : `Enable live captions (${transcription.activeModel.label})`
           }
           title={
             transcription.liveCaptionsEnabled
-              ? `Live captions ON (${transcription.activeModel.label}) — click to turn off`
-              : `Live on-device captions (${transcription.activeModel.label})`
+              ? transcription.modelStatus === 'downloading'
+                ? `Loading ${transcription.activeModel.label} · ${Math.round(transcription.downloadProgress)}% — click to turn off`
+                : `Live captions ON (${transcription.activeModel.label}) — click to turn off`
+              : `Enable live on-device captions (${transcription.activeModel.label})`
           }
         >
           <Captions size={17} />

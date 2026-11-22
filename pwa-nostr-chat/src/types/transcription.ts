@@ -1,5 +1,7 @@
 import type { VoiceMemoAttachment } from './protocol.ts'
 
+export type TranscriptionModelEngine = 'transformers' | 'parakeet'
+
 export type TranscriptionDtypeValue =
   | 'fp32'
   | 'fp16'
@@ -19,6 +21,7 @@ export interface TranscriptionModelSpec {
   id: string
   label: string
   hfModelId: string
+  engine: TranscriptionModelEngine
   sizeHint: string
   languages: string
   description: string
@@ -50,6 +53,7 @@ export interface LiveCaptionEntry {
 
 export interface PersistedTranscriptionConfig {
   activeModelId: string
+  autoTranscribe: boolean
   customModels: TranscriptionModelSpec[]
 }
 
@@ -62,6 +66,10 @@ export interface TranscriptionEngine {
   addCustomModel: (hfModelId: string, label?: string) => boolean
   removeCustomModel: (modelId: string) => void
 
+  // Automatic transcription preference (default ON)
+  autoTranscribe: boolean
+  setAutoTranscribe: (enabled: boolean) => void
+
   // Worker & model runtime state
   modelStatus: TranscriptionModelStatus
   downloadProgress: number // 0..100
@@ -71,7 +79,7 @@ export interface TranscriptionEngine {
   preloadModel: () => Promise<boolean>
   clearModelCache: () => Promise<void>
 
-  // On-demand voice memo transcription (strictly Trusted-Peers gated)
+  // On-demand & automatic voice memo transcription (strictly Trusted-Peers gated)
   memoTranscripts: Record<string, MemoTranscriptState>
   transcribeVoiceMemo: (
     memoKey: string,

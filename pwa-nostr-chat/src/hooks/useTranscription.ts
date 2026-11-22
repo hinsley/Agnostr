@@ -24,6 +24,7 @@ import type {
 } from '../lib/transcription.worker.ts'
 import {
   createCustomTranscriptionModel,
+  DEFAULT_AUTO_TRANSCRIBE,
   DEFAULT_TRANSCRIPTION_MODEL_ID,
   mergeTranscriptionModels,
   resolveActiveTranscriptionModel,
@@ -31,6 +32,7 @@ import {
 
 const MAX_CALL_CAPTION_ENTRIES = 500
 const TRANSFORMERS_CACHE_KEY = 'transformers-cache'
+const PARAKEET_IDB_NAME = 'parakeet-cache-db'
 
 export interface UseTranscriptionParams {
   activeCall: ActiveCallSession | null
@@ -73,6 +75,13 @@ type PendingWorkerRequest =
   | PendingMemoRequest
   | PendingLiveRequest
 
+interface QueuedMemoItem {
+  memoKey: string
+  memo: VoiceMemoAttachment
+  senderPubkey: string
+  resolvers: Array<() => void>
+}
+
 function slugifyTitle(raw: string): string {
   const cleaned = raw
     .toLowerCase()
@@ -88,6 +97,20 @@ function formatClock(ms: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+function deleteIndexedDbSafe(name: string): Promise<void> {
+  if (typeof indexedDB === 'undefined') return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    try {
+      const req = indexedDB.deleteDatabase(name)
+      req.onsuccess = () => resolve()
+      req.onerror = () => resolve()
+      req.onblocked = () => resolve()
+    } catch {
+      resolve()
+    }
+  })
+}
+
 export function useTranscription(
   params: UseTranscriptionParams
 ): UseTranscriptionResult {
@@ -99,6 +122,9 @@ export function useTranscription(
   )
   const [activeModelId, setActiveModelIdState] = useState<string>(
     () => initialConfig.activeModelId
+  )
+  const [autoTranscribe, setAutoTranscribeState] = useState<boolean>(
+    () => initialConfig.autoTranscribe
   )
 
   const models = useMemo(
@@ -127,8 +153,11 @@ export function useTranscription(
   const workerRef = useRef<Worker | null>(null)
   const capturerRef = useRef<LiveStreamSpeechCapturer | null>(null)
   const pendingRef = useRef<Map<string, PendingWorkerRequest>>(new Map())
+  const memoQueueRef = useRef<QueuedMemoItem[]>([])
+  const memoQueueRunningRef = useRef<boolean>(false)
+  const activeMemoKeyRef = useRef<string | null>(null)
   const reqSeqRef = useRef<number>(0)
-  const loadedHfModelIdRef = useRef<string | null>(null)
+  const loadedModelKeyRef = useRef<string | null>(null)
   const activeCallRef = useRef<ActiveCallSession | null>(activeCall)
   activeCallRef.current = activeCall
   const lastCallIdRef = useRef<string | null>(activeCall?.callId ?? null)
@@ -141,6 +170,9 @@ export function useTranscription(
 
   const customModelsRef = useRef<TranscriptionModelSpec[]>(customModels)
   customModelsRef.current = customModels
+
+  const autoTranscribeRef = useRef<boolean>(autoTranscribe)
+  autoTranscribeRef.current = autoTranscribe
 
   const memoTranscriptsRef =
     useRef<Record<string, MemoTranscriptState>>(memoTranscripts)
@@ -155,6 +187,9 @@ export function useTranscription(
   const pushToastRef = useRef(pushToast)
   pushToastRef.current = pushToast
 
+  const loadedKeyForModel = (m: TranscriptionModelSpec) =>
+    `${m.engine}::${m.hfModelId}`
+
   const nextRequestId = useCallback((prefix: string): string => {
     reqSeqRef.current += 1
     return `${prefix}-${Date.now()}-${reqSeqRef.current}`
@@ -167,10 +202,18 @@ export function useTranscription(
     }
   }, [])
 
+  const clearMemoQueue = useCallback(() => {
+    const queued = memoQueueRef.current.splice(0)
+    activeMemoKeyRef.current = null
+    for (const item of queued) {
+      for (const res of item.resolvers) res()
+    }
+  }, [])
+
   const terminateWorker = useCallback(() => {
     const w = workerRef.current
     workerRef.current = null
-    loadedHfModelIdRef.current = null
+    loadedModelKeyRef.current = null
 
     for (const req of pendingRef.current.values()) {
       if (req.kind === 'load') {
@@ -209,12 +252,12 @@ export function useTranscription(
           setRuntimeDevice(msg.runtimeDevice)
         }
         if (msg.status === 'ready') {
-          loadedHfModelIdRef.current = msg.hfModelId
+          loadedModelKeyRef.current = loadedKeyForModel(activeModelRef.current)
           setModelError(null)
           setDownloadProgress(100)
           setDownloadFile(null)
         } else if (msg.status === 'error') {
-          loadedHfModelIdRef.current = null
+          loadedModelKeyRef.current = null
           setModelError(msg.error ?? 'Failed to load transcription model.')
         } else if (msg.status === 'downloading') {
           setModelError(null)
@@ -232,7 +275,9 @@ export function useTranscription(
       pendingRef.current.delete(msg.requestId)
 
       if (msg.type === 'result') {
-        loadedHfModelIdRef.current = msg.hfModelId
+        if (msg.hfModelId === activeModelRef.current.hfModelId) {
+          loadedModelKeyRef.current = loadedKeyForModel(activeModelRef.current)
+        }
         setRuntimeDevice(msg.runtimeDevice)
 
         if (pending.kind === 'load') {
@@ -319,7 +364,7 @@ export function useTranscription(
       const errMsg = ev.message || 'Transcription worker crashed.'
       setModelStatus('error')
       setModelError(errMsg)
-      loadedHfModelIdRef.current = null
+      loadedModelKeyRef.current = null
       for (const req of pendingRef.current.values()) {
         if (req.kind === 'load') {
           req.resolve(false)
@@ -348,10 +393,8 @@ export function useTranscription(
 
   const preloadModel = useCallback(async (): Promise<boolean> => {
     const model = activeModelRef.current
-    if (
-      loadedHfModelIdRef.current === model.hfModelId &&
-      workerRef.current
-    ) {
+    const targetKey = loadedKeyForModel(model)
+    if (loadedModelKeyRef.current === targetKey && workerRef.current) {
       setModelStatus('ready')
       setDownloadProgress(100)
       return true
@@ -370,6 +413,7 @@ export function useTranscription(
         const payload: WorkerInMessage = {
           type: 'load',
           requestId,
+          engine: model.engine,
           hfModelId: model.hfModelId,
           dtype: model.dtype,
         }
@@ -388,19 +432,21 @@ export function useTranscription(
     (modelId: string) => {
       const found = modelsRef.current.find((m) => m.id === modelId)
       if (!found) return
+      activeModelRef.current = found
       setActiveModelIdState(found.id)
       saveTranscriptionConfig({
         activeModelId: found.id,
+        autoTranscribe: autoTranscribeRef.current,
         customModels: customModelsRef.current,
       })
 
-      if (loadedHfModelIdRef.current !== found.hfModelId) {
+      if (loadedModelKeyRef.current !== loadedKeyForModel(found)) {
         setModelStatus('idle')
         setDownloadProgress(0)
         setDownloadFile(null)
+        setRuntimeDevice(null)
         setModelError(null)
         if (liveCaptionsEnabledRef.current && activeCallRef.current) {
-          activeModelRef.current = found
           void preloadModel()
         }
       } else {
@@ -410,6 +456,38 @@ export function useTranscription(
       }
     },
     [preloadModel]
+  )
+
+  const setAutoTranscribe = useCallback(
+    (enabled: boolean) => {
+      autoTranscribeRef.current = enabled
+      setAutoTranscribeState(enabled)
+      saveTranscriptionConfig({
+        activeModelId: activeModelRef.current.id,
+        autoTranscribe: enabled,
+        customModels: customModelsRef.current,
+      })
+
+      // If currently in an active call, immediately sync live captions with the preference
+      if (activeCallRef.current) {
+        if (enabled && !liveCaptionsEnabledRef.current) {
+          liveCaptionsEnabledRef.current = true
+          setLiveCaptionsEnabled(true)
+          void preloadModel().then((ok) => {
+            if (!ok && liveCaptionsEnabledRef.current) {
+              liveCaptionsEnabledRef.current = false
+              setLiveCaptionsEnabled(false)
+              stopCapturer()
+            }
+          })
+        } else if (!enabled && liveCaptionsEnabledRef.current) {
+          liveCaptionsEnabledRef.current = false
+          setLiveCaptionsEnabled(false)
+          stopCapturer()
+        }
+      }
+    },
+    [preloadModel, stopCapturer]
   )
 
   const addCustomModel = useCallback(
@@ -441,17 +519,20 @@ export function useTranscription(
 
       const nextCustom = [...customModelsRef.current, created]
       customModelsRef.current = nextCustom
+      activeModelRef.current = created
       setCustomModels(nextCustom)
       setActiveModelIdState(created.id)
       saveTranscriptionConfig({
         activeModelId: created.id,
+        autoTranscribe: autoTranscribeRef.current,
         customModels: nextCustom,
       })
 
-      if (loadedHfModelIdRef.current !== created.hfModelId) {
+      if (loadedModelKeyRef.current !== loadedKeyForModel(created)) {
         setModelStatus('idle')
         setDownloadProgress(0)
         setDownloadFile(null)
+        setRuntimeDevice(null)
         setModelError(null)
       }
 
@@ -473,27 +554,31 @@ export function useTranscription(
     customModelsRef.current = nextCustom
     setCustomModels(nextCustom)
 
-    const nextActiveId =
-      activeModelRef.current.id === modelId
-        ? DEFAULT_TRANSCRIPTION_MODEL_ID
-        : activeModelRef.current.id
+    const removingActive = activeModelRef.current.id === modelId
+    const nextActiveId = removingActive
+      ? DEFAULT_TRANSCRIPTION_MODEL_ID
+      : activeModelRef.current.id
     setActiveModelIdState(nextActiveId)
     saveTranscriptionConfig({
       activeModelId: nextActiveId,
+      autoTranscribe: autoTranscribeRef.current,
       customModels: nextCustom,
     })
 
-    if (activeModelRef.current.id === modelId) {
+    if (removingActive) {
       setModelStatus('idle')
       setDownloadProgress(0)
       setDownloadFile(null)
+      setRuntimeDevice(null)
       setModelError(null)
     }
     pushToastRef.current('info', `Removed ${target.label}`)
   }, [])
 
   const clearModelCache = useCallback(async (): Promise<void> => {
+    clearMemoQueue()
     stopCapturer()
+    liveCaptionsEnabledRef.current = false
     setLiveCaptionsEnabled(false)
     terminateWorker()
     setModelStatus('idle')
@@ -503,13 +588,15 @@ export function useTranscription(
     setModelError(null)
 
     try {
+      const tasks: Promise<unknown>[] = [deleteIndexedDbSafe(PARAKEET_IDB_NAME)]
       if (typeof caches !== 'undefined') {
-        await caches.delete(TRANSFORMERS_CACHE_KEY)
+        tasks.push(caches.delete(TRANSFORMERS_CACHE_KEY))
       }
+      await Promise.all(tasks)
       pushToastRef.current(
         'info',
         'Model cache cleared',
-        'Cached local speech models removed from browser storage.'
+        'Cached Moonshine & Parakeet speech models removed from browser storage.'
       )
     } catch {
       pushToastRef.current(
@@ -518,9 +605,75 @@ export function useTranscription(
         'Browser storage prevented removing cached model weights.'
       )
     }
-  }, [stopCapturer, terminateWorker])
+  }, [clearMemoQueue, stopCapturer, terminateWorker])
 
-  // On-demand voice memo transcription (strictly reuses Trusted-Peers gated fetchVoiceMemoBlob)
+  // Sequential voice memo transcription drain (prevents fetch/decode stampedes when auto-transcribing)
+  const drainMemoQueue = useCallback(async (): Promise<void> => {
+    if (memoQueueRunningRef.current) return
+    memoQueueRunningRef.current = true
+    try {
+      while (memoQueueRef.current.length > 0) {
+        const item = memoQueueRef.current.shift()
+        if (!item) continue
+        activeMemoKeyRef.current = item.memoKey
+        const model = activeModelRef.current
+
+        try {
+          // Strict engine-level Trusted-Peers guard (never fetches untrusted memos)
+          const blobUrl = await fetchVoiceMemoBlobRef.current(
+            item.memo,
+            item.senderPubkey
+          )
+          const response = await fetch(blobUrl)
+          const blob = await response.blob()
+          const pcm16k = await decodeBlobToPcm16k(blob)
+
+          const worker = ensureWorker()
+          const requestId = nextRequestId('memo')
+
+          await new Promise<void>((resolve) => {
+            pendingRef.current.set(requestId, {
+              kind: 'memo',
+              memoKey: item.memoKey,
+              modelLabel: model.label,
+              resolve,
+            })
+            const payload: WorkerInMessage = {
+              type: 'transcribe',
+              requestId,
+              kind: 'memo',
+              engine: model.engine,
+              hfModelId: model.hfModelId,
+              dtype: model.dtype,
+              pcm16k,
+            }
+            worker.postMessage(payload, [pcm16k.buffer])
+          })
+        } catch (err) {
+          const message =
+            err instanceof Error
+              ? err.message
+              : 'Unable to transcribe voice memo.'
+          setMemoTranscripts((prev) => ({
+            ...prev,
+            [item.memoKey]: {
+              status: 'error',
+              error: message,
+              modelLabel: model.label,
+              updatedAt: Date.now(),
+            },
+          }))
+        } finally {
+          activeMemoKeyRef.current = null
+          for (const res of item.resolvers) res()
+        }
+      }
+    } finally {
+      memoQueueRunningRef.current = false
+    }
+  }, [ensureWorker, nextRequestId])
+
+  // On-demand & automatic voice memo transcription (strictly Trusted-Peers gated + serialized)
   const transcribeVoiceMemo = useCallback(
     async (
       memoKey: string,
@@ -528,6 +681,17 @@ export function useTranscription(
       senderPubkey: string
     ): Promise<void> => {
       if (!memoKey) return
+      if (activeMemoKeyRef.current === memoKey) return
+
+      const existingQueued = memoQueueRef.current.find(
+        (item) => item.memoKey === memoKey
+      )
+      if (existingQueued) {
+        return await new Promise<void>((resolve) => {
+          existingQueued.resolvers.push(resolve)
+        })
+      }
+
       if (memoTranscriptsRef.current[memoKey]?.status === 'loading') return
 
       const model = activeModelRef.current
@@ -540,50 +704,17 @@ export function useTranscription(
         },
       }))
 
-      try {
-        // Strict engine-level Trusted-Peers guard (never fetches untrusted memos)
-        const blobUrl = await fetchVoiceMemoBlobRef.current(memo, senderPubkey)
-        const response = await fetch(blobUrl)
-        const blob = await response.blob()
-        const pcm16k = await decodeBlobToPcm16k(blob)
-
-        const worker = ensureWorker()
-        const requestId = nextRequestId('memo')
-
-        await new Promise<void>((resolve) => {
-          pendingRef.current.set(requestId, {
-            kind: 'memo',
-            memoKey,
-            modelLabel: model.label,
-            resolve,
-          })
-          const payload: WorkerInMessage = {
-            type: 'transcribe',
-            requestId,
-            kind: 'memo',
-            hfModelId: model.hfModelId,
-            dtype: model.dtype,
-            pcm16k,
-          }
-          worker.postMessage(payload, [pcm16k.buffer])
+      await new Promise<void>((resolve) => {
+        memoQueueRef.current.push({
+          memoKey,
+          memo,
+          senderPubkey,
+          resolvers: [resolve],
         })
-      } catch (err) {
-        const message =
-          err instanceof Error
-            ? err.message
-            : 'Unable to transcribe voice memo.'
-        setMemoTranscripts((prev) => ({
-          ...prev,
-          [memoKey]: {
-            status: 'error',
-            error: message,
-            modelLabel: model.label,
-            updatedAt: Date.now(),
-          },
-        }))
-      }
+        void drainMemoQueue()
+      })
     },
-    [ensureWorker, nextRequestId]
+    [drainMemoQueue]
   )
 
   const handleCapturedSpeechSegment = useCallback(
@@ -609,6 +740,7 @@ export function useTranscription(
           type: 'transcribe',
           requestId,
           kind: 'live',
+          engine: model.engine,
           hfModelId: model.hfModelId,
           dtype: model.dtype,
           pcm16k: segment.pcm16k,
@@ -654,7 +786,7 @@ export function useTranscription(
     })
   }, [preloadModel, stopCapturer])
 
-  // Lifecycle sync between activeCall, liveCaptionsEnabled, and LiveStreamSpeechCapturer
+  // Lifecycle sync between activeCall, autoTranscribe, liveCaptionsEnabled, and LiveStreamSpeechCapturer
   useEffect(() => {
     const currentCallId = activeCall?.callId ?? null
 
@@ -671,12 +803,38 @@ export function useTranscription(
       return
     }
 
-    if (lastCallIdRef.current && lastCallIdRef.current !== currentCallId) {
-      setLiveCaptions([])
+    // Detect brand-new call join/start -> apply autoTranscribe default for this call
+    const isNewCall = lastCallIdRef.current !== currentCallId
+    if (isNewCall) {
+      if (lastCallIdRef.current !== null) {
+        setLiveCaptions([])
+      }
+      lastCallIdRef.current = currentCallId
+      const shouldEnable = autoTranscribeRef.current
+      if (liveCaptionsEnabledRef.current !== shouldEnable) {
+        liveCaptionsEnabledRef.current = shouldEnable
+        setLiveCaptionsEnabled(shouldEnable)
+      }
+      if (shouldEnable) {
+        void preloadModel().then((ok) => {
+          if (
+            !ok &&
+            liveCaptionsEnabledRef.current &&
+            activeCallRef.current?.callId === currentCallId
+          ) {
+            liveCaptionsEnabledRef.current = false
+            setLiveCaptionsEnabled(false)
+            stopCapturer()
+          }
+        })
+      }
     }
-    lastCallIdRef.current = currentCallId
 
-    if (!liveCaptionsEnabled) {
+    const effectiveEnabled = isNewCall
+      ? autoTranscribeRef.current
+      : liveCaptionsEnabled
+
+    if (!effectiveEnabled) {
       stopCapturer()
       return
     }
@@ -697,15 +855,22 @@ export function useTranscription(
     } else {
       capturerRef.current.syncParticipants(activeCall.participants)
     }
-  }, [activeCall, liveCaptionsEnabled, handleCapturedSpeechSegment, stopCapturer])
+  }, [
+    activeCall,
+    liveCaptionsEnabled,
+    handleCapturedSpeechSegment,
+    preloadModel,
+    stopCapturer,
+  ])
 
   // Clean up capturer & worker on unmount
   useEffect(() => {
     return () => {
+      clearMemoQueue()
       stopCapturer()
       terminateWorker()
     }
-  }, [stopCapturer, terminateWorker])
+  }, [clearMemoQueue, stopCapturer, terminateWorker])
 
   const clearCallTranscript = useCallback(() => {
     setLiveCaptions([])
@@ -741,6 +906,7 @@ export function useTranscription(
   }, [liveCaptions])
 
   const resetAllTranscription = useCallback(() => {
+    clearMemoQueue()
     stopCapturer()
     terminateWorker()
     liveCaptionsEnabledRef.current = false
@@ -749,6 +915,8 @@ export function useTranscription(
     setMemoTranscripts({})
     customModelsRef.current = []
     setCustomModels([])
+    autoTranscribeRef.current = DEFAULT_AUTO_TRANSCRIBE
+    setAutoTranscribeState(DEFAULT_AUTO_TRANSCRIBE)
     setActiveModelIdState(DEFAULT_TRANSCRIPTION_MODEL_ID)
     setModelStatus('idle')
     setDownloadProgress(0)
@@ -756,7 +924,7 @@ export function useTranscription(
     setRuntimeDevice(null)
     setModelError(null)
     lastCallIdRef.current = null
-  }, [stopCapturer, terminateWorker])
+  }, [clearMemoQueue, stopCapturer, terminateWorker])
 
   const transcription: TranscriptionEngine = useMemo(
     () => ({
@@ -766,6 +934,8 @@ export function useTranscription(
       setActiveModelId,
       addCustomModel,
       removeCustomModel,
+      autoTranscribe,
+      setAutoTranscribe,
       modelStatus,
       downloadProgress,
       downloadFile,
@@ -787,6 +957,8 @@ export function useTranscription(
       setActiveModelId,
       addCustomModel,
       removeCustomModel,
+      autoTranscribe,
+      setAutoTranscribe,
       modelStatus,
       downloadProgress,
       downloadFile,

@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   Ban,
+  Captions,
   Check,
   ChevronRight,
   Copy,
@@ -33,6 +34,7 @@ import {
   RECORDING_QUALITY_PRESETS,
   getRecordingQualitySpec,
 } from '../lib/callRecorder.ts'
+import { DEFAULT_TRANSCRIPTION_MODEL_ID } from '../lib/transcriptionModels.ts'
 import { radioAudio, type SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 
@@ -1019,6 +1021,27 @@ export function SettingsModal({
             100% local in your browser — audio never leaves your device.
           </p>
 
+          <label className="ag-set-toggle-card">
+            <div className="ag-set-toggle-copy">
+              <span className="ag-set-toggle-title">
+                <Captions size={16} />
+                <span>Automatic transcription</span>
+              </span>
+              <span className="ag-set-toggle-desc">
+                Auto-transcribe trusted voice memos and turn on live call captions (CC).
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              className="ag-switch"
+              checked={transcription.autoTranscribe}
+              onChange={() => {
+                transcription.setAutoTranscribe(!transcription.autoTranscribe)
+                onPlaySound?.('click')
+              }}
+            />
+          </label>
+
           <div
             className="ag-set-model-list"
             role="radiogroup"
@@ -1026,6 +1049,8 @@ export function SettingsModal({
           >
             {transcription.models.map((model) => {
               const selected = model.id === transcription.activeModelId
+              const isDefault = model.id === DEFAULT_TRANSCRIPTION_MODEL_ID
+              const isParakeet = model.engine === 'parakeet'
               return (
                 <div
                   key={model.id}
@@ -1047,11 +1072,20 @@ export function SettingsModal({
                     </span>
                     <span className="ag-set-model-copy">
                       <span className="ag-set-model-title-row">
-                        <span className="ag-set-model-name truncate">{model.label}</span>
+                        <span className="ag-set-model-name-wrap">
+                          <span className="ag-set-model-name truncate">{model.label}</span>
+                          {isDefault && <span className="ag-badge ag-badge-accent">Default</span>}
+                          {isParakeet && (
+                            <span className="ag-badge ag-badge-muted">Desktop WebGPU</span>
+                          )}
+                        </span>
                         <span className="ag-set-model-meta mono">
                           {model.sizeHint} · {model.languages}
                         </span>
                       </span>
+                      {model.description && (
+                        <span className="ag-set-model-desc">{model.description}</span>
+                      )}
                       <span className="ag-set-model-repo mono truncate" title={model.hfModelId}>
                         {model.hfModelId}
                       </span>

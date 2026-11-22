@@ -667,6 +667,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     isSenderExplicitlyTrusted={!msg.isOwn && engine.isExplicitlyTrusted(msg.pubkey)}
                     fetchVoiceMemoBlob={engine.fetchVoiceMemoBlob}
                     fetchImageAttachmentBlob={engine.fetchImageAttachmentBlob}
+                    autoTranscribe={engine.transcription.autoTranscribe}
                     memoTranscript={memoTranscript}
                     transcriptionModelStatus={engine.transcription.modelStatus}
                     transcriptionDownloadProgress={engine.transcription.downloadProgress}

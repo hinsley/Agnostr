@@ -72,6 +72,7 @@ export interface MessageItemProps {
   isSenderExplicitlyTrusted: boolean
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
   fetchImageAttachmentBlob: (image: ImageAttachment, senderPubkey: string) => Promise<string>
+  autoTranscribe?: boolean
   memoTranscript?: MemoTranscriptState
   transcriptionModelStatus?: TranscriptionModelStatus
   transcriptionDownloadProgress?: number
@@ -112,6 +113,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     isSenderExplicitlyTrusted,
     fetchVoiceMemoBlob,
     fetchImageAttachmentBlob,
+    autoTranscribe,
     memoTranscript,
     transcriptionModelStatus,
     transcriptionDownloadProgress,
@@ -370,6 +372,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 senderDisplayHandle={handle.full}
                 isTrusted={isSenderTrusted}
                 isDmMode={isEncryptedContext}
+                autoTranscribe={autoTranscribe}
                 fetchVoiceMemoBlob={fetchVoiceMemoBlob}
                 memoTranscript={memoTranscript}
                 transcriptionModelStatus={transcriptionModelStatus}

@@ -365,6 +365,21 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         },
       },
       {
+        id: 'act-auto-transcribe',
+        group: 'Actions',
+        title: 'Toggle Automatic Transcription',
+        subtitle: engine.transcription.autoTranscribe
+          ? `On — auto-transcribing trusted voice memos & call captions (${engine.transcription.activeModel.label})`
+          : 'Off — click Transcribe or CC manually when needed',
+        keywords: 'auto automatic transcription captions voice memo moonshine parakeet speech toggle',
+        badge: engine.transcription.autoTranscribe ? 'ON' : 'OFF',
+        icon: <Captions size={15} />,
+        run: () => {
+          engine.transcription.setAutoTranscribe(!engine.transcription.autoTranscribe)
+          onClose()
+        },
+      },
+      {
         id: 'act-trusted-only',
         group: 'Actions',
         title: 'Toggle Trusted Peers Only',

@@ -2739,19 +2739,32 @@
   cursor: pointer;
 }
 
-.ag-voice-track-col .ag-voice-waveform {
-  flex: 0 0 28px;
-  height: 28px;
-  width: 100%;
+.ag-voice-waveform.compact {
+  height: 18px;
+  gap: 2px;
+  padding: 1px 0;
+}
+
+.ag-voice-waveform.slim {
+  height: 14px;
+  gap: 1.5px;
+  padding: 1px 0;
+  opacity: 0.52;
+  transition: opacity var(--dur-fast) ease;
+}
+
+.ag-voice-mini-bar:hover .ag-voice-waveform.slim,
+.ag-voice-waveform.slim.playing {
+  opacity: 0.95;
 }
 
 .ag-voice-wave-bar {
   flex: 1;
-  min-width: 2px;
-  min-height: 4px;
+  min-width: 1.5px;
+  min-height: 3px;
   border-radius: 2px;
   background-color: var(--border-strong);
-  opacity: 0.72;
+  opacity: 0.65;
   transition: background-color 80ms ease, opacity 80ms ease;
 }
 
@@ -2764,16 +2777,161 @@
   background-color: var(--dm-accent);
 }
 
-/* Voice Player Card Left-Aligned in Stream */
+/* --------------------------------------------------------------------------
+   Transcription-First Compact Voice Memo (Primary Text + Quiet Slim Audio Strip)
+   -------------------------------------------------------------------------- */
+.ag-voice-transcribed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  max-width: 100%;
+}
+
+.ag-voice-lead-text {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.48;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.ag-voice-mini-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: min(320px, 100%);
+  height: 28px;
+  padding: 0 7px 0 3px;
+  border-radius: 7px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-voice-mini-bar:hover {
+  border-color: var(--border-default);
+}
+
+.ag-voice-mini-bar.playing {
+  border-color: var(--border-accent);
+}
+
+.ag-voice-mini-bar.dm.playing {
+  border-color: var(--dm-accent);
+}
+
+.ag-voice-mini-play {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-voice-mini-play:hover:not(:disabled),
+.ag-voice-mini-play.playing {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ag-voice-mini-play.dm:hover:not(:disabled),
+.ag-voice-mini-play.dm.playing {
+  background-color: var(--dm-soft);
+  color: var(--dm-accent);
+}
+
+.ag-voice-mini-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ag-voice-mini-bar.playing .ag-voice-mini-time {
+  color: var(--text-secondary);
+}
+
+.ag-voice-mini-speed {
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background-color: transparent;
+  flex-shrink: 0;
+  transition:
+    color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-voice-mini-speed:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+.ag-voice-mini-speed.boosted {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+.ag-voice-mini-lock {
+  display: inline-flex;
+  align-items: center;
+  color: var(--dm-accent);
+  opacity: 0.78;
+  flex-shrink: 0;
+}
+
+.ag-voice-mini-copy {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition:
+    color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-voice-mini-copy:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+/* --------------------------------------------------------------------------
+   Compact Pending / Loading / Manual Voice Memo Player
+   -------------------------------------------------------------------------- */
 .ag-voice-player {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  width: min(440px, 100%);
-  padding: 8px 10px;
-  border-radius: var(--radius-md);
+  gap: 5px;
+  width: min(390px, 100%);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
   background-color: var(--bg-surface);
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--border-subtle);
+  transition: border-color var(--dur-fast) ease;
+}
+
+.ag-voice-player:hover {
+  border-color: var(--border-default);
 }
 
 .ag-voice-player.playing {
@@ -2788,49 +2946,60 @@
   border-color: rgba(239, 68, 68, 0.45);
 }
 
-.ag-voice-player-main {
+.ag-voice-compact-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-}
-
-.ag-voice-track-col {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.ag-voice-meta-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   gap: 8px;
-  flex-wrap: wrap;
+  min-height: 28px;
+}
+
+.ag-voice-play-btn.compact {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ag-voice-play-btn.compact:hover:not(:disabled),
+.ag-voice-play-btn.compact.playing {
+  background-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+.ag-voice-play-btn.compact.dm {
+  background-color: var(--dm-soft);
+  color: var(--dm-accent);
+}
+
+.ag-voice-play-btn.compact.dm:hover:not(:disabled),
+.ag-voice-play-btn.compact.dm.playing {
+  background-color: var(--dm-accent);
+  color: #ffffff;
 }
 
 .ag-voice-time {
-  font-size: 11.5px;
-  color: var(--text-secondary);
+  font-size: 11px;
+  color: var(--text-muted);
   white-space: nowrap;
-}
-
-.ag-voice-pills {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+  flex-shrink: 0;
 }
 
 .ag-voice-speed-btn {
   height: 20px;
-  padding: 0 6px;
-  border-radius: 5px;
+  padding: 0 5px;
+  border-radius: 4px;
   font-size: 10.5px;
   font-weight: 600;
-  color: var(--text-secondary);
-  background-color: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  background-color: transparent;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+}
+
+.ag-voice-speed-btn:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
 }
 
 .ag-voice-speed-btn.boosted {
@@ -2839,7 +3008,7 @@
   color: var(--accent);
 }
 
-/* On-Demand Voice Memo Transcribe Trigger & Selectable Local Transcript Box */
+/* Compact On-Demand Transcribe Trigger & Slim Inline Progress */
 .ag-voice-transcribe-btn {
   display: inline-flex;
   align-items: center;
@@ -2853,6 +3022,7 @@
   background-color: var(--bg-elevated);
   border: 1px solid var(--border-default);
   white-space: nowrap;
+  flex-shrink: 0;
   transition:
     background-color var(--dur-fast) ease,
     border-color var(--dur-fast) ease,
@@ -2871,34 +3041,20 @@
   border-color: var(--dm-accent);
 }
 
-.ag-voice-transcribe-btn.active {
-  color: var(--accent);
-  background-color: var(--accent-soft);
-  border-color: var(--border-accent);
-}
-
-.ag-voice-transcribe-btn.dm.active {
-  color: var(--dm-accent);
-  background-color: var(--dm-soft);
-  border-color: var(--dm-accent);
-}
-
 .ag-voice-transcribe-status {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 7px 9px;
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  font-size: 12px;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 11.5px;
 }
 
 .ag-voice-transcribe-status-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
 }
 
@@ -2913,7 +3069,7 @@
 
 .ag-voice-transcribe-progress {
   width: 100%;
-  height: 3px;
+  height: 2px;
   border-radius: var(--radius-full);
   background-color: var(--bg-subtle);
   overflow: hidden;
@@ -2930,94 +3086,11 @@
   background-color: var(--dm-accent);
 }
 
-.ag-voice-transcript-box {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-left: 2.5px solid var(--accent);
-  user-select: text;
-  animation: ag-fade-in var(--dur-fast) ease;
-}
-
-.ag-voice-transcript-box.dm {
-  border-left-color: var(--dm-accent);
-}
-
-.ag-voice-transcript-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.ag-voice-transcript-model {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  min-width: 0;
-}
-
-.ag-voice-transcript-model svg {
-  color: var(--accent);
-  flex-shrink: 0;
-}
-
-.ag-voice-transcript-box.dm .ag-voice-transcript-model svg {
-  color: var(--dm-accent);
-}
-
-.ag-voice-transcript-local {
-  font-weight: 400;
-  color: var(--text-muted);
-}
-
-.ag-voice-transcript-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-}
-
-.ag-voice-transcript-act {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  height: 22px;
-  padding: 0 6px;
-  border-radius: 5px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background-color: transparent;
-  transition:
-    background-color var(--dur-fast) ease,
-    color var(--dur-fast) ease;
-}
-
-.ag-voice-transcript-act:hover {
-  background-color: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.ag-voice-transcript-text {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.48;
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .ag-voice-transcript-empty {
   margin: 0;
-  font-size: 12.5px;
+  padding-top: 3px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 12px;
   font-style: italic;
   color: var(--text-muted);
 }
@@ -3514,8 +3587,25 @@
     height: 38px;
   }
 
-  .ag-voice-transcribe-btn,
-  .ag-voice-transcript-act {
+  .ag-voice-mini-bar {
+    width: 100%;
+    height: 34px;
+    padding: 0 8px 0 4px;
+    gap: 8px;
+  }
+
+  .ag-voice-mini-play {
+    width: 26px;
+    height: 26px;
+  }
+
+  .ag-voice-mini-copy,
+  .ag-voice-mini-speed {
+    min-width: 26px;
+    height: 26px;
+  }
+
+  .ag-voice-transcribe-btn {
     height: 28px;
     padding: 0 9px;
   }

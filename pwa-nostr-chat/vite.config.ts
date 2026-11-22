@@ -7,6 +7,16 @@ export default defineConfig({
   base: '/Agnostr/',
   worker: {
     format: 'es',
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('/node_modules/parakeet.js/')) {
+            return 'parakeet'
+          }
+          return undefined
+        },
+      },
+    },
   },
   plugins: [
     react(),
@@ -93,7 +103,12 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,webmanifest,woff2}'],
-        globIgnores: ['**/transformers.web-*.js', '**/ort-wasm-*.wasm'],
+        globIgnores: [
+          '**/transformers.web-*.js',
+          '**/parakeet-*.js',
+          '**/ort.bundle*.js',
+          '**/ort-wasm-*.wasm',
+        ],
         navigateFallback: '/Agnostr/index.html',
         cleanupOutdatedCaches: true,
         runtimeCaching: [

@@ -2,6 +2,7 @@
 
 import type {
   TranscriptionModelDtype,
+  TranscriptionModelEngine,
   TranscriptionModelStatus,
   TranscriptionRuntimeDevice,
 } from '../types/transcription.ts'
@@ -10,6 +11,7 @@ export type WorkerInMessage =
   | {
       type: 'load'
       requestId: string
+      engine: TranscriptionModelEngine
       hfModelId: string
       dtype: TranscriptionModelDtype
     }
@@ -17,6 +19,7 @@ export type WorkerInMessage =
       type: 'transcribe'
       requestId: string
       kind: 'memo' | 'live'
+      engine: TranscriptionModelEngine
       hfModelId: string
       dtype: TranscriptionModelDtype
       pcm16k: Float32Array
@@ -63,6 +66,35 @@ interface AsrPipelineLike {
   dispose?: () => Promise<void>
 }
 
+interface ParakeetSessionLike {
+  release?: () => Promise<void>
+}
+
+interface ParakeetTensorLike {
+  dispose?: () => void
+}
+
+interface ParakeetModelLike {
+  encoderSession?: ParakeetSessionLike
+  joinerSession?: ParakeetSessionLike
+  _combState1?: ParakeetTensorLike
+  _combState2?: ParakeetTensorLike
+  _targetTensor?: ParakeetTensorLike
+  _targetLenTensor?: ParakeetTensorLike
+  clearIncrementalCache?: () => void
+  resetMelCache?: () => void
+  transcribe: (
+    audio: Float32Array,
+    sampleRate?: number,
+    opts?: { enableProfiling?: boolean }
+  ) => Promise<{ utterance_text?: string }>
+  transcribeLongAudio?: (
+    audio: Float32Array,
+    sampleRate?: number,
+    opts?: { chunkLengthS?: number; enableProfiling?: boolean }
+  ) => Promise<{ text?: string }>
+}
+
 interface ProgressEventLike {
   status?: string
   file?: string
@@ -75,9 +107,18 @@ interface QueuedJob {
   type: 'load' | 'transcribe'
   requestId: string
   kind: 'load' | 'memo' | 'live'
+  engine: TranscriptionModelEngine
   hfModelId: string
   dtype: TranscriptionModelDtype
   pcm16k?: Float32Array
+}
+
+interface ActiveModelHandle {
+  engine: TranscriptionModelEngine
+  key: string
+  device: TranscriptionRuntimeDevice
+  transformersPipe?: AsrPipelineLike
+  parakeetModel?: ParakeetModelLike
 }
 
 const SAMPLE_RATE = 16_000
@@ -86,10 +127,11 @@ const CHUNK_SLICE_SAMPLES = SAMPLE_RATE * 25
 const MAX_PENDING_LIVE_JOBS = 2
 
 let transformersModulePromise: Promise<typeof import('@huggingface/transformers')> | null = null
-let activePipeline: AsrPipelineLike | null = null
-let activeModelKey: string | null = null
-let activeRuntimeDevice: TranscriptionRuntimeDevice | null = null
-let webGpuFailed = false
+let parakeetModulePromise: Promise<typeof import('parakeet.js')> | null = null
+
+let activeHandle: ActiveModelHandle | null = null
+let transformersWebGpuFailed = false
+let parakeetWebGpuFailed = false
 
 const queue: QueuedJob[] = []
 let processing = false
@@ -98,8 +140,12 @@ function postOut(msg: WorkerOutMessage): void {
   self.postMessage(msg)
 }
 
-function modelCacheKey(hfModelId: string, dtype: TranscriptionModelDtype): string {
-  return `${hfModelId}::${JSON.stringify(dtype)}`
+function modelCacheKey(
+  engine: TranscriptionModelEngine,
+  hfModelId: string,
+  dtype: TranscriptionModelDtype
+): string {
+  return `${engine}::${hfModelId}::${JSON.stringify(dtype)}`
 }
 
 async function getTransformersModule(): Promise<typeof import('@huggingface/transformers')> {
@@ -123,49 +169,88 @@ async function getTransformersModule(): Promise<typeof import('@huggingface/tran
   return mod
 }
 
-async function hasWorkingWebGpu(): Promise<boolean> {
+async function getParakeetModule(): Promise<typeof import('parakeet.js')> {
+  if (!parakeetModulePromise) {
+    parakeetModulePromise = import('parakeet.js')
+  }
+  return await parakeetModulePromise
+}
+
+async function probeWebGpu(): Promise<{ available: boolean; hasFp16: boolean }> {
   try {
     const nav = navigator as Navigator & {
-      gpu?: { requestAdapter?: () => Promise<unknown> }
+      gpu?: {
+        requestAdapter?: () => Promise<{
+          features?: { has?: (feature: string) => boolean }
+        } | null>
+      }
     }
-    if (!nav.gpu || typeof nav.gpu.requestAdapter !== 'function') return false
+    if (!nav.gpu || typeof nav.gpu.requestAdapter !== 'function') {
+      return { available: false, hasFp16: false }
+    }
     const adapter = await nav.gpu.requestAdapter()
-    return Boolean(adapter)
+    if (!adapter) return { available: false, hasFp16: false }
+    const hasFp16 = Boolean(adapter.features?.has?.('shader-f16'))
+    return { available: true, hasFp16 }
   } catch {
-    return false
+    return { available: false, hasFp16: false }
   }
 }
 
-async function disposeActivePipeline(): Promise<void> {
-  const prev = activePipeline
-  activePipeline = null
-  activeModelKey = null
-  activeRuntimeDevice = null
-  if (prev && typeof prev.dispose === 'function') {
+async function disposeActiveModel(): Promise<void> {
+  const prev = activeHandle
+  activeHandle = null
+  if (!prev) return
+
+  if (prev.transformersPipe && typeof prev.transformersPipe.dispose === 'function') {
     try {
-      await prev.dispose()
+      await prev.transformersPipe.dispose()
     } catch {
       // Ignore disposal errors
     }
   }
+
+  if (prev.parakeetModel) {
+    const pm = prev.parakeetModel
+    try {
+      pm.clearIncrementalCache?.()
+      pm.resetMelCache?.()
+      pm._combState1?.dispose?.()
+      pm._combState2?.dispose?.()
+      pm._targetTensor?.dispose?.()
+      pm._targetLenTensor?.dispose?.()
+    } catch {
+      // Ignore tensor cleanup errors
+    }
+    try {
+      await pm.encoderSession?.release?.()
+    } catch {
+      // Ignore session release errors
+    }
+    try {
+      await pm.joinerSession?.release?.()
+    } catch {
+      // Ignore session release errors
+    }
+  }
 }
 
-async function ensurePipeline(
+async function ensureTransformersModel(
   hfModelId: string,
   dtype: TranscriptionModelDtype,
   forceWasm = false
-): Promise<{ pipe: AsrPipelineLike; device: TranscriptionRuntimeDevice }> {
-  const targetKey = modelCacheKey(hfModelId, dtype)
+): Promise<ActiveModelHandle> {
+  const targetKey = modelCacheKey('transformers', hfModelId, dtype)
   if (
-    activePipeline &&
-    activeModelKey === targetKey &&
-    activeRuntimeDevice &&
-    (!forceWasm || activeRuntimeDevice === 'wasm')
+    activeHandle &&
+    activeHandle.key === targetKey &&
+    activeHandle.transformersPipe &&
+    (!forceWasm || activeHandle.device === 'wasm')
   ) {
-    return { pipe: activePipeline, device: activeRuntimeDevice }
+    return activeHandle
   }
 
-  await disposeActivePipeline()
+  await disposeActiveModel()
 
   const mod = await getTransformersModule()
   const fileProgress = new Map<string, { loaded: number; total: number }>()
@@ -246,7 +331,8 @@ async function ensurePipeline(
     return await loader('automatic-speech-recognition', hfModelId, options)
   }
 
-  const tryWebGpu = !forceWasm && !webGpuFailed && (await hasWorkingWebGpu())
+  const gpu = await probeWebGpu()
+  const tryWebGpu = !forceWasm && !transformersWebGpuFailed && gpu.available
   let pipe: AsrPipelineLike
   let chosenDevice: TranscriptionRuntimeDevice
 
@@ -255,8 +341,7 @@ async function ensurePipeline(
       pipe = await createWithDevice('webgpu')
       chosenDevice = 'webgpu'
     } catch {
-      // Fall back cleanly to single-threaded / browser WASM when WebGPU rejects an op
-      webGpuFailed = true
+      transformersWebGpuFailed = true
       pipe = await createWithDevice('wasm')
       chosenDevice = 'wasm'
     }
@@ -265,9 +350,12 @@ async function ensurePipeline(
     chosenDevice = 'wasm'
   }
 
-  activePipeline = pipe
-  activeModelKey = targetKey
-  activeRuntimeDevice = chosenDevice
+  activeHandle = {
+    engine: 'transformers',
+    key: targetKey,
+    device: chosenDevice,
+    transformersPipe: pipe,
+  }
 
   postOut({
     type: 'status',
@@ -278,16 +366,171 @@ async function ensurePipeline(
     runtimeDevice: chosenDevice,
   })
 
-  return { pipe, device: chosenDevice }
+  return activeHandle
+}
+
+function weightForParakeetFile(fileName: string): number {
+  const lower = fileName.toLowerCase()
+  if (lower.includes('encoder')) return 0.96
+  if (lower.includes('decoder')) return 0.035
+  return 0.005
+}
+
+async function ensureParakeetModel(
+  hfModelId: string,
+  dtype: TranscriptionModelDtype,
+  forceWasm = false
+): Promise<ActiveModelHandle> {
+  const targetKey = modelCacheKey('parakeet', hfModelId, dtype)
+  if (
+    activeHandle &&
+    activeHandle.key === targetKey &&
+    activeHandle.parakeetModel &&
+    (!forceWasm || activeHandle.device === 'wasm')
+  ) {
+    return activeHandle
+  }
+
+  await disposeActiveModel()
+
+  const parakeet = await getParakeetModule()
+  const cpuThreads = self.crossOriginIsolated ? undefined : 1
+
+  postOut({
+    type: 'status',
+    status: 'downloading',
+    hfModelId,
+    progress: 0,
+    file: null,
+    runtimeDevice: null,
+  })
+
+  const loadWithBackend = async (
+    backend: 'webgpu-hybrid' | 'wasm',
+    encoderQuant: 'fp16' | 'int8'
+  ): Promise<ParakeetModelLike> => {
+    const fileFractions = new Map<string, number>()
+    let maxReportedPercent = 0
+    let lastReportTs = 0
+
+    const onProgress = (info: { loaded: number; total: number; file: string }) => {
+      const file = info.file || ''
+      const frac =
+        info.total > 0 ? Math.min(1, Math.max(0, info.loaded / info.total)) : 0
+      if (file) {
+        fileFractions.set(file, Math.max(fileFractions.get(file) ?? 0, frac))
+      }
+
+      let weighted = 0
+      for (const [name, f] of fileFractions.entries()) {
+        weighted += f * weightForParakeetFile(name)
+      }
+      const percent = Math.min(99, Math.max(maxReportedPercent, Math.round(weighted * 100)))
+      const now = Date.now()
+      if (percent !== maxReportedPercent || now - lastReportTs > 150) {
+        maxReportedPercent = percent
+        lastReportTs = now
+        postOut({
+          type: 'status',
+          status: 'downloading',
+          hfModelId,
+          progress: percent,
+          file: file || null,
+        })
+      }
+    }
+
+    const hubResult = await parakeet.getParakeetModel(hfModelId, {
+      backend,
+      encoderQuant,
+      decoderQuant: 'int8',
+      preprocessorBackend: 'js',
+      progress: onProgress,
+    })
+
+    try {
+      const model = (await parakeet.ParakeetModel.fromUrls({
+        ...hubResult.urls,
+        filenames: hubResult.filenames,
+        preprocessorBackend: 'js',
+        backend,
+        cpuThreads,
+      })) as unknown as ParakeetModelLike
+      return model
+    } finally {
+      // Revoke temporary blob URLs created from IndexedDB/fetch once sessions are built
+      for (const value of Object.values(hubResult.urls)) {
+        if (typeof value === 'string' && value.startsWith('blob:')) {
+          try {
+            URL.revokeObjectURL(value)
+          } catch {
+            // Ignore revoke failure
+          }
+        }
+      }
+    }
+  }
+
+  // On WebGPU with shader-f16, use webgpu-hybrid + fp16 encoder (avoids 2.36 GB fp32).
+  // Otherwise (or if WebGPU fails), fall back cleanly to int8 (~640 MB) on WASM.
+  const gpu = await probeWebGpu()
+  const tryWebGpuFp16 =
+    !forceWasm && !parakeetWebGpuFailed && gpu.available && gpu.hasFp16
+
+  let model: ParakeetModelLike
+  let chosenDevice: TranscriptionRuntimeDevice
+
+  if (tryWebGpuFp16) {
+    try {
+      model = await loadWithBackend('webgpu-hybrid', 'fp16')
+      chosenDevice = 'webgpu'
+    } catch {
+      parakeetWebGpuFailed = true
+      model = await loadWithBackend('wasm', 'int8')
+      chosenDevice = 'wasm'
+    }
+  } else {
+    model = await loadWithBackend('wasm', 'int8')
+    chosenDevice = 'wasm'
+  }
+
+  activeHandle = {
+    engine: 'parakeet',
+    key: targetKey,
+    device: chosenDevice,
+    parakeetModel: model,
+  }
+
+  postOut({
+    type: 'status',
+    status: 'ready',
+    hfModelId,
+    progress: 100,
+    file: null,
+    runtimeDevice: chosenDevice,
+  })
+
+  return activeHandle
+}
+
+async function ensureModel(
+  engine: TranscriptionModelEngine,
+  hfModelId: string,
+  dtype: TranscriptionModelDtype,
+  forceWasm = false
+): Promise<ActiveModelHandle> {
+  if (engine === 'parakeet') {
+    return await ensureParakeetModel(hfModelId, dtype, forceWasm)
+  }
+  return await ensureTransformersModel(hfModelId, dtype, forceWasm)
 }
 
 function cleanTranscriptText(raw: string): string {
-  const cleaned = raw
+  return raw
     .replace(/\[(?:BLANK_AUDIO|SILENCE|NO_SPEECH|MUSIC|INAUDIBLE)\]/gi, '')
     .replace(/\((?:silence|inaudible|music|blank audio)\)/gi, '')
     .replace(/\s+/g, ' ')
     .trim()
-  return cleaned
 }
 
 function extractTextFromOutput(out: AsrOutputLike | AsrOutputLike[]): string {
@@ -300,9 +543,32 @@ function extractTextFromOutput(out: AsrOutputLike | AsrOutputLike[]): string {
 }
 
 async function runTranscription(
-  pipe: AsrPipelineLike,
+  handle: ActiveModelHandle,
   pcm16k: Float32Array
 ): Promise<string> {
+  if (handle.engine === 'parakeet' && handle.parakeetModel) {
+    if (
+      pcm16k.length > LONG_AUDIO_THRESHOLD_SAMPLES &&
+      typeof handle.parakeetModel.transcribeLongAudio === 'function'
+    ) {
+      const longRes = await handle.parakeetModel.transcribeLongAudio(
+        pcm16k,
+        SAMPLE_RATE,
+        { chunkLengthS: 30, enableProfiling: false }
+      )
+      return cleanTranscriptText(longRes?.text ?? '')
+    }
+    const res = await handle.parakeetModel.transcribe(pcm16k, SAMPLE_RATE, {
+      enableProfiling: false,
+    })
+    return cleanTranscriptText(res?.utterance_text ?? '')
+  }
+
+  const pipe = handle.transformersPipe
+  if (!pipe) {
+    throw new Error('ASR pipeline is not initialized.')
+  }
+
   if (pcm16k.length <= LONG_AUDIO_THRESHOLD_SAMPLES) {
     const out = await pipe(pcm16k)
     return cleanTranscriptText(extractTextFromOutput(out))
@@ -331,7 +597,7 @@ async function processQueue(): Promise<void> {
       const job = queue.shift()
       if (!job) continue
       try {
-        const { pipe, device } = await ensurePipeline(job.hfModelId, job.dtype)
+        const handle = await ensureModel(job.engine, job.hfModelId, job.dtype)
         if (job.type === 'load') {
           postOut({
             type: 'result',
@@ -339,7 +605,7 @@ async function processQueue(): Promise<void> {
             kind: 'memo',
             text: '',
             hfModelId: job.hfModelId,
-            runtimeDevice: device,
+            runtimeDevice: handle.device,
           })
           continue
         }
@@ -352,21 +618,30 @@ async function processQueue(): Promise<void> {
             kind: job.kind === 'live' ? 'live' : 'memo',
             text: '',
             hfModelId: job.hfModelId,
-            runtimeDevice: device,
+            runtimeDevice: handle.device,
           })
           continue
         }
 
         let text: string
-        let finalDevice = device
+        let finalDevice = handle.device
         try {
-          text = await runTranscription(pipe, pcm)
+          text = await runTranscription(handle, pcm)
         } catch (inferErr) {
-          if (device === 'webgpu') {
-            webGpuFailed = true
-            const fallback = await ensurePipeline(job.hfModelId, job.dtype, true)
+          if (handle.device === 'webgpu') {
+            if (job.engine === 'parakeet') {
+              parakeetWebGpuFailed = true
+            } else {
+              transformersWebGpuFailed = true
+            }
+            const fallback = await ensureModel(
+              job.engine,
+              job.hfModelId,
+              job.dtype,
+              true
+            )
             finalDevice = fallback.device
-            text = await runTranscription(fallback.pipe, pcm)
+            text = await runTranscription(fallback, pcm)
           } else {
             throw inferErr
           }
@@ -382,7 +657,7 @@ async function processQueue(): Promise<void> {
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Local transcription failed.'
-        if (job.type === 'load' || !activePipeline) {
+        if (job.type === 'load' || !activeHandle) {
           postOut({
             type: 'status',
             status: 'error',
@@ -409,7 +684,7 @@ self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
 
   if (msg.type === 'dispose') {
     queue.length = 0
-    void disposeActivePipeline()
+    void disposeActiveModel()
     return
   }
 
@@ -418,6 +693,7 @@ self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
       type: 'load',
       requestId: msg.requestId,
       kind: 'load',
+      engine: msg.engine,
       hfModelId: msg.hfModelId,
       dtype: msg.dtype,
     })
@@ -439,7 +715,6 @@ self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
         if (dropped) {
           postOut({ type: 'dropped', requestId: dropped.requestId })
         }
-        // Adjust remaining indices after splice
         for (let j = 0; j < pendingLiveIndices.length; j++) {
           if (pendingLiveIndices[j] > dropIdx) pendingLiveIndices[j] -= 1
         }
@@ -450,6 +725,7 @@ self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
       type: 'transcribe',
       requestId: msg.requestId,
       kind: msg.kind,
+      engine: msg.engine,
       hfModelId: msg.hfModelId,
       dtype: msg.dtype,
       pcm16k: msg.pcm16k,

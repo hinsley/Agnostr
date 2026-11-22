@@ -1,22 +1,41 @@
 import type {
   TranscriptionDtypeValue,
   TranscriptionModelDtype,
+  TranscriptionModelEngine,
   TranscriptionModelSpec,
 } from '../types/transcription.ts'
 
 export const DEFAULT_TRANSCRIPTION_MODEL_ID = 'moonshine-base'
+export const DEFAULT_AUTO_TRANSCRIBE = true
 
 export const BUILTIN_TRANSCRIPTION_MODELS: readonly TranscriptionModelSpec[] = [
   {
     id: 'moonshine-base',
     label: 'Moonshine Base',
     hfModelId: 'onnx-community/moonshine-base-ONNX',
+    engine: 'transformers',
     sizeHint: '~64 MB',
     languages: 'English',
-    description: 'Fast, low-latency on-device speech recognition tuned for voice memos and live captions.',
+    description:
+      'Fast, lightweight default tuned for instant voice memos and live captions.',
     dtype: {
       encoder_model: 'q8',
       decoder_model_merged: 'q8',
+    },
+    isBuiltIn: true,
+  },
+  {
+    id: 'parakeet-tdt-0.6b-v3',
+    label: 'Parakeet TDT 0.6B',
+    hfModelId: 'ysdede/parakeet-tdt-0.6b-v3-onnx',
+    engine: 'parakeet',
+    sizeHint: '~640 MB–1.2 GB',
+    languages: 'Multilingual (25+)',
+    description:
+      'High-accuracy NVIDIA Parakeet TDT 0.6B v3 (heavier download — best on desktop WebGPU).',
+    dtype: {
+      encoder_model: 'int8',
+      decoder_joint: 'int8',
     },
     isBuiltIn: true,
   },
@@ -46,6 +65,16 @@ export function normalizeHfModelId(raw: string): string | null {
   return trimmed
 }
 
+export function inferTranscriptionEngine(
+  hfModelId: string,
+  explicit?: unknown
+): TranscriptionModelEngine {
+  if (explicit === 'parakeet' || explicit === 'transformers') {
+    return explicit
+  }
+  return /parakeet-tdt/i.test(hfModelId) ? 'parakeet' : 'transformers'
+}
+
 export function isValidTranscriptionDtype(raw: unknown): raw is TranscriptionModelDtype {
   if (typeof raw === 'string') {
     return VALID_DTYPES.has(raw as TranscriptionDtypeValue)
@@ -54,7 +83,10 @@ export function isValidTranscriptionDtype(raw: unknown): raw is TranscriptionMod
     const entries = Object.entries(raw as Record<string, unknown>)
     if (entries.length === 0) return false
     return entries.every(
-      ([k, v]) => k.trim().length > 0 && typeof v === 'string' && VALID_DTYPES.has(v as TranscriptionDtypeValue)
+      ([k, v]) =>
+        k.trim().length > 0 &&
+        typeof v === 'string' &&
+        VALID_DTYPES.has(v as TranscriptionDtypeValue)
     )
   }
   return false
@@ -82,15 +114,23 @@ export function createCustomTranscriptionModel(
 ): TranscriptionModelSpec | null {
   const hfModelId = normalizeHfModelId(rawHfModelId)
   if (!hfModelId) return null
-  const slug = hfModelId.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  const engine = inferTranscriptionEngine(hfModelId)
+  const slug = hfModelId
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
   return {
     id: `custom:${slug}`,
     label: deriveCustomModelLabel(hfModelId, customLabel),
     hfModelId,
-    sizeHint: 'Custom ONNX',
+    engine,
+    sizeHint: engine === 'parakeet' ? '~640 MB+' : 'Custom ONNX',
     languages: 'Model-dependent',
     description: `Custom Hugging Face ONNX ASR model (${hfModelId}).`,
-    dtype: 'q8',
+    dtype:
+      engine === 'parakeet'
+        ? { encoder_model: 'int8', decoder_joint: 'int8' }
+        : 'q8',
     isBuiltIn: false,
   }
 }
@@ -115,17 +155,31 @@ export function mergeTranscriptionModels(
     if (seenIds.has(item.id) || seenHfIds.has(hfId.toLowerCase())) continue
     seenIds.add(item.id)
     seenHfIds.add(hfId.toLowerCase())
+    const engine = inferTranscriptionEngine(hfId, item.engine)
     out.push({
       id: item.id,
       label: deriveCustomModelLabel(hfId, item.label),
       hfModelId: hfId,
-      sizeHint: typeof item.sizeHint === 'string' && item.sizeHint.trim() ? item.sizeHint.trim() : 'Custom ONNX',
-      languages: typeof item.languages === 'string' && item.languages.trim() ? item.languages.trim() : 'Model-dependent',
+      engine,
+      sizeHint:
+        typeof item.sizeHint === 'string' && item.sizeHint.trim()
+          ? item.sizeHint.trim()
+          : engine === 'parakeet'
+            ? '~640 MB+'
+            : 'Custom ONNX',
+      languages:
+        typeof item.languages === 'string' && item.languages.trim()
+          ? item.languages.trim()
+          : 'Model-dependent',
       description:
         typeof item.description === 'string' && item.description.trim()
           ? item.description.trim()
           : `Custom Hugging Face ONNX ASR model (${hfId}).`,
-      dtype: isValidTranscriptionDtype(item.dtype) ? item.dtype : 'q8',
+      dtype: isValidTranscriptionDtype(item.dtype)
+        ? item.dtype
+        : engine === 'parakeet'
+          ? { encoder_model: 'int8', decoder_joint: 'int8' }
+          : 'q8',
       isBuiltIn: false,
     })
   }

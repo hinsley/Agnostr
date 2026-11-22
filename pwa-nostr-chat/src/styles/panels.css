@@ -3706,9 +3706,18 @@
 
 .ag-set-model-title-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  flex-wrap: wrap;
+  gap: 0.32rem 0.5rem;
+  min-width: 0;
+}
+
+.ag-set-model-name-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
   min-width: 0;
 }
 
@@ -3723,6 +3732,12 @@
   color: var(--text-secondary);
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+.ag-set-model-desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
 }
 
 .ag-set-model-repo {
