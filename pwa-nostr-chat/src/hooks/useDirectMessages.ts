@@ -20,6 +20,39 @@ import { loadDmThreads, saveDmThreads } from '../lib/storage.ts'
 import { formatVoiceDuration } from '../lib/voiceRecorder.ts'
 
 const DM_LOOKBACK_SEC = 3 * 24 * 60 * 60 // 3 days to account for NIP-59 ±2d randomized timestamps
+const DM_BACKLOG_FALLBACK_MS = 2500
+const DM_EOSE_GRACE_MS = 500
+const LIVE_RECENCY_WINDOW_MS = 10 * 60 * 1000 // 10 minutes tolerance for live clock skew
+
+export function getDmOrderKey(msg: Pick<DmMessage, 'orderMs' | 'createdAt'>): number {
+  return typeof msg.orderMs === 'number' && Number.isFinite(msg.orderMs)
+    ? msg.orderMs
+    : msg.createdAt * 1000
+}
+
+export function compareDmMessages(a: DmMessage, b: DmMessage): number {
+  const diff = getDmOrderKey(a) - getDmOrderKey(b)
+  if (diff !== 0) return diff
+  return a.id.localeCompare(b.id)
+}
+
+function getMaxOrderMs(messages: readonly DmMessage[]): number {
+  let max = 0
+  for (const m of messages) {
+    const k = getDmOrderKey(m)
+    if (k > max) max = k
+  }
+  return max
+}
+
+function formatDmPreview(msg: DmMessage): string {
+  if (msg.voiceMemo) {
+    return msg.content
+      ? `🎤 ${msg.content}`.slice(0, 96)
+      : `🎤 Voice memo (${formatVoiceDuration(msg.voiceMemo.durationSec)})`
+  }
+  return msg.content.slice(0, 96)
+}
 
 export interface UseDirectMessagesOptions {
   pool: RelayPool | null
@@ -50,6 +83,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
   const [threads, setThreads] = useState<DmThread[]>(() => loadDmThreads())
   const processedWrapIdsRef = useRef<Set<string>>(new Set())
+  const dmBacklogSettledRef = useRef<boolean>(false)
   const activeDmPeerRef = useRef<string | null>(activeDmPeer)
   const blockedRef = useRef<Set<string>>(blockedPubkeys)
   const onIncomingRef = useRef(onIncomingDm)
@@ -103,12 +137,33 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     const pTags = Array.from(recipientByPubkey.keys())
     if (pTags.length === 0) return
 
+    dmBacklogSettledRef.current = false
+    const eoseRelays = new Set<string>()
+    let eoseGraceTimer: number | null = null
+    const settleBacklog = () => {
+      dmBacklogSettledRef.current = true
+      if (eoseGraceTimer !== null) {
+        window.clearTimeout(eoseGraceTimer)
+        eoseGraceTimer = null
+      }
+      window.clearTimeout(fallbackTimer)
+    }
+    const fallbackTimer = window.setTimeout(settleBacklog, DM_BACKLOG_FALLBACK_MS)
+
     const since = Math.floor(Date.now() / 1000) - DM_LOOKBACK_SEC
     const unsub = pool.subscribe(
       `agnostr-dm-${pTags.join('-').slice(0, 24)}`,
       dmRelays,
       [{ kinds: [KIND_GIFT_WRAP], '#p': pTags, since, limit: 150 }],
       {
+        onEose: (relayUrl) => {
+          eoseRelays.add(relayUrl)
+          if (eoseRelays.size >= dmRelays.length) {
+            settleBacklog()
+          } else if (eoseGraceTimer === null) {
+            eoseGraceTimer = window.setTimeout(settleBacklog, DM_EOSE_GRACE_MS)
+          }
+        },
         onEvent: (ev) => {
           if (ev.kind !== KIND_GIFT_WRAP) return
           if (processedWrapIdsRef.current.has(ev.id)) return
@@ -124,6 +179,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           const recipient = recipientByPubkey.get(targetTag)
           if (!recipient) return
 
+          const arrivedAfterEose = dmBacklogSettledRef.current
+          const receivedAtMs = Date.now()
           const wipeGen = identityManager.getWipeGeneration()
           void decryptGiftWrapEvent(ev, recipient).then((decrypted) => {
             if (!decrypted) return
@@ -165,7 +222,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             const handle = formatDisplayHandle(nick, senderPk)
             const isViewing = activeDmPeerRef.current?.toLowerCase() === senderPk
 
-            const newMsg: DmMessage = {
+            const rawMsgMs = decrypted.timestampMs ?? decrypted.createdAt * 1000
+            const clampedBacklogMs = Math.min(rawMsgMs, receivedAtMs)
+            const isLiveRecent =
+              arrivedAfterEose && Math.abs(receivedAtMs - rawMsgMs) <= LIVE_RECENCY_WINDOW_MS
+
+            const baseMsg: DmMessage = {
               id: decrypted.id,
               peerPubkey: senderPk,
               senderPubkey: senderPk,
@@ -182,9 +244,15 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               const existingIdx = prev.findIndex((t) => t.peerPubkey === senderPk)
               if (existingIdx !== -1) {
                 const existing = prev[existingIdx]
-                if (existing.messages.some((m) => m.id === newMsg.id)) return prev
+                if (existing.messages.some((m) => m.id === baseMsg.id)) return prev
                 added = true
-                const nextMsgs = [...existing.messages, newMsg].sort((a, b) => a.createdAt - b.createdAt)
+                const lastOrder = getMaxOrderMs(existing.messages)
+                const newMsg: DmMessage = {
+                  ...baseMsg,
+                  orderMs: isLiveRecent ? Math.max(receivedAtMs, lastOrder + 1) : clampedBacklogMs,
+                }
+                const nextMsgs = [...existing.messages, newMsg].sort(compareDmMessages)
+                const tail = nextMsgs[nextMsgs.length - 1]
                 const updated: DmThread = {
                   ...existing,
                   peerNickname: nick,
@@ -192,8 +260,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                   protocol: decrypted.protocol,
                   messages: nextMsgs,
                   unreadCount: isViewing ? 0 : existing.unreadCount + 1,
-                  lastMessageAt: Math.max(existing.lastMessageAt, newMsg.createdAt),
-                  lastPreview: previewText.slice(0, 96),
+                  lastMessageAt: tail.createdAt,
+                  lastPreview: formatDmPreview(tail),
                 }
                 const copy = [...prev]
                 copy[existingIdx] = updated
@@ -201,6 +269,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                 return copy
               }
               added = true
+              const newMsg: DmMessage = {
+                ...baseMsg,
+                orderMs: isLiveRecent ? receivedAtMs : clampedBacklogMs,
+              }
               const created: DmThread = {
                 peerPubkey: senderPk,
                 peerNpub: encodeNpubSafe(senderPk),
@@ -210,7 +282,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                 messages: [newMsg],
                 unreadCount: isViewing ? 0 : 1,
                 lastMessageAt: newMsg.createdAt,
-                lastPreview: previewText.slice(0, 96),
+                lastPreview: formatDmPreview(newMsg),
               }
               return [created, ...prev].sort((a, b) => b.lastMessageAt - a.lastMessageAt)
             })
@@ -224,6 +296,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     )
 
     return () => {
+      window.clearTimeout(fallbackTimer)
+      if (eoseGraceTimer !== null) window.clearTimeout(eoseGraceTimer)
       unsub()
     }
   }, [pool, dmRelays, activeGeohash, identityManager, presenceTracker, identityVersion])
@@ -297,14 +371,16 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         (signer.mode === 'extension' ? 'nip17' : 'bitchat')
 
       const localMsgId = bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
-      const nowSec = Math.floor(Date.now() / 1000)
+      const nowMs = Date.now()
+      const nowSec = Math.floor(nowMs / 1000)
 
-      const optimistic: DmMessage = {
+      const optimisticBase: DmMessage = {
         id: localMsgId,
         peerPubkey: pk,
         senderPubkey: signer.pubkey,
         content,
         createdAt: nowSec,
+        orderMs: nowMs,
         isOwn: true,
         protocol: chosenProtocol,
         deliveryStatus: 'sending',
@@ -316,11 +392,18 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       setThreads((prev) => {
         const idx = prev.findIndex((t) => t.peerPubkey === pk)
         if (idx !== -1) {
+          const lastOrder = getMaxOrderMs(prev[idx].messages)
+          const optimistic: DmMessage = {
+            ...optimisticBase,
+            orderMs: Math.max(nowMs, lastOrder + 1),
+          }
+          const nextMsgs = [...prev[idx].messages, optimistic].sort(compareDmMessages)
+          const tail = nextMsgs[nextMsgs.length - 1]
           const updated: DmThread = {
             ...prev[idx],
-            messages: [...prev[idx].messages, optimistic],
-            lastMessageAt: nowSec,
-            lastPreview: content.slice(0, 96),
+            messages: nextMsgs,
+            lastMessageAt: tail.createdAt,
+            lastPreview: formatDmPreview(tail),
             unreadCount: 0,
           }
           const copy = [...prev]
@@ -334,10 +417,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           peerNickname: nick,
           peerDisplayHandle: handle,
           protocol: chosenProtocol,
-          messages: [optimistic],
+          messages: [optimisticBase],
           unreadCount: 0,
           lastMessageAt: nowSec,
-          lastPreview: content.slice(0, 96),
+          lastPreview: formatDmPreview(optimisticBase),
         }
         return [created, ...prev]
       })
@@ -403,9 +486,6 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       const pk = peerPubkey.toLowerCase()
       const cleanCaption = caption?.trim() ?? ''
       const wireContent = encodeDmVoicePayload(voiceMemo, cleanCaption)
-      const previewText = cleanCaption
-        ? `🎤 ${cleanCaption}`
-        : `🎤 Voice memo (${formatVoiceDuration(voiceMemo.durationSec)})`
 
       const existingThread = threads.find((t) => t.peerPubkey === pk)
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
@@ -415,14 +495,16 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         (signer.mode === 'extension' ? 'nip17' : 'bitchat')
 
       const localMsgId = bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
-      const nowSec = Math.floor(Date.now() / 1000)
+      const nowMs = Date.now()
+      const nowSec = Math.floor(nowMs / 1000)
 
-      const optimistic: DmMessage = {
+      const optimisticBase: DmMessage = {
         id: localMsgId,
         peerPubkey: pk,
         senderPubkey: signer.pubkey,
         content: cleanCaption,
         createdAt: nowSec,
+        orderMs: nowMs,
         isOwn: true,
         protocol: chosenProtocol,
         voiceMemo,
@@ -435,11 +517,18 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       setThreads((prev) => {
         const idx = prev.findIndex((t) => t.peerPubkey === pk)
         if (idx !== -1) {
+          const lastOrder = getMaxOrderMs(prev[idx].messages)
+          const optimistic: DmMessage = {
+            ...optimisticBase,
+            orderMs: Math.max(nowMs, lastOrder + 1),
+          }
+          const nextMsgs = [...prev[idx].messages, optimistic].sort(compareDmMessages)
+          const tail = nextMsgs[nextMsgs.length - 1]
           const updated: DmThread = {
             ...prev[idx],
-            messages: [...prev[idx].messages, optimistic],
-            lastMessageAt: nowSec,
-            lastPreview: previewText.slice(0, 96),
+            messages: nextMsgs,
+            lastMessageAt: tail.createdAt,
+            lastPreview: formatDmPreview(tail),
             unreadCount: 0,
           }
           const copy = [...prev]
@@ -453,10 +542,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           peerNickname: nick,
           peerDisplayHandle: handle,
           protocol: chosenProtocol,
-          messages: [optimistic],
+          messages: [optimisticBase],
           unreadCount: 0,
           lastMessageAt: nowSec,
-          lastPreview: previewText.slice(0, 96),
+          lastPreview: formatDmPreview(optimisticBase),
         }
         return [created, ...prev]
       })

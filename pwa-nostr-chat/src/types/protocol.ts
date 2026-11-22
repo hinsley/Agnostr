@@ -238,6 +238,8 @@ export interface DmMessage {
   senderPubkey: string
   content: string
   createdAt: number // unix seconds
+  /** Monotonic causal sort key in unix ms (prevents clock-skew reordering across sessions) */
+  orderMs?: number
   isOwn: boolean
   protocol: DmProtocol
   voiceMemo?: VoiceMemoAttachment

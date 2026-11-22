@@ -110,9 +110,19 @@ export interface DecryptedDm {
   senderPubkey: string
   content: string
   createdAt: number
+  /** Millisecond timestamp extracted from Bitchat binary packet when available */
+  timestampMs?: number
   protocol: DmProtocol
   embeddedMessageId?: string
   ackType?: 'delivered' | 'read'
+}
+
+const MIN_VALID_EPOCH_MS = 1_577_836_800_000 // 2020-01-01T00:00:00Z
+
+function clampDmCreatedAtSec(rawSec: number): number {
+  const nowSec = Math.floor(Date.now() / 1000)
+  if (!Number.isFinite(rawSec) || rawSec <= 0) return nowSec
+  return Math.min(Math.floor(rawSec), nowSec)
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -227,6 +237,7 @@ interface DecodedBitchatPayload {
   kind: 'pm' | 'delivered' | 'read'
   messageId: string
   content?: string
+  timestampMs?: number
 }
 
 export function decodeBitchatEmbeddedPayload(rawContent: string): DecodedBitchatPayload | null {
@@ -247,6 +258,17 @@ export function decodeBitchatEmbeddedPayload(rawContent: string): DecodedBitchat
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
   const headerSize = version === 2 ? 16 : 14
   if (data.length < headerSize + 8) return null
+
+  // Extract 8-byte big-endian millisecond timestamp from packet header bytes 3..10
+  let timestampMs: number | undefined
+  try {
+    const rawMs = Number(view.getBigUint64(3, false))
+    if (Number.isFinite(rawMs) && rawMs >= MIN_VALID_EPOCH_MS && rawMs <= Date.now() + 86_400_000) {
+      timestampMs = rawMs
+    }
+  } catch {
+    timestampMs = undefined
+  }
 
   const payloadLen = version === 2 ? view.getUint32(12, false) : view.getUint16(12, false)
   const payloadOffset = headerSize + 8 + (hasRecipient ? 8 : 0)
@@ -274,7 +296,7 @@ export function decodeBitchatEmbeddedPayload(rawContent: string): DecodedBitchat
       }
     }
     if (messageId !== null && content !== null) {
-      return { kind: 'pm', messageId, content }
+      return { kind: 'pm', messageId, content, timestampMs }
     }
     return null
   }
@@ -282,7 +304,7 @@ export function decodeBitchatEmbeddedPayload(rawContent: string): DecodedBitchat
   if (noiseType === 0x02 || noiseType === 0x03) {
     try {
       const messageId = utf8Decoder.decode(payload.slice(1))
-      return { kind: noiseType === 0x02 ? 'read' : 'delivered', messageId }
+      return { kind: noiseType === 0x02 ? 'read' : 'delivered', messageId, timestampMs }
     } catch {
       return null
     }
@@ -439,13 +461,23 @@ export async function decryptGiftWrapEvent(
     }
 
     const decodedEmbedded = decodeBitchatEmbeddedPayload(rumor.content)
+    const rawRumorSec = typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at
     if (decodedEmbedded) {
+      const embeddedSec =
+        typeof decodedEmbedded.timestampMs === 'number'
+          ? Math.floor(decodedEmbedded.timestampMs / 1000)
+          : rawRumorSec
+      const clampedTsMs =
+        typeof decodedEmbedded.timestampMs === 'number'
+          ? Math.min(decodedEmbedded.timestampMs, Date.now())
+          : undefined
       if (decodedEmbedded.kind === 'delivered' || decodedEmbedded.kind === 'read') {
         return {
           id: giftWrap.id,
           senderPubkey: seal.pubkey.toLowerCase(),
           content: '',
-          createdAt: typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at,
+          createdAt: clampDmCreatedAtSec(embeddedSec),
+          timestampMs: clampedTsMs,
           protocol: 'bitchat',
           embeddedMessageId: decodedEmbedded.messageId,
           ackType: decodedEmbedded.kind,
@@ -455,7 +487,8 @@ export async function decryptGiftWrapEvent(
         id: decodedEmbedded.messageId || giftWrap.id,
         senderPubkey: seal.pubkey.toLowerCase(),
         content: decodedEmbedded.content ?? '',
-        createdAt: typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at,
+        createdAt: clampDmCreatedAtSec(embeddedSec),
+        timestampMs: clampedTsMs,
         protocol: 'bitchat',
         embeddedMessageId: decodedEmbedded.messageId,
       }
@@ -465,7 +498,7 @@ export async function decryptGiftWrapEvent(
       id: giftWrap.id,
       senderPubkey: seal.pubkey.toLowerCase(),
       content: rumor.content,
-      createdAt: typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at,
+      createdAt: clampDmCreatedAtSec(rawRumorSec),
       protocol: 'bitchat',
     }
   }
@@ -479,7 +512,7 @@ export async function decryptGiftWrapEvent(
         id: rumor.id || giftWrap.id,
         senderPubkey: rumor.pubkey.toLowerCase(),
         content: rumor.content,
-        createdAt: rumor.created_at,
+        createdAt: clampDmCreatedAtSec(rumor.created_at),
         protocol: 'nip17',
       }
     } catch {
@@ -509,11 +542,12 @@ export async function decryptGiftWrapEvent(
       ) {
         return null
       }
+      const rawSec = typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at
       return {
         id: rumor.id || giftWrap.id,
         senderPubkey: seal.pubkey.toLowerCase(),
         content: rumor.content,
-        createdAt: typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at,
+        createdAt: clampDmCreatedAtSec(rawSec),
         protocol: 'nip17',
       }
     } catch {

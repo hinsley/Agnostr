@@ -372,7 +372,7 @@ export function buildLocationNoteTemplate(opts: {
 
 export function clampTimestamp(createdAt: number): number {
   const nowSec = Math.floor(Date.now() / 1000)
-  return Math.min(createdAt, nowSec + 15)
+  return Math.min(createdAt, nowSec)
 }
 
 export function parseGeohashChatEvent(

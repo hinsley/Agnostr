@@ -387,7 +387,18 @@ export function clearChannelMessagesStorage(geohash: string): void {
 export function loadDmThreads(): DmThread[] {
   const parsed = safeJsonParse<DmThread[]>(safeGet(KEYS.dmThreads), [])
   if (!Array.isArray(parsed)) return []
-  return parsed.filter((t) => t && typeof t.peerPubkey === 'string' && Array.isArray(t.messages))
+  return parsed
+    .filter((t) => t && typeof t.peerPubkey === 'string' && Array.isArray(t.messages))
+    .map((t) => ({
+      ...t,
+      messages: t.messages
+        .filter((m) => m && typeof m.id === 'string' && typeof m.createdAt === 'number')
+        .map((m) => ({
+          ...m,
+          orderMs:
+            typeof m.orderMs === 'number' && Number.isFinite(m.orderMs) ? m.orderMs : undefined,
+        })),
+    }))
 }
 
 export function saveDmThreads(threads: DmThread[]): void {
