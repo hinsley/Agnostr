@@ -2517,6 +2517,151 @@
 }
 
 /* --------------------------------------------------------------------------
+   PWA Status Banners (Offline / Update Ready), Sidebar Install & Safe Areas
+   -------------------------------------------------------------------------- */
+.ag-pwa-banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.36rem 0.9rem;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-pwa-banner.offline {
+  background-color: var(--status-warn-soft);
+  color: var(--status-warn);
+  border-bottom-color: rgba(245, 158, 11, 0.28);
+}
+
+.ag-pwa-banner.update {
+  background-color: var(--accent-soft);
+  color: var(--text-primary);
+  border-bottom-color: var(--border-accent);
+}
+
+.ag-pwa-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ag-pwa-banner.update .ag-pwa-banner-left svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-pwa-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.ag-pwa-reload-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  height: 24px;
+  padding: 0 0.6rem;
+  border-radius: var(--radius-xs);
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  transition: filter var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+
+.ag-pwa-reload-btn:hover {
+  filter: brightness(1.08);
+}
+
+.ag-pwa-reload-btn:active {
+  transform: scale(0.96);
+}
+
+.ag-pwa-dismiss-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+
+.ag-pwa-dismiss-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-sidebar-install-wrap {
+  flex-shrink: 0;
+  padding: 0.45rem 0.65rem 0.42rem;
+  border-top: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+}
+
+.ag-sidebar-install-btn {
+  width: 100%;
+  height: 32px;
+  padding: 0 0.6rem;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  background-color: var(--accent-soft);
+  border: 1px solid var(--border-accent);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  transition: background-color var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+
+.ag-sidebar-install-btn:hover {
+  background-color: var(--bg-active);
+}
+
+.ag-sidebar-install-btn:active {
+  transform: scale(0.985);
+}
+
+.ag-sidebar-install-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
+/* Standalone Installed PWA Safe-Area Polish (iOS Dynamic Island / Home Indicator / Android WCO) */
+@media (display-mode: standalone), (display-mode: window-controls-overlay) {
+  .ag-header {
+    padding-top: max(env(safe-area-inset-top, 0px), env(titlebar-area-y, 0px));
+  }
+
+  .ag-composer-dock {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+  }
+
+  .ag-sidebar-footer {
+    padding-bottom: max(0.65rem, env(safe-area-inset-bottom, 0px));
+  }
+
+  .ag-toast-stack {
+    top: calc(var(--header-h) + env(safe-area-inset-top, 0px) + 12px);
+  }
+}
+
+/* --------------------------------------------------------------------------
    Mobile Tweaks
    -------------------------------------------------------------------------- */
 @media (max-width: 767px) {
@@ -2538,6 +2683,10 @@
     padding: 0.4rem 0.65rem;
     flex-wrap: wrap;
     gap: 0.4rem;
+  }
+
+  .ag-pwa-banner {
+    padding: 0.36rem 0.65rem;
   }
 
   .ag-quick-tune-wrap {

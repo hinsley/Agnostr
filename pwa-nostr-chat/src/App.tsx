@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { RefreshCw, WifiOff, X } from 'lucide-react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
+import { usePwa } from './hooks/usePwa'
 import type { GeoMessage, InspectorTab, PeerInfo, ThemeId } from './types/protocol'
 import type { ServerMessage, ServerSummary } from './types/servers'
 import { radioAudio, type SoundCue } from './utils/sound'
@@ -17,6 +19,7 @@ import ToastStack from './components/ToastStack'
 import InspectorDrawer from './components/InspectorDrawer'
 import PeerInspectorModal from './components/PeerInspectorModal'
 import ExpandedRadarModal from './components/ExpandedRadarModal'
+import PwaInstallModal from './components/PwaInstallModal'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#090C0A',
@@ -60,6 +63,7 @@ export function App() {
   const [searchMatchIdx, setSearchMatchIdx] = useState(0)
   const [inspectedPeer, setInspectedPeer] = useState<PeerInfo | null>(null)
   const [radarExpanded, setRadarExpanded] = useState(false)
+  const [installModalOpen, setInstallModalOpen] = useState(false)
   const [serverHubState, setServerHubState] = useState<{ open: boolean; tab: ServerHubTab }>({
     open: false,
     tab: 'create',
@@ -84,6 +88,14 @@ export function App() {
   const activeServer = engine.servers.activeServer
   const activeChannel = engine.servers.activeChannel
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
+
+  // Total unread count across DMs, Servers, and pinned Geohash channels for PWA App Badge
+  const totalUnreadBadge = useMemo(() => {
+    const pinnedUnread = engine.pinnedChannels.reduce((sum, ch) => sum + ch.unreadCount, 0)
+    return engine.totalDmUnread + engine.servers.totalServerUnread + pinnedUnread
+  }, [engine.totalDmUnread, engine.servers.totalServerUnread, engine.pinnedChannels])
+
+  const pwa = usePwa(totalUnreadBadge)
 
   const settingsServer: ServerSummary | null = useMemo(() => {
     if (!serverSettingsState.serverId) return null
@@ -214,6 +226,7 @@ export function App() {
     ) {
       setServerSettingsState({ serverId: null, tab: 'overview' })
       setRadarExpanded(false)
+      setInstallModalOpen(false)
       setPanicFlash(true)
       const t = window.setTimeout(() => setPanicFlash(false), 700)
       prevMasterPkRef.current = engine.identity.masterPubkey
@@ -306,6 +319,8 @@ export function App() {
           closeServerHub()
         } else if (radarExpanded) {
           setRadarExpanded(false)
+        } else if (installModalOpen) {
+          setInstallModalOpen(false)
         } else if (inspectedPeer) {
           setInspectedPeer(null)
         } else if (searchOpen) {
@@ -326,6 +341,7 @@ export function App() {
     serverHubState.open,
     closeServerHub,
     radarExpanded,
+    installModalOpen,
     inspectedPeer,
     searchOpen,
     inspectorOpen,
@@ -523,6 +539,29 @@ export function App() {
     }
   }, [])
 
+  const { pushToast } = engine
+  const handleOpenInstall = useCallback(() => {
+    radioAudio.play('click')
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setSidebarOpen(false)
+    }
+    if (typeof window !== 'undefined' && window.innerWidth < 1100) {
+      setInspectorOpen(false)
+    }
+    if (pwa.canPromptInstall) {
+      void pwa.promptInstall().then((outcome) => {
+        if (outcome === 'accepted') {
+          radioAudio.play('tune')
+          pushToast('success', 'Agnostr installed', 'Launch anytime from your home screen or dock.')
+        } else if (outcome === 'unavailable') {
+          setInstallModalOpen(true)
+        }
+      })
+      return
+    }
+    setInstallModalOpen(true)
+  }, [pwa, pushToast])
+
   const handleToggleSound = useCallback(() => {
     const next = !engine.settings.soundEnabled
     engine.updateSettings({ soundEnabled: next })
@@ -706,6 +745,8 @@ export function App() {
             onOpenInspectorTab={handleOpenInspectorTab}
             onExpandRadar={handleExpandRadar}
             onLocateMe={() => void handleLocateMe()}
+            pwa={pwa}
+            onOpenInstall={handleOpenInstall}
           />
         )}
       </div>
@@ -737,6 +778,43 @@ export function App() {
           onExpandRadar={handleExpandRadar}
           onExport={handleExport}
         />
+
+        {/* Compact PWA Offline & Update-Ready Status Strips */}
+        {pwa.isOffline && (
+          <div className="ag-pwa-banner offline" role="status" aria-live="polite">
+            <div className="ag-pwa-banner-left">
+              <WifiOff size={13} />
+              <span>Offline · Cached mode</span>
+            </div>
+          </div>
+        )}
+
+        {pwa.updateAvailable && (
+          <div className="ag-pwa-banner update" role="status" aria-live="polite">
+            <div className="ag-pwa-banner-left">
+              <RefreshCw size={13} />
+              <span>New version ready</span>
+            </div>
+            <div className="ag-pwa-banner-actions">
+              <button
+                type="button"
+                className="ag-pwa-reload-btn"
+                onClick={() => void pwa.applyUpdate()}
+              >
+                Reload
+              </button>
+              <button
+                type="button"
+                className="ag-pwa-dismiss-btn"
+                onClick={pwa.dismissUpdate}
+                title="Dismiss update notice"
+                aria-label="Dismiss update notice"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          </div>
+        )}
 
         <SearchBar
           open={searchOpen}
@@ -799,6 +877,8 @@ export function App() {
         onOpenServerSettings={handleOpenServerSettings}
         onExpandRadar={handleExpandRadar}
         onLeftServer={handleLeftServer}
+        pwa={pwa}
+        onOpenInstall={handleOpenInstall}
         onPlaySound={playSound}
       />
 
@@ -817,6 +897,14 @@ export function App() {
         engine={engine}
         onClose={() => setRadarExpanded(false)}
         onTuneChannel={handleTuneChannel}
+        onPlaySound={playSound}
+      />
+
+      {/* PWA Install Guide / Native Install Modal */}
+      <PwaInstallModal
+        open={installModalOpen}
+        pwa={pwa}
+        onClose={() => setInstallModalOpen(false)}
         onPlaySound={playSound}
       />
 
@@ -855,6 +943,8 @@ export function App() {
         onToggleSound={handleToggleSound}
         onRunCommand={handleRunCommand}
         onExport={handleExport}
+        pwa={pwa}
+        onOpenInstall={handleOpenInstall}
       />
 
       {/* Tactical Non-Blocking Notifications */}

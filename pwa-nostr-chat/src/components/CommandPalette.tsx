@@ -11,6 +11,7 @@ import {
   Palette,
   Plus,
   Radio,
+  RefreshCw,
   RotateCw,
   Search,
   Server,
@@ -23,6 +24,7 @@ import {
   Wifi,
 } from 'lucide-react'
 import type { AgnostrEngine, InspectorTab, ThemeId } from '../types/protocol'
+import type { PwaState } from '../hooks/usePwa'
 import type { ServerHubTab } from './ServerHubModal'
 
 const GEOHASH_REGEX = /^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$/i
@@ -58,6 +60,8 @@ export interface CommandPaletteProps {
   onToggleSound: () => void
   onRunCommand: (cmdLine: string) => void
   onExport: (format: 'markdown' | 'json') => void
+  pwa?: PwaState
+  onOpenInstall?: () => void
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
@@ -73,6 +77,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onToggleSound,
   onRunCommand,
   onExport,
+  pwa,
+  onOpenInstall,
 }) => {
   const [query, setQuery] = useState('')
   const [selectedIdx, setSelectedIdx] = useState(0)
@@ -366,6 +372,57 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       }
     )
 
+    // PWA Install & Update Actions
+    if (pwa && !pwa.isInstalled && onOpenInstall) {
+      list.push({
+        id: 'act-pwa-install',
+        group: 'Actions',
+        title: 'Install Agnostr App (PWA)',
+        subtitle: pwa.canPromptInstall
+          ? 'Install Agnostr for full-screen standalone mode & offline cache'
+          : pwa.isIosSafari
+            ? 'Add to Home Screen via Safari Share menu'
+            : 'Install Agnostr as a standalone desktop or mobile app',
+        keywords: 'install pwa app home screen homescreen standalone offline download',
+        badge: pwa.canPromptInstall ? '1-TAP' : 'PWA',
+        icon: <Download size={15} />,
+        run: () => {
+          onClose()
+          onOpenInstall()
+        },
+      })
+    }
+
+    if (pwa) {
+      list.push({
+        id: 'act-pwa-check-update',
+        group: 'Actions',
+        title: pwa.updateAvailable ? 'Reload to Apply App Update' : 'Check for App Updates',
+        subtitle: pwa.updateAvailable
+          ? 'A newer version of Agnostr is ready — reload now'
+          : 'Check Service Worker for the latest Agnostr release',
+        keywords: 'check update updates refresh reload pwa service worker version',
+        badge: pwa.updateAvailable ? 'READY' : undefined,
+        icon: <RefreshCw size={15} />,
+        run: () => {
+          onClose()
+          if (pwa.updateAvailable) {
+            void pwa.applyUpdate()
+          } else {
+            void pwa.checkForUpdates().then((found) => {
+              engine.pushToast(
+                found ? 'success' : 'info',
+                found ? 'Update ready' : 'Agnostr is up to date',
+                found
+                  ? 'Click Reload in the update bar to activate the new version.'
+                  : 'Running the latest cached build.'
+              )
+            })
+          }
+        },
+      })
+    }
+
     // Themes
     for (const theme of THEMES) {
       list.push({
@@ -419,6 +476,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     onToggleSound,
     onExport,
     onRunCommand,
+    pwa,
+    onOpenInstall,
   ])
 
   useEffect(() => {
@@ -508,7 +567,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                     {entry.badge && (
                       <span
                         className={`ag-badge ${
-                          entry.badge === 'LIVE' || entry.badge === 'ON'
+                          entry.badge === 'LIVE' || entry.badge === 'ON' || entry.badge === 'READY'
                             ? 'ok'
                             : entry.badge === 'OFF'
                               ? 'muted'

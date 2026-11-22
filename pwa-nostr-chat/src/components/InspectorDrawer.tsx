@@ -9,6 +9,7 @@ import {
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, InspectorTab, PeerInfo } from '../types/protocol.ts'
+import type { PwaState } from '../hooks/usePwa.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { GeoRadarPanel } from './GeoRadarPanel.tsx'
 import { IdentitySettingsPanel } from './IdentitySettingsPanel.tsx'
@@ -33,6 +34,8 @@ export interface InspectorDrawerProps {
   onExpandRadar?: () => void
   onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
   onLeftServer?: () => void
+  pwa?: PwaState
+  onOpenInstall?: () => void
   onPlaySound?: (cue: SoundCue) => void
 }
 
@@ -71,6 +74,8 @@ export function InspectorDrawer({
   onExpandRadar,
   onOpenServerSettings,
   onLeftServer,
+  pwa,
+  onOpenInstall,
   onPlaySound,
 }: InspectorDrawerProps) {
   const { presence, locationNotes, connectedRelayCount, totalRelayCount, activeView, servers } =
@@ -224,7 +229,12 @@ export function InspectorDrawer({
             <RelayTelemetryPanel engine={engine} onPlaySound={onPlaySound} />
           )}
           {effectiveTab === 'identity' && (
-            <IdentitySettingsPanel engine={engine} onPlaySound={onPlaySound} />
+            <IdentitySettingsPanel
+              engine={engine}
+              pwa={pwa}
+              onOpenInstall={onOpenInstall}
+              onPlaySound={onPlaySound}
+            />
           )}
         </div>
       </aside>

@@ -13,6 +13,7 @@ import {
   Fingerprint,
   Flame,
   Key,
+  Loader2,
   Lock,
   Palette,
   Plus,
@@ -23,17 +24,21 @@ import {
   Shield,
   ShieldAlert,
   ShieldCheck,
+  Smartphone,
   Trash2,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, SignMode, ThemeId } from '../types/protocol.ts'
+import type { PwaState } from '../hooks/usePwa.ts'
 import { radioAudio, type SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 
 export interface IdentitySettingsPanelProps {
   engine: AgnostrEngine
+  pwa?: PwaState
+  onOpenInstall?: () => void
   onPlaySound?: (cue: SoundCue) => void
 }
 
@@ -107,7 +112,12 @@ function stripHttpScheme(url: string): string {
   return url.replace(/^https?:\/\//i, '').replace(/\/+$/, '')
 }
 
-export function IdentitySettingsPanel({ engine, onPlaySound }: IdentitySettingsPanelProps) {
+export function IdentitySettingsPanel({
+  engine,
+  pwa,
+  onOpenInstall,
+  onPlaySound,
+}: IdentitySettingsPanelProps) {
   const {
     identity,
     settings,
@@ -123,6 +133,7 @@ export function IdentitySettingsPanel({ engine, onPlaySound }: IdentitySettingsP
   const [secretFeedback, setSecretFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [revealNsec, setRevealNsec] = useState(false)
   const [copiedField, setCopiedField] = useState<'npub' | 'nsec' | null>(null)
+  const [updateCheckNote, setUpdateCheckNote] = useState<string | null>(null)
 
   // Whitelist & Blossom form state
   const [trustKeyDraft, setTrustKeyDraft] = useState('')
@@ -919,6 +930,112 @@ export function IdentitySettingsPanel({ engine, onPlaySound }: IdentitySettingsP
           })}
         </div>
       </section>
+
+      {/* App & PWA */}
+      {pwa && (
+        <section className="ag-panel-card" aria-label="App and PWA settings">
+          <div className="ag-panel-card-head">
+            <div className="ag-panel-card-title">
+              <Smartphone size={13} />
+              <span>APP &amp; PWA</span>
+            </div>
+            <span
+              className={`ag-badge ${
+                pwa.isInstalled
+                  ? 'ag-badge-ok'
+                  : pwa.canPromptInstall
+                    ? 'ag-badge-accent'
+                    : 'ag-badge-muted'
+              }`}
+            >
+              {pwa.isInstalled ? 'INSTALLED' : pwa.canPromptInstall ? 'INSTALLABLE' : 'BROWSER'}
+            </span>
+          </div>
+
+          <div className="ag-pwa-card-status">
+            <span className="ag-pwa-status-item mono">
+              <span
+                className={`ag-led ${
+                  pwa.isOffline
+                    ? 'ag-led-warn'
+                    : pwa.offlineReady || pwa.swReady
+                      ? 'ag-led-ok'
+                      : 'ag-led-muted'
+                }`}
+              />
+              <span>
+                {pwa.isOffline
+                  ? 'Offline · Cached'
+                  : pwa.offlineReady || pwa.swReady
+                    ? 'Offline Ready'
+                    : 'Caching app…'}
+              </span>
+            </span>
+            {updateCheckNote && (
+              <span className="ag-pwa-check-note mono">{updateCheckNote}</span>
+            )}
+          </div>
+
+          <div className="ag-pwa-card-actions">
+            {!pwa.isInstalled && (
+              <button
+                type="button"
+                className="ag-btn ag-btn-primary ag-btn-sm"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  if (onOpenInstall) {
+                    onOpenInstall()
+                  } else if (pwa.canPromptInstall) {
+                    void pwa.promptInstall()
+                  }
+                }}
+              >
+                <Download size={13} />
+                <span>Install App</span>
+              </button>
+            )}
+
+            {pwa.updateAvailable ? (
+              <button
+                type="button"
+                className="ag-btn ag-btn-primary ag-btn-sm"
+                onClick={() => {
+                  onPlaySound?.('tune')
+                  void pwa.applyUpdate()
+                }}
+              >
+                <RefreshCw size={13} />
+                <span>Update Ready · Reload</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="ag-btn ag-btn-secondary ag-btn-sm"
+                disabled={pwa.checkingUpdate || pwa.isOffline}
+                onClick={async () => {
+                  onPlaySound?.('click')
+                  setUpdateCheckNote(null)
+                  const found = await pwa.checkForUpdates()
+                  setUpdateCheckNote(found ? 'Update ready' : 'Up to date')
+                  window.setTimeout(() => setUpdateCheckNote(null), 3000)
+                }}
+              >
+                {pwa.checkingUpdate ? (
+                  <>
+                    <Loader2 size={13} className="ag-spin" />
+                    <span>Checking…</span>
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw size={13} />
+                    <span>Check for Updates</span>
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Transcript Export */}
       <section className="ag-panel-card">

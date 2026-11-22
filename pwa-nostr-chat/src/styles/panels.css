@@ -2269,6 +2269,209 @@
 }
 
 /* --------------------------------------------------------------------------
+   App & PWA Settings Card + PwaInstallModal
+   -------------------------------------------------------------------------- */
+.ag-pwa-card-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  padding: 0.4rem 0.52rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-pwa-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.ag-pwa-check-note {
+  font-size: 10.5px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ag-pwa-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+}
+
+.ag-pwa-card-actions .ag-btn {
+  flex: 1 1 auto;
+}
+
+.ag-pwa-modal {
+  width: min(100%, 400px);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  animation: ag-scale-in var(--dur-med) var(--ease-spring);
+}
+
+.ag-pwa-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.ag-pwa-hero {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.ag-pwa-app-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-accent);
+  box-shadow: var(--accent-glow);
+  display: block;
+}
+
+.ag-pwa-hero-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+  min-width: 0;
+}
+
+.ag-pwa-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+
+.ag-pwa-sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ag-pwa-chips {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.36rem;
+}
+
+.ag-pwa-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.42rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.ag-pwa-chip svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-pwa-cta {
+  height: 40px;
+  font-size: var(--text-sm);
+}
+
+.ag-pwa-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+}
+
+.ag-pwa-step {
+  display: flex;
+  align-items: center;
+  gap: 0.52rem;
+  padding: 0.55rem 0.68rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+
+.ag-pwa-step-num {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-soft);
+  border: 1px solid var(--border-accent);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ag-pwa-step-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-pwa-tip,
+.ag-pwa-installed-box {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.72rem;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ag-pwa-tip {
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.ag-pwa-tip strong {
+  color: var(--text-primary);
+}
+
+.ag-pwa-tip svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-pwa-installed-box {
+  background-color: var(--status-ok-soft);
+  border: 1px solid color-mix(in srgb, var(--status-ok) 38%, transparent);
+  color: var(--status-ok);
+  font-weight: 600;
+}
+
+.ag-pwa-installed-box svg {
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
    Responsive Slide-Over Drawer (Tablet & Mobile < 1100px)
    -------------------------------------------------------------------------- */
 @media (max-width: 1099px) {

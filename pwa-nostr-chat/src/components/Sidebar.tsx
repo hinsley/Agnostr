@@ -3,6 +3,7 @@ import {
   Clock,
   Command,
   Crosshair,
+  Download,
   Globe,
   Lock,
   Map as MapIcon,
@@ -14,6 +15,7 @@ import {
   MapPin,
 } from 'lucide-react'
 import type { AgnostrEngine, InspectorTab, ThemeId } from '../types/protocol'
+import type { PwaState } from '../hooks/usePwa'
 import { identiconDataUrl } from '../utils/identicon'
 
 const THEME_ORDER: ThemeId[] = ['phosphor', 'amber', 'obsidian', 'daylight']
@@ -44,6 +46,8 @@ export interface SidebarProps {
   onOpenInspectorTab: (tab: InspectorTab) => void
   onExpandRadar?: () => void
   onLocateMe: () => void
+  pwa?: PwaState
+  onOpenInstall?: () => void
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -56,6 +60,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenInspectorTab,
   onExpandRadar,
   onLocateMe,
+  pwa,
+  onOpenInstall,
 }) => {
   const [freqDraft, setFreqDraft] = useState('')
 
@@ -362,6 +368,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </section>
         )}
       </div>
+
+      {/* Sleek PWA Install Prompt (hidden automatically once installed) */}
+      {pwa && !pwa.isInstalled && onOpenInstall && (
+        <div className="ag-sidebar-install-wrap">
+          <button
+            type="button"
+            className="ag-sidebar-install-btn"
+            onClick={onOpenInstall}
+            title={
+              pwa.canPromptInstall
+                ? 'Install Agnostr as a standalone app'
+                : 'Install Agnostr PWA on your device'
+            }
+          >
+            <span className="ag-sidebar-install-left">
+              <Download size={13} />
+              <span>Install App</span>
+            </span>
+            <span className="ag-badge accent">{pwa.canPromptInstall ? '1-TAP' : 'PWA'}</span>
+          </button>
+        </div>
+      )}
 
       {/* Bottom User Identity & Quick Theme Switcher */}
       <div className="ag-sidebar-footer">
