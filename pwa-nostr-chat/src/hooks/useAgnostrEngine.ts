@@ -73,6 +73,7 @@ import {
   decodePubkeyInput,
   detectNip07,
   encodeNpubSafe,
+  formatDisplayHandle,
   generateRandomNickname,
   IdentityManager,
 } from '../lib/identity.ts'
@@ -122,6 +123,11 @@ import { useCallEngine } from './useCallEngine.ts'
 import { useDirectMessages } from './useDirectMessages.ts'
 import { useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
+import {
+  useNotifications,
+  type NotifyGeoMessageInput,
+  type NotifyLocationNoteInput,
+} from './useNotifications.ts'
 import { useServers } from './useServers.ts'
 import { useToasts } from './useToasts.ts'
 import { useTranscription } from './useTranscription.ts'
@@ -289,12 +295,13 @@ export function useAgnostrEngine(): AgnostrEngine {
     saveSettings(settings)
   }, [settings])
 
-  // Sync URL hash <-> activeGeohash (preserve #invite=... links until dismissed)
+  // Sync URL hash <-> activeGeohash (preserve #invite=... and #notify=... deep links until consumed)
   useEffect(() => {
     saveActiveGeohash(activeGeohash)
     try {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
-      if (rawHash.toLowerCase().startsWith('invite=')) return
+      const lowerHash = rawHash.toLowerCase()
+      if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=')) return
       const currentHash = normalizeGeohash(rawHash)
       if (currentHash !== activeGeohash) {
         window.history.replaceState(null, '', `#${activeGeohash}`)
@@ -307,7 +314,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   useEffect(() => {
     const onHashChange = () => {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
-      if (rawHash.toLowerCase().startsWith('invite=')) return
+      const lowerHash = rawHash.toLowerCase()
+      if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=')) return
       const hash = normalizeGeohash(rawHash)
       if (hash && isValidGeohash(hash)) {
         setActiveGeohash(hash)
@@ -383,6 +391,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   const strictWhitelistRef = useRef<boolean>(settings.strictWhitelistMode)
   const ownPubkeysRef = useRef<Set<string>>(ownPubkeys)
   const activeViewRef = useRef<ActiveView>(activeView)
+  const notifyGeoMessageRef = useRef<(input: NotifyGeoMessageInput) => void>(() => {})
+  const notifyLocationNoteRef = useRef<(input: NotifyLocationNoteInput) => void>(() => {})
 
   // Sync security-critical refs in useLayoutEffect so they are always up to date
   // BEFORE any child component's mount/update useEffect (e.g. TrustedImageView) runs!
@@ -626,8 +636,28 @@ export function useAgnostrEngine(): AgnostrEngine {
               return next
             })
 
-            if (!isHistoryReplay && !parsed.isOwn && activeViewRef.current.type === 'dm') {
-              setUnreadDividerId((curr) => curr ?? parsed.id)
+            if (!isHistoryReplay && !parsed.isOwn) {
+              if (activeViewRef.current.type === 'dm') {
+                setUnreadDividerId((curr) => curr ?? parsed.id)
+              }
+              if (!strictWhitelistRef.current || trustedSetRef.current.has(pk)) {
+                const myNick = identityManager.getNickname()
+                const geoPk = identityManager.getKeyMaterialForGeohash(gh).pubkey
+                const masterPk = identityManager.getMasterKeyMaterial().pubkey
+                const mentionedMe =
+                  doesContentMentionUser(parsed.content, parsed.mentions, myNick, geoPk) ||
+                  (masterPk !== geoPk &&
+                    doesContentMentionUser(parsed.content, parsed.mentions, myNick, masterPk))
+                notifyGeoMessageRef.current({
+                  id: parsed.id,
+                  geohash: gh,
+                  senderHandle: parsed.displayHandle,
+                  content: parsed.content,
+                  mentionedMe,
+                  hasVoice: Boolean(parsed.voiceMemo),
+                  hasImage: Boolean(parsed.imageAttachment),
+                })
+              }
             }
           }
         },
@@ -638,7 +668,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       window.clearTimeout(eoseFallback)
       unsub()
     }
-  }, [pool, activeGeohash, relaySelection.channelRelays, presenceTracker, refreshPeers])
+  }, [pool, activeGeohash, relaySelection.channelRelays, presenceTracker, refreshPeers, identityManager])
 
   // Location dead-drop notes subscription (kind 1 + NIP-40 expiration)
   useEffect(() => {
@@ -646,18 +676,27 @@ export function useAgnostrEngine(): AgnostrEngine {
     setLocationNotes([])
     if (!pool) return
 
+    let isNoteReplay = true
     const seenNoteIds = new Set<string>()
+    const noteEoseFallback = window.setTimeout(() => {
+      isNoteReplay = false
+    }, 3000)
     const since = Math.floor(Date.now() / 1000) - 24 * 60 * 60
     const unsub = pool.subscribe(
       `agnostr-notes-${gh}-${notesRefreshNonce}`,
       relaySelection.dmRelays,
       [{ kinds: [KIND_LOCATION_NOTE], '#g': [gh], since, limit: 60 }],
       {
+        onEose: () => {
+          isNoteReplay = false
+          window.clearTimeout(noteEoseFallback)
+        },
         onEvent: (ev) => {
           if (seenNoteIds.has(ev.id)) return
           if (!verifyEventCached(ev)) return
           seenNoteIds.add(ev.id)
-          if (blockedSetRef.current.has(ev.pubkey.toLowerCase())) return
+          const notePk = ev.pubkey.toLowerCase()
+          if (blockedSetRef.current.has(notePk)) return
 
           const parsed = parseLocationNoteEvent(ev, gh, ownPubkeysRef.current)
           if (!parsed) return
@@ -665,11 +704,26 @@ export function useAgnostrEngine(): AgnostrEngine {
             if (prev.some((n) => n.id === parsed.id)) return prev
             return [parsed, ...prev].sort((a, b) => b.createdAt - a.createdAt).slice(0, 60)
           })
+          if (
+            !isNoteReplay &&
+            !parsed.isOwn &&
+            (!strictWhitelistRef.current || trustedSetRef.current.has(notePk))
+          ) {
+            notifyLocationNoteRef.current({
+              id: parsed.id,
+              geohash: gh,
+              senderHandle: parsed.displayHandle,
+              content: parsed.content,
+            })
+          }
         },
       }
     )
 
-    return () => unsub()
+    return () => {
+      window.clearTimeout(noteEoseFallback)
+      unsub()
+    }
   }, [pool, activeGeohash, relaySelection.dmRelays, notesRefreshNonce])
 
   // Background unread watcher for pinned channels (excluding currently viewed channel)
@@ -717,6 +771,14 @@ export function useAgnostrEngine(): AgnostrEngine {
                 : p
             )
           )
+
+          notifyGeoMessageRef.current({
+            id: ev.id,
+            geohash: gh,
+            senderHandle: formatDisplayHandle(getTagValue(ev.tags, 'n'), pk),
+            content: ev.content,
+            mentionedMe,
+          })
         },
       }
     )
@@ -1528,6 +1590,65 @@ export function useAgnostrEngine(): AgnostrEngine {
     pushToast,
   })
 
+  // Push Notifications, Live Incoming DM Call Ringing & Optional NIP-98/VAPID Web Push Bridge
+  const notificationRelayUrls = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...relaySelection.dmRelays,
+          ...relaySelection.channelRelays,
+          ...callSignalingRelays,
+        ])
+      ),
+    [relaySelection.dmRelays, relaySelection.channelRelays, callSignalingRelays]
+  )
+  const pinnedGeohashList = useMemo(
+    () => pinnedChannels.map((p) => p.geohash),
+    [pinnedChannels]
+  )
+  const signNotificationEvent = useCallback(
+    (tmpl: Parameters<IdentityManager['signEvent']>[0]) =>
+      identityManager.signEvent(tmpl),
+    [identityManager]
+  )
+
+  const {
+    notifications: notificationsEngine,
+    notifyGeoMessage,
+    notifyLocationNote,
+    resetAllNotifications,
+  } = useNotifications({
+    activeView,
+    activeGeohash,
+    ownPubkeys,
+    masterPubkey: identity.masterPubkey,
+    nickname: identity.nickname,
+    dmThreads,
+    joinedServers: serversEngine.joinedServers,
+    activeServer: serversEngine.activeServer,
+    activeChannelId: serversEngine.activeChannel?.id ?? null,
+    activeServerMessages: serversEngine.messages,
+    incomingCall: callsEngine.incomingCall,
+    isOutgoingDmRinging: callsEngine.isOutgoingDmRinging,
+    serverCallRosters: callsEngine.serverCallRosters,
+    activeCallServerId:
+      callsEngine.activeCall?.mode === 'server'
+        ? callsEngine.activeCall.serverId ?? null
+        : null,
+    relayUrls: notificationRelayUrls,
+    pinnedGeohashes: pinnedGeohashList,
+    signEvent: signNotificationEvent,
+    pushToast,
+  })
+
+  useLayoutEffect(() => {
+    notifyGeoMessageRef.current = notifyGeoMessage
+  }, [notifyGeoMessage])
+
+  useLayoutEffect(() => {
+    notifyLocationNoteRef.current = notifyLocationNote
+  }, [notifyLocationNote])
+
   const sendImageAttachment = useCallback(
     async (image: PreparedImage, caption?: string): Promise<boolean> => {
       if (!pool || image.size <= 0) return false
@@ -1823,6 +1944,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   const panicWipe = useCallback(() => {
     trustedSetRef.current = new Set()
     blockedSetRef.current = new Set()
+    resetAllNotifications()
     resetAllTranscription()
     resetAllCalls()
     pool?.closeAll()
@@ -1859,7 +1981,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     clearToasts()
     pushToast('warning', 'Panic Wipe Complete', 'All local keys, caches, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.')
-  }, [pool, presenceTracker, clearPulse, clearAllDms, resetAllServers, resetAllCalls, resetAllTranscription, resetLocation, identityManager, clearToasts, pushToast])
+  }, [pool, presenceTracker, clearPulse, clearAllDms, resetAllServers, resetAllCalls, resetAllTranscription, resetAllNotifications, resetLocation, identityManager, clearToasts, pushToast])
 
   // Unified composer submit (commands, DMs, public messages)
   const addSystemMessage = useCallback(
@@ -2054,6 +2176,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     servers: serversEngine,
     calls: callsEngine,
     transcription: transcriptionEngine,
+    notifications: notificationsEngine,
 
     commands: SLASH_COMMANDS,
     exportTranscript,

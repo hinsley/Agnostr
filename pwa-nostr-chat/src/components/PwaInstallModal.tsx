@@ -6,6 +6,7 @@ import {
   HardDrive,
   Loader2,
   Maximize2,
+  PhoneCall,
   PlusSquare,
   Share,
   Smartphone,
@@ -81,7 +82,7 @@ export function PwaInstallModal({
                 Install Agnostr
               </h2>
               <p className="ag-pwa-sub">
-                Geohash radio &amp; Nostr transceiver app.
+                Push alerts, DM call ringing &amp; standalone full-screen messaging.
               </p>
             </div>
           </div>
@@ -96,19 +97,23 @@ export function PwaInstallModal({
           </button>
         </div>
 
-        {/* 3 Compact Feature Chips */}
+        {/* Highlight Chips — Push Notifications & DM Call Ringing */}
         <div className="ag-pwa-chips" aria-label="App highlights">
           <span className="ag-pwa-chip">
-            <HardDrive size={12} />
-            <span>Offline cache</span>
+            <Bell size={12} />
+            <span>Push notifications</span>
+          </span>
+          <span className="ag-pwa-chip">
+            <PhoneCall size={12} />
+            <span>DM call ringing</span>
           </span>
           <span className="ag-pwa-chip">
             <Maximize2 size={12} />
             <span>Full-screen</span>
           </span>
           <span className="ag-pwa-chip">
-            <Bell size={12} />
-            <span>App badge</span>
+            <HardDrive size={12} />
+            <span>Offline cache</span>
           </span>
         </div>
 
@@ -116,50 +121,70 @@ export function PwaInstallModal({
         {pwa.isInstalled ? (
           <div className="ag-pwa-installed-box">
             <CheckCircle2 size={16} />
-            <span>Agnostr is already installed on this device.</span>
+            <span>Agnostr is installed on this device — push alerts &amp; call ringing are ready.</span>
           </div>
         ) : pwa.canPromptInstall ? (
-          <button
-            type="button"
-            className="ag-btn ag-btn-primary ag-btn-block ag-pwa-cta"
-            onClick={() => void handleInstallClick()}
-            disabled={installing}
-          >
-            {installing ? (
-              <>
-                <Loader2 size={15} className="ag-spin" />
-                <span>Installing…</span>
-              </>
-            ) : (
-              <>
-                <Download size={15} />
-                <span>Install Agnostr</span>
-              </>
-            )}
-          </button>
+          <>
+            <button
+              type="button"
+              className="ag-btn ag-btn-primary ag-btn-block ag-pwa-cta"
+              onClick={() => void handleInstallClick()}
+              disabled={installing}
+            >
+              {installing ? (
+                <>
+                  <Loader2 size={15} className="ag-spin" />
+                  <span>Installing…</span>
+                </>
+              ) : (
+                <>
+                  <Download size={15} />
+                  <span>Install Agnostr</span>
+                </>
+              )}
+            </button>
+            <p className="ag-pwa-push-note">
+              Install to your dock or Home Screen for background notifications, unread badges, and
+              incoming DM call ringing.
+            </p>
+          </>
         ) : pwa.isIosSafari ? (
-          <div className="ag-pwa-steps" role="list" aria-label="iOS install steps">
-            <div className="ag-pwa-step" role="listitem">
-              <span className="ag-pwa-step-num mono">1</span>
-              <Share size={15} className="ag-pwa-step-icon" />
-              <span>
-                Tap <strong>Share</strong> in Safari
-              </span>
+          <>
+            <div className="ag-pwa-steps" role="list" aria-label="iOS install steps">
+              <div className="ag-pwa-step" role="listitem">
+                <span className="ag-pwa-step-num mono">1</span>
+                <Share size={15} className="ag-pwa-step-icon" />
+                <span>
+                  Tap <strong>Share</strong> in Safari
+                </span>
+              </div>
+              <div className="ag-pwa-step" role="listitem">
+                <span className="ag-pwa-step-num mono">2</span>
+                <PlusSquare size={15} className="ag-pwa-step-icon" />
+                <span>
+                  Tap <strong>Add to Home Screen</strong>
+                </span>
+              </div>
+              <div className="ag-pwa-step" role="listitem">
+                <span className="ag-pwa-step-num mono">3</span>
+                <Bell size={15} className="ag-pwa-step-icon" />
+                <span>
+                  Open from Home Screen to enable <strong>Push &amp; Call Ringing</strong>
+                </span>
+              </div>
             </div>
-            <div className="ag-pwa-step" role="listitem">
-              <span className="ag-pwa-step-num mono">2</span>
-              <PlusSquare size={15} className="ag-pwa-step-icon" />
-              <span>
-                Tap <strong>Add to Home Screen</strong>
-              </span>
-            </div>
-          </div>
+            <p className="ag-pwa-push-note">
+              iOS Safari requires Home Screen installation to unlock Web Push notifications and
+              incoming DM call alerts.
+            </p>
+          </>
         ) : (
           <div className="ag-pwa-tip">
             <Smartphone size={15} />
             <span>
               Use your browser&apos;s menu → <strong>Install App</strong> /{' '}
-              <strong>Add to Home Screen</strong>.
+              <strong>Add to Home Screen</strong> to enable standalone push alerts and incoming DM
+              call ringing.
             </span>
           </div>
         )}

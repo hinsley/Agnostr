@@ -1,4 +1,5 @@
 import type { CallEngine } from './calls.ts'
+import type { NotificationEngine } from './notifications.ts'
 import type { ServersEngine } from './servers.ts'
 import type { TranscriptionEngine } from './transcription.ts'
 
@@ -465,6 +466,9 @@ export interface AgnostrEngine {
 
   // On-device local voice transcription (Voice Memos + Live Call Captions)
   transcription: TranscriptionEngine
+
+  // Push notifications, live incoming DM call ringing & Web Push bridge
+  notifications: NotificationEngine
 
   // Commands, export & notifications
   commands: SlashCommandDef[]

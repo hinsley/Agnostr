@@ -4,8 +4,12 @@ import {
   AlertTriangle,
   ArrowLeft,
   Ban,
+  Bell,
+  BellOff,
+  BellRing,
   Captions,
   Check,
+  ChevronDown,
   ChevronRight,
   Copy,
   Download,
@@ -21,7 +25,9 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Server,
   ShieldCheck,
+  Smartphone,
   Trash2,
   User,
   Volume2,
@@ -29,6 +35,7 @@ import {
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, SignMode, ThemeId } from '../types/protocol.ts'
+import type { NotificationFilterMode } from '../types/notifications.ts'
 import type { PwaState } from '../hooks/usePwa.ts'
 import {
   RECORDING_QUALITY_PRESETS,
@@ -38,7 +45,13 @@ import { DEFAULT_TRANSCRIPTION_MODEL_ID } from '../lib/transcriptionModels.ts'
 import { radioAudio, type SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 
-export type SettingsTab = 'profile' | 'privacy' | 'appearance' | 'calls' | 'network'
+export type SettingsTab =
+  | 'profile'
+  | 'notifications'
+  | 'privacy'
+  | 'appearance'
+  | 'calls'
+  | 'network'
 
 export interface SettingsModalProps {
   open: boolean
@@ -105,12 +118,19 @@ const SIGN_MODES: readonly { id: SignMode; label: string }[] = [
   { id: 'extension', label: 'Extension' },
 ]
 
+const NOTIF_FILTER_MODES: readonly { id: NotificationFilterMode; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'mentions', label: 'Mentions' },
+  { id: 'off', label: 'Off' },
+]
+
 const NAV_ITEMS: readonly {
   id: SettingsTab
   label: string
   subtitle: string
 }[] = [
   { id: 'profile', label: 'Profile', subtitle: 'Name, keys & signer' },
+  { id: 'notifications', label: 'Notifications', subtitle: 'Push alerts & call ringing' },
   { id: 'privacy', label: 'Privacy & Trust', subtitle: 'Trusted peers & blocks' },
   { id: 'appearance', label: 'Appearance', subtitle: 'Theme & sound effects' },
   { id: 'calls', label: 'Calls & Recording', subtitle: 'Quality, captions & TURN' },
@@ -171,6 +191,26 @@ export function SettingsModal({
   const [trustLabelDraft, setTrustLabelDraft] = useState('')
   const [trustFeedback, setTrustFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
 
+  // Notifications & optional Web Push bridge drafts
+  const [requestingNotifPerm, setRequestingNotifPerm] = useState(false)
+  const [testingNotif, setTestingNotif] = useState(false)
+  const [notifTestFeedback, setNotifTestFeedback] = useState<{ ok: boolean; msg: string } | null>(
+    null,
+  )
+  const [bridgeOpen, setBridgeOpen] = useState(() =>
+    Boolean(
+      engine.notifications.settings.pushBridgeUrl ||
+        engine.notifications.pushStatus === 'connected',
+    ),
+  )
+  const [bridgeUrlDraft, setBridgeUrlDraft] = useState(
+    () => engine.notifications.settings.pushBridgeUrl,
+  )
+  const [vapidKeyDraft, setVapidKeyDraft] = useState(
+    () => engine.notifications.settings.vapidPublicKey,
+  )
+  const [bridgeFeedback, setBridgeFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
+
   // Calls TURN & Transcription drafts
   const [turnUrlDraft, setTurnUrlDraft] = useState(() => engine.calls.turnConfig?.url ?? '')
   const [turnUserDraft, setTurnUserDraft] = useState(() => engine.calls.turnConfig?.username ?? '')
@@ -220,6 +260,14 @@ export function SettingsModal({
     setTurnUserDraft(engine.calls.turnConfig?.username ?? '')
     setTurnCredDraft(engine.calls.turnConfig?.credential ?? '')
   }, [engine.calls.turnConfig])
+
+  useEffect(() => {
+    setBridgeUrlDraft(engine.notifications.settings.pushBridgeUrl)
+    setVapidKeyDraft(engine.notifications.settings.vapidPublicKey)
+  }, [
+    engine.notifications.settings.pushBridgeUrl,
+    engine.notifications.settings.vapidPublicKey,
+  ])
 
   // Escape dismissal
   useEffect(() => {
@@ -293,6 +341,11 @@ export function SettingsModal({
         setTrustKeyDraft('')
         setTrustLabelDraft('')
         setTrustFeedback(null)
+        setNotifTestFeedback(null)
+        setBridgeUrlDraft('')
+        setVapidKeyDraft('')
+        setBridgeFeedback(null)
+        setBridgeOpen(false)
         setTurnUrlDraft('')
         setTurnUserDraft('')
         setTurnCredDraft('')
@@ -464,10 +517,39 @@ export function SettingsModal({
     }
   }
 
+  const handleConnectPushBridge = async (e: FormEvent) => {
+    e.preventDefault()
+    const rawUrl = bridgeUrlDraft.trim()
+    if (!rawUrl || engine.notifications.pushStatus === 'connecting') return
+    const normalizedUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`
+    setBridgeFeedback(null)
+    onPlaySound?.('click')
+    const ok = await engine.notifications.connectPushBridge(
+      normalizedUrl,
+      vapidKeyDraft.trim() || undefined,
+    )
+    if (ok) {
+      setBridgeUrlDraft(normalizedUrl)
+      setBridgeFeedback({ ok: true, msg: 'Device subscribed to background push bridge' })
+      onPlaySound?.('tune')
+    } else if (!engine.notifications.pushError) {
+      setBridgeFeedback({ ok: false, msg: 'Could not connect to push bridge' })
+    }
+  }
+
+  const handleDisconnectPushBridge = async () => {
+    setBridgeFeedback(null)
+    onPlaySound?.('click')
+    await engine.notifications.disconnectPushBridge()
+    setBridgeFeedback({ ok: true, msg: 'Disconnected background push device' })
+  }
+
   const renderTabIcon = (id: SettingsTab) => {
     switch (id) {
       case 'profile':
         return <User size={17} />
+      case 'notifications':
+        return <Bell size={17} />
       case 'privacy':
         return <ShieldCheck size={17} />
       case 'appearance':
@@ -701,6 +783,547 @@ export function SettingsModal({
       </label>
     </div>
   )
+
+  const renderNotificationsTab = () => {
+    const notif = engine.notifications
+    const ns = notif.settings
+    const ringtoneAndVibe = ns.ringtoneEnabled || ns.vibrationEnabled
+
+    const bannerState = notif.isIosRequiresInstall
+      ? 'ios-install'
+      : !notif.isSupported || notif.permission === 'unsupported'
+        ? 'unsupported'
+        : notif.permission === 'denied'
+          ? 'denied'
+          : notif.permission === 'granted'
+            ? 'granted'
+            : 'default'
+
+    const pushStatusBadge =
+      notif.pushStatus === 'connected'
+        ? { cls: 'ag-badge-accent', label: 'Connected' }
+        : notif.pushStatus === 'connecting'
+          ? { cls: 'ag-badge-warn', label: 'Connecting…' }
+          : notif.pushStatus === 'error'
+            ? { cls: 'ag-badge-danger', label: 'Error' }
+            : notif.pushStatus === 'unsupported'
+              ? { cls: 'ag-badge-muted', label: 'Unavailable' }
+              : { cls: 'ag-badge-muted', label: 'Optional' }
+
+    const handleEnableNotificationsClick = () => {
+      if (requestingNotifPerm) return
+      setRequestingNotifPerm(true)
+      setNotifTestFeedback(null)
+      // Synchronously invoke inside user gesture for iOS Safari / Chrome PWA compatibility
+      const permPromise = notif.requestPermission()
+      void permPromise
+        .then((res) => {
+          if (res === 'granted') {
+            onPlaySound?.('tune')
+            setNotifTestFeedback({ ok: true, msg: 'Notifications enabled for this device' })
+          } else if (res === 'denied') {
+            setNotifTestFeedback({
+              ok: false,
+              msg: 'Permission blocked — enable alerts in browser site settings',
+            })
+          }
+        })
+        .finally(() => setRequestingNotifPerm(false))
+    }
+
+    const handleTestNotificationClick = () => {
+      if (testingNotif) return
+      setTestingNotif(true)
+      setNotifTestFeedback(null)
+      const testPromise = notif.sendTestNotification()
+      void testPromise
+        .then((ok) => {
+          if (ok) {
+            onPlaySound?.('click')
+            setNotifTestFeedback({ ok: true, msg: 'Test notification sent' })
+          } else {
+            setNotifTestFeedback({
+              ok: false,
+              msg:
+                notif.permission === 'denied'
+                  ? 'Notifications are blocked in browser settings'
+                  : 'Enable browser notifications first to preview OS alerts',
+            })
+          }
+        })
+        .finally(() => setTestingNotif(false))
+    }
+
+    const handleTestRingtoneClick = () => {
+      notif.testRingtone()
+      setNotifTestFeedback({ ok: true, msg: 'Playing 3s incoming call ringtone preview…' })
+    }
+
+    return (
+      <div className="ag-set-pane-stack">
+        {/* Permission & Master Status Banner */}
+        <div className={`ag-set-notif-banner state-${bannerState}`}>
+          <div className="ag-set-notif-banner-head">
+            <div className="ag-set-notif-banner-title-wrap">
+              <span className="ag-set-notif-banner-icon" aria-hidden="true">
+                {bannerState === 'ios-install' ? (
+                  <Smartphone size={17} />
+                ) : bannerState === 'denied' || bannerState === 'unsupported' ? (
+                  <BellOff size={17} />
+                ) : (
+                  <BellRing size={17} />
+                )}
+              </span>
+              <div className="ag-set-notif-banner-copy">
+                <div className="ag-set-notif-banner-title-row">
+                  <span className="ag-set-notif-banner-title">
+                    {bannerState === 'ios-install'
+                      ? 'Add to Home Screen for iOS Push'
+                      : bannerState === 'denied'
+                        ? 'Blocked in browser'
+                        : bannerState === 'unsupported'
+                          ? 'Browser notifications unavailable'
+                          : bannerState === 'granted'
+                            ? 'Push Notifications'
+                            : 'Enable Push Notifications'}
+                  </span>
+                  <span
+                    className={`ag-badge ${
+                      bannerState === 'granted'
+                        ? ns.enabled
+                          ? 'ag-badge-accent'
+                          : 'ag-badge-muted'
+                        : bannerState === 'denied'
+                          ? 'ag-badge-danger'
+                          : bannerState === 'ios-install'
+                            ? 'ag-badge-warn'
+                            : 'ag-badge-muted'
+                    }`}
+                  >
+                    {bannerState === 'granted'
+                      ? ns.enabled
+                        ? 'Enabled'
+                        : 'Paused'
+                      : bannerState === 'denied'
+                        ? 'Blocked'
+                        : bannerState === 'ios-install'
+                          ? 'iOS PWA'
+                          : bannerState === 'unsupported'
+                            ? 'Unsupported'
+                            : 'Off'}
+                  </span>
+                </div>
+                <p className="ag-set-notif-banner-desc">
+                  {bannerState === 'ios-install'
+                    ? 'Add Agnostr to your Home Screen via Share → Add to Home Screen to enable iPhone/iPad push notifications.'
+                    : bannerState === 'denied'
+                      ? 'Notifications are blocked for this site. Allow notifications in your browser site settings and reload.'
+                      : bannerState === 'unsupported'
+                        ? 'This browser does not support Web Notifications. In-app chimes and incoming call ringing still work while open.'
+                        : bannerState === 'granted'
+                          ? 'Receive system notifications for direct messages, mentions, and incoming calls while backgrounded.'
+                          : 'Stay notified for DMs, incoming calls, mentions, and group lounges even when this tab is in the background.'}
+                </p>
+              </div>
+            </div>
+
+            {bannerState === 'granted' && (
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.enabled}
+                aria-label="Enable notifications"
+                onChange={() => {
+                  notif.updateSettings({ enabled: !ns.enabled })
+                  onPlaySound?.('click')
+                }}
+              />
+            )}
+          </div>
+
+          {bannerState === 'default' && (
+            <div className="ag-set-notif-banner-actions">
+              <button
+                type="button"
+                className="ag-btn ag-btn-primary ag-btn-sm"
+                disabled={requestingNotifPerm}
+                onClick={handleEnableNotificationsClick}
+              >
+                {requestingNotifPerm ? (
+                  <Loader2 size={14} className="ag-spin" />
+                ) : (
+                  <Bell size={14} />
+                )}
+                <span>{requestingNotifPerm ? 'Requesting…' : 'Enable Notifications'}</span>
+              </button>
+            </div>
+          )}
+
+          {bannerState === 'ios-install' && (
+            <div className="ag-set-notif-banner-actions">
+              <button
+                type="button"
+                className="ag-btn ag-btn-primary ag-btn-sm"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  onClose()
+                  onOpenInstall()
+                }}
+              >
+                <Download size={14} />
+                <span>Install Guide</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Category Controls */}
+        <div className={`ag-set-group ${!ns.enabled ? 'ag-set-dimmed' : ''}`}>
+          <span className="ag-set-label">Categories</span>
+          <div className="ag-set-card-list">
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Direct Messages</span>
+                <span className="ag-set-notif-row-desc">
+                  Encrypted 1-on-1 messages (NIP-17 &amp; Bitchat)
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.dms}
+                onChange={() => {
+                  notif.updateSettings({ dms: !ns.dms })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Incoming DM Call Ringing</span>
+                <span className="ag-set-notif-row-desc">
+                  Full-screen call ringer and priority OS alert for 1-on-1 calls
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.dmCallRinging}
+                onChange={() => {
+                  notif.updateSettings({ dmCallRinging: !ns.dmCallRinging })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <div className="ag-set-notif-seg-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Server Messages</span>
+                <span className="ag-set-notif-row-desc">
+                  Messages across your joined servers and channels
+                </span>
+              </div>
+              <div
+                className="ag-segmented ag-set-notif-seg"
+                role="radiogroup"
+                aria-label="Server message notifications"
+              >
+                {NOTIF_FILTER_MODES.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={ns.serverMessages === mode.id}
+                    className={ns.serverMessages === mode.id ? 'active' : ''}
+                    onClick={() => {
+                      notif.updateSettings({ serverMessages: mode.id })
+                      onPlaySound?.('click')
+                    }}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Server Calls</span>
+                <span className="ag-set-notif-row-desc">
+                  Alert when peers start a Voice &amp; Video Lounge call
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.serverCalls}
+                onChange={() => {
+                  notif.updateSettings({ serverCalls: !ns.serverCalls })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <div className="ag-set-notif-seg-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Geo Radio</span>
+                <span className="ag-set-notif-row-desc">
+                  Messages in your tuned geohash radio channel
+                </span>
+              </div>
+              <div
+                className="ag-segmented ag-set-notif-seg"
+                role="radiogroup"
+                aria-label="Geo radio notifications"
+              >
+                {NOTIF_FILTER_MODES.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={ns.geoMessages === mode.id}
+                    className={ns.geoMessages === mode.id ? 'active' : ''}
+                    onClick={() => {
+                      notif.updateSettings({ geoMessages: mode.id })
+                      onPlaySound?.('click')
+                    }}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Sound, Ringtone & Privacy */}
+        <div className="ag-set-group">
+          <span className="ag-set-label">Sound, Ringtone &amp; Privacy</span>
+          <div className="ag-set-card-list">
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Message chimes</span>
+                <span className="ag-set-notif-row-desc">
+                  Play a subtle chime when new messages arrive
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.soundEnabled}
+                onChange={() => {
+                  notif.updateSettings({ soundEnabled: !ns.soundEnabled })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Call ringtone &amp; vibration</span>
+                <span className="ag-set-notif-row-desc">
+                  Looping synth ringtone and haptic vibration on incoming DM calls
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ringtoneAndVibe}
+                onChange={() => {
+                  const next = !ringtoneAndVibe
+                  notif.updateSettings({ ringtoneEnabled: next, vibrationEnabled: next })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Show message previews</span>
+                <span className="ag-set-notif-row-desc">
+                  Hide message content on lock screens when turned off
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.showPreviews}
+                onChange={() => {
+                  notif.updateSettings({ showPreviews: !ns.showPreviews })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+          </div>
+        </div>
+
+        {/* Test Actions */}
+        <div className="ag-set-group">
+          <span className="ag-set-label">Test Alerts</span>
+          <div className="ag-set-notif-test-row">
+            <button
+              type="button"
+              className="ag-btn ag-btn-secondary ag-btn-sm"
+              disabled={
+                testingNotif ||
+                !notif.isSupported ||
+                notif.permission === 'denied' ||
+                notif.isIosRequiresInstall
+              }
+              onClick={handleTestNotificationClick}
+            >
+              {testingNotif ? <Loader2 size={14} className="ag-spin" /> : <Bell size={14} />}
+              <span>Send Test Notification</span>
+            </button>
+
+            <button
+              type="button"
+              className="ag-btn ag-btn-secondary ag-btn-sm"
+              onClick={handleTestRingtoneClick}
+            >
+              <PhoneCall size={14} />
+              <span>Test Call Ringtone</span>
+            </button>
+          </div>
+          {notifTestFeedback && (
+            <p
+              className={`ag-field-hint ${
+                notifTestFeedback.ok ? 'ag-field-hint-accent' : 'ag-field-hint-danger'
+              }`}
+              role="status"
+            >
+              {notifTestFeedback.msg}
+            </p>
+          )}
+        </div>
+
+        {/* Collapsible Optional Background Web Push Server */}
+        <div className="ag-set-bridge-card">
+          <button
+            type="button"
+            className="ag-set-bridge-toggle"
+            aria-expanded={bridgeOpen}
+            onClick={() => {
+              setBridgeOpen((v) => !v)
+              onPlaySound?.('click')
+            }}
+          >
+            <span className="ag-set-bridge-toggle-left">
+              <Server size={15} className="ag-set-bridge-icon" />
+              <span className="ag-set-bridge-title">
+                Background Web Push Server (Optional)
+              </span>
+            </span>
+            <span className="ag-set-bridge-toggle-right">
+              <span className={`ag-badge ${pushStatusBadge.cls}`}>{pushStatusBadge.label}</span>
+              <ChevronDown
+                size={15}
+                className={`ag-set-bridge-chevron ${bridgeOpen ? 'open' : ''}`}
+              />
+            </span>
+          </button>
+
+          {bridgeOpen && (
+            <div className="ag-set-bridge-body">
+              <p className="ag-set-helper">
+                Notifications and call ringing work automatically while Agnostr is open or
+                backgrounded. Connect a self-hosted NIP-98/VAPID push bridge to wake a completely
+                closed or locked phone.
+              </p>
+
+              <form className="ag-set-subform" onSubmit={(e) => void handleConnectPushBridge(e)}>
+                <input
+                  type="text"
+                  inputMode="url"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  className="ag-input mono"
+                  placeholder="https://push.example.com"
+                  value={bridgeUrlDraft}
+                  onChange={(e) => {
+                    setBridgeUrlDraft(e.target.value)
+                    if (bridgeFeedback) setBridgeFeedback(null)
+                  }}
+                  aria-label="Web Push bridge URL"
+                />
+                <input
+                  type="text"
+                  autoComplete="off"
+                  className="ag-input mono"
+                  placeholder="VAPID public key (optional)"
+                  value={vapidKeyDraft}
+                  onChange={(e) => {
+                    setVapidKeyDraft(e.target.value)
+                    if (bridgeFeedback) setBridgeFeedback(null)
+                  }}
+                  aria-label="VAPID public key"
+                />
+                <div className="ag-set-bridge-actions">
+                  <button
+                    type="submit"
+                    className="ag-btn ag-btn-primary ag-btn-sm"
+                    disabled={
+                      !bridgeUrlDraft.trim() ||
+                      notif.pushStatus === 'connecting' ||
+                      !notif.isPushSupported
+                    }
+                  >
+                    {notif.pushStatus === 'connecting' && (
+                      <Loader2 size={13} className="ag-spin" />
+                    )}
+                    <span>
+                      {notif.pushStatus === 'connecting'
+                        ? 'Connecting…'
+                        : notif.pushStatus === 'connected'
+                          ? 'Reconnect Device'
+                          : 'Connect Device'}
+                    </span>
+                  </button>
+
+                  {(notif.pushStatus === 'connected' || notif.pushEndpoint) && (
+                    <button
+                      type="button"
+                      className="ag-btn ag-btn-secondary ag-btn-sm"
+                      onClick={() => void handleDisconnectPushBridge()}
+                    >
+                      Disconnect
+                    </button>
+                  )}
+                </div>
+              </form>
+
+              {!notif.isPushSupported && (
+                <p className="ag-field-hint ag-field-hint-warn">
+                  Web Push (PushManager) is unavailable in this browser context.
+                </p>
+              )}
+
+              {notif.pushEndpoint && notif.pushStatus === 'connected' && (
+                <p className="ag-set-bridge-endpoint mono truncate" title={notif.pushEndpoint}>
+                  Endpoint · {stripScheme(notif.pushEndpoint)}
+                </p>
+              )}
+
+              {notif.pushError && (
+                <p className="ag-field-hint ag-field-hint-danger">{notif.pushError}</p>
+              )}
+
+              {bridgeFeedback && !notif.pushError && (
+                <p
+                  className={`ag-field-hint ${
+                    bridgeFeedback.ok ? 'ag-field-hint-accent' : 'ag-field-hint-danger'
+                  }`}
+                >
+                  {bridgeFeedback.msg}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   const renderPrivacyTab = () => (
     <div className="ag-set-pane-stack">
@@ -1707,6 +2330,7 @@ export function SettingsModal({
 
             <div className="ag-set-detail-body">
               {activeTab === 'profile' && renderProfileTab()}
+              {activeTab === 'notifications' && renderNotificationsTab()}
               {activeTab === 'privacy' && renderPrivacyTab()}
               {activeTab === 'appearance' && renderAppearanceTab()}
               {activeTab === 'calls' && renderCallsTab()}

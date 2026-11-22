@@ -105,6 +105,8 @@ export interface TurnServerConfig {
 export interface CallEngine {
   activeCall: ActiveCallSession | null
   incomingCall: IncomingCallOffer | null
+  /** True while an outgoing 1-on-1 DM call is ringing and awaiting remote pickup */
+  isOutgoingDmRinging: boolean
   /** Map of serverId -> active participants in that server's Voice & Video Lounge */
   serverCallRosters: Record<string, RoomCallPresence[]>
   maxParticipants: number

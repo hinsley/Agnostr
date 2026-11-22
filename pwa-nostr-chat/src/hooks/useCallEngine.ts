@@ -50,6 +50,7 @@ import {
 import { isScreenShareSupported, WebRtcMesh } from '../lib/webrtcMesh.ts'
 
 const RING_TIMEOUT_MS = 45_000
+const OUTGOING_INVITE_REBROADCAST_MS = 3_500
 const ROSTER_SWEEP_INTERVAL_MS = 5_000
 const MAX_SEEN_SIGNALS = 600
 
@@ -138,6 +139,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const lastPresenceTsByRoomPeerRef = useRef<Map<string, number>>(new Map())
   const endedCallIdsRef = useRef<Set<string>>(new Set())
   const outgoingRingTimerRef = useRef<number | null>(null)
+  const outgoingRingInviteTimerRef = useRef<number | null>(null)
   const incomingRingTimerRef = useRef<number | null>(null)
   const roomHeartbeatTimerRef = useRef<number | null>(null)
   const lastRoomPongRef = useRef<number>(0)
@@ -221,6 +223,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     if (outgoingRingTimerRef.current !== null) {
       window.clearTimeout(outgoingRingTimerRef.current)
       outgoingRingTimerRef.current = null
+    }
+    if (outgoingRingInviteTimerRef.current !== null) {
+      window.clearInterval(outgoingRingInviteTimerRef.current)
+      outgoingRingInviteTimerRef.current = null
     }
     if (incomingRingTimerRef.current !== null) {
       window.clearTimeout(incomingRingTimerRef.current)
@@ -337,9 +343,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       if (notifyNetwork && current) {
         const selfPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
         if (current.mode === 'dm' && current.peerPubkey) {
+          const action = current.status === 'ringing-out' ? 'call-cancel' : 'call-hangup'
           void publishDirectSignal(current.peerPubkey, {
             v: 1,
-            action: 'call-hangup',
+            action,
             callId: current.callId,
             ts: Date.now(),
           })
@@ -697,6 +704,26 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         nickname: identityManager.getNickname(),
         ts: Date.now(),
       })
+
+      // Periodically re-broadcast call-invite every 3.5s while awaiting pickup so waking/reconnecting PWAs ring reliably
+      outgoingRingInviteTimerRef.current = window.setInterval(() => {
+        const cur = activeCallRef.current
+        if (!cur || cur.callId !== callId || cur.status !== 'ringing-out') {
+          if (outgoingRingInviteTimerRef.current !== null) {
+            window.clearInterval(outgoingRingInviteTimerRef.current)
+            outgoingRingInviteTimerRef.current = null
+          }
+          return
+        }
+        void publishDirectSignal(pk, {
+          v: 1,
+          action: 'call-invite',
+          callId,
+          media: cur.mediaType,
+          nickname: identityManager.getNickname(),
+          ts: Date.now(),
+        })
+      }, OUTGOING_INVITE_REBROADCAST_MS)
 
       outgoingRingTimerRef.current = window.setTimeout(() => {
         if (activeCallRef.current?.callId === callId && activeCallRef.current.status === 'ringing-out') {
@@ -1104,11 +1131,17 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             if (!isExplicitlyTrustedRef.current(sender)) return
 
             if (payload.action === 'call-invite') {
-              // Drop replayed invite if this callId was already hung up / declined
+              // Drop replayed invite if this callId was already hung up / canceled / declined
               if (endedCallIdsRef.current.has(payload.callId)) return
-              // If already in a call or ringing, reply busy
+              // Ignore re-broadcasted invite for a call we are already ringing or answered
+              if (
+                incomingCallRef.current?.callId === payload.callId ||
+                activeCallRef.current?.callId === payload.callId
+              ) {
+                return
+              }
+              // If already in another call or ringing, reply busy
               if (activeCallRef.current || incomingCallRef.current) {
-                if (incomingCallRef.current?.callId === payload.callId) return
                 void publishDirectSignal(sender, {
                   v: 1,
                   action: 'call-decline',
@@ -1153,6 +1186,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 window.clearTimeout(outgoingRingTimerRef.current)
                 outgoingRingTimerRef.current = null
               }
+              if (outgoingRingInviteTimerRef.current !== null) {
+                window.clearInterval(outgoingRingInviteTimerRef.current)
+                outgoingRingInviteTimerRef.current = null
+              }
               const nextSession: ActiveCallSession = { ...active, status: 'connecting' }
               activeCallRef.current = nextSession
               setActiveCall(nextSession)
@@ -1181,7 +1218,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               return
             }
 
-            if (payload.action === 'call-hangup') {
+            if (payload.action === 'call-hangup' || payload.action === 'call-cancel') {
               endedCallIdsRef.current.add(payload.callId)
               if (endedCallIdsRef.current.size > 200) {
                 const first = endedCallIdsRef.current.values().next().value
@@ -1700,10 +1737,15 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     remoteRecordingRef.current.clear()
   }, [teardownActiveCall])
 
+  const isOutgoingDmRinging = Boolean(
+    activeCall && activeCall.mode === 'dm' && activeCall.status === 'ringing-out'
+  )
+
   const calls: CallEngine = useMemo(
     () => ({
       activeCall,
       incomingCall,
+      isOutgoingDmRinging,
       serverCallRosters,
       maxParticipants: MAX_CALL_PARTICIPANTS,
       recordingQuality,
@@ -1726,6 +1768,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     [
       activeCall,
       incomingCall,
+      isOutgoingDmRinging,
       serverCallRosters,
       recordingQuality,
       setRecordingQuality,

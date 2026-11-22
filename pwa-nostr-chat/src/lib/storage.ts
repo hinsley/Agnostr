@@ -1,5 +1,9 @@
 import type { RecordingQualityPreset, TurnServerConfig } from '../types/calls.ts'
 import type {
+  NotificationFilterMode,
+  NotificationSettings,
+} from '../types/notifications.ts'
+import type {
   AppSettings,
   DmThread,
   GeohashCell,
@@ -39,6 +43,7 @@ const KEYS = {
   iceServers: `${PREFIX}ice_servers`,
   recordingQuality: `${PREFIX}recording_quality`,
   transcription: `${PREFIX}transcription`,
+  notifications: `${PREFIX}notifications`,
   servers: `${PREFIX}servers`,
   serverMsgChannel: (serverId: string, channelId: string) => `${PREFIX}smsgs:${serverId}:${channelId}`,
   customRelays: `${PREFIX}custom_relays`,
@@ -318,6 +323,90 @@ export function loadTranscriptionConfig(): PersistedTranscriptionConfig {
     autoTranscribe,
     customModels,
   }
+}
+
+export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
+  enabled: false,
+  dms: true,
+  dmCallRinging: true,
+  serverMessages: 'all',
+  serverCalls: true,
+  geoMessages: 'all',
+  soundEnabled: true,
+  ringtoneEnabled: true,
+  vibrationEnabled: true,
+  showPreviews: true,
+  pushBridgeUrl: '',
+  vapidPublicKey: '',
+}
+
+function parseFilterMode(
+  raw: unknown,
+  fallback: NotificationFilterMode
+): NotificationFilterMode {
+  if (raw === 'all' || raw === 'mentions' || raw === 'off') return raw
+  return fallback
+}
+
+export function loadNotificationSettings(): NotificationSettings {
+  const parsed = safeJsonParse<Partial<NotificationSettings>>(
+    safeGet(KEYS.notifications),
+    {}
+  )
+  return {
+    enabled:
+      typeof parsed.enabled === 'boolean'
+        ? parsed.enabled
+        : DEFAULT_NOTIFICATION_SETTINGS.enabled,
+    dms:
+      typeof parsed.dms === 'boolean'
+        ? parsed.dms
+        : DEFAULT_NOTIFICATION_SETTINGS.dms,
+    dmCallRinging:
+      typeof parsed.dmCallRinging === 'boolean'
+        ? parsed.dmCallRinging
+        : DEFAULT_NOTIFICATION_SETTINGS.dmCallRinging,
+    serverMessages: parseFilterMode(
+      parsed.serverMessages,
+      DEFAULT_NOTIFICATION_SETTINGS.serverMessages
+    ),
+    serverCalls:
+      typeof parsed.serverCalls === 'boolean'
+        ? parsed.serverCalls
+        : DEFAULT_NOTIFICATION_SETTINGS.serverCalls,
+    geoMessages: parseFilterMode(
+      parsed.geoMessages,
+      DEFAULT_NOTIFICATION_SETTINGS.geoMessages
+    ),
+    soundEnabled:
+      typeof parsed.soundEnabled === 'boolean'
+        ? parsed.soundEnabled
+        : DEFAULT_NOTIFICATION_SETTINGS.soundEnabled,
+    ringtoneEnabled:
+      typeof parsed.ringtoneEnabled === 'boolean'
+        ? parsed.ringtoneEnabled
+        : DEFAULT_NOTIFICATION_SETTINGS.ringtoneEnabled,
+    vibrationEnabled:
+      typeof parsed.vibrationEnabled === 'boolean'
+        ? parsed.vibrationEnabled
+        : DEFAULT_NOTIFICATION_SETTINGS.vibrationEnabled,
+    showPreviews:
+      typeof parsed.showPreviews === 'boolean'
+        ? parsed.showPreviews
+        : DEFAULT_NOTIFICATION_SETTINGS.showPreviews,
+    pushBridgeUrl:
+      typeof parsed.pushBridgeUrl === 'string'
+        ? parsed.pushBridgeUrl.trim().slice(0, 256)
+        : '',
+    vapidPublicKey:
+      typeof parsed.vapidPublicKey === 'string'
+        ? parsed.vapidPublicKey.trim().slice(0, 256)
+        : '',
+  }
+}
+
+export function saveNotificationSettings(settings: NotificationSettings): void {
+  safeSet(KEYS.notifications, JSON.stringify(settings))
 }
 
 export function saveTranscriptionConfig(config: PersistedTranscriptionConfig): void {

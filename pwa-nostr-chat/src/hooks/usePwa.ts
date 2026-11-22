@@ -212,6 +212,33 @@ function ensureSwRegistered(): void {
   })
 }
 
+export async function getPwaSwRegistration(): Promise<ServiceWorkerRegistration | null> {
+  const existing = await resolveRegistration()
+  if (existing) return existing
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return null
+  try {
+    const ready = await Promise.race<ServiceWorkerRegistration | null>([
+      navigator.serviceWorker.ready,
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 3000)),
+    ])
+    if (ready) {
+      swRegistration = ready
+      return ready
+    }
+  } catch {
+    // Ignore restricted contexts
+  }
+  return null
+}
+
+export function isPwaStandaloneMode(): boolean {
+  return detectInstalled()
+}
+
+export function isIosSafariNonStandalone(): boolean {
+  return detectIosSafariBrowser() && !detectInstalled()
+}
+
 export function usePwa(badgeCount?: number): PwaState {
   const [snapshot, setSnapshot] = useState<PwaStoreSnapshot>(() => storeState)
   const [checkingUpdate, setCheckingUpdate] = useState(false)

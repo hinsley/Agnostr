@@ -1,0 +1,410 @@
+import { sha256 } from '@noble/hashes/sha256'
+import type { EventTemplate, VerifiedEvent } from 'nostr-tools'
+import type {
+  NotificationPayloadData,
+  NotificationPermissionState,
+  NotificationSettings,
+  PendingNotificationAction,
+} from '../types/notifications.ts'
+import { getPwaSwRegistration } from '../hooks/usePwa.ts'
+import { bytesToHex } from './identity.ts'
+
+export const KIND_NIP98_HTTP_AUTH = 27235
+const APP_ICON = '/Agnostr/icon-192.png'
+const utf8Encoder = new TextEncoder()
+
+interface ExtendedNotificationOptions extends NotificationOptions {
+  renotify?: boolean
+  vibrate?: number[]
+  actions?: Array<{ action: string; title: string; icon?: string }>
+}
+
+export function getBrowserNotificationPermission(): NotificationPermissionState {
+  if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+    return 'unsupported'
+  }
+  const perm = Notification.permission
+  if (perm === 'granted' || perm === 'denied' || perm === 'default') {
+    return perm
+  }
+  return 'unsupported'
+}
+
+export function isWebPushSupported(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+    return false
+  }
+  return (
+    'serviceWorker' in navigator &&
+    'PushManager' in window &&
+    typeof Notification !== 'undefined'
+  )
+}
+
+export async function requestBrowserNotificationPermission(): Promise<NotificationPermissionState> {
+  if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+    return 'unsupported'
+  }
+  if (Notification.permission === 'granted') return 'granted'
+  if (Notification.permission === 'denied') return 'denied'
+  try {
+    // Must be called synchronously inside the user gesture handler
+    const result = await Notification.requestPermission()
+    return result === 'granted' || result === 'denied' ? result : 'default'
+  } catch {
+    return getBrowserNotificationPermission()
+  }
+}
+
+export function normalizePushBridgeUrl(raw: string): string | null {
+  const trimmed = raw.trim().replace(/\/+$/, '')
+  if (!trimmed) return null
+  try {
+    const parsed = new URL(trimmed)
+    const isLocal =
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === '[::1]'
+    if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLocal)) {
+      return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '')
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+export function urlBase64ToUint8Array(base64Url: string): Uint8Array<ArrayBuffer> {
+  const clean = base64Url.trim()
+  const pad = '='.repeat((4 - (clean.length % 4)) % 4)
+  const b64 = (clean + pad).replace(/-/g, '+').replace(/_/g, '/')
+  const raw = atob(b64)
+  const buf = new ArrayBuffer(raw.length)
+  const out = new Uint8Array(buf)
+  for (let i = 0; i < raw.length; i++) {
+    out[i] = raw.charCodeAt(i)
+  }
+  return out
+}
+
+export function parseNotifyHash(rawHash: string): PendingNotificationAction | null {
+  const trimmed = rawHash.replace(/^#/, '').trim()
+  if (!trimmed.toLowerCase().startsWith('notify=')) return null
+  const encoded = trimmed.slice('notify='.length).trim()
+  if (!encoded) return null
+
+  try {
+    const pad = '='.repeat((4 - (encoded.length % 4)) % 4)
+    const b64 = (encoded + pad).replace(/-/g, '+').replace(/_/g, '/')
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) {
+      bytes[i] = bin.charCodeAt(i)
+    }
+    const decoded = JSON.parse(new TextDecoder().decode(bytes)) as {
+      action?: unknown
+      payload?: Partial<NotificationPayloadData>
+    }
+    if (!decoded || typeof decoded !== 'object' || !decoded.payload) return null
+    const rawAction = decoded.action
+    const action: PendingNotificationAction['action'] =
+      rawAction === 'answer' ||
+      rawAction === 'answer-audio' ||
+      rawAction === 'decline'
+        ? rawAction
+        : 'open'
+    return {
+      action,
+      payload: {
+        category: decoded.payload.category ?? 'dm',
+        tag: decoded.payload.tag,
+        callId: decoded.payload.callId,
+        mediaType: decoded.payload.mediaType,
+        peerPubkey: decoded.payload.peerPubkey,
+        serverId: decoded.payload.serverId,
+        channelId: decoded.payload.channelId,
+        geohash: decoded.payload.geohash,
+        callerNickname: decoded.payload.callerNickname,
+      },
+      receivedAt: Date.now(),
+    }
+  } catch {
+    return null
+  }
+}
+
+export interface ShowOsNotificationInput {
+  title: string
+  body: string
+  tag: string
+  data: NotificationPayloadData
+  requireInteraction?: boolean
+  vibrate?: number[]
+  actions?: Array<{ action: string; title: string }>
+  onDirectClick?: (payload: NotificationPayloadData) => void
+}
+
+export async function showOsNotification(
+  input: ShowOsNotificationInput
+): Promise<boolean> {
+  if (getBrowserNotificationPermission() !== 'granted') return false
+
+  const options: ExtendedNotificationOptions = {
+    body: input.body,
+    icon: APP_ICON,
+    badge: APP_ICON,
+    tag: input.tag,
+    renotify: true,
+    requireInteraction: Boolean(input.requireInteraction),
+    vibrate: input.vibrate,
+    actions: input.actions,
+    data: { ...input.data, tag: input.tag },
+  }
+
+  // Prefer ServiceWorkerRegistration.showNotification (required on mobile PWAs & supports action buttons)
+  const reg = await getPwaSwRegistration()
+  if (reg && typeof reg.showNotification === 'function') {
+    try {
+      await reg.showNotification(input.title, options)
+      return true
+    } catch {
+      // Fall back to direct Notification constructor below
+    }
+  }
+
+  try {
+    const directOpts: NotificationOptions = {
+      body: input.body,
+      icon: APP_ICON,
+      tag: input.tag,
+      requireInteraction: Boolean(input.requireInteraction),
+      data: { ...input.data, tag: input.tag },
+    }
+    const notif = new Notification(input.title, directOpts)
+    notif.onclick = () => {
+      try {
+        window.focus()
+      } catch {
+        // Ignore
+      }
+      notif.close()
+      input.onDirectClick?.(input.data)
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function closeCallNotificationsViaSw(callId?: string): Promise<void> {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return
+  try {
+    navigator.serviceWorker.controller?.postMessage({
+      type: 'CLOSE_CALL_NOTIFICATIONS',
+      callId,
+    })
+  } catch {
+    // Ignore
+  }
+
+  const reg = await getPwaSwRegistration()
+  if (!reg) return
+  try {
+    reg.active?.postMessage({
+      type: 'CLOSE_CALL_NOTIFICATIONS',
+      callId,
+    })
+  } catch {
+    // Ignore
+  }
+  try {
+    if (typeof reg.getNotifications === 'function') {
+      const list = await reg.getNotifications()
+      const targetTag = callId ? `agnostr-call-${callId}` : null
+      for (const n of list) {
+        const nTag = n.tag || ''
+        const nData = (n.data || {}) as Partial<NotificationPayloadData>
+        if (targetTag) {
+          if (nTag === targetTag || nData.callId === callId) n.close()
+        } else if (nTag.startsWith('agnostr-call') || nData.category === 'dm-call') {
+          n.close()
+        }
+      }
+    }
+  } catch {
+    // Ignore
+  }
+}
+
+export async function buildNip98AuthHeader(opts: {
+  url: string
+  method: 'POST' | 'DELETE'
+  bodyJson: string
+  signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
+}): Promise<string> {
+  const payloadHash = bytesToHex(sha256(utf8Encoder.encode(opts.bodyJson)))
+  const template: EventTemplate = {
+    kind: KIND_NIP98_HTTP_AUTH,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [
+      ['u', opts.url],
+      ['method', opts.method],
+      ['payload', payloadHash],
+    ],
+    content: '',
+  }
+  const signed = await opts.signEvent(template)
+  const json = JSON.stringify(signed)
+  const bytes = utf8Encoder.encode(json)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  return `Nostr ${btoa(binary)}`
+}
+
+export async function fetchVapidPublicKey(bridgeUrl: string): Promise<string> {
+  const res = await fetch(`${bridgeUrl}/vapid-public-key`, {
+    method: 'GET',
+    headers: { Accept: 'application/json, text/plain' },
+  })
+  if (!res.ok) {
+    throw new Error(`Push bridge returned HTTP ${res.status} for /vapid-public-key.`)
+  }
+  const contentType = res.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    const data = (await res.json()) as {
+      publicKey?: string
+      vapidPublicKey?: string
+    }
+    const key = (data.publicKey || data.vapidPublicKey || '').trim()
+    if (!key) throw new Error('Push bridge returned an empty VAPID public key.')
+    return key
+  }
+  const text = (await res.text()).trim()
+  if (!text) throw new Error('Push bridge returned an empty VAPID public key.')
+  return text
+}
+
+export interface PushBridgeRegisterParams {
+  bridgeUrl: string
+  vapidPublicKey?: string
+  pubkey: string
+  relays: string[]
+  geohashes: string[]
+  serverIds: string[]
+  settings: NotificationSettings
+  signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
+}
+
+export async function registerWithPushBridge(
+  params: PushBridgeRegisterParams
+): Promise<{ endpoint: string; vapidPublicKey: string }> {
+  if (!isWebPushSupported()) {
+    throw new Error('Web Push (PushManager) is unavailable in this browser.')
+  }
+  const reg = await getPwaSwRegistration()
+  if (!reg || !reg.pushManager) {
+    throw new Error('Service Worker is not active yet. Reload once and retry.')
+  }
+
+  const resolvedKey =
+    params.vapidPublicKey?.trim() ||
+    (await fetchVapidPublicKey(params.bridgeUrl))
+
+  let subscription = await reg.pushManager.getSubscription()
+  if (!subscription) {
+    subscription = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(resolvedKey),
+    })
+  }
+
+  const endpointUrl = `${params.bridgeUrl}/subscribe`
+  const bodyObj = {
+    pubkey: params.pubkey.toLowerCase(),
+    subscription: subscription.toJSON(),
+    relays: params.relays.slice(0, 12),
+    geohashes: params.geohashes.slice(0, 12),
+    serverIds: params.serverIds.slice(0, 20),
+    preferences: {
+      dms: params.settings.dms,
+      dmCallRinging: params.settings.dmCallRinging,
+      serverMessages: params.settings.serverMessages,
+      serverCalls: params.settings.serverCalls,
+      geoMessages: params.settings.geoMessages,
+      showPreviews: params.settings.showPreviews,
+    },
+  }
+  const bodyJson = JSON.stringify(bodyObj)
+  const authHeader = await buildNip98AuthHeader({
+    url: endpointUrl,
+    method: 'POST',
+    bodyJson,
+    signEvent: params.signEvent,
+  })
+
+  const res = await fetch(endpointUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: authHeader,
+    },
+    body: bodyJson,
+  })
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '')
+    throw new Error(
+      `Push bridge registration failed (HTTP ${res.status})${errText ? `: ${errText.slice(0, 120)}` : ''}`
+    )
+  }
+
+  return { endpoint: subscription.endpoint, vapidPublicKey: resolvedKey }
+}
+
+export async function unregisterFromPushBridge(opts: {
+  bridgeUrl?: string
+  pubkey: string
+  signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
+}): Promise<void> {
+  const reg = await getPwaSwRegistration()
+  const sub = reg?.pushManager ? await reg.pushManager.getSubscription() : null
+  const endpoint = sub?.endpoint ?? null
+
+  if (opts.bridgeUrl && endpoint) {
+    const normalized = normalizePushBridgeUrl(opts.bridgeUrl)
+    if (normalized) {
+      try {
+        const endpointUrl = `${normalized}/subscribe`
+        const bodyJson = JSON.stringify({
+          pubkey: opts.pubkey.toLowerCase(),
+          endpoint,
+        })
+        const authHeader = await buildNip98AuthHeader({
+          url: endpointUrl,
+          method: 'DELETE',
+          bodyJson,
+          signEvent: opts.signEvent,
+        })
+        await fetch(endpointUrl, {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: authHeader,
+          },
+          body: bodyJson,
+        })
+      } catch {
+        // Proceed with local PushManager unsubscribe even if bridge is unreachable
+      }
+    }
+  }
+
+  if (sub) {
+    try {
+      await sub.unsubscribe()
+    } catch {
+      // Ignore
+    }
+  }
+}

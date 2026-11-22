@@ -18,6 +18,7 @@ import {
   Minimize2,
   MonitorOff,
   MonitorUp,
+  PhoneCall,
   PhoneOff,
   Radio,
   Square,
@@ -339,8 +340,11 @@ export function CallStage({
     }
   }
 
+  const isOutgoingRinging =
+    calls.isOutgoingDmRinging || activeCall.status === 'ringing-out'
+
   const statusText =
-    activeCall.status === 'ringing-out'
+    isOutgoingRinging
       ? 'Ringing…'
       : activeCall.status === 'connecting'
         ? 'Connecting…'
@@ -419,7 +423,13 @@ export function CallStage({
           aria-label={`Active call: ${activeCall.title}`}
         >
           <div className="ag-call-float-left">
-            <span className="ag-led ag-led-ok ag-led-pulse" />
+            <span
+              className={`ag-led ${
+                activeCall.status === 'active'
+                  ? 'ag-led-ok ag-led-pulse'
+                  : 'ag-led-warn ag-led-pulse'
+              }`}
+            />
             <span className="ag-call-float-title truncate">{activeCall.title}</span>
             {activeCall.encrypted && (
               <span className="ag-badge ag-badge-dm ag-hide-xs">
@@ -427,9 +437,16 @@ export function CallStage({
                 <span>E2EE P2P</span>
               </span>
             )}
-            <span className="ag-call-float-meta mono">
-              {count}/{activeCall.maxParticipants} · {statusText}
-            </span>
+            {isOutgoingRinging ? (
+              <span className="ag-call-ringing-pill" role="status">
+                <PhoneCall size={11} className="ag-call-ringing-icon" />
+                <span>Ringing…</span>
+              </span>
+            ) : (
+              <span className="ag-call-float-meta mono">
+                {count}/{activeCall.maxParticipants} · {statusText}
+              </span>
+            )}
             {recBadge}
             {transcription.liveCaptionsEnabled && (
               <span className="ag-badge ag-badge-accent mono ag-hide-xs" title="Live captions active">
@@ -544,7 +561,14 @@ export function CallStage({
               {count}/{activeCall.maxParticipants}
             </span>
           </span>
-          <span className="ag-call-timer mono">{statusText}</span>
+          {isOutgoingRinging ? (
+            <span className="ag-call-ringing-pill" role="status">
+              <PhoneCall size={11} className="ag-call-ringing-icon" />
+              <span>Ringing…</span>
+            </span>
+          ) : (
+            <span className="ag-call-timer mono">{statusText}</span>
+          )}
           {recBadge}
         </div>
 
@@ -588,6 +612,20 @@ export function CallStage({
       {/* Main Stage Body: Participant Grid + Live Captions Overlay + Optional Transcript Panel */}
       <div className={`ag-call-stage-body ${transcriptOpen ? 'with-transcript' : ''}`}>
         <div className="ag-call-stage-main">
+          {/* Outgoing DM Call Ringback Status Banner */}
+          {isOutgoingRinging && (
+            <div className="ag-call-ringback-dock" role="status" aria-live="polite">
+              <span className="ag-call-ringback-banner">
+                <PhoneCall size={13} className="ag-call-ringing-icon" />
+                <span className="truncate">Ringing {activeCall.title}…</span>
+                <span className="ag-call-ringback-sep ag-hide-xs" aria-hidden="true">
+                  ·
+                </span>
+                <span className="ag-call-ringback-sub ag-hide-xs">Waiting for answer</span>
+              </span>
+            </div>
+          )}
+
           {/* Responsive 1–6 Participant Tile Grid */}
           <div className="ag-call-grid" data-count={count}>
             {activeCall.participants.map((participant) => (

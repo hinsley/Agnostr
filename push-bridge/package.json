@@ -1,0 +1,19 @@
+{
+  "name": "agnostr-push-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional self-hostable NIP-98 / VAPID Web Push bridge for waking closed Agnostr PWAs on DMs, DM calls, servers, and Geo Radio.",
+  "scripts": {
+    "start": "node server.mjs",
+    "generate-vapid": "node -e \"import('web-push').then(w => console.log(JSON.stringify(w.default.generateVAPIDKeys(), null, 2)))\""
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.16.2",
+    "web-push": "^3.6.7",
+    "ws": "^8.18.0"
+  }
+}

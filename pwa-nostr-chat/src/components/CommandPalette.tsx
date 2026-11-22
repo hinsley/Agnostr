@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Bell,
+  BellRing,
   Captions,
   Circle,
   Crosshair,
@@ -392,6 +394,69 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         run: () => {
           engine.setStrictWhitelistMode(!engine.strictWhitelistMode)
           onClose()
+        },
+      },
+      {
+        id: 'act-notif-quick',
+        group: 'Actions',
+        title:
+          engine.notifications.permission === 'granted'
+            ? 'Send Test Notification'
+            : 'Enable Notifications',
+        subtitle:
+          engine.notifications.permission === 'granted'
+            ? 'Send a live test push alert to this device'
+            : engine.notifications.isIosRequiresInstall
+              ? 'Add Agnostr to your Home Screen first to enable iOS push alerts'
+              : 'Allow push notifications for DMs, servers, rooms, and calls',
+        keywords: 'notifications push alerts enable test permission bell',
+        badge:
+          engine.notifications.permission === 'granted'
+            ? 'READY'
+            : engine.notifications.permission === 'denied'
+              ? 'OFF'
+              : undefined,
+        icon: <Bell size={15} />,
+        run: () => {
+          onClose()
+          if (engine.notifications.permission === 'granted') {
+            void engine.notifications.sendTestNotification()
+          } else if (engine.notifications.isIosRequiresInstall && onOpenInstall) {
+            onOpenInstall()
+          } else {
+            void engine.notifications.requestPermission()
+          }
+        },
+      },
+      {
+        id: 'act-test-ringtone',
+        group: 'Actions',
+        title: 'Test Call Ringtone',
+        subtitle: 'Preview the incoming DM call ringtone and vibration',
+        keywords: 'test call ringtone ring sound vibrate phone dm audio',
+        icon: <BellRing size={15} />,
+        run: () => {
+          onClose()
+          engine.notifications.testRingtone()
+        },
+      },
+      {
+        id: 'act-settings-notifications',
+        group: 'Settings',
+        title: 'Notification Settings',
+        subtitle:
+          engine.notifications.permission === 'granted' && engine.notifications.settings.enabled
+            ? 'Push alerts ON · DMs, DM call ringing, servers & Geo Radio'
+            : 'Configure push alerts, DM call ringing & optional Web Push bridge',
+        keywords: 'notifications settings push alerts ringtone call ringing vapid bridge bell',
+        badge:
+          engine.notifications.permission === 'granted' && engine.notifications.settings.enabled
+            ? 'ON'
+            : 'OFF',
+        icon: <Bell size={15} />,
+        run: () => {
+          onClose()
+          onOpenSettings('notifications')
         },
       },
       {

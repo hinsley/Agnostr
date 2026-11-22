@@ -35,6 +35,7 @@ export type DirectCallAction =
   | 'call-invite'
   | 'call-accept'
   | 'call-decline'
+  | 'call-cancel'
   | 'call-hangup'
   | 'offer'
   | 'answer'
@@ -280,6 +281,7 @@ const VALID_DIRECT_ACTIONS = new Set<DirectCallAction>([
   'call-invite',
   'call-accept',
   'call-decline',
+  'call-cancel',
   'call-hangup',
   'offer',
   'answer',

@@ -109,16 +109,85 @@ export function App() {
   )
   const callCompactFloating = Boolean(activeCall && !callExpanded && !viewingActiveCallContext)
 
-  // Periodic subtle ringtone while an incoming E2EE P2P call offer is ringing
-  const incomingCallId = engine.calls.incomingCall?.callId ?? null
+  // Handle Service Worker notification clicks & cold-launch `#notify=...` deep links
+  const pendingNotifAction = engine.notifications.pendingAction
+  const incomingCall = engine.calls.incomingCall
+  const navigatedNotifTsRef = useRef<number>(0)
   useEffect(() => {
-    if (!incomingCallId) return
-    radioAudio.play('ring')
-    const timer = window.setInterval(() => {
-      radioAudio.play('ring')
-    }, 2600)
-    return () => window.clearInterval(timer)
-  }, [incomingCallId])
+    if (!pendingNotifAction) return
+    const { action, payload, receivedAt } = pendingNotifAction
+
+    // Navigate to target room/DM/server once per pending notification action
+    if (navigatedNotifTsRef.current !== receivedAt) {
+      navigatedNotifTsRef.current = receivedAt
+      setRoomInfoOpen(false)
+      setCmdkOpen(false)
+      setRadarExpanded(false)
+
+      if ((payload.category === 'dm' || payload.category === 'dm-call') && payload.peerPubkey) {
+        engine.openDmThread(payload.peerPubkey, payload.callerNickname)
+        setListTab('dms')
+        setMobileScreen('chat')
+      } else if (
+        (payload.category === 'server-message' || payload.category === 'server-call') &&
+        payload.serverId
+      ) {
+        if (payload.channelId) {
+          engine.servers.selectChannel(payload.serverId, payload.channelId)
+        } else {
+          engine.servers.selectServer(payload.serverId)
+        }
+        setListTab('servers')
+        setMobileScreen('chat')
+      } else if (
+        (payload.category === 'geo-message' || payload.category === 'location-note') &&
+        payload.geohash
+      ) {
+        engine.tuneGeohash(payload.geohash)
+        setListTab('radio')
+        setMobileScreen('chat')
+      } else if (payload.category === 'test') {
+        setSettingsState({ open: true, tab: 'notifications' })
+      }
+    }
+
+    if (action === 'open') {
+      engine.notifications.consumePendingAction()
+      return
+    }
+
+    // Execute Answer / Decline call actions (waiting briefly for relay invite on cold launch)
+    const callMatches = Boolean(
+      incomingCall &&
+        ((payload.callId && incomingCall.callId === payload.callId) ||
+          (payload.peerPubkey &&
+            incomingCall.callerPubkey.toLowerCase() === payload.peerPubkey.toLowerCase()) ||
+          (!payload.callId && !payload.peerPubkey))
+    )
+
+    if (callMatches && incomingCall) {
+      if (action === 'decline') {
+        radioAudio.play('call-leave')
+        engine.calls.declineIncomingCall()
+      } else if (action === 'answer-audio') {
+        void engine.calls.acceptIncomingCall('audio')
+      } else if (action === 'answer') {
+        void engine.calls.acceptIncomingCall(payload.mediaType ?? incomingCall.mediaType)
+      }
+      engine.notifications.consumePendingAction()
+      return
+    }
+
+    const remainingMs = 18_000 - (Date.now() - receivedAt)
+    if (remainingMs <= 0) {
+      engine.notifications.consumePendingAction()
+      return
+    }
+    const expiryTimer = window.setTimeout(() => {
+      engine.notifications.consumePendingAction()
+    }, remainingMs)
+    return () => window.clearTimeout(expiryTimer)
+  }, [pendingNotifAction, incomingCall, engine])
 
   // Play crisp join/leave cues when active call starts or ends
   const activeCallId = activeCall?.callId ?? null
@@ -991,10 +1060,15 @@ export function App() {
         onClose={() => setLightboxImage(null)}
       />
 
-      {/* Incoming Encrypted P2P Call Offer Banner */}
+      {/* Incoming Encrypted P2P Call Offer Takeover / Card */}
       {engine.calls.incomingCall && (
         <IncomingCallBanner
           incoming={engine.calls.incomingCall}
+          mode="dm"
+          isRinging={engine.notifications.isRinging}
+          isRingMuted={engine.notifications.isRingMuted}
+          isStandalonePwa={pwa.isInstalled}
+          onMuteRing={engine.notifications.muteCurrentRing}
           onAcceptAudio={() => {
             const offer = engine.calls.incomingCall
             if (offer) {
