@@ -460,7 +460,7 @@
   line-height: 1.25;
   white-space: nowrap;
   flex-shrink: 0;
-  max-width: 175px;
+  max-width: 240px;
 }
 
 [data-theme='daylight'] .ag-call-rec-pill,
@@ -1085,7 +1085,7 @@
   }
 
   .ag-call-rec-pill {
-    max-width: 132px;
+    max-width: 196px;
     font-size: 10px;
     padding: 0.12rem 0.4rem;
   }
@@ -1139,6 +1139,17 @@
 }
 
 @media (max-width: 520px) {
+  .ag-call-rec-pill {
+    max-width: 176px;
+    font-size: 9.5px;
+    padding: 0.1rem 0.36rem;
+    gap: 0.26rem;
+  }
+
+  .ag-call-floating-bar.is-recording .ag-call-float-meta {
+    display: none;
+  }
+
   .ag-turn-cred-row {
     grid-template-columns: 1fr;
   }

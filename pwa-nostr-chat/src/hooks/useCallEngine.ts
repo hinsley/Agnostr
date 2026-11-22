@@ -116,6 +116,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const recorderRef = useRef<CallRecorderController | null>(null)
   const recordingStartedAtRef = useRef<number | null>(null)
   const recordingModeRef = useRef<CallRecordingMode | null>(null)
+  const recordingBytesRef = useRef<number>(0)
   const remoteRecordingRef = useRef<Map<string, boolean>>(new Map())
   const seenEventIdsRef = useRef<Set<string>>(new Set())
   const lastLeaveTsByRoomPeerRef = useRef<Map<string, number>>(new Map())
@@ -175,6 +176,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       localRecording: mesh.getLocalRecording(),
       localRecordingStartedAt: recordingStartedAtRef.current,
       localRecordingMode: recordingModeRef.current,
+      localRecordingBytes: recordingBytesRef.current,
       recordingSupported: isCallRecordingSupported(),
       participants,
     }
@@ -308,6 +310,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       const wasRecording = Boolean(recorderRef.current?.isRecording())
       recordingStartedAtRef.current = null
       recordingModeRef.current = null
+      recordingBytesRef.current = 0
 
       if (wasRecording && !opts?.abortRecording && meshToDispose) {
         // Broadcast recording: false before hanging up
@@ -659,6 +662,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         localRecording: false,
         localRecordingStartedAt: null,
         localRecordingMode: null,
+        localRecordingBytes: 0,
         recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
         participants: mesh.getParticipantsSnapshot(),
@@ -754,6 +758,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         localRecording: false,
         localRecordingStartedAt: null,
         localRecordingMode: null,
+        localRecordingBytes: 0,
         recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
         participants: mesh.getParticipantsSnapshot(),
@@ -878,6 +883,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         localRecording: false,
         localRecordingStartedAt: null,
         localRecordingMode: null,
+        localRecordingBytes: 0,
         recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
         participants: mesh.getParticipantsSnapshot(),
@@ -1536,6 +1542,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     if (recorder.isRecording()) {
       recordingStartedAtRef.current = null
       recordingModeRef.current = null
+      recordingBytesRef.current = 0
       mesh.setLocalRecording(false)
       syncActiveCallFromMesh()
 
@@ -1550,14 +1557,27 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
     // Start new call recording
     try {
-      const startInfo = recorder.start(mesh.getParticipantsSnapshot(), (errMsg) => {
-        recordingStartedAtRef.current = null
-        recordingModeRef.current = null
-        meshRef.current?.setLocalRecording(false)
-        syncActiveCallFromMesh()
-        if (errMsg) {
-          pushToastRef.current('error', 'Recording stopped unexpectedly', errMsg)
-        }
+      recordingBytesRef.current = 0
+      const startInfo = recorder.start(mesh.getParticipantsSnapshot(), {
+        onBytesChange: (bytes) => {
+          recordingBytesRef.current = bytes
+          const cur = activeCallRef.current
+          if (cur && cur.localRecordingBytes !== bytes) {
+            const nextSession: ActiveCallSession = { ...cur, localRecordingBytes: bytes }
+            activeCallRef.current = nextSession
+            setActiveCall(nextSession)
+          }
+        },
+        onUnexpectedStop: (errMsg) => {
+          recordingStartedAtRef.current = null
+          recordingModeRef.current = null
+          recordingBytesRef.current = 0
+          meshRef.current?.setLocalRecording(false)
+          syncActiveCallFromMesh()
+          if (errMsg) {
+            pushToastRef.current('error', 'Recording stopped unexpectedly', errMsg)
+          }
+        },
       })
       recordingStartedAtRef.current = startInfo.startedAt
       recordingModeRef.current = startInfo.mode
@@ -1573,6 +1593,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     } catch (err) {
       recordingStartedAtRef.current = null
       recordingModeRef.current = null
+      recordingBytesRef.current = 0
       recorder.abort()
       mesh.setLocalRecording(false)
       syncActiveCallFromMesh()
@@ -1618,6 +1639,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   )
 
   const resetAllCalls = useCallback(() => {
+    recordingBytesRef.current = 0
     recorderRef.current?.abort()
     teardownActiveCall(true, { abortRecording: true })
     incomingCallRef.current = null

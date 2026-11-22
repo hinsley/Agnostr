@@ -2,6 +2,11 @@ import type { CallParticipant } from '../types/calls.ts'
 
 export type CallRecordingMode = 'audio' | 'video'
 
+export interface CallRecordingStartOptions {
+  onUnexpectedStop?: (errorMessage?: string) => void
+  onBytesChange?: (bytes: number) => void
+}
+
 export interface CallRecordingStartResult {
   mode: CallRecordingMode
   startedAt: number
@@ -42,6 +47,11 @@ interface VideoElementBinding {
   element: HTMLVideoElement
 }
 
+interface StreamListenerBinding {
+  stream: MediaStream
+  onTrackChange: () => void
+}
+
 function getAudioContextCtor(): typeof AudioContext | null {
   if (typeof window === 'undefined') return null
   return (
@@ -70,6 +80,16 @@ function pickSupportedMime(mode: CallRecordingMode): string {
     }
   }
   return ''
+}
+
+function canRecordVideoCanvas(): boolean {
+  if (typeof document === 'undefined' || typeof MediaRecorder === 'undefined') return false
+  if (typeof HTMLCanvasElement === 'undefined') return false
+  if (typeof HTMLCanvasElement.prototype.captureStream !== 'function') return false
+  if (typeof MediaRecorder.isTypeSupported === 'function') {
+    return pickSupportedMime('video').length > 0
+  }
+  return true
 }
 
 function extensionForMime(mime: string, mode: CallRecordingMode): string {
@@ -102,14 +122,6 @@ function formatTimerLabel(ms: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
 }
 
-function hasAnyActiveVideo(participants: readonly CallParticipant[]): boolean {
-  return participants.some((p) => {
-    if (!p.videoEnabled && !p.screenSharing) return false
-    const track = p.stream?.getVideoTracks().find((t) => t.readyState === 'live')
-    return Boolean(track)
-  })
-}
-
 function getGridDimensions(count: number): { cols: number; rows: number } {
   if (count <= 1) return { cols: 1, rows: 1 }
   if (count === 2) return { cols: 2, rows: 1 }
@@ -135,6 +147,20 @@ function drawRoundedRect(
   ctx.closePath()
 }
 
+function pickActiveAudioTrack(participant: CallParticipant): MediaStreamTrack | null {
+  const tracks = participant.stream?.getAudioTracks() ?? []
+  return tracks.find((t) => t.readyState === 'live') ?? null
+}
+
+function pickActiveVideoTrack(participant: CallParticipant): MediaStreamTrack | null {
+  if (!participant.videoEnabled && !participant.screenSharing) return null
+  const liveTracks = (participant.stream?.getVideoTracks() ?? []).filter(
+    (t) => t.readyState === 'live' && t.enabled
+  )
+  if (liveTracks.length === 0) return null
+  return liveTracks.find((t) => !t.muted) ?? liveTracks[0] ?? null
+}
+
 export class CallRecorderController {
   private audioCtx: AudioContext | null = null
   private audioDest: MediaStreamAudioDestinationNode | null = null
@@ -144,11 +170,15 @@ export class CallRecorderController {
 
   private canvasCtx: CanvasRenderingContext2D | null = null
   private canvasStream: MediaStream | null = null
+  private videoHostEl: HTMLDivElement | null = null
   private drawTimer: number | null = null
   private videoElements = new Map<string, VideoElementBinding>()
+  private streamListeners = new Map<string, StreamListenerBinding>()
 
   private recorder: MediaRecorder | null = null
   private chunks: Blob[] = []
+  private recordedBytes = 0
+  private onBytesChange: ((bytes: number) => void) | null = null
   private latestParticipants: CallParticipant[] = []
   private mode: CallRecordingMode | null = null
   private mimeType = ''
@@ -169,13 +199,17 @@ export class CallRecorderController {
     return this.active ? this.startedAt : null
   }
 
+  getRecordedBytes(): number {
+    return this.active ? this.recordedBytes : 0
+  }
+
   start(
     participants: readonly CallParticipant[],
-    onUnexpectedStop?: (errorMessage?: string) => void
+    options?: CallRecordingStartOptions
   ): CallRecordingStartResult {
     if (this.active) {
       return {
-        mode: this.mode ?? 'audio',
+        mode: this.mode ?? 'video',
         startedAt: this.startedAt,
         mimeType: this.mimeType,
       }
@@ -193,6 +227,8 @@ export class CallRecorderController {
     this.aborted = false
     this.stopping = false
     this.chunks = []
+    this.recordedBytes = 0
+    this.onBytesChange = options?.onBytesChange ?? null
     this.latestParticipants = [...participants]
 
     // 1. Set up dynamic Web Audio mixer for all participants
@@ -215,8 +251,11 @@ export class CallRecorderController {
     this.silenceOsc = osc
     this.silenceGain = gain
 
-    // 2. Choose video vs audio-only mode
-    let chosenMode: CallRecordingMode = hasAnyActiveVideo(participants) ? 'video' : 'audio'
+    // 2. Always record with the 1280x720 canvas compositor + mixed audio whenever video
+    // MediaRecorder is supported so voice-only participants seamlessly appear on video if
+    // they enable camera or screen share mid-recording! Fall back to audio-only ONLY when
+    // the browser has no video MediaRecorder / canvas.captureStream support.
+    let chosenMode: CallRecordingMode = canRecordVideoCanvas() ? 'video' : 'audio'
     let combinedStream: MediaStream
 
     if (chosenMode === 'video' && typeof document !== 'undefined') {
@@ -228,6 +267,7 @@ export class CallRecorderController {
       if (c2d && typeof canvas.captureStream === 'function') {
         this.canvasCtx = c2d
         this.canvasStream = canvas.captureStream(CANVAS_FPS)
+        this.ensureVideoHostElement()
         const tracks: MediaStreamTrack[] = [
           ...this.canvasStream.getVideoTracks(),
           ...dest.stream.getAudioTracks(),
@@ -273,21 +313,25 @@ export class CallRecorderController {
       recorder = new MediaRecorder(combinedStream)
     }
 
-    this.mimeType = recorder.mimeType || pickedMime || (chosenMode === 'video' ? 'video/webm' : 'audio/webm')
+    this.mimeType =
+      recorder.mimeType || pickedMime || (chosenMode === 'video' ? 'video/webm' : 'audio/webm')
     this.recorder = recorder
     this.active = true
+    this.onBytesChange?.(0)
 
     recorder.ondataavailable = (event: BlobEvent) => {
       if (this.aborted) return
       if (event.data && event.data.size > 0) {
         this.chunks.push(event.data)
+        this.recordedBytes += event.data.size
+        this.onBytesChange?.(this.recordedBytes)
       }
     }
 
     recorder.onerror = () => {
       if (this.aborted || this.stopping) return
       this.abort()
-      onUnexpectedStop?.('MediaRecorder encountered an error while recording.')
+      options?.onUnexpectedStop?.('MediaRecorder encountered an error while recording.')
     }
 
     recorder.start(1000)
@@ -308,8 +352,12 @@ export class CallRecorderController {
       const pk = p.pubkey.toLowerCase()
       activePubkeys.add(pk)
 
-      // Sync audio track into Web Audio mixer
-      const audioTrack = p.stream?.getAudioTracks().find((t) => t.readyState === 'live') ?? null
+      // Attach addtrack/removetrack listeners so mid-call track additions on existing
+      // MediaStream instances are captured immediately even without a React render.
+      this.syncStreamListener(pk, p.stream)
+
+      // Sync audio track by live track ID into Web Audio mixer
+      const audioTrack = pickActiveAudioTrack(p)
       const existingAudio = this.audioSources.get(pk)
       if (audioTrack) {
         if (!existingAudio || existingAudio.trackId !== audioTrack.id) {
@@ -337,25 +385,19 @@ export class CallRecorderController {
         this.audioSources.delete(pk)
       }
 
-      // Sync video element for canvas compositor when recording video
+      // Sync video element by live video track ID for canvas compositor
       if (this.mode === 'video' && typeof document !== 'undefined') {
-        const videoTrack =
-          (p.videoEnabled || p.screenSharing)
-            ? p.stream?.getVideoTracks().find((t) => t.readyState === 'live') ?? null
-            : null
+        const videoTrack = pickActiveVideoTrack(p)
         const existingVideo = this.videoElements.get(pk)
         if (videoTrack) {
           if (!existingVideo || existingVideo.trackId !== videoTrack.id) {
             if (existingVideo) {
               this.cleanupVideoElement(existingVideo.element)
             }
-            const el = document.createElement('video')
-            el.muted = true
-            el.playsInline = true
-            el.autoplay = true
-            el.srcObject = new MediaStream([videoTrack])
-            void el.play().catch(() => {})
+            const el = this.createCompositorVideoElement(videoTrack)
             this.videoElements.set(pk, { trackId: videoTrack.id, element: el })
+          } else if (existingVideo.element.paused && existingVideo.element.readyState >= 1) {
+            void existingVideo.element.play().catch(() => {})
           }
         } else if (existingVideo) {
           this.cleanupVideoElement(existingVideo.element)
@@ -364,7 +406,7 @@ export class CallRecorderController {
       }
     }
 
-    // Remove departed participants from audio mixer and video map
+    // Remove departed participants from audio mixer, video map, and stream listeners
     for (const [pk, binding] of Array.from(this.audioSources.entries())) {
       if (!activePubkeys.has(pk)) {
         try {
@@ -381,6 +423,11 @@ export class CallRecorderController {
         this.videoElements.delete(pk)
       }
     }
+    for (const [pk] of Array.from(this.streamListeners.entries())) {
+      if (!activePubkeys.has(pk)) {
+        this.detachStreamListener(pk)
+      }
+    }
   }
 
   async stopAndDownload(filenameBase: string): Promise<CallRecordingStopResult | null> {
@@ -391,7 +438,7 @@ export class CallRecorderController {
 
     this.stopping = true
     const rec = this.recorder
-    const recordedMode = this.mode ?? 'audio'
+    const recordedMode = this.mode ?? 'video'
     const recordedMime = this.mimeType || (recordedMode === 'video' ? 'video/webm' : 'audio/webm')
     const durationSec = Math.max(1, Math.round((Date.now() - this.startedAt) / 1000))
 
@@ -477,9 +524,98 @@ export class CallRecorderController {
     this.cleanupResources()
   }
 
+  private ensureVideoHostElement(): HTMLDivElement | null {
+    if (typeof document === 'undefined' || !document.body) return null
+    if (this.videoHostEl && this.videoHostEl.isConnected) return this.videoHostEl
+    const host = document.createElement('div')
+    host.setAttribute('aria-hidden', 'true')
+    host.style.position = 'fixed'
+    host.style.left = '-4px'
+    host.style.top = '-4px'
+    host.style.width = '2px'
+    host.style.height = '2px'
+    host.style.opacity = '0.001'
+    host.style.pointerEvents = 'none'
+    host.style.overflow = 'hidden'
+    host.style.zIndex = '-1'
+    document.body.appendChild(host)
+    this.videoHostEl = host
+    return host
+  }
+
+  private createCompositorVideoElement(videoTrack: MediaStreamTrack): HTMLVideoElement {
+    const el = document.createElement('video')
+    el.muted = true
+    el.playsInline = true
+    el.autoplay = true
+    el.style.width = '2px'
+    el.style.height = '2px'
+    el.srcObject = new MediaStream([videoTrack])
+    el.onloadedmetadata = () => {
+      void el.play().catch(() => {})
+    }
+    el.oncanplay = () => {
+      if (el.paused) void el.play().catch(() => {})
+    }
+    const host = this.ensureVideoHostElement()
+    if (host) {
+      host.appendChild(el)
+    }
+    void el.play().catch(() => {})
+    return el
+  }
+
+  private syncStreamListener(pk: string, stream: MediaStream | null): void {
+    const existing = this.streamListeners.get(pk)
+    if (existing && existing.stream === stream) return
+    if (existing) this.detachStreamListener(pk)
+    if (!stream) return
+    const onTrackChange = () => {
+      if (this.active) {
+        this.syncParticipants(this.latestParticipants)
+      }
+    }
+    stream.addEventListener('addtrack', onTrackChange)
+    stream.addEventListener('removetrack', onTrackChange)
+    this.streamListeners.set(pk, { stream, onTrackChange })
+  }
+
+  private detachStreamListener(pk: string): void {
+    const existing = this.streamListeners.get(pk)
+    if (!existing) return
+    existing.stream.removeEventListener('addtrack', existing.onTrackChange)
+    existing.stream.removeEventListener('removetrack', existing.onTrackChange)
+    this.streamListeners.delete(pk)
+  }
+
+  private reconcileTracksBeforeDraw(): void {
+    let needsSync = false
+    for (const p of this.latestParticipants) {
+      const pk = p.pubkey.toLowerCase()
+      const activeAudio = pickActiveAudioTrack(p)
+      const boundAudio = this.audioSources.get(pk)
+      if ((activeAudio?.id ?? null) !== (boundAudio?.trackId ?? null)) {
+        needsSync = true
+        break
+      }
+      const activeVideo = pickActiveVideoTrack(p)
+      const boundVideo = this.videoElements.get(pk)
+      if ((activeVideo?.id ?? null) !== (boundVideo?.trackId ?? null)) {
+        needsSync = true
+        break
+      }
+    }
+    if (needsSync) {
+      this.syncParticipants(this.latestParticipants)
+    }
+  }
+
   private drawCompositeFrame(): void {
     const ctx = this.canvasCtx
     if (!ctx) return
+
+    // Catch any mid-call track unmute/addTrack immediately before rendering this frame
+    this.reconcileTracksBeforeDraw()
 
     ctx.fillStyle = '#090C0A'
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
@@ -509,6 +645,10 @@ export class CallRecorderController {
 
       const vidBinding = this.videoElements.get(p.pubkey.toLowerCase())
       const vid = vidBinding?.element
+      if (vid && vid.paused && vid.readyState >= 1) {
+        void vid.play().catch(() => {})
+      }
+
       if (vid && vid.readyState >= 2 && vid.videoWidth > 0 && vid.videoHeight > 0) {
         const vw = vid.videoWidth
         const vh = vid.videoHeight
@@ -605,29 +745,49 @@ export class CallRecorderController {
 
   private cleanupVideoElement(el: HTMLVideoElement): void {
     try {
+      el.onloadedmetadata = null
+      el.oncanplay = null
       el.pause()
       el.srcObject = null
+      el.remove()
     } catch {
       // Ignore
     }
   }
 
   private cleanupResources(): void {
+    const bytesCb = this.onBytesChange
+    this.onBytesChange = null
     this.active = false
     this.stopping = false
     this.mode = null
     this.recorder = null
     this.chunks = []
+    this.recordedBytes = 0
+    bytesCb?.(0)
 
     if (this.drawTimer !== null) {
       window.clearInterval(this.drawTimer)
       this.drawTimer = null
     }
 
+    for (const pk of Array.from(this.streamListeners.keys())) {
+      this.detachStreamListener(pk)
+    }
+
     for (const binding of this.videoElements.values()) {
       this.cleanupVideoElement(binding.element)
     }
     this.videoElements.clear()
+
+    if (this.videoHostEl) {
+      try {
+        this.videoHostEl.remove()
+      } catch {
+        // Ignore
+      }
+      this.videoHostEl = null
+    }
 
     if (this.canvasStream) {
       this.canvasStream.getTracks().forEach((t) => t.stop())

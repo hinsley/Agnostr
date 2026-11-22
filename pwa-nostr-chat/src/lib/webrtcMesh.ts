@@ -387,14 +387,22 @@ export class WebRtcMesh {
     pc.ontrack = (event) => {
       if (this.disposed) return
       const track = event.track
-      const alreadyHas = entry.remoteStream.getTracks().some((t) => t.id === track.id)
-      if (!alreadyHas) {
-        entry.remoteStream.addTrack(track)
-      }
+      const keptTracks = entry.remoteStream.getTracks().filter((t) => {
+        if (t.id === track.id) return false
+        // Replace any stale/previous video track with the newly negotiated track
+        if (track.kind === 'video' && t.kind === 'video') return false
+        return t.readyState === 'live'
+      })
+      keptTracks.push(track)
+      entry.remoteStream = new MediaStream(keptTracks)
+
       if (track.kind === 'video') {
         entry.videoEnabled = true
         track.onended = () => {
-          entry.remoteStream.removeTrack(track)
+          const remaining = entry.remoteStream
+            .getTracks()
+            .filter((t) => t.id !== track.id && t.readyState === 'live')
+          entry.remoteStream = new MediaStream(remaining)
           entry.videoEnabled = entry.remoteStream
             .getVideoTracks()
             .some((t) => t.readyState === 'live' && t.enabled)
@@ -530,6 +538,10 @@ export class WebRtcMesh {
       await pc.setLocalDescription({ type: 'answer', sdp: optimizedSdp })
       if (pc.localDescription?.sdp) {
         this.callbacks.onSendAnswer(pk, pc.localDescription.sdp)
+      }
+      if (entry.renegotiateQueued && pc.signalingState === 'stable') {
+        entry.renegotiateQueued = false
+        void this.initiateOffer(entry)
       }
       this.emitState()
       return true
@@ -736,7 +748,7 @@ export class WebRtcMesh {
     for (const entry of this.peers.values()) {
       const hasLiveRemoteVideo = entry.remoteStream
         .getVideoTracks()
-        .some((t) => t.readyState === 'live' && !t.muted)
+        .some((t) => t.readyState === 'live')
       remotes.push({
         pubkey: entry.pubkey,
         nickname: entry.nickname,
@@ -869,9 +881,39 @@ export class WebRtcMesh {
     try {
       if (entry.videoSender) {
         await entry.videoSender.replaceTrack(nextTrack)
+        if (nextTrack) {
+          const transceiver = entry.pc
+            .getTransceivers()
+            .find((t) => t.sender === entry.videoSender)
+          if (
+            transceiver &&
+            transceiver.direction !== 'sendrecv' &&
+            transceiver.direction !== 'sendonly'
+          ) {
+            transceiver.direction = 'sendrecv'
+            await this.initiateOffer(entry)
+          }
+        }
         return
       }
       if (nextTrack && this.localStream) {
+        // Reuse an existing recvonly/inactive video transceiver when upgrading voice -> video
+        // (e.g., when remote joined with video while we joined audio-only)
+        const reusableTransceiver = entry.pc
+          .getTransceivers()
+          .find(
+            (t) =>
+              t.receiver.track?.kind === 'video' &&
+              !t.sender.track &&
+              t.direction !== 'stopped'
+          )
+        if (reusableTransceiver) {
+          await reusableTransceiver.sender.replaceTrack(nextTrack)
+          reusableTransceiver.direction = 'sendrecv'
+          entry.videoSender = reusableTransceiver.sender
+          await this.initiateOffer(entry)
+          return
+        }
         entry.videoSender = entry.pc.addTrack(nextTrack, this.localStream)
         await this.initiateOffer(entry)
       }

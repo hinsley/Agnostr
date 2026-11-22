@@ -53,6 +53,7 @@ export interface ActiveCallSession {
   localRecording: boolean
   localRecordingStartedAt: number | null
   localRecordingMode: 'audio' | 'video' | null
+  localRecordingBytes: number
   recordingSupported: boolean
   screenShareSupported: boolean
   participants: CallParticipant[]

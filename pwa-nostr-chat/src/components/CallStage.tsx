@@ -42,6 +42,18 @@ function formatCallDuration(startedAtMs: number, nowMs: number): string {
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
 }
 
+function formatRecordingBytes(bytes: number): string {
+  const safe = Math.max(0, Number.isFinite(bytes) ? bytes : 0)
+  if (safe < 1023.5 * 1024) {
+    const kb = safe === 0 ? 0 : Math.max(1, Math.round(safe / 1024))
+    return `${kb} KB`
+  }
+  if (safe < 1023.95 * 1024 * 1024) {
+    return `${(safe / (1024 * 1024)).toFixed(1)} MB`
+  }
+  return `${(safe / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
 function iceLedClass(state: PeerIceConnectionState): string {
   if (state === 'connected' || state === 'completed') return 'ag-led-ok'
   if (state === 'checking' || state === 'new') return 'ag-led-warn ag-led-pulse'
@@ -88,11 +100,12 @@ function ParticipantTile({
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
 
-  const hasLiveVideo = Boolean(
-    participant.stream &&
-      (participant.videoEnabled || participant.screenSharing) &&
-      participant.stream.getVideoTracks().some((t) => t.readyState === 'live'),
-  )
+  const liveVideoTrack =
+    participant.stream && (participant.videoEnabled || participant.screenSharing)
+      ? (participant.stream.getVideoTracks().find((t) => t.readyState === 'live') ?? null)
+      : null
+  const liveVideoTrackId = liveVideoTrack?.id ?? null
+  const hasLiveVideo = liveVideoTrack !== null
 
   useEffect(() => {
     const el = videoRef.current
@@ -107,7 +120,7 @@ function ParticipantTile({
     } else if (el.srcObject) {
       el.srcObject = null
     }
-  }, [hasLiveVideo, participant.stream])
+  }, [hasLiveVideo, participant.stream, liveVideoTrackId])
 
   const handleColor = pubkeyToColor(participant.pubkey)
   const avatarSize = compact ? 44 : 60
@@ -242,15 +255,19 @@ export function CallStage({
       ? formatCallDuration(activeCall.localRecordingStartedAt, nowMs)
       : null
 
+  const recSize = activeCall.localRecording
+    ? formatRecordingBytes(activeCall.localRecordingBytes)
+    : null
+
   let recPillLabel: string | null = null
   let recPillTitle = ''
   if (isAnyRecording) {
     if (activeCall.localRecording && remoteRecorders.length === 0) {
-      recPillLabel = `REC · ${recTimer ?? '00:00'}`
-      recPillTitle = `You are recording this call${activeCall.localRecordingMode ? ` (${activeCall.localRecordingMode})` : ''}`
+      recPillLabel = `REC · ${recTimer ?? '00:00'} · ${recSize ?? '0 KB'}`
+      recPillTitle = `You are recording this call (${recSize ?? '0 KB'}${activeCall.localRecordingMode ? `, ${activeCall.localRecordingMode}` : ''})`
     } else if (activeCall.localRecording && remoteRecorders.length > 0) {
-      recPillLabel = `REC · ${recTimer ?? '00:00'} · +${remoteRecorders.length}`
-      recPillTitle = `You and ${remoteRecorders.map((p) => p.displayHandle).join(', ')} are recording this call`
+      recPillLabel = `REC · ${recTimer ?? '00:00'} · ${recSize ?? '0 KB'} · +${remoteRecorders.length}`
+      recPillTitle = `You (${recSize ?? '0 KB'}) and ${remoteRecorders.map((p) => p.displayHandle).join(', ')} are recording this call`
     } else if (remoteRecorders.length === 1) {
       const peer = remoteRecorders[0]
       const shortName = peer.nickname ? `@${peer.nickname}` : peer.displayHandle
