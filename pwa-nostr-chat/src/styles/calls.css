@@ -18,8 +18,8 @@
   padding: 0.35rem 0.8rem;
   background: linear-gradient(
     90deg,
-    var(--status-ok-soft) 0%,
-    var(--bg-elevated) 42%,
+    var(--accent-soft) 0%,
+    var(--bg-elevated) 44%,
     var(--bg-surface) 100%
   );
   border-bottom: 1px solid var(--border-accent);
@@ -301,7 +301,7 @@
 }
 
 .ag-call-tile.has-video {
-  background-color: #090d0b;
+  background-color: #0b0c0f;
 }
 
 .ag-call-tile.speaking {
@@ -316,7 +316,7 @@
   height: 100%;
   object-fit: cover;
   display: block;
-  background-color: #090d0b;
+  background-color: #0b0c0f;
 }
 
 .ag-call-video.mirrored {
@@ -909,7 +909,7 @@
   position: absolute;
   inset: -4px;
   border-radius: var(--radius-full);
-  border: 2px solid var(--status-ok);
+  border: 2px solid var(--accent);
   animation: ag-incoming-sonar 1.7s cubic-bezier(0.22, 1, 0.36, 1) infinite;
   pointer-events: none;
 }
@@ -920,7 +920,7 @@
   width: 42px;
   height: 42px;
   border-radius: var(--radius-full);
-  border: 2px solid var(--status-ok);
+  border: 2px solid var(--accent);
   background-color: var(--bg-canvas);
   display: block;
 }
@@ -1000,7 +1000,7 @@
   border-color: var(--border-accent);
   background: linear-gradient(
     180deg,
-    var(--status-ok-soft) 0%,
+    var(--accent-soft) 0%,
     var(--bg-elevated) 55%
   );
 }
@@ -1111,7 +1111,7 @@
   gap: 0.32rem;
   font-size: 11px;
   font-weight: 700;
-  color: var(--status-ok);
+  color: var(--accent);
   padding-left: 0.15rem;
 }
 

@@ -733,7 +733,7 @@ export const Composer: React.FC<ComposerProps> = ({
           </div>
         )}
 
-        {/* Rounded Pill Composer OR Voice Recorder Bar */}
+        {/* Sleek Full-Width Slack/Linear Input Bar OR Voice Recorder Bar */}
         {voiceMode ? (
           <VoiceRecorderBar
             isDm={isViolet}
@@ -746,16 +746,16 @@ export const Composer: React.FC<ComposerProps> = ({
           />
         ) : (
           <form
-            className={`ag-composer-pill ${isViolet ? 'dm' : ''} ${activeReply || pendingImage ? 'with-strip' : ''}`}
+            className={`ag-composer-bar ${isViolet ? 'dm' : ''} ${activeReply || pendingImage ? 'with-strip' : ''}`}
             onSubmit={(e) => {
               e.preventDefault()
               void handleSubmit()
             }}
           >
-            {/* Left Circular Image Picker Button */}
+            {/* Left Compact Image Picker Button */}
             <button
               type="button"
-              className={`ag-pill-attach-btn ${isViolet ? 'dm' : ''} ${pendingImage ? 'active' : ''}`}
+              className={`ag-composer-icon-btn ${isViolet ? 'dm' : ''} ${pendingImage ? 'active' : ''}`}
               disabled={!canSign || isSending || preparingImage}
               onClick={() => fileInputRef.current?.click()}
               title={
@@ -768,13 +768,13 @@ export const Composer: React.FC<ComposerProps> = ({
               aria-label={isViolet ? 'Attach encrypted image' : 'Attach image'}
             >
               {preparingImage ? (
-                <Loader2 size={18} className="ag-spin" />
+                <Loader2 size={17} className="ag-spin" />
               ) : (
-                <ImagePlus size={19} />
+                <ImagePlus size={18} />
               )}
             </button>
 
-            {/* Smooth 16px Auto-Growing Input */}
+            {/* Full-Width Auto-Growing Input (16px on mobile) */}
             <textarea
               ref={textareaRef}
               className="ag-composer-input"
@@ -793,25 +793,11 @@ export const Composer: React.FC<ComposerProps> = ({
               aria-label={placeholder}
             />
 
-            {/* Right Smart Morphing Action: Mic when empty -> Accent Send ArrowUp when ready */}
-            {hasContentToSend || isSending ? (
-              <button
-                type="submit"
-                className={`ag-pill-send-btn ${isViolet ? 'dm' : ''}`}
-                disabled={!hasContentToSend || isSending || preparingImage || !canSign}
-                title={imagePhaseText ?? 'Send message'}
-                aria-label="Send message"
-              >
-                {isSending ? (
-                  <Loader2 size={18} className="ag-spin" />
-                ) : (
-                  <ArrowUp size={19} strokeWidth={2.4} />
-                )}
-              </button>
-            ) : (
+            {/* Right Compact Action Cluster: Mic + Accent Send */}
+            <div className="ag-composer-right">
               <button
                 type="button"
-                className={`ag-pill-mic-btn ${isViolet ? 'dm' : ''}`}
+                className={`ag-composer-icon-btn ${isViolet ? 'dm' : ''}`}
                 disabled={!voiceSupported || !canSign || isSending || preparingImage}
                 onClick={() => {
                   clearPendingImage()
@@ -828,9 +814,23 @@ export const Composer: React.FC<ComposerProps> = ({
                 }
                 aria-label={isViolet ? 'Record encrypted voice memo' : 'Record voice memo'}
               >
-                <Mic size={19} />
+                <Mic size={17} />
               </button>
-            )}
+
+              <button
+                type="submit"
+                className={`ag-composer-send-btn ${isViolet ? 'dm' : ''} ${hasContentToSend ? 'ready' : ''}`}
+                disabled={!hasContentToSend || isSending || preparingImage || !canSign}
+                title={imagePhaseText ?? 'Send message'}
+                aria-label="Send message"
+              >
+                {isSending ? (
+                  <Loader2 size={16} className="ag-spin" />
+                ) : (
+                  <ArrowUp size={17} strokeWidth={2.4} />
+                )}
+              </button>
+            </div>
           </form>
         )}
       </div>

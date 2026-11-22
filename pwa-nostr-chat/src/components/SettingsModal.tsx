@@ -54,46 +54,46 @@ interface ThemeCardOption {
   tagline: string
   bg: string
   surface: string
-  bubble: string
+  elevated: string
   accent: string
 }
 
 const THEME_CARDS: readonly ThemeCardOption[] = [
   {
     id: 'phosphor',
-    name: 'Emerald Dark',
-    tagline: 'Calm dark pine',
-    bg: '#0D1110',
-    surface: '#151A18',
-    bubble: '#0F3A2B',
-    accent: '#10B981',
+    name: 'Carbon',
+    tagline: 'Neutral graphite & electric blue',
+    bg: '#0B0C0F',
+    surface: '#111318',
+    elevated: '#1F232C',
+    accent: '#3B82F6',
   },
   {
     id: 'obsidian',
-    name: 'Midnight',
-    tagline: 'Deep indigo slate',
-    bg: '#0B0D14',
-    surface: '#131622',
-    bubble: '#252B58',
+    name: 'Indigo',
+    tagline: 'Deep ink & modern indigo',
+    bg: '#090A10',
+    surface: '#10121C',
+    elevated: '#202438',
     accent: '#6366F1',
   },
   {
     id: 'amber',
-    name: 'Warm Dusk',
-    tagline: 'Cozy espresso',
-    bg: '#120F0C',
-    surface: '#1B1612',
-    bubble: '#3D2910',
+    name: 'Stone',
+    tagline: 'Warm charcoal & amber',
+    bg: '#100F0E',
+    surface: '#171514',
+    elevated: '#2B2724',
     accent: '#F59E0B',
   },
   {
     id: 'daylight',
     name: 'Light',
-    tagline: 'Clean daylight',
-    bg: '#F5F7F9',
-    surface: '#FFFFFF',
-    bubble: '#D1FAE5',
-    accent: '#059669',
+    tagline: 'Clean white & cobalt blue',
+    bg: '#FFFFFF',
+    surface: '#F6F7F9',
+    elevated: '#E3E7EE',
+    accent: '#2563EB',
   },
 ]
 
@@ -853,9 +853,14 @@ export function SettingsModal({
                 }}
               >
                 <div className="ag-set-theme-swatch" style={{ backgroundColor: t.bg }}>
-                  <span className="ag-set-swatch-in" style={{ backgroundColor: t.surface }} />
-                  <span className="ag-set-swatch-out" style={{ backgroundColor: t.bubble }} />
-                  <span className="ag-set-swatch-accent" style={{ backgroundColor: t.accent }} />
+                  <span className="ag-set-swatch-rail" style={{ backgroundColor: t.surface }}>
+                    <span className="ag-set-swatch-pill" style={{ backgroundColor: t.accent }} />
+                    <span className="ag-set-swatch-line" style={{ backgroundColor: t.elevated }} />
+                  </span>
+                  <span className="ag-set-swatch-stream">
+                    <span className="ag-set-swatch-row" style={{ backgroundColor: t.elevated }} />
+                    <span className="ag-set-swatch-row short" style={{ backgroundColor: t.elevated }} />
+                  </span>
                 </div>
                 <div className="ag-set-theme-info">
                   <span className="ag-set-theme-name">{t.name}</span>

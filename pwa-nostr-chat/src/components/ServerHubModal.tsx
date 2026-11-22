@@ -46,12 +46,12 @@ const EMOJI_CHOICES = [
 ] as const
 
 const ACCENT_CHOICES = [
-  { id: 'emerald', hex: '#22E584', label: 'Emerald' },
-  { id: 'sky', hex: '#38BDF8', label: 'Cyan' },
-  { id: 'violet', hex: '#A78BFA', label: 'Violet' },
-  { id: 'amber', hex: '#F5A623', label: 'Amber' },
+  { id: 'blue', hex: '#3B82F6', label: 'Cobalt' },
+  { id: 'indigo', hex: '#6366F1', label: 'Indigo' },
+  { id: 'sky', hex: '#38BDF8', label: 'Sky' },
+  { id: 'violet', hex: '#8B5CF6', label: 'Violet' },
+  { id: 'amber', hex: '#F59E0B', label: 'Amber' },
   { id: 'rose', hex: '#FB7185', label: 'Coral' },
-  { id: 'teal', hex: '#2DD4BF', label: 'Teal' },
 ] as const
 
 function stripWs(url: string): string {
@@ -423,7 +423,7 @@ export function ServerHubModal({
                   onClick={() => {
                     setCreateMode('virtual-public')
                     setIconDraft('📡')
-                    setAccentDraft('#22E584')
+                    setAccentDraft('#3B82F6')
                   }}
                 >
                   <div className="ag-srv-mode-top">

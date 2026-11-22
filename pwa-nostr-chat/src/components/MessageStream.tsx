@@ -391,7 +391,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       {showTrustedFilterBar && (
         <div className="ag-trusted-filter-bar" role="status" aria-live="polite">
           <div className="ag-trusted-filter-copy">
-            <ShieldCheck size={14} style={{ color: 'var(--status-ok)', flexShrink: 0 }} />
+            <ShieldCheck size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
             <span>
               <strong>Trusted Peers Only</strong> · hiding{' '}
               <span className="tabular">{hiddenCount}</span>{' '}
@@ -536,7 +536,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       className="ag-cta-btn"
                       onClick={() => onTuneChannel(hottestPulse.geohash)}
                     >
-                      <Radio size={15} style={{ color: 'var(--status-ok)' }} />
+                      <Radio size={15} style={{ color: 'var(--accent)' }} />
                       <span>
                         Join #{hottestPulse.geohash}
                         {hottestPulse.nearestCity ? ` · ${hottestPulse.nearestCity}` : ''}

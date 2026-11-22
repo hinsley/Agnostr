@@ -36,10 +36,10 @@ import type { SettingsTab } from './SettingsModal'
 const GEOHASH_REGEX = /^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$/i
 
 const THEMES: Array<{ id: ThemeId; name: string; desc: string }> = [
-  { id: 'phosphor', name: 'Emerald Dark', desc: 'Calm deep slate with emerald accents' },
-  { id: 'obsidian', name: 'Midnight', desc: 'Refined nocturnal indigo-slate palette' },
-  { id: 'amber', name: 'Warm Dusk', desc: 'Cozy espresso dark with golden highlights' },
-  { id: 'daylight', name: 'Light', desc: 'Clean, airy daylight messaging theme' },
+  { id: 'phosphor', name: 'Carbon', desc: 'Neutral graphite & electric blue' },
+  { id: 'obsidian', name: 'Indigo', desc: 'Deep ink & modern indigo' },
+  { id: 'amber', name: 'Stone', desc: 'Warm charcoal & refined amber' },
+  { id: 'daylight', name: 'Light', desc: 'Clean white & cobalt blue' },
 ]
 
 interface PaletteEntry {
@@ -164,7 +164,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'}${room.lastPreview ? ` · ${room.lastPreview}` : ''}`,
         keywords: `live room radio ${room.geohash} ${room.nearestCity ?? ''}`,
         badge: 'LIVE',
-        icon: <Radio size={15} style={{ color: 'var(--status-ok)' }} />,
+        icon: <Radio size={15} style={{ color: 'var(--accent)' }} />,
         run: () => {
           onTuneChannel(room.geohash)
           onClose()

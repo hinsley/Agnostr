@@ -24,10 +24,10 @@ import IncomingCallBanner from './components/IncomingCallBanner'
 import ImageLightboxModal, { type LightboxImagePayload } from './components/ImageLightboxModal'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
-  phosphor: '#0D1110',
-  obsidian: '#0B0D14',
-  amber: '#120F0C',
-  daylight: '#F5F7F9',
+  phosphor: '#0B0C0F',
+  obsidian: '#090A10',
+  amber: '#100F0E',
+  daylight: '#FFFFFF',
 }
 
 const ZERO_ARG_COMMANDS = new Set([

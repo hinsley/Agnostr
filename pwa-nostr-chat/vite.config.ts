@@ -28,8 +28,8 @@ export default defineConfig({
         display: 'standalone',
         display_override: ['window-controls-overlay', 'standalone'],
         orientation: 'any',
-        background_color: '#090C0A',
-        theme_color: '#090C0A',
+        background_color: '#0B0C0F',
+        theme_color: '#0B0C0F',
         categories: ['social', 'communication', 'utilities'],
         icons: [
           {

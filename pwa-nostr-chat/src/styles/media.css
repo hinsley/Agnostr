@@ -116,19 +116,14 @@
 }
 
 .ag-img-shield-btn.trust {
-  color: var(--status-ok);
-  background-color: var(--status-ok-soft);
-  border-color: rgba(34, 229, 132, 0.42);
-}
-
-[data-theme='daylight'] .ag-img-shield-btn.trust,
-[data-theme='paper'] .ag-img-shield-btn.trust {
-  border-color: rgba(13, 138, 82, 0.42);
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
 }
 
 .ag-img-shield-btn.trust:hover {
-  background-color: var(--status-ok);
-  border-color: var(--status-ok);
+  background-color: var(--accent);
+  border-color: var(--accent);
   color: var(--text-inverse);
 }
 
@@ -263,10 +258,10 @@
   pointer-events: none;
   background: linear-gradient(
     180deg,
-    rgba(6, 10, 8, 0.38) 0%,
+    rgba(9, 11, 16, 0.42) 0%,
     transparent 34%,
     transparent 64%,
-    rgba(6, 10, 8, 0.52) 100%
+    rgba(9, 11, 16, 0.56) 100%
   );
   opacity: 0;
   transition: opacity var(--dur-fast) ease;
@@ -291,12 +286,12 @@
   gap: 0.26rem;
   padding: 0.14rem 0.45rem;
   border-radius: var(--radius-full);
-  background-color: rgba(8, 12, 10, 0.76);
+  background-color: rgba(11, 13, 18, 0.78);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border: 1px solid rgba(255, 255, 255, 0.16);
   color: #f1f5f9;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 1.25;
   white-space: nowrap;
@@ -314,7 +309,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background-color: rgba(8, 12, 10, 0.76);
+  background-color: rgba(11, 13, 18, 0.78);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border: 1px solid rgba(255, 255, 255, 0.18);
@@ -380,7 +375,7 @@
   position: fixed;
   inset: 0;
   z-index: calc(var(--z-modal) + 10);
-  background-color: rgba(5, 8, 7, 0.9);
+  background-color: rgba(7, 9, 13, 0.92);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   display: flex;
@@ -397,7 +392,7 @@
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.65rem 1rem;
-  background-color: rgba(10, 14, 12, 0.72);
+  background-color: rgba(11, 13, 18, 0.78);
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   color: #f1f5f9;
 }
