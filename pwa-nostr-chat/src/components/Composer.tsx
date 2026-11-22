@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CornerUpLeft,
   Cpu,
+  ImagePlus,
   Loader2,
   Lock,
   Mic,
@@ -11,12 +12,34 @@ import {
 } from 'lucide-react'
 import type {
   AgnostrEngine,
+  PreparedImage,
   RecordedVoiceMemo,
   SlashCommandDef,
+  VoiceSendPhase,
 } from '../types/protocol'
+import {
+  formatImageBytes,
+  isSupportedImageFile,
+  prepareImageFile,
+  revokeImagePreviewUrl,
+} from '../lib/imageProcessor'
 import { formatVoiceDuration, isVoiceRecordingSupported } from '../lib/voiceRecorder'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon'
 import { VoiceRecorderBar } from './VoiceRecorderBar'
+
+const MEDIA_PHASE_LABEL: Record<VoiceSendPhase, string> = {
+  idle: 'Send',
+  encrypting: 'Encrypting…',
+  uploading: 'Uploading…',
+  signing: 'Signing…',
+  publishing: 'Publishing…',
+}
+
+function dataTransferHasFiles(dt: DataTransfer | null): boolean {
+  if (!dt) return false
+  if (dt.types && Array.from(dt.types).includes('Files')) return true
+  return dt.files.length > 0
+}
 
 export interface ComposerProps {
   engine: AgnostrEngine
@@ -47,7 +70,34 @@ export const Composer: React.FC<ComposerProps> = ({
   const [history, setHistory] = useState<string[]>([])
   const [historyIdx, setHistoryIdx] = useState(-1)
   const [voiceMode, setVoiceMode] = useState(false)
+  const [pendingImage, setPendingImage] = useState<PreparedImage | null>(null)
+  const [preparingImage, setPreparingImage] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const pendingImageRef = useRef<PreparedImage | null>(null)
+  const contextEpochRef = useRef(0)
+  const dragDepthRef = useRef(0)
+
+  const clearPendingImage = useCallback(() => {
+    contextEpochRef.current += 1
+    if (pendingImageRef.current) {
+      revokeImagePreviewUrl(pendingImageRef.current)
+      pendingImageRef.current = null
+    }
+    setPendingImage(null)
+  }, [])
+
+  // Always revoke any staged image preview URL on unmount and invalidate in-flight image prep
+  useEffect(() => {
+    return () => {
+      contextEpochRef.current += 1
+      if (pendingImageRef.current) {
+        revokeImagePreviewUrl(pendingImageRef.current)
+        pendingImageRef.current = null
+      }
+    }
+  }, [])
 
   const voiceSupported = useMemo(() => isVoiceRecordingSupported(), [])
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
@@ -68,8 +118,8 @@ export const Composer: React.FC<ComposerProps> = ({
       ? `srv:${activeServer?.id ?? ''}:${activeChannel?.id ?? ''}`
       : `ch:${engine.activeGeohash}`
 
-  // Immediately tear down voice recorder (stops mic & revokes preview URL) on Panic Wipe,
-  // key rotation, or switching target channel/DM so audio never leaks across contexts.
+  // Immediately tear down voice recorder & staged images (stops mic & revokes preview URLs)
+  // on Panic Wipe, key rotation, or switching target channel/DM/server so media never leaks across contexts.
   const prevMasterPkRef = useRef(engine.identity.masterPubkey)
   const prevTargetKeyRef = useRef(activeTargetKey)
   useEffect(() => {
@@ -79,8 +129,12 @@ export const Composer: React.FC<ComposerProps> = ({
     prevTargetKeyRef.current = activeTargetKey
     if (pkChanged || targetChanged) {
       setVoiceMode(false)
+      clearPendingImage()
+      setPreparingImage(false)
+      dragDepthRef.current = 0
+      setDragActive(false)
     }
-  }, [engine.identity.masterPubkey, activeTargetKey])
+  }, [engine.identity.masterPubkey, activeTargetKey, clearPendingImage])
 
   // Handle external mention or snippet insertions (e.g., clicking "Mention" in PeerInspector)
   useEffect(() => {
@@ -212,9 +266,142 @@ export const Composer: React.FC<ComposerProps> = ({
         ? engine.identity.hasNip07
         : engine.identity.localSecretValid
 
+  const { pushToast } = engine
+
+  const stageImageFile = useCallback(
+    async (file: File) => {
+      if (!canSign || isSending || preparingImage) return
+      if (!isSupportedImageFile(file)) {
+        pushToast(
+          'warning',
+          'Unsupported image format',
+          'Choose a PNG, JPEG, WebP, or GIF image (SVG is blocked for safety).'
+        )
+        return
+      }
+      const prepEpoch = ++contextEpochRef.current
+      setVoiceMode(false)
+      setPreparingImage(true)
+      try {
+        const prepared = await prepareImageFile(file)
+        if (contextEpochRef.current !== prepEpoch) {
+          // Context switched, Panic Wiped, cancelled, or unmounted mid-flight
+          revokeImagePreviewUrl(prepared)
+          return
+        }
+        if (pendingImageRef.current) {
+          revokeImagePreviewUrl(pendingImageRef.current)
+        }
+        pendingImageRef.current = prepared
+        setPendingImage(prepared)
+        requestAnimationFrame(() => textareaRef.current?.focus())
+      } catch (err) {
+        if (contextEpochRef.current !== prepEpoch) return
+        pushToast(
+          'warning',
+          'Could not process image',
+          err instanceof Error ? err.message : 'Unable to strip EXIF and compress image.'
+        )
+      } finally {
+        if (contextEpochRef.current === prepEpoch) {
+          setPreparingImage(false)
+        }
+      }
+    },
+    [canSign, isSending, preparingImage, pushToast]
+  )
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (file) {
+      void stageImageFile(file)
+    }
+  }
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items
+    if (items) {
+      for (const item of Array.from(items)) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const file = item.getAsFile()
+          if (file) {
+            e.preventDefault()
+            void stageImageFile(file)
+            return
+          }
+        }
+      }
+    }
+    const files = e.clipboardData?.files
+    if (files && files.length > 0) {
+      const imgFile = Array.from(files).find((f) => isSupportedImageFile(f))
+      if (imgFile) {
+        e.preventDefault()
+        void stageImageFile(imgFile)
+      }
+    }
+  }
+
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!canSign || !dataTransferHasFiles(e.dataTransfer)) return
+    e.preventDefault()
+    dragDepthRef.current += 1
+    setDragActive(true)
+  }
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!canSign || !dataTransferHasFiles(e.dataTransfer)) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+  }
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!dataTransferHasFiles(e.dataTransfer)) return
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+    if (dragDepthRef.current === 0) {
+      setDragActive(false)
+    }
+  }
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!dataTransferHasFiles(e.dataTransfer)) return
+    e.preventDefault()
+    dragDepthRef.current = 0
+    setDragActive(false)
+    if (!canSign) return
+    const dropped = Array.from(e.dataTransfer.files)
+    const imgFile = dropped.find((f) => isSupportedImageFile(f)) ?? dropped[0]
+    if (imgFile) {
+      void stageImageFile(imgFile)
+    }
+  }
+
   const handleSubmit = async () => {
     const trimmed = draft.trim()
-    if (!trimmed || isSending || !canSign) return
+    if ((!trimmed && !pendingImage) || isSending || preparingImage || !canSign) return
+
+    if (pendingImage) {
+      const staged = pendingImage
+      const caption = trimmed || undefined
+      if (trimmed) {
+        setHistory((prev) => [trimmed, ...prev.filter((x) => x !== trimmed)].slice(0, 30))
+        setHistoryIdx(-1)
+      }
+      setDraft('')
+
+      const ok = isServer
+        ? await engine.servers.sendImageAttachment(staged, caption)
+        : await engine.sendImageAttachment(staged, caption)
+
+      if (ok) {
+        clearPendingImage()
+        onSent?.(isViolet)
+      } else {
+        setDraft(trimmed)
+      }
+      return
+    }
 
     setHistory((prev) => [trimmed, ...prev.filter((x) => x !== trimmed)].slice(0, 30))
     setHistoryIdx(-1)
@@ -310,10 +497,17 @@ export const Composer: React.FC<ComposerProps> = ({
       return
     }
 
-    if (e.key === 'Escape' && activeReply) {
-      e.preventDefault()
-      if (isServer) engine.servers.setReplyingTo(null)
-      else engine.setReplyingTo(null)
+    if (e.key === 'Escape') {
+      if (pendingImage && !isSending) {
+        e.preventDefault()
+        clearPendingImage()
+        return
+      }
+      if (activeReply) {
+        e.preventDefault()
+        if (isServer) engine.servers.setReplyingTo(null)
+        else engine.setReplyingTo(null)
+      }
     }
   }
 
@@ -321,7 +515,6 @@ export const Composer: React.FC<ComposerProps> = ({
     setVoiceMode(false)
   }, [])
 
-  const { pushToast } = engine
   const handleVoiceErrorToast = useCallback(
     (title: string, detail?: string) => {
       pushToast('warning', title, detail)
@@ -350,6 +543,11 @@ export const Composer: React.FC<ComposerProps> = ({
       if (stripped) return stripped.slice(0, 72)
       return `Voice memo (${formatVoiceDuration(target.voiceMemo.durationSec)})`
     }
+    if (target.imageAttachment) {
+      const stripped = target.content.split(target.imageAttachment.url).join('').trim()
+      if (stripped) return stripped.slice(0, 72)
+      return `Image (${target.imageAttachment.width}×${target.imageAttachment.height})`
+    }
     return target.content.slice(0, 72)
   }, [activeReply])
 
@@ -357,19 +555,54 @@ export const Composer: React.FC<ComposerProps> = ({
     ? engine.identity.signMode === 'extension'
       ? 'No NIP-07 extension detected — switch to Auto in Identity tab…'
       : 'Enter a valid nsec key in Identity tab to transmit…'
-    : isDm && dmThread
-      ? `Encrypted DM to ${dmThread.peerDisplayHandle}…`
-      : isServer && activeServer && activeChannel
-        ? isServerE2ee
-          ? `Encrypted message to #${activeChannel.name} in ${activeServer.name}…`
-          : `Message #${activeChannel.name} in ${activeServer.name}… (@ to mention)`
-        : `Transmit to #${engine.activeGeohash}… (/ for commands, @ to mention)`
+    : pendingImage
+      ? isViolet
+        ? 'Add an optional encrypted caption… (Enter to send)'
+        : 'Add an optional caption… (Enter to send)'
+      : isDm && dmThread
+        ? `Encrypted DM to ${dmThread.peerDisplayHandle}…`
+        : isServer && activeServer && activeChannel
+          ? isServerE2ee
+            ? `Encrypted message to #${activeChannel.name} in ${activeServer.name}…`
+            : `Message #${activeChannel.name} in ${activeServer.name}… (@ to mention)`
+          : `Transmit to #${engine.activeGeohash}… (/ for commands, @ to mention)`
 
-  const hasBanner = Boolean(activeReply) || isDm || isServerE2ee
+  const hasTopBanner = Boolean(activeReply) || isDm || isServerE2ee
+  const hasBanner = hasTopBanner || Boolean(pendingImage && !voiceMode)
+  const imagePhaseText =
+    pendingImage && isSending && engine.voiceSendPhase !== 'idle'
+      ? MEDIA_PHASE_LABEL[engine.voiceSendPhase]
+      : null
 
   return (
     <div className="ag-composer-dock">
-      <div className="ag-composer-inner">
+      <div
+        className={`ag-composer-inner ag-composer-dropzone ${isViolet ? 'dm' : ''}`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif,image/avif,image/*"
+          className="sr-only"
+          onChange={handleFileInputChange}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
+
+        {dragActive && (
+          <div className="ag-composer-drop-overlay" role="status">
+            <ImagePlus size={16} />
+            <span>
+              {isViolet
+                ? 'Drop image to encrypt & send (EXIF stripped)'
+                : 'Drop image to attach (EXIF stripped)'}
+            </span>
+          </div>
+        )}
         {/* Slash Command Autocomplete Popup */}
         {!voiceMode && autocomplete.type === 'command' && (
           <div className="ag-autocomplete-popup" role="listbox" aria-label="Slash commands">
@@ -441,7 +674,9 @@ export const Composer: React.FC<ComposerProps> = ({
 
         {/* Contextual Encrypted Server / DM Banner */}
         {isServer && isServerE2ee && activeServer && activeChannel && (
-          <div className={`ag-composer-banner dm ${activeReply ? 'has-next-banner' : ''}`}>
+          <div
+            className={`ag-composer-banner dm ${activeReply || (pendingImage && !voiceMode) ? 'has-next-banner' : ''}`}
+          >
             <div className="ag-composer-banner-left">
               <Lock size={12} style={{ flexShrink: 0 }} />
               <span className="mono truncate" style={{ fontSize: 11 }}>
@@ -449,7 +684,7 @@ export const Composer: React.FC<ComposerProps> = ({
               </span>
               <span
                 className="ag-badge dm ag-e2ee-voice-pill"
-                title="Voice memos in this E2EE server are encrypted client-side with AES-256-GCM before upload"
+                title="Voice memos & images in this E2EE server are encrypted client-side with AES-256-GCM before upload"
               >
                 <Mic size={9} />
                 E2EE VOICE
@@ -463,7 +698,9 @@ export const Composer: React.FC<ComposerProps> = ({
 
         {/* Contextual Reply Banner (Geohash Channels & Servers) */}
         {activeReply && (
-          <div className={`ag-composer-banner ${isServerE2ee ? 'stacked' : ''}`}>
+          <div
+            className={`ag-composer-banner ${isServerE2ee ? 'stacked' : ''} ${pendingImage && !voiceMode ? 'has-next-banner' : ''}`}
+          >
             <div className="ag-composer-banner-left">
               <CornerUpLeft size={13} style={{ color: isServerE2ee ? 'var(--dm-accent)' : 'var(--accent)', flexShrink: 0 }} />
               <span className="truncate">
@@ -489,7 +726,9 @@ export const Composer: React.FC<ComposerProps> = ({
         )}
 
         {isDm && dmThread && (
-          <div className="ag-composer-banner dm">
+          <div
+            className={`ag-composer-banner dm ${pendingImage && !voiceMode ? 'has-next-banner' : ''}`}
+          >
             <div className="ag-composer-banner-left">
               <Lock size={12} style={{ flexShrink: 0 }} />
               <span className="mono truncate" style={{ fontSize: 11 }}>
@@ -497,7 +736,7 @@ export const Composer: React.FC<ComposerProps> = ({
               </span>
               <span
                 className="ag-badge dm ag-e2ee-voice-pill"
-                title="DM voice memos are encrypted client-side with AES-256-GCM before Blossom upload"
+                title="DM voice memos & images are encrypted client-side with AES-256-GCM before Blossom upload"
               >
                 <Mic size={9} />
                 E2EE VOICE
@@ -506,6 +745,60 @@ export const Composer: React.FC<ComposerProps> = ({
             <span className="mono ag-hide-xs" style={{ fontSize: 10.5, opacity: 0.85, flexShrink: 0 }}>
               {dmThread.peerDisplayHandle}
             </span>
+          </div>
+        )}
+
+        {/* Staged Image Preview Strip */}
+        {pendingImage && !voiceMode && (
+          <div
+            className={`ag-composer-img-preview ${isViolet ? 'dm' : ''} ${hasTopBanner ? 'stacked' : ''}`}
+            role="region"
+            aria-label="Staged image preview"
+          >
+            <div className="ag-composer-img-preview-left">
+              <div className="ag-composer-img-thumb-wrap">
+                <img
+                  src={pendingImage.previewUrl}
+                  alt={pendingImage.fileName}
+                  className="ag-composer-img-thumb"
+                />
+              </div>
+              <div className="ag-composer-img-meta">
+                <div className="ag-composer-img-name-row">
+                  <span className="ag-composer-img-name truncate">{pendingImage.fileName}</span>
+                  {isViolet && (
+                    <span
+                      className="ag-badge dm"
+                      title="Image will be encrypted client-side with AES-256-GCM before Blossom upload"
+                    >
+                      <Lock size={9} />
+                      E2EE IMAGE
+                    </span>
+                  )}
+                </div>
+                <div className="ag-composer-img-sub mono tabular">
+                  <span>
+                    {pendingImage.width}×{pendingImage.height} · {formatImageBytes(pendingImage.size)} · EXIF stripped
+                  </span>
+                  {imagePhaseText && (
+                    <span className="ag-composer-img-phase">
+                      <Loader2 size={11} className="ag-spin" />
+                      {imagePhaseText}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="ag-composer-img-discard"
+              onClick={clearPendingImage}
+              disabled={isSending}
+              title="Discard staged image (Esc)"
+              aria-label="Discard staged image"
+            >
+              <X size={14} />
+            </button>
           </div>
         )}
 
@@ -559,14 +852,39 @@ export const Composer: React.FC<ComposerProps> = ({
               onClick={(e) => setCursorPos(e.currentTarget.selectionStart ?? draft.length)}
               onKeyUp={(e) => setCursorPos(e.currentTarget.selectionStart ?? draft.length)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               aria-label={placeholder}
             />
 
             <button
               type="button"
+              className={`ag-img-btn ${isViolet ? 'dm' : ''} ${pendingImage ? 'active' : ''}`}
+              disabled={!canSign || isSending || preparingImage}
+              onClick={() => fileInputRef.current?.click()}
+              title={
+                !canSign
+                  ? 'Configure a signing key in Identity tab to send images'
+                  : isViolet
+                    ? 'Attach E2EE image (EXIF stripped, AES-256-GCM)'
+                    : 'Attach image (EXIF stripped, WebP compressed)'
+              }
+              aria-label={isViolet ? 'Attach encrypted image' : 'Attach image'}
+            >
+              {preparingImage ? (
+                <Loader2 size={16} className="ag-spin" />
+              ) : (
+                <ImagePlus size={16} />
+              )}
+            </button>
+
+            <button
+              type="button"
               className={`ag-mic-btn ${isViolet ? 'dm' : ''}`}
-              disabled={!voiceSupported || !canSign || isSending}
-              onClick={() => setVoiceMode(true)}
+              disabled={!voiceSupported || !canSign || isSending || preparingImage}
+              onClick={() => {
+                clearPendingImage()
+                setVoiceMode(true)
+              }}
               title={
                 !voiceSupported
                   ? 'Voice memos require microphone & MediaRecorder support in this browser'
@@ -586,7 +904,7 @@ export const Composer: React.FC<ComposerProps> = ({
             <button
               type="submit"
               className={`ag-send-btn ${isViolet ? 'dm' : ''}`}
-              disabled={!draft.trim() || isSending || !canSign}
+              disabled={(!draft.trim() && !pendingImage) || isSending || preparingImage || !canSign}
               aria-label="Send message"
             >
               {isSending ? (
@@ -594,7 +912,9 @@ export const Composer: React.FC<ComposerProps> = ({
               ) : (
                 <Send size={15} />
               )}
-              <span className="ag-desktop-only">{isSending ? 'TX…' : 'Send'}</span>
+              <span className="ag-desktop-only">
+                {imagePhaseText ?? (isSending ? 'TX…' : 'Send')}
+              </span>
             </button>
           </form>
         )}
@@ -606,13 +926,17 @@ export const Composer: React.FC<ComposerProps> = ({
               ? isViolet
                 ? 'AES-256-GCM E2EE audio · Up to 1:30 · Esc to discard'
                 : 'Blossom voice memo · Up to 1:30 · Esc to discard'
-              : isDm
-                ? 'Enter to send encrypted DM · Mic for E2EE voice · Shift+Enter for newline'
-                : isServer && activeServer
-                  ? isServerE2ee
-                    ? 'Enter to send E2EE message · Mic for E2EE voice · @ to mention · ⌘K palette'
-                    : `Enter to send to ${activeServer.name} · Mic for voice · @ to mention · ⌘K palette`
-                  : 'Enter to broadcast · Mic for voice · /trust · /strict · /j #geo · ⌘K palette'}
+              : pendingImage
+                ? isViolet
+                  ? 'AES-256-GCM E2EE image · EXIF stripped · Enter to send · Esc to discard'
+                  : 'Blossom image · EXIF stripped · Enter to send · Esc to discard'
+                : isDm
+                  ? 'Enter to send encrypted DM · Paste/drop image · Mic for E2EE voice'
+                  : isServer && activeServer
+                    ? isServerE2ee
+                      ? 'Enter to send E2EE · Paste/drop image · Mic for voice · @ to mention · ⌘K'
+                      : `Enter to send to ${activeServer.name} · Paste/drop image · Mic for voice · ⌘K`
+                    : 'Enter to broadcast · Paste/drop image · Mic for voice · /trust · /strict · ⌘K'}
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.55rem' }}>
             {engine.settings.powEnabled && !isDm && !(isServer && activeServer?.kind === 'nip29') && (

@@ -1,11 +1,12 @@
 import type { Event as NostrEvent, EventTemplate } from 'nostr-tools'
-import type { ReplyReference, VoiceMemoAttachment } from '../types/protocol.ts'
+import type { ImageAttachment, ReplyReference, VoiceMemoAttachment } from '../types/protocol.ts'
 import type {
   Nip29GroupMeta,
   Nip29RelayPreset,
   ServerMessage,
 } from '../types/servers.ts'
 import {
+  buildImageImetaTag,
   buildImetaTag,
   clampTimestamp,
   extractMentions,
@@ -13,6 +14,7 @@ import {
   getValidatedPowBits,
   isEmoteContent,
   KIND_EPHEMERAL_REACTION,
+  parseImageFromImeta,
   parseVoiceMemoFromImeta,
 } from './bitchatProtocol.ts'
 import { formatDisplayHandle } from './identity.ts'
@@ -223,6 +225,7 @@ export function buildNip29ChatTemplate(opts: {
   previousIds?: readonly string[]
   replyTo?: ServerMessage | null
   voiceMemo?: VoiceMemoAttachment
+  imageAttachment?: ImageAttachment
 }): EventTemplate {
   const tags: string[][] = [['h', opts.groupId]]
 
@@ -252,6 +255,9 @@ export function buildNip29ChatTemplate(opts: {
   if (opts.voiceMemo) {
     tags.push(buildImetaTag(opts.voiceMemo))
   }
+  if (opts.imageAttachment) {
+    tags.push(buildImageImetaTag(opts.imageAttachment))
+  }
 
   return {
     kind: KIND_NIP29_CHAT,
@@ -280,6 +286,7 @@ export function parseNip29ChatEvent(
   const rawNick = getTagValue(event.tags, 'n')?.trim() || getKnownNickname?.(pubkey) || ''
   const nickname = rawNick || `anon${pubkey.slice(-4)}`
   const voiceMemo = parseVoiceMemoFromImeta(event.tags)
+  const imageAttachment = parseImageFromImeta(event.tags)
 
   let replyTo: ReplyReference | undefined
   const refTag =
@@ -313,6 +320,7 @@ export function parseNip29ChatEvent(
     reactions: [],
     mentions: extractMentions(content),
     voiceMemo,
+    imageAttachment,
     deliveryStatus: 'sent',
   }
 }

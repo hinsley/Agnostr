@@ -15,22 +15,26 @@ import {
   AlertCircle,
   Loader2,
 } from 'lucide-react'
-import type { GeoMessage, VoiceMemoAttachment } from '../types/protocol'
+import type { GeoMessage, ImageAttachment, VoiceMemoAttachment } from '../types/protocol'
 import { identiconDataUrl, pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
+import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
 
-function extractVoiceCaption(content: string, memoUrl: string): string {
-  const trimmed = content.trim()
-  if (!trimmed) return ''
-  const target = memoUrl.trim()
-  if (!target) return trimmed
-  if (trimmed === target) return ''
-  return trimmed
-    .split(target)
-    .join('')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
+function extractMediaCaption(
+  content: string,
+  voiceUrl?: string,
+  imageUrl?: string
+): string {
+  let text = content.trim()
+  if (!text) return ''
+  for (const rawUrl of [voiceUrl, imageUrl]) {
+    const target = rawUrl?.trim()
+    if (!target) continue
+    if (text === target) return ''
+    text = text.split(target).join('')
+  }
+  return text.replace(/\n{3,}/g, '\n\n').trim()
 }
 
 const QUICK_EMOJIS = ['⚡', '🔥', '👍', '👀', '🫡', '❤️']
@@ -65,6 +69,8 @@ export interface MessageItemProps {
   isSenderTrusted: boolean
   isSenderExplicitlyTrusted: boolean
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
+  fetchImageAttachmentBlob: (image: ImageAttachment, senderPubkey: string) => Promise<string>
+  onOpenLightbox: (payload: LightboxImagePayload) => void
   onTrustSender: (pubkey: string, nickname: string) => void
   onBlockSender: (pubkey: string, displayHandle: string) => void
   onReply?: (message: GeoMessage) => void
@@ -92,6 +98,8 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     isSenderTrusted,
     isSenderExplicitlyTrusted,
     fetchVoiceMemoBlob,
+    fetchImageAttachmentBlob,
+    onOpenLightbox,
     onTrustSender,
     onBlockSender,
     onReply,
@@ -135,9 +143,14 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
     const handle = formatHandle(message.nickname, message.pubkey)
     const authorColor = pubkeyToColor(message.pubkey)
-    const visibleContent = message.voiceMemo
-      ? extractVoiceCaption(message.content, message.voiceMemo.url)
-      : message.content
+    const visibleContent =
+      message.voiceMemo || message.imageAttachment
+        ? extractMediaCaption(
+            message.content,
+            message.voiceMemo?.url,
+            message.imageAttachment?.url
+          )
+        : message.content
 
     const handleCopy = () => {
       const toCopy = visibleContent || message.content
@@ -327,7 +340,25 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             />
           )}
 
-          {/* Rich Content (omits redundant raw Blossom URL for voice-only memos) */}
+          {/* Image Attachment / Untrusted Shielded Card */}
+          {message.imageAttachment && (
+            <ImageAttachmentCard
+              image={message.imageAttachment}
+              senderPubkey={message.pubkey}
+              senderNickname={handle.base}
+              senderDisplayHandle={handle.full}
+              isTrusted={isSenderTrusted}
+              isDmMode={isDmMode}
+              caption={visibleContent || undefined}
+              fetchImageAttachmentBlob={fetchImageAttachmentBlob}
+              onTrustSender={onTrustSender}
+              onInspectSender={(pk, nick) => onInspectAuthor?.(pk, nick)}
+              onBlockSender={onBlockSender}
+              onOpenLightbox={onOpenLightbox}
+            />
+          )}
+
+          {/* Rich Content (omits redundant raw Blossom URL for media-only messages) */}
           {visibleContent.length > 0 && (
             <RichMessageContent
               content={visibleContent}

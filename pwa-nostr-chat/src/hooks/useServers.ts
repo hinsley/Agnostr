@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   ActiveView,
   AppSettings,
+  ImageAttachment,
+  PreparedImage,
   RecordedVoiceMemo,
   ToastLevel,
   VoiceMemoAttachment,
@@ -22,9 +24,11 @@ import type {
 } from '../types/servers.ts'
 import {
   cleanMimeType,
+  encryptMediaBytesAesGcm,
   encryptVoiceBytesAesGcm,
   uploadBlobToBlossom,
 } from '../lib/blossom.ts'
+import { revokeImagePreviewUrl } from '../lib/imageProcessor.ts'
 import {
   clampTimestamp,
   getTagValue,
@@ -1178,12 +1182,16 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     [pool, identityManager, activeView, setActiveView, activeGeohash, pushToast]
   )
 
-  // Messaging (text + voice + reactions + delete)
+  // Messaging (text + voice + image + reactions + delete)
   const sendMessage = useCallback(
-    async (rawText: string, voiceAttachment?: VoiceMemoAttachment): Promise<boolean> => {
+    async (
+      rawText: string,
+      voiceAttachment?: VoiceMemoAttachment,
+      imageAttachment?: ImageAttachment
+    ): Promise<boolean> => {
       const text = rawText.trim()
       if (!activeServer || !activeChannel || !pool) return false
-      if (!text && !voiceAttachment) return false
+      if (!text && !voiceAttachment && !imageAttachment) return false
 
       const server = activeServer
       const chanId = activeChannel.id
@@ -1210,6 +1218,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               nickname: nick,
               replyTo: replyingTo,
               voiceMemo: voiceAttachment,
+              imageAttachment,
             })
           : buildNip29ChatTemplate({
               groupId: server.groupId || chanId,
@@ -1218,6 +1227,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               previousIds: rawMessagesRef.current.filter((m) => !m.isSystem).map((m) => m.id),
               replyTo: replyingTo,
               voiceMemo: voiceAttachment,
+              imageAttachment,
             })
 
         if (isVirtual && settings.powEnabled && settings.powTargetBits > 0 && masterPk) {
@@ -1252,6 +1262,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           reactions: [],
           mentions: [],
           voiceMemo: voiceAttachment,
+          imageAttachment,
           deliveryStatus: 'sending',
         }
 
@@ -1372,6 +1383,84 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         return ok
       } catch (err) {
         pushToast('error', 'Server voice memo failed', err instanceof Error ? err.message : 'Upload error')
+        return false
+      } finally {
+        setVoiceSendPhase('idle')
+        setSending(false)
+      }
+    },
+    [activeServer, activeChannel, pool, blossomServers, identityManager, setVoiceSendPhase, sendMessage, pushToast]
+  )
+
+  const sendImageAttachment = useCallback(
+    async (image: PreparedImage, caption?: string): Promise<boolean> => {
+      if (!activeServer || !activeChannel || !pool) return false
+      if (image.size <= 0) return false
+
+      const server = activeServer
+      const cleanMime = cleanMimeType(image.mime, 'image/webp')
+      const cleanCaption = caption?.trim() ?? ''
+
+      setSending(true)
+      try {
+        const rawBytes = new Uint8Array(await image.blob.arrayBuffer())
+        let attachment: ImageAttachment
+
+        if (server.kind === 'virtual' && server.encrypted) {
+          setVoiceSendPhase('encrypting')
+          const { ciphertext, encryption } = await encryptMediaBytesAesGcm(rawBytes)
+          setVoiceSendPhase('uploading')
+          const upload = await uploadBlobToBlossom({
+            bytes: ciphertext,
+            mime: 'application/octet-stream',
+            servers: blossomServers,
+            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
+          })
+          attachment = {
+            url: upload.url,
+            mime: cleanMime,
+            sha256: upload.sha256,
+            size: image.size,
+            width: image.width,
+            height: image.height,
+            alt: image.fileName,
+            encryption,
+            server: upload.server,
+          }
+        } else {
+          setVoiceSendPhase('uploading')
+          const upload = await uploadBlobToBlossom({
+            bytes: rawBytes,
+            mime: cleanMime,
+            servers: blossomServers,
+            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
+          })
+          attachment = {
+            url: upload.url,
+            mime: cleanMime,
+            sha256: upload.sha256,
+            size: upload.size,
+            width: image.width,
+            height: image.height,
+            alt: image.fileName,
+            server: upload.server,
+          }
+        }
+
+        setVoiceSendPhase('publishing')
+        const body = server.encrypted
+          ? cleanCaption
+          : cleanCaption
+            ? `${cleanCaption}\n${attachment.url}`
+            : attachment.url
+
+        const ok = await sendMessage(body, undefined, attachment)
+        if (ok) {
+          revokeImagePreviewUrl(image)
+        }
+        return ok
+      } catch (err) {
+        pushToast('error', 'Server image upload failed', err instanceof Error ? err.message : 'Upload error')
         return false
       } finally {
         setVoiceSendPhase('idle')
@@ -1783,6 +1872,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       leaveServer,
       sendMessage: (rawText) => sendMessage(rawText),
       sendVoiceMemo,
+      sendImageAttachment,
       sendReaction,
       deleteMessage,
       clearChannelCache,
@@ -1826,6 +1916,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       leaveServer,
       sendMessage,
       sendVoiceMemo,
+      sendImageAttachment,
       sendReaction,
       deleteMessage,
       clearChannelCache,

@@ -1,0 +1,768 @@
+/* ==========================================================================
+   Agnostr Blossom Image Attachments, Lightbox & Composer Media Dock
+   ShieldedImageCard, TrustedImageView, ImageLightboxModal,
+   Composer Image Preview Strip & Drag-and-Drop Overlay.
+   Theme-adaptive via tokens.css across phosphor | amber | obsidian | daylight
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Inert Shielded Image Card (Untrusted Senders — Zero Network Fetches)
+   -------------------------------------------------------------------------- */
+.ag-img-shield-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  width: 100%;
+  max-width: 470px;
+  margin: 0.24rem 0 0.2rem;
+  padding: 0.65rem 0.78rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px dashed var(--border-strong);
+}
+
+.ag-img-shield-card.dm {
+  border-color: rgba(167, 139, 250, 0.45);
+}
+
+.ag-img-shield-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ag-img-shield-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.ag-img-shield-emblem {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--status-warn-soft);
+  color: var(--status-warn);
+  flex-shrink: 0;
+}
+
+.ag-img-shield-card.dm .ag-img-shield-emblem {
+  background-color: var(--dm-soft);
+  color: var(--dm-accent);
+}
+
+.ag-img-shield-title {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+.ag-img-shield-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.ag-img-shield-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.42;
+  color: var(--text-secondary);
+}
+
+.ag-img-shield-note strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.ag-img-shield-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+  margin-top: 0.1rem;
+}
+
+.ag-img-shield-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  height: 28px;
+  padding: 0 0.62rem;
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  transition:
+    color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-img-shield-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background-color: var(--bg-subtle);
+}
+
+.ag-img-shield-btn.trust {
+  color: var(--status-ok);
+  background-color: var(--status-ok-soft);
+  border-color: rgba(34, 229, 132, 0.42);
+}
+
+[data-theme='daylight'] .ag-img-shield-btn.trust,
+[data-theme='paper'] .ag-img-shield-btn.trust {
+  border-color: rgba(13, 138, 82, 0.42);
+}
+
+.ag-img-shield-btn.trust:hover {
+  background-color: var(--status-ok);
+  border-color: var(--status-ok);
+  color: var(--text-inverse);
+}
+
+.ag-img-shield-btn.danger:hover {
+  color: var(--status-danger);
+  background-color: var(--status-danger-soft);
+  border-color: rgba(244, 63, 94, 0.45);
+}
+
+/* --------------------------------------------------------------------------
+   2. Trusted Inline Image Attachment Viewer & Skeleton Shimmer
+   -------------------------------------------------------------------------- */
+@keyframes ag-img-shimmer {
+  0% {
+    background-position: -220% 0;
+  }
+  100% {
+    background-position: 220% 0;
+  }
+}
+
+.ag-img-card {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: min(380px, 100%);
+  max-height: 320px;
+  margin: 0.24rem 0 0.2rem;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-sm);
+  transition:
+    border-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
+}
+
+.ag-img-card.dm {
+  border-color: rgba(167, 139, 250, 0.38);
+}
+
+.ag-img-card.ready:hover {
+  border-color: var(--border-accent);
+  box-shadow: var(--shadow-md);
+}
+
+.ag-img-card.ready.dm:hover {
+  border-color: var(--dm-accent);
+}
+
+.ag-img-card.loading {
+  width: min(320px, 100%);
+  min-height: 140px;
+  max-height: 260px;
+}
+
+.ag-img-skeleton {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(
+    110deg,
+    var(--bg-surface) 22%,
+    var(--bg-subtle) 48%,
+    var(--bg-surface) 74%
+  );
+  background-size: 220% 100%;
+  animation: ag-img-shimmer 1.6s ease-in-out infinite;
+}
+
+.ag-img-skeleton-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.65rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-glass);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ag-img-skeleton-meta {
+  position: absolute;
+  left: 0.45rem;
+  bottom: 0.45rem;
+}
+
+.ag-img-frame-btn {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  line-height: 0;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+
+.ag-img-media {
+  display: block;
+  max-width: min(380px, 100%);
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  object-fit: cover;
+  background-color: var(--bg-canvas);
+  transition: transform var(--dur-med) var(--ease-out);
+}
+
+.ag-img-frame-btn:hover .ag-img-media {
+  transform: scale(1.015);
+}
+
+.ag-img-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 0.45rem;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(6, 10, 8, 0.38) 0%,
+    transparent 34%,
+    transparent 64%,
+    rgba(6, 10, 8, 0.52) 100%
+  );
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease;
+}
+
+.ag-img-frame-btn:hover .ag-img-overlay,
+.ag-img-frame-btn:focus-visible .ag-img-overlay {
+  opacity: 1;
+}
+
+.ag-img-overlay-top,
+.ag-img-overlay-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.ag-img-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.26rem;
+  padding: 0.14rem 0.45rem;
+  border-radius: var(--radius-full);
+  background-color: rgba(8, 12, 10, 0.76);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #f1f5f9;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.ag-img-chip-e2ee {
+  color: #d8b4fe;
+  border-color: rgba(167, 139, 250, 0.52);
+}
+
+.ag-img-expand-pill {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(8, 12, 10, 0.76);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #f8fafc;
+}
+
+/* Error State Card */
+.ag-img-error-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  width: 100%;
+  max-width: 420px;
+  margin: 0.24rem 0 0.2rem;
+  padding: 0.58rem 0.72rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px solid rgba(244, 63, 94, 0.45);
+}
+
+.ag-img-error-msg {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--status-danger);
+}
+
+.ag-img-error-msg svg {
+  flex-shrink: 0;
+}
+
+.ag-img-retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  height: 26px;
+  padding: 0 0.58rem;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  flex-shrink: 0;
+  transition:
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-img-retry-btn:hover {
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+
+/* --------------------------------------------------------------------------
+   3. Fullscreen Image Lightbox Modal
+   -------------------------------------------------------------------------- */
+.ag-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-modal) + 10);
+  background-color: rgba(5, 8, 7, 0.9);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  display: flex;
+  flex-direction: column;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  animation: ag-fade-in var(--dur-fast) var(--ease-out);
+}
+
+.ag-lightbox-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 1rem;
+  background-color: rgba(10, 14, 12, 0.72);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f1f5f9;
+}
+
+.ag-lightbox-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.ag-lightbox-handle {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: #f8fafc;
+  min-width: 0;
+}
+
+.ag-lightbox-dim {
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ag-lightbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  flex-shrink: 0;
+}
+
+.ag-lightbox-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.36rem;
+  height: 34px;
+  padding: 0 0.72rem;
+  border-radius: var(--radius-sm);
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #f8fafc;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-lightbox-btn:hover {
+  background-color: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.ag-lightbox-btn:active {
+  transform: scale(0.96);
+}
+
+.ag-lightbox-close {
+  width: 34px;
+  padding: 0;
+}
+
+.ag-lightbox-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  overflow: hidden;
+}
+
+.ag-lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.72);
+  animation: ag-scale-in var(--dur-med) var(--ease-spring);
+}
+
+.ag-lightbox-caption {
+  flex: 0 0 auto;
+  max-height: 22vh;
+  overflow-y: auto;
+  padding: 0.65rem 1.25rem;
+  background-color: rgba(10, 14, 12, 0.72);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  text-align: center;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* --------------------------------------------------------------------------
+   4. Composer Image Picker Button, Staged Preview Strip & Drag-and-Drop Zone
+   -------------------------------------------------------------------------- */
+.ag-img-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  background-color: transparent;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+  transition:
+    color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-img-btn:hover:not(:disabled) {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-img-btn.dm:hover:not(:disabled) {
+  color: var(--dm-accent);
+  background-color: var(--dm-soft);
+  border-color: rgba(167, 139, 250, 0.45);
+}
+
+.ag-img-btn.active {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-img-btn.dm.active {
+  color: var(--dm-accent);
+  background-color: var(--dm-soft);
+  border-color: var(--dm-accent);
+}
+
+.ag-img-btn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+/* Drag-and-Drop Composer Zone */
+.ag-composer-dropzone {
+  position: relative;
+}
+
+.ag-composer-drop-overlay {
+  position: absolute;
+  inset: -4px;
+  z-index: var(--z-popover);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: var(--radius-lg);
+  border: 2px dashed var(--accent);
+  background-color: var(--bg-glass);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  box-shadow: var(--shadow-md), var(--accent-glow);
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-composer-dropzone.dm .ag-composer-drop-overlay {
+  border-color: var(--dm-accent);
+  color: var(--dm-accent);
+  box-shadow: var(--shadow-md), 0 0 22px rgba(167, 139, 250, 0.28);
+}
+
+/* Staged Image Preview Strip above Composer Input */
+.ag-composer-img-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.48rem 0.68rem;
+  margin-bottom: -4px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-bottom: 1px solid var(--border-subtle);
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-composer-img-preview.dm {
+  border-color: var(--dm-accent);
+  background: linear-gradient(
+    90deg,
+    var(--dm-soft) 0%,
+    var(--bg-elevated) 48%
+  );
+}
+
+.ag-composer-img-preview.stacked {
+  border-radius: 0;
+  border-top: none;
+}
+
+.ag-composer-img-preview-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-composer-img-thumb-wrap {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-canvas);
+  flex-shrink: 0;
+}
+
+.ag-composer-img-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-composer-img-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-composer-img-name-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.ag-composer-img-name {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.ag-composer-img-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.ag-composer-img-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ag-composer-img-preview.dm .ag-composer-img-phase {
+  color: var(--dm-accent);
+}
+
+.ag-composer-img-discard {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  transition:
+    color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-composer-img-discard:hover:not(:disabled) {
+  color: var(--status-danger);
+  background-color: var(--status-danger-soft);
+  border-color: rgba(244, 63, 94, 0.45);
+}
+
+/* --------------------------------------------------------------------------
+   5. Touch & Mobile Adaptation (<768px)
+   -------------------------------------------------------------------------- */
+@media (hover: none) {
+  .ag-img-overlay {
+    opacity: 1;
+    background: linear-gradient(
+      180deg,
+      rgba(6, 10, 8, 0.25) 0%,
+      transparent 30%,
+      transparent 70%,
+      rgba(6, 10, 8, 0.4) 100%
+    );
+  }
+}
+
+@media (max-width: 767px) {
+  .ag-img-card,
+  .ag-img-media {
+    max-width: min(300px, 100%);
+    max-height: 260px;
+  }
+
+  .ag-img-shield-card {
+    max-width: 100%;
+    padding: 0.58rem 0.66rem;
+  }
+
+  .ag-img-shield-btn {
+    min-height: 34px;
+    height: 34px;
+  }
+
+  .ag-lightbox-bar {
+    padding: 0.55rem 0.72rem;
+  }
+
+  .ag-lightbox-btn {
+    min-width: 40px;
+    min-height: 40px;
+    height: 40px;
+  }
+
+  .ag-lightbox-stage {
+    padding: 0.5rem;
+  }
+
+  .ag-composer-img-preview {
+    padding: 0.42rem 0.55rem;
+    gap: 0.5rem;
+  }
+
+  .ag-composer-img-thumb-wrap {
+    width: 42px;
+    height: 42px;
+  }
+
+  .ag-composer-img-discard {
+    width: 34px;
+    height: 34px;
+  }
+}

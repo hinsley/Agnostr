@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   ActiveView,
   AgnostrEngine,
   AppSettings,
   DmProtocol,
   GeoMessage,
+  ImageAttachment,
   LocationNote,
   PeerInfo,
   PinnedChannel,
+  PreparedImage,
   RecordedVoiceMemo,
   RelayTelemetry,
   SignMode,
@@ -19,11 +21,13 @@ import type {
 import {
   cleanMimeType,
   DEFAULT_BLOSSOM_SERVERS,
+  encryptMediaBytesAesGcm,
   encryptVoiceBytesAesGcm,
   normalizeBlossomServerUrl,
   uploadBlobToBlossom,
   VoiceBlobCache,
 } from '../lib/blossom.ts'
+import { revokeImagePreviewUrl } from '../lib/imageProcessor.ts'
 import {
   buildGeohashChatTemplate,
   buildLocationNoteTemplate,
@@ -378,27 +382,29 @@ export function useAgnostrEngine(): AgnostrEngine {
   const ownPubkeysRef = useRef<Set<string>>(ownPubkeys)
   const activeViewRef = useRef<ActiveView>(activeView)
 
-  useEffect(() => {
+  // Sync security-critical refs in useLayoutEffect so they are always up to date
+  // BEFORE any child component's mount/update useEffect (e.g. TrustedImageView) runs!
+  useLayoutEffect(() => {
     messagesRef.current = messages
   }, [messages])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     blockedSetRef.current = blockedSet
   }, [blockedSet])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     trustedSetRef.current = trustedSet
   }, [trustedSet])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     strictWhitelistRef.current = settings.strictWhitelistMode
   }, [settings.strictWhitelistMode])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     ownPubkeysRef.current = ownPubkeys
   }, [ownPubkeys])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeViewRef.current = activeView
   }, [activeView])
 
@@ -758,6 +764,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     ensureThread,
     sendDirectMessage,
     sendDirectVoiceMemo,
+    sendDirectImageAttachment,
     clearThread,
     clearAllDms,
   } = useDirectMessages({
@@ -1159,8 +1166,13 @@ export function useAgnostrEngine(): AgnostrEngine {
         saveBlockedPubkeys(next)
         if (!exists) {
           setMessages((msgs) => msgs.filter((m) => m.pubkey.toLowerCase() !== pk))
-          // Blocking automatically revokes trust & cached voice audio
-          voiceCacheRef.current?.revokeAll()
+          // Synchronously revoke trust & cached media for this peer before next render
+          if (trustedSetRef.current.has(pk)) {
+            const nextTrusted = new Set(trustedSetRef.current)
+            nextTrusted.delete(pk)
+            trustedSetRef.current = nextTrusted
+          }
+          voiceCacheRef.current?.revokeForSender(pk)
           setTrustedPubkeys((trustedPrev) => {
             if (!trustedPrev.some((t) => t.pubkey === pk)) return trustedPrev
             const trimmed = trustedPrev.filter((t) => t.pubkey !== pk)
@@ -1212,6 +1224,12 @@ export function useAgnostrEngine(): AgnostrEngine {
       }
       const cleanLabel =
         label?.trim() || presenceTracker.getNickname(pk) || undefined
+      // Synchronously update trustedSetRef before next render / child useEffect mounts
+      if (!trustedSetRef.current.has(pk)) {
+        const nextTrusted = new Set(trustedSetRef.current)
+        nextTrusted.add(pk)
+        trustedSetRef.current = nextTrusted
+      }
       setTrustedPubkeys((prev) => {
         const existingIdx = prev.findIndex((t) => t.pubkey === pk)
         let next: TrustedPeerEntry[]
@@ -1253,7 +1271,12 @@ export function useAgnostrEngine(): AgnostrEngine {
   const untrustPubkey = useCallback(
     (pubkey: string) => {
       const pk = pubkey.toLowerCase()
-      voiceCacheRef.current?.revokeAll()
+      if (trustedSetRef.current.has(pk)) {
+        const nextTrusted = new Set(trustedSetRef.current)
+        nextTrusted.delete(pk)
+        trustedSetRef.current = nextTrusted
+      }
+      voiceCacheRef.current?.revokeForSender(pk)
       setTrustedPubkeys((prev) => {
         const next = prev.filter((t) => t.pubkey !== pk)
         saveTrustedPubkeys(next)
@@ -1265,6 +1288,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const clearTrustedPubkeys = useCallback(() => {
+    trustedSetRef.current = new Set()
     voiceCacheRef.current?.revokeAll()
     setTrustedPubkeys([])
     saveTrustedPubkeys([])
@@ -1470,7 +1494,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     ]
   )
 
-  // STRICT engine-level whitelist guard: zero network requests for unwhitelisted senders
+  // STRICT engine-level Trusted Peers guard: zero network requests for untrusted senders
   const fetchVoiceMemoBlob = useCallback(
     async (memo: VoiceMemoAttachment, senderPubkey: string): Promise<string> => {
       const pk = senderPubkey.toLowerCase()
@@ -1482,8 +1506,181 @@ export function useAgnostrEngine(): AgnostrEngine {
       // Enforce immediately before touching cache or network
       assertAuthorized()
       const cache = voiceCacheRef.current
-      if (!cache) throw new Error('Voice media cache unavailable.')
-      return await cache.getOrFetch(memo, assertAuthorized)
+      if (!cache) throw new Error('Media cache unavailable.')
+      return await cache.getOrFetch(memo, assertAuthorized, pk)
+    },
+    []
+  )
+
+  const sendImageAttachment = useCallback(
+    async (image: PreparedImage, caption?: string): Promise<boolean> => {
+      if (!pool || image.size <= 0) return false
+
+      if (activeView.type === 'server') {
+        return await serversEngine.sendImageAttachment(image, caption)
+      }
+
+      const gh = activeGeohash
+      const isDm = activeView.type === 'dm'
+      const cleanMime = cleanMimeType(image.mime, 'image/webp')
+      const cleanCaption = caption?.trim() ?? ''
+
+      setSending(true)
+      try {
+        const rawBytes = new Uint8Array(await image.blob.arrayBuffer())
+
+        if (isDm) {
+          setVoiceSendPhase('encrypting')
+          const { ciphertext, encryption } = await encryptMediaBytesAesGcm(rawBytes)
+
+          setVoiceSendPhase('uploading')
+          const upload = await uploadBlobToBlossom({
+            bytes: ciphertext,
+            mime: 'application/octet-stream',
+            servers: blossomServers,
+            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+          })
+
+          const attachment: ImageAttachment = {
+            url: upload.url,
+            mime: cleanMime,
+            sha256: upload.sha256,
+            size: image.size,
+            width: image.width,
+            height: image.height,
+            alt: image.fileName,
+            encryption,
+            server: upload.server,
+          }
+
+          setVoiceSendPhase('publishing')
+          const ok = await sendDirectImageAttachment(activeView.peerPubkey, attachment, cleanCaption)
+          if (ok) {
+            revokeImagePreviewUrl(image)
+            pushToast('success', 'Encrypted image sent', 'AES-256-GCM image delivered inside E2EE gift wrap.')
+          }
+          return ok
+        }
+
+        // Public geohash channel: upload EXIF-stripped image to Blossom + publish kind 20000 with NIP-92 imeta
+        setVoiceSendPhase('uploading')
+        const upload = await uploadBlobToBlossom({
+          bytes: rawBytes,
+          mime: cleanMime,
+          servers: blossomServers,
+          signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+        })
+
+        const attachment: ImageAttachment = {
+          url: upload.url,
+          mime: cleanMime,
+          sha256: upload.sha256,
+          size: upload.size,
+          width: image.width,
+          height: image.height,
+          alt: image.fileName,
+          server: upload.server,
+        }
+
+        setVoiceSendPhase('signing')
+        const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
+        const activeKey = identityManager.getKeyMaterialForGeohash(gh)
+        const template = buildGeohashChatTemplate({
+          content,
+          geohash: gh,
+          nickname: identityManager.getNickname(),
+          isTeleported: location.isTeleported,
+          replyTo: replyingTo,
+          imageAttachment: attachment,
+        })
+
+        if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
+          const nonceTag = await mineNip13NonceTag(template, activeKey.pubkey, settings.powTargetBits, 450)
+          if (nonceTag) {
+            template.tags = [...template.tags, nonceTag]
+          }
+        }
+
+        const signed = await identityManager.signEvent(template, gh)
+        const optimistic = parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
+          messagesRef.current.find((m) => m.id === id)
+        )
+        if (optimistic) {
+          optimistic.deliveryStatus = 'sending'
+          optimistic.isOwn = true
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === optimistic.id)) return prev
+            const next = [...prev, optimistic].sort((a, b) => a.createdAt - b.createdAt)
+            saveChannelMessages(gh, next)
+            return next
+          })
+        }
+
+        setReplyingTo(null)
+        setVoiceSendPhase('publishing')
+
+        const res = await pool.publish(relaySelection.channelRelays, signed)
+        const ok = res.acceptedRelays.length > 0
+
+        setMessages((prev) => {
+          const next = prev.map((m) =>
+            m.id === signed.id
+              ? {
+                  ...m,
+                  deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
+                  relayCount: res.acceptedRelays.length,
+                }
+              : m
+          )
+          saveChannelMessages(gh, next)
+          return next
+        })
+
+        if (ok) {
+          revokeImagePreviewUrl(image)
+        } else {
+          pushToast('error', 'Image publish failed', 'Uploaded to Blossom, but no Nostr relay accepted the event.')
+        }
+        return ok
+      } catch (err) {
+        pushToast('error', 'Image upload failed', err instanceof Error ? err.message : 'Unable to upload image.')
+        return false
+      } finally {
+        setVoiceSendPhase('idle')
+        setSending(false)
+      }
+    },
+    [
+      pool,
+      activeGeohash,
+      activeView,
+      serversEngine,
+      blossomServers,
+      identityManager,
+      sendDirectImageAttachment,
+      location.isTeleported,
+      replyingTo,
+      settings.powEnabled,
+      settings.powTargetBits,
+      relaySelection.channelRelays,
+      pushToast,
+    ]
+  )
+
+  // STRICT engine-level Trusted Peers guard: zero network requests for untrusted senders
+  const fetchImageAttachmentBlob = useCallback(
+    async (image: ImageAttachment, senderPubkey: string): Promise<string> => {
+      const pk = senderPubkey.toLowerCase()
+      const assertAuthorized = () => {
+        if (!ownPubkeysRef.current.has(pk) && !trustedSetRef.current.has(pk)) {
+          throw new Error('Blocked: trust this sender before loading images or media.')
+        }
+      }
+      // Enforce immediately before touching cache or network
+      assertAuthorized()
+      const cache = voiceCacheRef.current
+      if (!cache) throw new Error('Media cache unavailable.')
+      return await cache.getOrFetch(image, assertAuthorized, pk)
     },
     []
   )
@@ -1608,6 +1805,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const panicWipe = useCallback(() => {
+    trustedSetRef.current = new Set()
+    blockedSetRef.current = new Set()
     resetAllCalls()
     pool?.closeAll()
     voiceCacheRef.current?.revokeAll()
@@ -1811,6 +2010,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     voiceSendPhase,
     sendVoiceMemo,
     fetchVoiceMemoBlob,
+    sendImageAttachment,
+    fetchImageAttachmentBlob,
 
     relays,
     connectedRelayCount: connectedRelays.length,

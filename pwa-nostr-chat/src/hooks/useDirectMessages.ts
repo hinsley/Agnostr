@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { DmMessage, DmProtocol, DmThread, VoiceMemoAttachment } from '../types/protocol.ts'
+import type {
+  DmMessage,
+  DmProtocol,
+  DmThread,
+  ImageAttachment,
+  VoiceMemoAttachment,
+} from '../types/protocol.ts'
 import { KIND_GIFT_WRAP, verifyEventCached } from '../lib/bitchatProtocol.ts'
 import {
   createEncryptedDmEvent,
+  decodeDmImagePayload,
   decodeDmVoicePayload,
   decryptGiftWrapEvent,
+  encodeDmImagePayload,
   encodeDmVoicePayload,
 } from '../lib/dmCrypto.ts'
 import {
@@ -50,6 +58,13 @@ function formatDmPreview(msg: DmMessage): string {
     return msg.content
       ? `🎤 ${msg.content}`.slice(0, 96)
       : `🎤 Voice memo (${formatVoiceDuration(msg.voiceMemo.durationSec)})`
+  }
+  if (msg.imageAttachment) {
+    return msg.content
+      ? `🖼️ ${msg.content}`.slice(0, 96)
+      : msg.imageAttachment.width > 0 && msg.imageAttachment.height > 0
+        ? `🖼️ Image (${msg.imageAttachment.width}×${msg.imageAttachment.height})`
+        : '🖼️ Image'
   }
   return msg.content.slice(0, 96)
 }
@@ -211,12 +226,23 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             if (!decrypted.content.trim()) return
 
             const decodedVoice = decodeDmVoicePayload(decrypted.content)
-            const displayContent = decodedVoice ? decodedVoice.caption : decrypted.content
+            const decodedImage = decodedVoice ? null : decodeDmImagePayload(decrypted.content)
+            const displayContent = decodedVoice
+              ? decodedVoice.caption
+              : decodedImage
+                ? decodedImage.caption
+                : decrypted.content
             const previewText = decodedVoice
               ? decodedVoice.caption
                 ? `🎤 ${decodedVoice.caption}`
                 : `🎤 Voice memo (${formatVoiceDuration(decodedVoice.voiceMemo.durationSec)})`
-              : decrypted.content.slice(0, 96)
+              : decodedImage
+                ? decodedImage.caption
+                  ? `🖼️ ${decodedImage.caption}`
+                  : decodedImage.imageAttachment.width > 0 && decodedImage.imageAttachment.height > 0
+                    ? `🖼️ Image (${decodedImage.imageAttachment.width}×${decodedImage.imageAttachment.height})`
+                    : '🖼️ Image'
+                : decrypted.content.slice(0, 96)
 
             const nick = presenceTracker.getNickname(senderPk) || `anon${senderPk.slice(-4)}`
             const handle = formatDisplayHandle(nick, senderPk)
@@ -236,6 +262,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               isOwn: false,
               protocol: decrypted.protocol,
               voiceMemo: decodedVoice?.voiceMemo,
+              imageAttachment: decodedImage?.imageAttachment,
               deliveryStatus: 'delivered',
             }
 
@@ -601,6 +628,132 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     [pool, threads, identityManager, activeGeohash, presenceTracker, dmRelays, onError]
   )
 
+  const sendDirectImageAttachment = useCallback(
+    async (
+      peerPubkey: string,
+      imageAttachment: ImageAttachment,
+      caption?: string,
+      protocolOverride?: DmProtocol
+    ): Promise<boolean> => {
+      if (!pool) return false
+      const pk = peerPubkey.toLowerCase()
+      const cleanCaption = caption?.trim() ?? ''
+      const wireContent = encodeDmImagePayload(imageAttachment, cleanCaption)
+
+      const existingThread = threads.find((t) => t.peerPubkey === pk)
+      const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
+      const chosenProtocol: DmProtocol =
+        protocolOverride ??
+        existingThread?.protocol ??
+        (signer.mode === 'extension' ? 'nip17' : 'bitchat')
+
+      const localMsgId = bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
+      const nowMs = Date.now()
+      const nowSec = Math.floor(nowMs / 1000)
+
+      const optimisticBase: DmMessage = {
+        id: localMsgId,
+        peerPubkey: pk,
+        senderPubkey: signer.pubkey,
+        content: cleanCaption,
+        createdAt: nowSec,
+        orderMs: nowMs,
+        isOwn: true,
+        protocol: chosenProtocol,
+        imageAttachment,
+        deliveryStatus: 'sending',
+      }
+
+      const nick = existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
+      const handle = formatDisplayHandle(nick, pk)
+
+      setThreads((prev) => {
+        const idx = prev.findIndex((t) => t.peerPubkey === pk)
+        if (idx !== -1) {
+          const lastOrder = getMaxOrderMs(prev[idx].messages)
+          const optimistic: DmMessage = {
+            ...optimisticBase,
+            orderMs: Math.max(nowMs, lastOrder + 1),
+          }
+          const nextMsgs = [...prev[idx].messages, optimistic].sort(compareDmMessages)
+          const tail = nextMsgs[nextMsgs.length - 1]
+          const updated: DmThread = {
+            ...prev[idx],
+            messages: nextMsgs,
+            lastMessageAt: tail.createdAt,
+            lastPreview: formatDmPreview(tail),
+            unreadCount: 0,
+          }
+          const copy = [...prev]
+          copy[idx] = updated
+          copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+          return copy
+        }
+        const created: DmThread = {
+          peerPubkey: pk,
+          peerNpub: encodeNpubSafe(pk),
+          peerNickname: nick,
+          peerDisplayHandle: handle,
+          protocol: chosenProtocol,
+          messages: [optimisticBase],
+          unreadCount: 0,
+          lastMessageAt: nowSec,
+          lastPreview: formatDmPreview(optimisticBase),
+        }
+        return [created, ...prev]
+      })
+
+      try {
+        const { event, protocol } = await createEncryptedDmEvent({
+          content: wireContent,
+          recipientPubkey: pk,
+          signer,
+          protocol: chosenProtocol,
+          messageId: localMsgId,
+        })
+        processedWrapIdsRef.current.add(event.id)
+        const res = await pool.publish(dmRelays, event)
+        const ok = res.acceptedRelays.length > 0
+
+        setThreads((prev) =>
+          prev.map((t) => {
+            if (t.peerPubkey !== pk) return t
+            return {
+              ...t,
+              protocol,
+              messages: t.messages.map((m) =>
+                m.id === localMsgId ? { ...m, protocol, deliveryStatus: ok ? 'sent' : 'failed' } : m
+              ),
+            }
+          })
+        )
+
+        if (!ok) {
+          onError?.('Encrypted image DM failed', 'No DM-capable relay accepted the gift wrap.')
+        }
+        return ok
+      } catch (err) {
+        setThreads((prev) =>
+          prev.map((t) => {
+            if (t.peerPubkey !== pk) return t
+            return {
+              ...t,
+              messages: t.messages.map((m) =>
+                m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
+              ),
+            }
+          })
+        )
+        onError?.(
+          'Encrypted image DM error',
+          err instanceof Error ? err.message : 'Unable to send encrypted image'
+        )
+        return false
+      }
+    },
+    [pool, threads, identityManager, activeGeohash, presenceTracker, dmRelays, onError]
+  )
+
   const clearThread = useCallback((peerPubkey: string) => {
     const pk = peerPubkey.toLowerCase()
     setThreads((prev) =>
@@ -624,6 +777,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     ensureThread,
     sendDirectMessage,
     sendDirectVoiceMemo,
+    sendDirectImageAttachment,
     clearThread,
     clearAllDms,
   }

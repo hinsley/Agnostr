@@ -126,6 +126,29 @@ export interface RecordedVoiceMemo {
   previewUrl: string
 }
 
+export interface ImageAttachment {
+  url: string
+  mime: string
+  sha256: string
+  size: number
+  width: number
+  height: number
+  alt?: string
+  encryption?: VoiceMemoEncryption
+  server?: string
+}
+
+export interface PreparedImage {
+  blob: Blob
+  mime: string
+  size: number
+  width: number
+  height: number
+  /** Local preview object URL (revoked on discard/send/unmount) */
+  previewUrl: string
+  fileName: string
+}
+
 export interface TrustedPeerEntry {
   pubkey: string
   npub: string
@@ -155,6 +178,7 @@ export interface GeoMessage {
   reactions: ReactionSummary[]
   mentions: string[]
   voiceMemo?: VoiceMemoAttachment
+  imageAttachment?: ImageAttachment
   deliveryStatus?: MessageDeliveryStatus
   relayCount?: number
 }
@@ -243,6 +267,7 @@ export interface DmMessage {
   isOwn: boolean
   protocol: DmProtocol
   voiceMemo?: VoiceMemoAttachment
+  imageAttachment?: ImageAttachment
   deliveryStatus: 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
 }
 
@@ -402,8 +427,11 @@ export interface AgnostrEngine {
   resetBlossomServers: () => void
   voiceSendPhase: VoiceSendPhase
   sendVoiceMemo: (recorded: RecordedVoiceMemo, caption?: string) => Promise<boolean>
-  /** STRICT whitelist-gated fetch: refuses unwhitelisted senders with zero network requests */
+  /** STRICT trusted-peers-gated fetch: refuses untrusted senders with zero network requests */
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
+  sendImageAttachment: (image: PreparedImage, caption?: string) => Promise<boolean>
+  /** STRICT trusted-peers-gated fetch: refuses untrusted senders with zero network requests */
+  fetchImageAttachmentBlob: (image: ImageAttachment, senderPubkey: string) => Promise<string>
 
   // Relays & telemetry
   relays: RelayTelemetry[]

@@ -487,6 +487,7 @@ export function formatTranscriptExport(
             powBits: m.powBits,
             replyToId: m.replyTo?.id ?? null,
             voiceMemo: m.voiceMemo ?? null,
+            imageAttachment: m.imageAttachment ?? null,
             reactions: m.reactions.map((r) => ({ emoji: r.emoji, count: r.count })),
           })),
         },
@@ -519,7 +520,10 @@ export function formatTranscriptExport(
       lines.push(`*${iso} — ${m.content}*`)
     } else {
       const voiceSuffix = m.voiceMemo ? ` [Voice memo ${Math.round(m.voiceMemo.durationSec)}s]` : ''
-      lines.push(`**[${iso}] ${m.displayHandle}**${badgeStr}${voiceSuffix}: ${m.content}`)
+      const imageSuffix = m.imageAttachment
+        ? ` [Image ${m.imageAttachment.width > 0 ? `${m.imageAttachment.width}x${m.imageAttachment.height}` : m.imageAttachment.mime}]`
+        : ''
+      lines.push(`**[${iso}] ${m.displayHandle}**${badgeStr}${voiceSuffix}${imageSuffix}: ${m.content}`)
       if (m.reactions.length > 0) {
         lines.push(`  > Reactions: ${m.reactions.map((r) => `${r.emoji} ${r.count}`).join('  ')}`)
       }

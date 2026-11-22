@@ -22,6 +22,7 @@ import ExpandedRadarModal from './components/ExpandedRadarModal'
 import PwaInstallModal from './components/PwaInstallModal'
 import CallStage from './components/CallStage'
 import IncomingCallBanner from './components/IncomingCallBanner'
+import ImageLightboxModal, { type LightboxImagePayload } from './components/ImageLightboxModal'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#090C0A',
@@ -67,6 +68,7 @@ export function App() {
   const [radarExpanded, setRadarExpanded] = useState(false)
   const [installModalOpen, setInstallModalOpen] = useState(false)
   const [callExpanded, setCallExpanded] = useState(false)
+  const [lightboxImage, setLightboxImage] = useState<LightboxImagePayload | null>(null)
   const [serverHubState, setServerHubState] = useState<{ open: boolean; tab: ServerHubTab }>({
     open: false,
     tab: 'create',
@@ -288,6 +290,7 @@ export function App() {
       setRadarExpanded(false)
       setInstallModalOpen(false)
       setCallExpanded(false)
+      setLightboxImage(null)
       setPanicFlash(true)
       const t = window.setTimeout(() => setPanicFlash(false), 700)
       prevMasterPkRef.current = engine.identity.masterPubkey
@@ -374,6 +377,8 @@ export function App() {
       if (e.key === 'Escape') {
         if (cmdkOpen) {
           setCmdkOpen(false)
+        } else if (lightboxImage) {
+          setLightboxImage(null)
         } else if (serverSettingsState.serverId) {
           setServerSettingsState({ serverId: null, tab: 'overview' })
         } else if (serverHubState.open) {
@@ -400,6 +405,7 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [
     cmdkOpen,
+    lightboxImage,
     serverSettingsState.serverId,
     serverHubState.open,
     closeServerHub,
@@ -931,6 +937,7 @@ export function App() {
           onOpenRadar={() => handleOpenInspectorTab('radar')}
           onRunHelpCommand={() => void engine.sendInput('/help')}
           onOpenServerSettings={handleOpenServerSettings}
+          onOpenLightbox={setLightboxImage}
         />
 
         <Composer
@@ -1022,6 +1029,12 @@ export function App() {
         onExport={handleExport}
         pwa={pwa}
         onOpenInstall={handleOpenInstall}
+      />
+
+      {/* Fullscreen Image Lightbox Viewer */}
+      <ImageLightboxModal
+        payload={lightboxImage}
+        onClose={() => setLightboxImage(null)}
       />
 
       {/* Incoming Encrypted P2P Call Offer Banner */}

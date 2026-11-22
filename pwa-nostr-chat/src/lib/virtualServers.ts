@@ -1,6 +1,6 @@
 import { sha256 } from '@noble/hashes/sha256'
 import { nip19, type Event as NostrEvent, type EventTemplate } from 'nostr-tools'
-import type { ReplyReference, VoiceMemoAttachment } from '../types/protocol.ts'
+import type { ImageAttachment, ReplyReference, VoiceMemoAttachment } from '../types/protocol.ts'
 import type {
   ServerChannel,
   ServerInvite,
@@ -9,6 +9,7 @@ import type {
   VirtualServerManifest,
 } from '../types/servers.ts'
 import {
+  buildImageImetaTag,
   buildImetaTag,
   clampTimestamp,
   extractMentions,
@@ -16,6 +17,7 @@ import {
   getValidatedPowBits,
   isEmoteContent,
   KIND_EPHEMERAL_REACTION,
+  parseImageFromImeta,
   parseVoiceMemoFromImeta,
 } from './bitchatProtocol.ts'
 import { CORE_DM_RELAYS, normalizeRelayUrl } from './geoRelays.ts'
@@ -129,6 +131,7 @@ export interface VirtualEncryptedPayload {
   replyToId?: string
   replyToPubkey?: string
   voiceMemo?: VoiceMemoAttachment
+  imageAttachment?: ImageAttachment
 }
 
 export async function encryptVirtualPayload(
@@ -201,6 +204,7 @@ export async function decryptVirtualPayload(
       replyToId: typeof parsed.replyToId === 'string' ? parsed.replyToId : undefined,
       replyToPubkey: typeof parsed.replyToPubkey === 'string' ? parsed.replyToPubkey : undefined,
       voiceMemo: parsed.voiceMemo,
+      imageAttachment: parsed.imageAttachment,
     }
   } catch {
     return null
@@ -319,6 +323,7 @@ export async function buildVirtualChatTemplate(opts: {
   nickname: string
   replyTo?: ServerMessage | null
   voiceMemo?: VoiceMemoAttachment
+  imageAttachment?: ImageAttachment
 }): Promise<EventTemplate> {
   const chanTag = getVirtualChannelTag(opts.server, opts.channelId)
   const tags: string[][] = [['t', chanTag]]
@@ -331,6 +336,7 @@ export async function buildVirtualChatTemplate(opts: {
       replyToId: opts.replyTo && !opts.replyTo.isSystem ? opts.replyTo.id : undefined,
       replyToPubkey: opts.replyTo && !opts.replyTo.isSystem ? opts.replyTo.pubkey : undefined,
       voiceMemo: opts.voiceMemo,
+      imageAttachment: opts.imageAttachment,
     })
     return {
       kind: KIND_VIRTUAL_CHAT,
@@ -350,6 +356,9 @@ export async function buildVirtualChatTemplate(opts: {
   }
   if (opts.voiceMemo) {
     tags.push(buildImetaTag(opts.voiceMemo))
+  }
+  if (opts.imageAttachment) {
+    tags.push(buildImageImetaTag(opts.imageAttachment))
   }
 
   return {
@@ -377,6 +386,7 @@ export async function parseVirtualChatEvent(
   let nickname = ''
   let replyTo: ReplyReference | undefined
   let voiceMemo: VoiceMemoAttachment | undefined
+  let imageAttachment: ImageAttachment | undefined
   let decryptFailed = false
 
   if (server.encrypted) {
@@ -392,6 +402,7 @@ export async function parseVirtualChatEvent(
       text = dec.text
       nickname = dec.nickname
       voiceMemo = dec.voiceMemo
+      imageAttachment = dec.imageAttachment
       if (dec.replyToId) {
         const parent = findMessageById?.(dec.replyToId)
         replyTo = {
@@ -407,6 +418,7 @@ export async function parseVirtualChatEvent(
     if (!text) return null
     nickname = getTagValue(event.tags, 'n')?.trim() ?? ''
     voiceMemo = parseVoiceMemoFromImeta(event.tags)
+    imageAttachment = parseImageFromImeta(event.tags)
     const eTag = event.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16)
     if (eTag) {
       const parent = findMessageById?.(eTag[1])
@@ -439,6 +451,7 @@ export async function parseVirtualChatEvent(
     reactions: [],
     mentions: extractMentions(text),
     voiceMemo,
+    imageAttachment,
     deliveryStatus: 'sent',
   }
 }

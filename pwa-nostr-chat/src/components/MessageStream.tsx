@@ -16,6 +16,7 @@ import {
 import type { AgnostrEngine, GeoMessage, PeerInfo } from '../types/protocol'
 import type { ServerMessage } from '../types/servers'
 import type { ServerSettingsTab } from './ServerSettingsModal'
+import type { LightboxImagePayload } from './ImageLightboxModal'
 import { MessageItem } from './MessageItem'
 import { identiconDataUrl, formatHandle } from '../utils/identicon'
 
@@ -85,6 +86,7 @@ export interface MessageStreamProps {
   onOpenRadar: () => void
   onRunHelpCommand: () => void
   onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
+  onOpenLightbox: (payload: LightboxImagePayload) => void
 }
 
 export const MessageStream: React.FC<MessageStreamProps> = ({
@@ -103,6 +105,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   onOpenRadar,
   onRunHelpCommand,
   onOpenServerSettings,
+  onOpenLightbox,
 }) => {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
@@ -165,6 +168,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         reactions: sm.reactions,
         mentions: sm.mentions,
         voiceMemo: sm.voiceMemo,
+        imageAttachment: sm.imageAttachment,
         deliveryStatus: sm.deliveryStatus,
         relayCount: sm.relayCount,
       }))
@@ -190,6 +194,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         reactions: [],
         mentions: [],
         voiceMemo: dm.voiceMemo,
+        imageAttachment: dm.imageAttachment,
         deliveryStatus:
           dm.deliveryStatus === 'failed'
             ? 'failed'
@@ -683,6 +688,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     isSenderTrusted={engine.isTrusted(msg.pubkey)}
                     isSenderExplicitlyTrusted={!msg.isOwn && engine.isExplicitlyTrusted(msg.pubkey)}
                     fetchVoiceMemoBlob={engine.fetchVoiceMemoBlob}
+                    fetchImageAttachmentBlob={engine.fetchImageAttachmentBlob}
+                    onOpenLightbox={onOpenLightbox}
                     onTrustSender={handleTrustSender}
                     onBlockSender={handleBlockSender}
                     onReply={!isDm ? handleReplyUnified : undefined}

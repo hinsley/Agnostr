@@ -1,5 +1,7 @@
 import type {
+  ImageAttachment,
   MessageDeliveryStatus,
+  PreparedImage,
   ReactionSummary,
   RecordedVoiceMemo,
   ReplyReference,
@@ -123,6 +125,7 @@ export interface ServerMessage {
   reactions: ReactionSummary[]
   mentions: string[]
   voiceMemo?: VoiceMemoAttachment
+  imageAttachment?: ImageAttachment
   deliveryStatus?: MessageDeliveryStatus
   relayCount?: number
 }
@@ -214,9 +217,10 @@ export interface ServersEngine {
   sendInviteViaDm: (serverId: string, recipientPubkey: string) => Promise<boolean>
   leaveServer: (serverId: string) => Promise<void>
 
-  // Messaging, voice & reactions (all voice memos strictly honor Trusted Peers gate)
+  // Messaging, voice, images & reactions (all media strictly honors Trusted Peers gate)
   sendMessage: (rawText: string) => Promise<boolean>
   sendVoiceMemo: (recorded: RecordedVoiceMemo, caption?: string) => Promise<boolean>
+  sendImageAttachment: (image: PreparedImage, caption?: string) => Promise<boolean>
   sendReaction: (message: ServerMessage, emoji: string) => Promise<void>
   deleteMessage: (message: ServerMessage) => Promise<boolean>
   clearChannelCache: () => void

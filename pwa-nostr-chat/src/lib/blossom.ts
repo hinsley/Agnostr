@@ -4,19 +4,27 @@ import type { VoiceMemoAttachment, VoiceMemoEncryption } from '../types/protocol
 import { bytesToHex } from './identity.ts'
 
 export const KIND_BLOSSOM_AUTH = 24242
-export const MAX_VOICE_BLOB_BYTES = 15 * 1024 * 1024 // 15 MiB safety bound
+export const MAX_MEDIA_BLOB_BYTES = 15 * 1024 * 1024 // 15 MiB safety bound
+export const MAX_VOICE_BLOB_BYTES = MAX_MEDIA_BLOB_BYTES
 
 /**
  * Live-verified CORS-friendly BUD-02 Blossom servers.
- * First two accept BOTH audio/* AND application/octet-stream (E2EE DM blobs);
- * the remaining two provide redundant public audio/* fallback.
+ * First two accept audio/*, image/*, AND application/octet-stream (E2EE blobs);
+ * the remaining two provide redundant public audio/* & image/* fallback.
  */
 export const DEFAULT_BLOSSOM_SERVERS: readonly string[] = [
-  'https://nostr.download',
   'https://blossom.yakihonne.com',
+  'https://nostr.download',
   'https://blossom.primal.net',
   'https://blossom.band',
 ]
+
+export interface MediaBlobDescriptor {
+  url: string
+  mime: string
+  sha256: string
+  encryption?: VoiceMemoEncryption
+}
 
 export function normalizeBlossomServerUrl(raw: string): string | null {
   const trimmed = raw.trim()
@@ -38,9 +46,9 @@ export function normalizeBlossomServerUrl(raw: string): string | null {
   }
 }
 
-export function cleanMimeType(rawMime: string): string {
+export function cleanMimeType(rawMime: string, fallback = 'application/octet-stream'): string {
   const base = rawMime.split(';')[0].trim().toLowerCase()
-  return base || 'audio/webm'
+  return base || fallback
 }
 
 export function computeSha256Hex(bytes: Uint8Array): string {
@@ -157,6 +165,9 @@ export async function decryptVoiceBytesAesGcm(
   return plaintext
 }
 
+export const encryptMediaBytesAesGcm = encryptVoiceBytesAesGcm
+export const decryptMediaBytesAesGcm = decryptVoiceBytesAesGcm
+
 export interface BlossomUploadResult {
   url: string
   sha256: string
@@ -199,10 +210,10 @@ export async function uploadBlobToBlossom(opts: {
 }): Promise<BlossomUploadResult> {
   const { bytes, signAuthEvent, timeoutMs = 15_000 } = opts
   if (bytes.byteLength === 0) {
-    throw new Error('Cannot upload an empty voice memo.')
+    throw new Error('Cannot upload an empty media file.')
   }
-  if (bytes.byteLength > MAX_VOICE_BLOB_BYTES) {
-    throw new Error('Voice memo exceeds maximum 15 MiB size limit.')
+  if (bytes.byteLength > MAX_MEDIA_BLOB_BYTES) {
+    throw new Error('Media attachment exceeds maximum 15 MiB size limit.')
   }
 
   const cleanMime = cleanMimeType(opts.mime)
@@ -217,7 +228,7 @@ export async function uploadBlobToBlossom(opts: {
       ['x', hashHex],
       ['expiration', String(nowSec + 300)],
     ],
-    content: 'Upload voice memo',
+    content: 'Upload media',
   }
 
   const signedAuth = await signAuthEvent(authTemplate)
@@ -293,79 +304,103 @@ export async function uploadBlobToBlossom(opts: {
 }
 
 /**
- * Fetches, SHA-256 verifies, and (if encrypted) AES-256-GCM decrypts a Blossom voice memo.
- * Caller MUST enforce whitelist authorization BEFORE invoking this function.
+ * Fetches, SHA-256 verifies, and (if encrypted) AES-256-GCM decrypts a Blossom media blob
+ * (voice memo or image attachment).
+ * Caller MUST enforce Trusted Peers authorization BEFORE invoking this function.
  */
-export async function downloadAndVerifyVoiceMemo(
-  memo: VoiceMemoAttachment,
+export async function downloadAndVerifyMediaBlob(
+  media: MediaBlobDescriptor,
   assertAuthorized: () => void,
   timeoutMs = 20_000
 ): Promise<Blob> {
   // Defense-in-depth authorization guard BEFORE any network I/O
   assertAuthorized()
 
-  if (!/^https?:\/\//i.test(memo.url)) {
-    throw new Error('Blocked invalid non-HTTP(S) voice memo URL.')
+  if (!/^https?:\/\//i.test(media.url)) {
+    throw new Error('Blocked invalid non-HTTP(S) media URL.')
   }
 
-  const res = await fetchWithTimeout(memo.url, { method: 'GET', mode: 'cors' }, timeoutMs)
+  const res = await fetchWithTimeout(media.url, { method: 'GET', mode: 'cors' }, timeoutMs)
   if (!res.ok) {
     throw new Error(`Blossom download failed (HTTP ${res.status})`)
   }
 
   const contentLength = Number.parseInt(res.headers.get('content-length') ?? '', 10)
-  if (Number.isFinite(contentLength) && contentLength > MAX_VOICE_BLOB_BYTES) {
-    throw new Error('Voice memo exceeds maximum allowed download size.')
+  if (Number.isFinite(contentLength) && contentLength > MAX_MEDIA_BLOB_BYTES) {
+    throw new Error('Media attachment exceeds maximum allowed download size.')
   }
 
   const rawBuf = await res.arrayBuffer()
-  if (rawBuf.byteLength > MAX_VOICE_BLOB_BYTES) {
-    throw new Error('Voice memo exceeds maximum allowed download size.')
+  if (rawBuf.byteLength > MAX_MEDIA_BLOB_BYTES) {
+    throw new Error('Media attachment exceeds maximum allowed download size.')
   }
 
   const rawBytes = new Uint8Array(rawBuf)
 
-  if (memo.sha256 && /^[0-9a-f]{64}$/i.test(memo.sha256)) {
+  if (media.sha256 && /^[0-9a-f]{64}$/i.test(media.sha256)) {
     const actualHash = computeSha256Hex(rawBytes)
-    if (actualHash !== memo.sha256.toLowerCase()) {
-      throw new Error('Voice memo SHA-256 hash mismatch — refusing corrupted or tampered audio.')
+    if (actualHash !== media.sha256.toLowerCase()) {
+      throw new Error('Media SHA-256 hash mismatch — refusing corrupted or tampered content.')
     }
   }
 
-  const audioBytes = memo.encryption
-    ? await decryptVoiceBytesAesGcm(rawBytes, memo.encryption)
+  const plainBytes = media.encryption
+    ? await decryptMediaBytesAesGcm(rawBytes, media.encryption)
     : rawBytes
 
-  return new Blob([toArrayBuffer(audioBytes)], { type: cleanMimeType(memo.mime || 'audio/webm') })
+  return new Blob([toArrayBuffer(plainBytes)], { type: cleanMimeType(media.mime) })
+}
+
+export async function downloadAndVerifyVoiceMemo(
+  memo: VoiceMemoAttachment,
+  assertAuthorized: () => void,
+  timeoutMs = 20_000
+): Promise<Blob> {
+  return await downloadAndVerifyMediaBlob(memo, assertAuthorized, timeoutMs)
 }
 
 /**
- * Caches decrypted/verified object URLs per memo and cleanly revokes all URLs on wipe/unmount.
+ * Caches decrypted/verified object URLs per media attachment (voice & image) and
+ * cleanly revokes URLs per sender on untrust/block or all URLs on Panic Wipe/unmount.
  */
 export class VoiceBlobCache {
   private urls = new Map<string, string>()
+  private sendersByKey = new Map<string, Set<string>>()
   private inflight = new Map<string, Promise<string>>()
 
-  private keyFor(memo: VoiceMemoAttachment): string {
-    return `${memo.url}|${memo.sha256}|${memo.encryption?.ivB64 ?? 'plain'}`
+  private keyFor(media: MediaBlobDescriptor): string {
+    return `${media.url}|${media.sha256}|${media.encryption?.ivB64 ?? 'plain'}`
   }
 
   async getOrFetch(
-    memo: VoiceMemoAttachment,
-    assertAuthorized: () => void
+    media: MediaBlobDescriptor,
+    assertAuthorized: () => void,
+    senderPubkey?: string
   ): Promise<string> {
-    // Always re-verify authorization even on cache hit so untrusting a peer immediately blocks playback!
+    // Always re-verify authorization even on cache hit so untrusting a peer immediately blocks access!
     assertAuthorized()
 
-    const key = this.keyFor(memo)
+    const key = this.keyFor(media)
+    const pk = senderPubkey?.toLowerCase()
+    if (pk) {
+      let set = this.sendersByKey.get(key)
+      if (!set) {
+        set = new Set<string>()
+        this.sendersByKey.set(key, set)
+      }
+      set.add(pk)
+    }
+
     const cached = this.urls.get(key)
     if (cached) return cached
 
     const pending = this.inflight.get(key)
     if (pending) return pending
 
-    const task = downloadAndVerifyVoiceMemo(memo, assertAuthorized)
+    const task = downloadAndVerifyMediaBlob(media, assertAuthorized)
       .then((blob) => {
+        // Re-verify authorization after network I/O in case peer was untrusted mid-download
+        assertAuthorized()
         const objectUrl = URL.createObjectURL(blob)
         this.urls.set(key, objectUrl)
         return objectUrl
@@ -378,6 +413,26 @@ export class VoiceBlobCache {
     return task
   }
 
+  revokeForSender(senderPubkey: string): void {
+    const pk = senderPubkey.toLowerCase()
+    for (const [key, senders] of Array.from(this.sendersByKey.entries())) {
+      if (!senders.has(pk)) continue
+      senders.delete(pk)
+      if (senders.size === 0) {
+        this.sendersByKey.delete(key)
+        const objectUrl = this.urls.get(key)
+        if (objectUrl) {
+          try {
+            URL.revokeObjectURL(objectUrl)
+          } catch {
+            // Ignore
+          }
+          this.urls.delete(key)
+        }
+      }
+    }
+  }
+
   revokeAll(): void {
     for (const objectUrl of this.urls.values()) {
       try {
@@ -387,6 +442,7 @@ export class VoiceBlobCache {
       }
     }
     this.urls.clear()
+    this.sendersByKey.clear()
     this.inflight.clear()
   }
 }

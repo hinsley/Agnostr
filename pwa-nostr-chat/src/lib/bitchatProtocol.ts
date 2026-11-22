@@ -2,6 +2,7 @@ import { sha256 } from '@noble/hashes/sha256'
 import { verifyEvent, type Event as NostrEvent, type EventTemplate } from 'nostr-tools'
 import type {
   GeoMessage,
+  ImageAttachment,
   LocationNote,
   ReplyReference,
   VoiceMemoAttachment,
@@ -288,6 +289,81 @@ export function parseVoiceMemoFromImeta(tags: string[][]): VoiceMemoAttachment |
   return undefined
 }
 
+export function buildImageImetaTag(image: ImageAttachment): string[] {
+  const fields: string[] = [
+    'imeta',
+    `url ${image.url}`,
+    `m ${image.mime}`,
+  ]
+  if (image.sha256) fields.push(`x ${image.sha256}`)
+  if (image.size > 0) fields.push(`size ${Math.round(image.size)}`)
+  if (image.width > 0 && image.height > 0) {
+    fields.push(`dim ${Math.round(image.width)}x${Math.round(image.height)}`)
+  }
+  if (image.alt && image.alt.trim()) {
+    fields.push(`alt ${image.alt.trim().slice(0, 120)}`)
+  }
+  return fields
+}
+
+const IMAGE_URL_EXT_RE = /\.(?:webp|jpe?g|png|gif|avif|bmp)(?:[?#].*)?$/i
+
+export function parseImageFromImeta(tags: string[][]): ImageAttachment | undefined {
+  for (const tag of tags) {
+    if (tag[0] !== 'imeta' || tag.length < 2) continue
+    const map = new Map<string, string>()
+    for (let i = 1; i < tag.length; i++) {
+      const entry = tag[i]
+      if (typeof entry !== 'string') continue
+      const spaceIdx = entry.indexOf(' ')
+      if (spaceIdx <= 0) continue
+      const key = entry.slice(0, spaceIdx).trim().toLowerCase()
+      const val = entry.slice(spaceIdx + 1).trim()
+      if (key && val) map.set(key, val)
+    }
+
+    const url = map.get('url')
+    if (!url || !/^https?:\/\//i.test(url)) continue
+    const rawMime = (map.get('m') ?? '').toLowerCase()
+    if (rawMime === 'image/svg+xml') continue // Disallow SVG scripts
+    const hasImageHints = rawMime.startsWith('image/') || IMAGE_URL_EXT_RE.test(url)
+    if (!hasImageHints) continue
+
+    const sha256Hex = (map.get('x') ?? '').toLowerCase()
+    const size = Number.parseInt(map.get('size') ?? '0', 10)
+    let width = 0
+    let height = 0
+    const rawDim = map.get('dim')
+    if (rawDim) {
+      const dimMatch = /^(\d{1,5})x(\d{1,5})$/i.exec(rawDim.trim())
+      if (dimMatch) {
+        width = Number.parseInt(dimMatch[1], 10)
+        height = Number.parseInt(dimMatch[2], 10)
+      }
+    }
+    const alt = map.get('alt')?.trim().slice(0, 120) || undefined
+
+    let server: string | undefined
+    try {
+      server = new URL(url).origin
+    } catch {
+      server = undefined
+    }
+
+    return {
+      url,
+      mime: rawMime.startsWith('image/') ? rawMime : 'image/webp',
+      sha256: /^[0-9a-f]{64}$/.test(sha256Hex) ? sha256Hex : '',
+      size: Number.isFinite(size) && size > 0 ? size : 0,
+      width: Number.isFinite(width) && width > 0 ? width : 0,
+      height: Number.isFinite(height) && height > 0 ? height : 0,
+      alt,
+      server,
+    }
+  }
+  return undefined
+}
+
 export function buildGeohashChatTemplate(opts: {
   content: string
   geohash: string
@@ -295,6 +371,7 @@ export function buildGeohashChatTemplate(opts: {
   isTeleported: boolean
   replyTo?: GeoMessage | null
   voiceMemo?: VoiceMemoAttachment
+  imageAttachment?: ImageAttachment
 }): EventTemplate {
   const gh = normalizeGeohash(opts.geohash)
   const tags: string[][] = [['g', gh]]
@@ -313,6 +390,9 @@ export function buildGeohashChatTemplate(opts: {
   }
   if (opts.voiceMemo) {
     tags.push(buildImetaTag(opts.voiceMemo))
+  }
+  if (opts.imageAttachment) {
+    tags.push(buildImageImetaTag(opts.imageAttachment))
   }
   return {
     kind: KIND_GEOHASH_CHAT,
@@ -416,6 +496,7 @@ export function parseGeohashChatEvent(
   }
 
   const voiceMemo = parseVoiceMemoFromImeta(event.tags)
+  const imageAttachment = parseImageFromImeta(event.tags)
 
   return {
     id: event.id,
@@ -436,6 +517,7 @@ export function parseGeohashChatEvent(
     reactions: [],
     mentions: extractMentions(content),
     voiceMemo,
+    imageAttachment,
     deliveryStatus: 'sent',
   }
 }
