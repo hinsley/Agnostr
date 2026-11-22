@@ -328,7 +328,7 @@ export function ServerHubModal({
               Servers &amp; Communities
             </h2>
             <p className="ag-srv-modal-sub">
-              Spin up instant multi-channel Nostr servers or join NIP-29 relay communities.
+              Create or join a Nostr server.
             </p>
           </div>
           <button
@@ -396,6 +396,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'virtual-e2ee'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-e2ee' ? 'active e2ee' : ''}`}
+                  title="End-to-end encrypted channels & voice memos with an invite-only key"
                   onClick={() => {
                     setCreateMode('virtual-e2ee')
                     setIconDraft('🔐')
@@ -406,9 +407,7 @@ export function ServerHubModal({
                     <Lock size={14} />
                     <span>E2EE Private</span>
                   </div>
-                  <span className="ag-srv-mode-desc">
-                    AES-256-GCM encrypted channels &amp; voice memos, invite-only key.
-                  </span>
+                  <span className="ag-srv-mode-desc">Invite-only</span>
                 </button>
 
                 <button
@@ -416,6 +415,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'virtual-public'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-public' ? 'active' : ''}`}
+                  title="Multi-channel public server across standard Nostr relays"
                   onClick={() => {
                     setCreateMode('virtual-public')
                     setIconDraft('📡')
@@ -426,9 +426,7 @@ export function ServerHubModal({
                     <Globe size={14} />
                     <span>Instant Public</span>
                   </div>
-                  <span className="ag-srv-mode-desc">
-                    Multi-channel Nostr server stored across core relays.
-                  </span>
+                  <span className="ag-srv-mode-desc">Open chat</span>
                 </button>
 
                 <button
@@ -436,6 +434,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'nip29'}
                   className={`ag-srv-mode-card ${createMode === 'nip29' ? 'active nip29' : ''}`}
+                  title="Relay-enforced moderated community on a NIP-29 server"
                   onClick={() => {
                     setCreateMode('nip29')
                     setIconDraft('🛰️')
@@ -446,9 +445,7 @@ export function ServerHubModal({
                     <Server size={14} />
                     <span>NIP-29 Relay</span>
                   </div>
-                  <span className="ag-srv-mode-desc">
-                    Relay-enforced moderated community on a NIP-29 server.
-                  </span>
+                  <span className="ag-srv-mode-desc">Moderated</span>
                 </button>
               </div>
 

@@ -550,15 +550,17 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 0.28rem;
-  padding: 0.58rem 0.6rem;
+  justify-content: center;
+  gap: 0.24rem;
+  padding: 0.65rem 0.72rem;
   border-radius: var(--radius-md);
   background-color: var(--bg-input);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-default);
   text-align: left;
   transition:
     border-color var(--dur-fast) ease,
-    background-color var(--dur-fast) ease;
+    background-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
 }
 
 .ag-srv-mode-card:hover {
@@ -584,10 +586,15 @@
 .ag-srv-mode-top {
   display: inline-flex;
   align-items: center;
-  gap: 0.32rem;
-  font-size: 12px;
+  gap: 0.36rem;
+  font-size: 12.5px;
   font-weight: 700;
   color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.ag-srv-mode-top svg {
+  flex-shrink: 0;
 }
 
 .ag-srv-mode-card.active .ag-srv-mode-top {
@@ -603,9 +610,15 @@
 }
 
 .ag-srv-mode-desc {
-  font-size: 10.5px;
-  line-height: 1.35;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.3;
   color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.ag-srv-mode-card.active .ag-srv-mode-desc {
+  color: var(--text-primary);
 }
 
 /* Icon & Color Customizer */
@@ -1067,6 +1080,14 @@
 
   .ag-srv-mode-grid {
     grid-template-columns: 1fr;
+    gap: 0.36rem;
+  }
+
+  .ag-srv-mode-card {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.62rem 0.75rem;
   }
 
   .ag-srv-customize-grid {
