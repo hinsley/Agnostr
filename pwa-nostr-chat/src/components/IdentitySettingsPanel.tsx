@@ -16,6 +16,7 @@ import {
   Loader2,
   Lock,
   Palette,
+  PhoneCall,
   Plus,
   Radio,
   RefreshCw,
@@ -135,12 +136,18 @@ export function IdentitySettingsPanel({
   const [copiedField, setCopiedField] = useState<'npub' | 'nsec' | null>(null)
   const [updateCheckNote, setUpdateCheckNote] = useState<string | null>(null)
 
-  // Whitelist & Blossom form state
+  // Whitelist, Blossom & TURN form state
   const [trustKeyDraft, setTrustKeyDraft] = useState('')
   const [trustLabelDraft, setTrustLabelDraft] = useState('')
   const [trustFeedback, setTrustFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [blossomDraft, setBlossomDraft] = useState('')
   const [blossomError, setBlossomError] = useState<string | null>(null)
+  const [turnUrlDraft, setTurnUrlDraft] = useState(() => engine.calls.turnConfig?.url ?? '')
+  const [turnUserDraft, setTurnUserDraft] = useState(() => engine.calls.turnConfig?.username ?? '')
+  const [turnCredDraft, setTurnCredDraft] = useState(
+    () => engine.calls.turnConfig?.credential ?? '',
+  )
+  const [turnFeedback, setTurnFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
 
   // Hold-to-confirm Panic Wipe state
   const [panicProgress, setPanicProgress] = useState(0)
@@ -153,6 +160,12 @@ export function IdentitySettingsPanel({
   useEffect(() => {
     setNickDraft(identity.nickname)
   }, [identity.nickname])
+
+  useEffect(() => {
+    setTurnUrlDraft(engine.calls.turnConfig?.url ?? '')
+    setTurnUserDraft(engine.calls.turnConfig?.username ?? '')
+    setTurnCredDraft(engine.calls.turnConfig?.credential ?? '')
+  }, [engine.calls.turnConfig])
 
   const cancelPanicHold = useCallback(() => {
     if (rafRef.current !== null) {
@@ -197,6 +210,10 @@ export function IdentitySettingsPanel({
         setTrustFeedback(null)
         setBlossomDraft('')
         setBlossomError(null)
+        setTurnUrlDraft('')
+        setTurnUserDraft('')
+        setTurnCredDraft('')
+        setTurnFeedback(null)
         onPlaySound?.('wipe')
         engine.panicWipe()
         setJustWiped(true)
@@ -328,6 +345,32 @@ export function IdentitySettingsPanel({
     } else {
       setBlossomError('Enter a valid https:// Blossom server URL')
     }
+  }
+
+  const handleSaveTurn = (e: FormEvent) => {
+    e.preventDefault()
+    const url = turnUrlDraft.trim()
+    if (!url) return
+    const ok = engine.calls.saveTurnConfig({
+      url,
+      username: turnUserDraft.trim() || undefined,
+      credential: turnCredDraft.trim() || undefined,
+    })
+    if (ok) {
+      setTurnFeedback({ ok: true, msg: 'Custom TURN server saved' })
+      onPlaySound?.('click')
+    } else {
+      setTurnFeedback({ ok: false, msg: 'Enter a valid turn: or turns: server URL' })
+    }
+  }
+
+  const handleClearTurn = () => {
+    engine.calls.clearTurnConfig()
+    setTurnUrlDraft('')
+    setTurnUserDraft('')
+    setTurnCredDraft('')
+    setTurnFeedback({ ok: true, msg: 'Reverted to default STUN' })
+    onPlaySound?.('click')
   }
 
   const handleColor = pubkeyToColor(identity.activePubkey)
@@ -711,6 +754,94 @@ export function IdentitySettingsPanel({
           </button>
         </form>
         {blossomError && <p className="ag-field-hint ag-field-hint-danger">{blossomError}</p>}
+      </section>
+
+      {/* Voice & Video (TURN / ICE) */}
+      <section className="ag-panel-card" aria-label="Voice and video TURN ICE settings">
+        <div className="ag-panel-card-head">
+          <div className="ag-panel-card-title">
+            <PhoneCall size={13} />
+            <span>VOICE &amp; VIDEO (TURN / ICE)</span>
+          </div>
+          <span
+            className={`ag-badge ${engine.calls.turnConfig ? 'ag-badge-ok' : 'ag-badge-muted'}`}
+          >
+            {engine.calls.turnConfig ? 'CUSTOM TURN' : 'STUN ONLY'}
+          </span>
+        </div>
+
+        <p className="ag-turn-note">
+          Calls connect peer-to-peer (WebRTC) and share your IP with call peers. Add a TURN server
+          for strict firewalls.
+        </p>
+
+        <form className="ag-turn-form" onSubmit={handleSaveTurn}>
+          <input
+            type="text"
+            className="ag-input mono"
+            placeholder="turns:turn.example.com:5349"
+            value={turnUrlDraft}
+            onChange={(e) => {
+              setTurnUrlDraft(e.target.value)
+              if (turnFeedback) setTurnFeedback(null)
+            }}
+            aria-label="TURN server URL"
+          />
+          <div className="ag-turn-cred-row">
+            <input
+              type="text"
+              autoComplete="off"
+              className="ag-input"
+              placeholder="Username (optional)"
+              value={turnUserDraft}
+              onChange={(e) => {
+                setTurnUserDraft(e.target.value)
+                if (turnFeedback) setTurnFeedback(null)
+              }}
+              aria-label="TURN username"
+            />
+            <input
+              type="password"
+              autoComplete="new-password"
+              className="ag-input"
+              placeholder="Credential (optional)"
+              value={turnCredDraft}
+              onChange={(e) => {
+                setTurnCredDraft(e.target.value)
+                if (turnFeedback) setTurnFeedback(null)
+              }}
+              aria-label="TURN credential"
+            />
+          </div>
+          <div className="ag-turn-actions">
+            <button
+              type="submit"
+              className="ag-btn ag-btn-primary ag-btn-sm"
+              disabled={!turnUrlDraft.trim()}
+            >
+              <span>Save TURN</span>
+            </button>
+            {engine.calls.turnConfig && (
+              <button
+                type="button"
+                className="ag-btn ag-btn-secondary ag-btn-sm"
+                onClick={handleClearTurn}
+              >
+                <Trash2 size={12} />
+                <span>Clear</span>
+              </button>
+            )}
+          </div>
+          {turnFeedback && (
+            <p
+              className={`ag-field-hint ${
+                turnFeedback.ok ? 'ag-field-hint-ok' : 'ag-field-hint-danger'
+              }`}
+            >
+              {turnFeedback.msg}
+            </p>
+          )}
+        </form>
       </section>
 
       {/* Signer Mode Switcher */}

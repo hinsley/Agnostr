@@ -1,3 +1,4 @@
+import type { CallEngine } from './calls.ts'
 import type { ServersEngine } from './servers.ts'
 
 export type ThemeId = 'phosphor' | 'amber' | 'obsidian' | 'daylight'
@@ -427,6 +428,9 @@ export interface AgnostrEngine {
 
   // Discord-like Servers (Instant Virtual Public/E2EE + NIP-29 Relay Communities)
   servers: ServersEngine
+
+  // P2P WebRTC Voice & Video Calls (1-on-1 DM Calls + Server Group Calls up to 6)
+  calls: CallEngine
 
   // Commands, export & notifications
   commands: SlashCommandDef[]

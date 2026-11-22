@@ -3,7 +3,17 @@
    Generates crisp, subtle, low-volume tactile feedback without external files.
    ========================================================================== */
 
-export type SoundCue = 'send' | 'receive' | 'mention' | 'tune' | 'dm' | 'wipe' | 'click'
+export type SoundCue =
+  | 'send'
+  | 'receive'
+  | 'mention'
+  | 'tune'
+  | 'dm'
+  | 'wipe'
+  | 'click'
+  | 'ring'
+  | 'call-join'
+  | 'call-leave'
 
 class RadioAudioEngine {
   private ctx: AudioContext | null = null
@@ -42,7 +52,7 @@ class RadioAudioEngine {
 
     // Rate-limit rapid bursts so busy channels stay pleasant
     const nowMs = Date.now()
-    const minGap = cue === 'receive' ? 350 : 90
+    const minGap = cue === 'ring' ? 1200 : cue === 'receive' ? 350 : 90
     const prev = this.lastPlayed.get(cue) ?? 0
     if (nowMs - prev < minGap) return
     this.lastPlayed.set(cue, nowMs)
@@ -88,6 +98,26 @@ class RadioAudioEngine {
 
       case 'click':
         this.tone(ctx, t, 920, 720, 0.028, 0.022, 'sine')
+        break
+
+      case 'ring':
+        // Tactical dual-pulse sonar ringtone for incoming E2EE P2P calls
+        this.tone(ctx, t, 587.33, 587.33, 0.14, 0.052, 'sine')
+        this.tone(ctx, t + 0.01, 880, 880, 0.13, 0.032, 'triangle')
+        this.tone(ctx, t + 0.22, 587.33, 587.33, 0.16, 0.052, 'sine')
+        this.tone(ctx, t + 0.23, 880, 880, 0.15, 0.032, 'triangle')
+        break
+
+      case 'call-join':
+        // Crisp 2-step ascending comms-channel lock-on chime
+        this.tone(ctx, t, 440, 523.25, 0.08, 0.045, 'triangle')
+        this.tone(ctx, t + 0.085, 659.25, 880, 0.14, 0.05, 'sine')
+        break
+
+      case 'call-leave':
+        // Clean descending comms disconnect cadence
+        this.tone(ctx, t, 587.33, 440, 0.09, 0.045, 'sine')
+        this.tone(ctx, t + 0.09, 392, 293.66, 0.14, 0.04, 'triangle')
         break
     }
   }

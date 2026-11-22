@@ -1,3 +1,4 @@
+import type { TurnServerConfig } from '../types/calls.ts'
 import type {
   AppSettings,
   DmThread,
@@ -27,6 +28,7 @@ const KEYS = {
   blockedPubkeys: `${PREFIX}blocked_pubkeys`,
   trusted: `${PREFIX}trusted`,
   blossomServers: `${PREFIX}blossom_servers`,
+  iceServers: `${PREFIX}ice_servers`,
   servers: `${PREFIX}servers`,
   serverMsgChannel: (serverId: string, channelId: string) => `${PREFIX}smsgs:${serverId}:${channelId}`,
   customRelays: `${PREFIX}custom_relays`,
@@ -230,6 +232,46 @@ export function loadBlossomServers(): string[] {
 
 export function saveBlossomServers(servers: string[]): void {
   safeSet(KEYS.blossomServers, JSON.stringify(servers))
+}
+
+export function normalizeTurnUrl(raw: string): string | null {
+  const trimmed = raw.trim()
+  if (!trimmed || /\s/.test(trimmed)) return null
+  if (!/^(turns?|stuns?):[^\s]+$/i.test(trimmed)) return null
+  return trimmed
+}
+
+export function loadTurnConfig(): TurnServerConfig | null {
+  const parsed = safeJsonParse<Partial<TurnServerConfig> | null>(safeGet(KEYS.iceServers), null)
+  if (!parsed || typeof parsed.url !== 'string') return null
+  const url = normalizeTurnUrl(parsed.url)
+  if (!url) return null
+  return {
+    url,
+    username: typeof parsed.username === 'string' && parsed.username.trim() ? parsed.username.trim() : undefined,
+    credential:
+      typeof parsed.credential === 'string' && parsed.credential.trim() ? parsed.credential.trim() : undefined,
+  }
+}
+
+export function saveTurnConfig(config: TurnServerConfig | null): void {
+  if (!config) {
+    safeRemove(KEYS.iceServers)
+    return
+  }
+  const url = normalizeTurnUrl(config.url)
+  if (!url) {
+    safeRemove(KEYS.iceServers)
+    return
+  }
+  safeSet(
+    KEYS.iceServers,
+    JSON.stringify({
+      url,
+      username: config.username?.trim() || undefined,
+      credential: config.credential?.trim() || undefined,
+    })
+  )
 }
 
 export function loadJoinedServers(): ServerSummary[] {

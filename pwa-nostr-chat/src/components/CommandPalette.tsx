@@ -8,7 +8,11 @@ import {
   Key,
   Lock,
   Map as MapIcon,
+  Mic,
+  MicOff,
   Palette,
+  Phone,
+  PhoneOff,
   Plus,
   Radio,
   RefreshCw,
@@ -181,6 +185,82 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     }
 
     // Tactical Actions
+    if (engine.calls.activeCall) {
+      const activeCall = engine.calls.activeCall
+      list.push(
+        {
+          id: 'act-call-mute',
+          group: 'Actions',
+          title: 'Toggle Call Mute',
+          subtitle: activeCall.localMuted
+            ? `Currently muted in ${activeCall.title} — click to unmute`
+            : `Mic live in ${activeCall.title} — click to mute`,
+          keywords: 'call mute unmute mic audio voice video toggle',
+          badge: activeCall.localMuted ? 'MUTED' : 'LIVE',
+          icon: activeCall.localMuted ? <MicOff size={15} /> : <Mic size={15} />,
+          run: () => {
+            engine.calls.toggleMute()
+            onClose()
+          },
+        },
+        {
+          id: 'act-call-leave',
+          group: 'Actions',
+          title: 'Leave Active Call',
+          subtitle: `Hang up and disconnect from ${activeCall.title}`,
+          keywords: 'leave hang up hangup end disconnect call voice video',
+          badge: 'CALL',
+          icon: <PhoneOff size={15} style={{ color: 'var(--status-danger)' }} />,
+          run: () => {
+            engine.calls.leaveCall()
+            onClose()
+          },
+        }
+      )
+    } else if (engine.activeView.type === 'server' && engine.servers.activeServer) {
+      const srv = engine.servers.activeServer
+      const count = engine.calls.getServerCallCount(srv.id)
+      list.push({
+        id: 'act-call-join-server',
+        group: 'Actions',
+        title: 'Join Server Voice Call',
+        subtitle: `Join P2P Voice & Video Lounge in ${srv.name} (${count}/${engine.calls.maxParticipants})`,
+        keywords: 'join server voice video call lounge webrtc p2p talk',
+        badge: `${count}/${engine.calls.maxParticipants}`,
+        icon: <Phone size={15} />,
+        run: () => {
+          onClose()
+          void engine.calls.joinServerCall(srv.id, 'audio')
+        },
+      })
+    } else if (engine.activeView.type === 'dm' && engine.activeDmThread) {
+      const dm = engine.activeDmThread
+      const trusted = engine.isExplicitlyTrusted(dm.peerPubkey)
+      list.push({
+        id: 'act-call-start-dm',
+        group: 'Actions',
+        title: 'Start DM Voice Call',
+        subtitle: trusted
+          ? `Call ${dm.peerDisplayHandle} via E2EE P2P WebRTC`
+          : `Trust ${dm.peerDisplayHandle} first (P2P calls share IP addresses)`,
+        keywords: 'start dm voice video call phone webrtc p2p talk',
+        badge: 'E2EE',
+        icon: <Phone size={15} />,
+        run: () => {
+          onClose()
+          if (!trusted) {
+            engine.pushToast(
+              'warning',
+              `Trust ${dm.peerDisplayHandle} first`,
+              'P2P WebRTC calls share IP addresses directly. Trust this peer in Inspect to unlock calls.'
+            )
+            return
+          }
+          void engine.calls.startDmCall(dm.peerPubkey, 'audio', dm.peerNickname)
+        },
+      })
+    }
+
     list.push(
       {
         id: 'act-create-join-server',

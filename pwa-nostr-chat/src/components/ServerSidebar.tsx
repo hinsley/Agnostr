@@ -6,22 +6,28 @@ import {
   Compass,
   Database,
   Hash,
+  Headphones,
   Loader2,
   Lock,
+  MicOff,
   Palette,
   PanelLeftClose,
+  Phone,
+  PhoneOff,
   Plus,
   Radio,
   Server,
   Settings,
   ShieldCheck,
   UserPlus,
+  Video,
+  Volume2,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, InspectorTab, ThemeId } from '../types/protocol.ts'
 import type { ServersEngine, ServerSummary } from '../types/servers.ts'
 import type { SoundCue } from '../utils/sound.ts'
-import { identiconDataUrl } from '../utils/identicon.ts'
+import { identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
 import type { ServerHubTab } from './ServerHubModal.tsx'
 import type { ServerSettingsTab } from './ServerSettingsModal.tsx'
 
@@ -80,6 +86,50 @@ export function ServerSidebar({
   const [channelNameDraft, setChannelNameDraft] = useState('')
   const [creatingChannel, setCreatingChannel] = useState(false)
   const [joiningNip29, setJoiningNip29] = useState(false)
+  const [joiningVoice, setJoiningVoice] = useState<'audio' | 'video' | null>(null)
+
+  const { calls } = engine
+  const activeCall = calls.activeCall
+  const isInThisServerCall =
+    activeCall?.mode === 'server' && activeCall.serverId === server.id
+  const callRoster = calls.serverCallRosters[server.id] ?? []
+  const voiceParticipants = isInThisServerCall
+    ? activeCall.participants.map((p) => ({
+        pubkey: p.pubkey,
+        displayHandle: p.displayHandle,
+        hasVideo: p.videoEnabled || p.screenSharing,
+        audioMuted: p.audioMuted,
+        isSpeaking: p.isSpeaking,
+      }))
+    : callRoster.map((r) => ({
+        pubkey: r.pubkey,
+        displayHandle: r.displayHandle,
+        hasVideo: r.hasVideo,
+        audioMuted: r.audioMuted,
+        isSpeaking: false,
+      }))
+  const rawVoiceCount = calls.getServerCallCount(server.id)
+  const voiceCount = isInThisServerCall
+    ? Math.max(rawVoiceCount, activeCall.participants.length)
+    : Math.max(rawVoiceCount, callRoster.length)
+  const voiceMax = calls.maxParticipants
+  const voiceFull = voiceCount >= voiceMax && !isInThisServerCall
+
+  const handleJoinVoiceLounge = async (media: 'audio' | 'video') => {
+    if (joiningVoice || voiceFull) return
+    setJoiningVoice(media)
+    try {
+      const ok = await calls.joinServerCall(server.id, media)
+      if (ok) {
+        onPlaySound?.('call-join')
+        if (window.matchMedia('(max-width: 1023px)').matches) {
+          onClose()
+        }
+      }
+    } finally {
+      setJoiningVoice(null)
+    }
+  }
 
   const accentStyle = {
     '--srv-accent': server.accentColor || 'var(--accent)',
@@ -367,6 +417,138 @@ export function ServerSidebar({
               </button>
             )
           })}
+        </section>
+
+        {/* Live Voice & Video Lounge (up to 6 participants) */}
+        <section className="ag-side-section" aria-label="Voice and video lounge">
+          <div className="ag-side-section-head">
+            <span className="ag-side-section-title">
+              <Volume2 size={11} />
+              <span>Voice &amp; Video</span>
+            </span>
+            <span
+              className={`ag-badge mono ${
+                voiceFull
+                  ? 'ag-badge-warn'
+                  : voiceCount > 0
+                    ? 'ag-badge-ok'
+                    : 'ag-badge-muted'
+              }`}
+              title={`${voiceCount} of ${voiceMax} peers in Voice Lounge`}
+            >
+              {voiceFull ? `FULL ${voiceCount}/${voiceMax}` : `${voiceCount}/${voiceMax}`}
+            </span>
+          </div>
+
+          <div className={`ag-srv-voice-card ${isInThisServerCall ? 'in-call' : ''}`}>
+            <div className="ag-srv-voice-room">
+              <div className="ag-srv-voice-room-left">
+                <Headphones size={13} />
+                <span className="ag-srv-voice-room-name">Voice Lounge</span>
+              </div>
+              {isInThisServerCall ? (
+                <span className="ag-badge ag-badge-ok">
+                  <span className="ag-led ag-led-ok ag-led-pulse" />
+                  <span>LIVE</span>
+                </span>
+              ) : voiceCount > 0 ? (
+                <span className="ag-led ag-led-ok ag-led-pulse" aria-hidden="true" />
+              ) : null}
+            </div>
+
+            {voiceParticipants.length > 0 && (
+              <div className="ag-srv-voice-roster" role="list" aria-label="Voice lounge participants">
+                {voiceParticipants.map((p) => (
+                  <div
+                    key={p.pubkey}
+                    role="listitem"
+                    className={`ag-srv-voice-peer ${p.isSpeaking ? 'speaking' : ''}`}
+                  >
+                    <img
+                      src={identiconDataUrl(p.pubkey)}
+                      alt=""
+                      width={20}
+                      height={20}
+                      className="ag-srv-voice-avatar"
+                    />
+                    <span
+                      className="ag-srv-voice-handle truncate"
+                      style={{ color: pubkeyToColor(p.pubkey) }}
+                      title={p.displayHandle}
+                    >
+                      {p.displayHandle}
+                    </span>
+                    <span className="ag-srv-voice-flags">
+                      {p.hasVideo && (
+                        <Video size={11} className="ag-srv-voice-flag video" aria-label="Video on" />
+                      )}
+                      {p.audioMuted && (
+                        <MicOff size={11} className="ag-srv-voice-flag muted" aria-label="Muted" />
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="ag-srv-voice-actions">
+              {isInThisServerCall ? (
+                <>
+                  <span className="ag-srv-voice-status">
+                    <Radio size={12} />
+                    <span>In Call</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="ag-srv-voice-btn leave"
+                    onClick={() => {
+                      onPlaySound?.('call-leave')
+                      calls.leaveCall()
+                    }}
+                    title="Leave Voice Lounge"
+                  >
+                    <PhoneOff size={12} />
+                    <span>Leave</span>
+                  </button>
+                </>
+              ) : voiceFull ? (
+                <div className="ag-srv-voice-full mono">
+                  Full ({voiceCount}/{voiceMax})
+                </div>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="ag-srv-voice-btn join"
+                    onClick={() => void handleJoinVoiceLounge('audio')}
+                    disabled={joiningVoice !== null}
+                    title="Join Voice Lounge (audio only)"
+                  >
+                    {joiningVoice === 'audio' ? (
+                      <Loader2 size={12} className="ag-spin" />
+                    ) : (
+                      <Phone size={12} />
+                    )}
+                    <span>Join Voice</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="ag-srv-voice-btn video"
+                    onClick={() => void handleJoinVoiceLounge('video')}
+                    disabled={joiningVoice !== null}
+                    title="Join Voice Lounge with camera"
+                  >
+                    {joiningVoice === 'video' ? (
+                      <Loader2 size={12} className="ag-spin" />
+                    ) : (
+                      <Video size={12} />
+                    )}
+                    <span>Join Video</span>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
         </section>
 
         {/* Other Joined Groups on the Same NIP-29 Relay */}

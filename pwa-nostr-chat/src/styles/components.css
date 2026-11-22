@@ -593,6 +593,11 @@
   text-overflow: ellipsis;
 }
 
+.ag-chan-server-name {
+  flex-shrink: 2;
+  max-width: 140px;
+}
+
 .ag-srv-header-chip {
   width: 28px;
   height: 28px;

@@ -12,6 +12,7 @@ import {
   Navigation,
   PanelLeft,
   PanelRight,
+  Phone,
   Search,
   Server,
   Settings,
@@ -21,6 +22,7 @@ import {
   User,
   UserPlus,
   Users,
+  Video,
   Volume2,
   VolumeX,
   Zap,
@@ -52,6 +54,7 @@ export interface ChannelHeaderProps {
   onInspectPeer: (peer: PeerInfo) => void
   onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
   onExpandRadar?: () => void
+  onFocusActiveCall?: () => void
   onExport?: (format: 'markdown' | 'json') => void
 }
 
@@ -71,6 +74,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   onInspectPeer,
   onOpenServerSettings,
   onExpandRadar,
+  onFocusActiveCall,
   onExport,
 }) => {
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
@@ -83,6 +87,61 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   const activeChannel = engine.servers.activeChannel
   const pinned = engine.isChannelPinned(engine.activeGeohash)
   const activeStepRef = useRef<HTMLButtonElement | null>(null)
+
+  const activeCall = engine.calls.activeCall
+  const dmPeerTrusted = Boolean(
+    isDm && dmThread && engine.isExplicitlyTrusted(dmThread.peerPubkey)
+  )
+  const inThisDmCall = Boolean(
+    isDm &&
+      dmThread &&
+      activeCall?.mode === 'dm' &&
+      activeCall.peerPubkey?.toLowerCase() === dmThread.peerPubkey.toLowerCase()
+  )
+  const serverCallCount =
+    isServer && activeServer ? engine.calls.getServerCallCount(activeServer.id) : 0
+  const inThisServerCall = Boolean(
+    isServer &&
+      activeServer &&
+      activeCall?.mode === 'server' &&
+      activeCall.serverId === activeServer.id
+  )
+  const isServerCallFull =
+    isServer && !inThisServerCall && serverCallCount >= engine.calls.maxParticipants
+
+  const handleDmCallClick = (media: 'audio' | 'video') => {
+    if (!dmThread) return
+    if (inThisDmCall) {
+      onFocusActiveCall?.()
+      return
+    }
+    if (!dmPeerTrusted) {
+      engine.pushToast(
+        'warning',
+        `Trust ${dmThread.peerDisplayHandle} first`,
+        'P2P WebRTC calls share IP addresses directly. Open Inspect and trust this peer to unlock calls.'
+      )
+      return
+    }
+    void engine.calls.startDmCall(dmThread.peerPubkey, media, dmThread.peerNickname)
+  }
+
+  const handleServerCallClick = () => {
+    if (!activeServer) return
+    if (inThisServerCall) {
+      onFocusActiveCall?.()
+      return
+    }
+    if (isServerCallFull) {
+      engine.pushToast(
+        'warning',
+        `Voice Lounge full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`,
+        'P2P mesh calls support up to 6 simultaneous participants.'
+      )
+      return
+    }
+    void engine.calls.joinServerCall(activeServer.id, 'audio')
+  }
 
   useEffect(() => {
     if (!isDm && !isServer && activeStepRef.current) {
@@ -199,7 +258,10 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
               </div>
               <div className="ag-chan-meta">
                 <div className="ag-chan-title-line">
-                  <span className="ag-chan-title-geo">
+                  <span
+                    className="ag-chan-title-geo"
+                    title={`#${activeChannel.name} · ${activeServer.name}`}
+                  >
                     <span
                       className="hash"
                       style={{ color: activeServer.accentColor || 'var(--accent)' }}
@@ -208,7 +270,11 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                     </span>
                     {activeChannel.name}
                   </span>
-                  <span className="ag-chan-city ag-desktop-only">· {activeServer.name}</span>
+                  {!sidebarOpen && (
+                    <span className="ag-chan-city ag-chan-server-name ag-desktop-only">
+                      · {activeServer.name}
+                    </span>
+                  )}
                   {activeServer.kind === 'nip29' ? (
                     <span className="ag-badge mesh" title="NIP-29 Relay-Moderated Community">
                       <Server size={9} />
@@ -364,12 +430,42 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
             <>
               <button
                 type="button"
+                className={`ag-pill-btn ${inThisServerCall ? 'active' : ''}`}
+                onClick={handleServerCallClick}
+                disabled={isServerCallFull}
+                title={
+                  inThisServerCall
+                    ? 'Focus active Server Voice & Video Lounge'
+                    : isServerCallFull
+                      ? `Voice Lounge full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                      : `Join Server Voice Lounge (${serverCallCount}/${engine.calls.maxParticipants})`
+                }
+                aria-label={
+                  inThisServerCall
+                    ? 'Focus active server call'
+                    : `Join server voice call (${serverCallCount} of ${engine.calls.maxParticipants})`
+                }
+              >
+                <Phone size={13} style={inThisServerCall || serverCallCount > 0 ? { color: 'var(--status-ok)' } : undefined} />
+                <span className="ag-desktop-only">
+                  {inThisServerCall ? 'In Call' : 'Call'}
+                </span>
+                <span className="mono tabular">
+                  {serverCallCount}/{engine.calls.maxParticipants}
+                </span>
+              </button>
+
+              <button
+                type="button"
                 className="ag-pill-btn ag-hide-xs"
                 onClick={() => onOpenServerSettings?.(activeServer.id, 'overview')}
                 title={`Invite peers to ${activeServer.name}`}
+                aria-label={`Invite peers to ${activeServer.name}`}
               >
                 <UserPlus size={13} />
-                <span className="ag-desktop-only">Invite</span>
+                {(!sidebarOpen || !inspectorOpen) && (
+                  <span className="ag-desktop-only">Invite</span>
+                )}
               </button>
 
               <button
@@ -397,9 +493,42 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
           )}
 
           {isDm && dmThread && (
-            <button
-              type="button"
-              className="ag-pill-btn"
+            <>
+              <button
+                type="button"
+                className={`ag-icon-btn ${inThisDmCall ? 'active' : ''}`}
+                onClick={() => handleDmCallClick('audio')}
+                title={
+                  inThisDmCall
+                    ? 'Focus active voice call'
+                    : dmPeerTrusted
+                      ? `Start E2EE P2P voice call with ${dmThread.peerDisplayHandle}`
+                      : `Trust ${dmThread.peerDisplayHandle} first — P2P calls share IP addresses directly`
+                }
+                aria-label={inThisDmCall ? 'Focus active voice call' : 'Start voice call'}
+              >
+                <Phone size={15} />
+              </button>
+
+              <button
+                type="button"
+                className={`ag-icon-btn ${inThisDmCall && activeCall?.mediaType === 'video' ? 'active' : ''}`}
+                onClick={() => handleDmCallClick('video')}
+                title={
+                  inThisDmCall
+                    ? 'Focus active video call'
+                    : dmPeerTrusted
+                      ? `Start E2EE P2P video call with ${dmThread.peerDisplayHandle}`
+                      : `Trust ${dmThread.peerDisplayHandle} first — P2P calls share IP addresses directly`
+                }
+                aria-label={inThisDmCall ? 'Focus active video call' : 'Start video call'}
+              >
+                <Video size={15} />
+              </button>
+
+              <button
+                type="button"
+                className="ag-pill-btn"
               onClick={() => {
                 const existing = engine.getPeerByPubkey(dmThread.peerPubkey)
                 onInspectPeer(
@@ -424,6 +553,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
               <User size={13} />
               <span className="ag-desktop-only">Inspect</span>
             </button>
+            </>
           )}
 
           <button

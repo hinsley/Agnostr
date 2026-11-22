@@ -113,6 +113,7 @@ import {
 } from '../lib/storage.ts'
 import { buildNip42AuthTemplate } from '../lib/nip29.ts'
 import { revokeVoicePreviewUrl } from '../lib/voiceRecorder.ts'
+import { useCallEngine } from './useCallEngine.ts'
 import { useDirectMessages } from './useDirectMessages.ts'
 import { useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
@@ -803,7 +804,41 @@ export function useAgnostrEngine(): AgnostrEngine {
     pushToast,
   })
 
-  // Keep active geohash + DM + pulse + active server/NIP-29 relays synced in RelayPool
+  // P2P WebRTC Voice & Video Calls (1-on-1 DM Calls + Server Group Calls up to 6)
+  const getCallPeerNickname = useCallback(
+    (pk: string): string | undefined => {
+      const lower = pk.toLowerCase()
+      const dm = dmThreads.find((t) => t.peerPubkey === lower)
+      if (dm?.peerNickname) return dm.peerNickname
+      const trusted = trustedPubkeys.find((t) => t.pubkey === lower)
+      if (trusted?.label) return trusted.label
+      return presenceTracker.getNickname(lower) ?? undefined
+    },
+    [dmThreads, trustedPubkeys, presenceTracker]
+  )
+
+  const checkExplicitlyTrusted = useCallback(
+    (pk: string) => trustedSetRef.current.has(pk.toLowerCase()),
+    []
+  )
+
+  const {
+    calls: callsEngine,
+    callSignalingRelays,
+    resetAllCalls,
+  } = useCallEngine({
+    pool,
+    identityManager,
+    servers: serversEngine.joinedServers,
+    identityVersion,
+    blockedSet,
+    isExplicitlyTrusted: checkExplicitlyTrusted,
+    strictWhitelistMode: settings.strictWhitelistMode,
+    getPeerNickname: getCallPeerNickname,
+    pushToast,
+  })
+
+  // Keep active geohash + DM + pulse + active server/NIP-29 + call signaling relays synced in RelayPool
   const activeServerRelaysRef = useRef<string[]>(activeServerRelays)
   useEffect(() => {
     activeServerRelaysRef.current = activeServerRelays
@@ -816,15 +851,16 @@ export function useAgnostrEngine(): AgnostrEngine {
       ...relaySelection.dmRelays,
       ...relaySelection.pulseRelays,
       ...activeServerRelays,
+      ...callSignalingRelays,
     ])
     const combinedMeta = new Map(relaySelection.allMetadata)
-    for (const url of activeServerRelays) {
+    for (const url of [...activeServerRelays, ...callSignalingRelays]) {
       if (!combinedMeta.has(url)) {
         combinedMeta.set(url, { url, roles: ['custom'], supportsDm: false })
       }
     }
     pool.syncMetadata(combinedMeta, keepUrls)
-  }, [pool, relaySelection, activeServerRelays])
+  }, [pool, relaySelection, activeServerRelays, callSignalingRelays])
 
   // Wire NIP-42 AUTH responder onto RelayPool (auto-signs for NIP-29 relays)
   useEffect(() => {
@@ -1572,6 +1608,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const panicWipe = useCallback(() => {
+    resetAllCalls()
     pool?.closeAll()
     voiceCacheRef.current?.revokeAll()
     clearProtocolCaches()
@@ -1605,8 +1642,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     setIdentityVersion((v) => v + 1)
 
     clearToasts()
-    pushToast('warning', 'Panic Wipe Complete', 'All local keys, caches, servers, trusted peers, and decrypted audio purged. Fresh identity active.')
-  }, [pool, presenceTracker, clearPulse, clearAllDms, resetAllServers, resetLocation, identityManager, clearToasts, pushToast])
+    pushToast('warning', 'Panic Wipe Complete', 'All local keys, caches, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.')
+  }, [pool, presenceTracker, clearPulse, clearAllDms, resetAllServers, resetAllCalls, resetLocation, identityManager, clearToasts, pushToast])
 
   // Unified composer submit (commands, DMs, public messages)
   const addSystemMessage = useCallback(
@@ -1797,6 +1834,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     panicWipe,
 
     servers: serversEngine,
+    calls: callsEngine,
 
     commands: SLASH_COMMANDS,
     exportTranscript,

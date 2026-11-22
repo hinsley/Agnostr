@@ -20,6 +20,8 @@ import InspectorDrawer from './components/InspectorDrawer'
 import PeerInspectorModal from './components/PeerInspectorModal'
 import ExpandedRadarModal from './components/ExpandedRadarModal'
 import PwaInstallModal from './components/PwaInstallModal'
+import CallStage from './components/CallStage'
+import IncomingCallBanner from './components/IncomingCallBanner'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#090C0A',
@@ -64,6 +66,7 @@ export function App() {
   const [inspectedPeer, setInspectedPeer] = useState<PeerInfo | null>(null)
   const [radarExpanded, setRadarExpanded] = useState(false)
   const [installModalOpen, setInstallModalOpen] = useState(false)
+  const [callExpanded, setCallExpanded] = useState(false)
   const [serverHubState, setServerHubState] = useState<{ open: boolean; tab: ServerHubTab }>({
     open: false,
     tab: 'create',
@@ -96,6 +99,44 @@ export function App() {
   }, [engine.totalDmUnread, engine.servers.totalServerUnread, engine.pinnedChannels])
 
   const pwa = usePwa(totalUnreadBadge)
+
+  const activeCall = engine.calls.activeCall
+  const viewingActiveCallContext = Boolean(
+    activeCall &&
+      ((activeCall.mode === 'dm' &&
+        engine.activeView.type === 'dm' &&
+        engine.activeView.peerPubkey.toLowerCase() ===
+          (activeCall.peerPubkey ?? '').toLowerCase()) ||
+        (activeCall.mode === 'server' &&
+          engine.activeView.type === 'server' &&
+          engine.activeView.serverId === activeCall.serverId))
+  )
+  const callCompactFloating = Boolean(activeCall && !callExpanded && !viewingActiveCallContext)
+
+  // Periodic subtle ringtone while an incoming E2EE P2P call offer is ringing
+  const incomingCallId = engine.calls.incomingCall?.callId ?? null
+  useEffect(() => {
+    if (!incomingCallId) return
+    radioAudio.play('ring')
+    const timer = window.setInterval(() => {
+      radioAudio.play('ring')
+    }, 2600)
+    return () => window.clearInterval(timer)
+  }, [incomingCallId])
+
+  // Play crisp join/leave cues when active call starts or ends
+  const activeCallId = activeCall?.callId ?? null
+  const prevActiveCallIdRef = useRef<string | null>(activeCallId)
+  useEffect(() => {
+    const prev = prevActiveCallIdRef.current
+    prevActiveCallIdRef.current = activeCallId
+    if (!prev && activeCallId) {
+      radioAudio.play('call-join')
+    } else if (prev && !activeCallId) {
+      radioAudio.play('call-leave')
+      setCallExpanded(false)
+    }
+  }, [activeCallId])
 
   const settingsServer: ServerSummary | null = useMemo(() => {
     if (!serverSettingsState.serverId) return null
@@ -227,6 +268,7 @@ export function App() {
       setServerSettingsState({ serverId: null, tab: 'overview' })
       setRadarExpanded(false)
       setInstallModalOpen(false)
+      setCallExpanded(false)
       setPanicFlash(true)
       const t = window.setTimeout(() => setPanicFlash(false), 700)
       prevMasterPkRef.current = engine.identity.masterPubkey
@@ -321,6 +363,8 @@ export function App() {
           setRadarExpanded(false)
         } else if (installModalOpen) {
           setInstallModalOpen(false)
+        } else if (callExpanded) {
+          setCallExpanded(false)
         } else if (inspectedPeer) {
           setInspectedPeer(null)
         } else if (searchOpen) {
@@ -342,6 +386,7 @@ export function App() {
     closeServerHub,
     radarExpanded,
     installModalOpen,
+    callExpanded,
     inspectedPeer,
     searchOpen,
     inspectorOpen,
@@ -776,6 +821,7 @@ export function App() {
           onInspectPeer={setInspectedPeer}
           onOpenServerSettings={handleOpenServerSettings}
           onExpandRadar={handleExpandRadar}
+          onFocusActiveCall={() => setCallExpanded(true)}
           onExport={handleExport}
         />
 
@@ -814,6 +860,18 @@ export function App() {
               </button>
             </div>
           </div>
+        )}
+
+        {/* Active P2P Voice & Video Call Stage (Docked, Compact Floating Bar, or Full-Screen Spotlight) */}
+        {activeCall && (
+          <CallStage
+            calls={engine.calls}
+            engine={engine}
+            expanded={callExpanded}
+            compactFloating={callCompactFloating}
+            onToggleExpand={() => setCallExpanded((v) => !v)}
+            onPlaySound={playSound}
+          />
         )}
 
         <SearchBar
@@ -946,6 +1004,31 @@ export function App() {
         pwa={pwa}
         onOpenInstall={handleOpenInstall}
       />
+
+      {/* Incoming Encrypted P2P Call Offer Banner */}
+      {engine.calls.incomingCall && (
+        <IncomingCallBanner
+          incoming={engine.calls.incomingCall}
+          onAcceptAudio={() => {
+            const offer = engine.calls.incomingCall
+            if (offer) {
+              engine.openDmThread(offer.callerPubkey, offer.callerNickname)
+            }
+            void engine.calls.acceptIncomingCall('audio')
+          }}
+          onAcceptVideo={() => {
+            const offer = engine.calls.incomingCall
+            if (offer) {
+              engine.openDmThread(offer.callerPubkey, offer.callerNickname)
+            }
+            void engine.calls.acceptIncomingCall('video')
+          }}
+          onDecline={() => {
+            radioAudio.play('call-leave')
+            engine.calls.declineIncomingCall()
+          }}
+        />
+      )}
 
       {/* Tactical Non-Blocking Notifications */}
       <ToastStack toasts={engine.toasts} onDismiss={engine.dismissToast} />
