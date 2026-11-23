@@ -19,6 +19,7 @@ import type {
 } from '../types/notifications.ts'
 import type {
   AppSettings,
+  DmMessage,
   DmThread,
   GeohashCell,
   GeoMessage,
@@ -46,6 +47,7 @@ import {
   mergeTranscriptionModels,
   resolveActiveTranscriptionModel,
 } from './transcriptionModels.ts'
+import { formatVoiceDuration } from './voiceRecorder.ts'
 
 const PREFIX = 'agnostr:v2:'
 const MAX_MESSAGES_PER_CHANNEL = 250
@@ -614,20 +616,50 @@ export function saveJoinedServers(servers: ServerSummary[]): void {
   safeSet(KEYS.servers, JSON.stringify(clean))
 }
 
+export function isStuckVoiceMemoPlaceholder(msg: {
+  content?: unknown
+  voiceMemo?: unknown
+}): boolean {
+  if (msg.voiceMemo) return false
+  if (typeof msg.content !== 'string') return false
+  const trimmed = msg.content.trim()
+  return trimmed === 'Sending voice memo…' || trimmed === 'Sending voice memo...'
+}
+
+function formatDmPreviewForStorage(msg: DmMessage): string {
+  if (msg.voiceMemo) {
+    return msg.content
+      ? `🎤 ${msg.content}`.slice(0, 96)
+      : `🎤 Voice memo (${formatVoiceDuration(msg.voiceMemo.durationSec)})`
+  }
+  if (msg.imageAttachment) {
+    return msg.content
+      ? `🖼️ ${msg.content}`.slice(0, 96)
+      : msg.imageAttachment.width > 0 && msg.imageAttachment.height > 0
+        ? `🖼️ Image (${msg.imageAttachment.width}×${msg.imageAttachment.height})`
+        : '🖼️ Image'
+  }
+  return msg.content.slice(0, 96)
+}
+
 export function loadServerChannelMessages(serverId: string, channelId: string): ServerMessage[] {
   const parsed = safeJsonParse<ServerMessage[]>(safeGet(KEYS.serverMsgChannel(serverId, channelId)), [])
   if (!Array.isArray(parsed)) return []
   const clean: ServerMessage[] = []
-  let hadForeign = false
+  let needsRewrite = false
   for (const m of parsed) {
     if (!m || typeof m.id !== 'string' || typeof m.content !== 'string') continue
+    if (isStuckVoiceMemoPlaceholder(m)) {
+      needsRewrite = true
+      continue
+    }
     if (!m.isSystem && (m.serverId !== serverId || m.channelId !== channelId)) {
-      hadForeign = true
+      needsRewrite = true
       continue
     }
     clean.push(m)
   }
-  if (hadForeign) {
+  if (needsRewrite) {
     safeSet(KEYS.serverMsgChannel(serverId, channelId), JSON.stringify(clean.slice(-MAX_MESSAGES_PER_CHANNEL)))
   }
   return clean
@@ -694,19 +726,23 @@ export function loadChannelMessages(geohash: string): GeoMessage[] {
   const parsed = safeJsonParse<GeoMessage[]>(safeGet(KEYS.msgChannel(gh)), [])
   if (!Array.isArray(parsed)) return []
   const clean: GeoMessage[] = []
-  let hadForeign = false
+  let needsRewrite = false
   for (const m of parsed) {
     if (!m || typeof m.id !== 'string' || typeof m.content !== 'string') continue
+    if (isStuckVoiceMemoPlaceholder(m)) {
+      needsRewrite = true
+      continue
+    }
     if (!m.isSystem) {
       const msgKey = normalizeRadioChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
       if (msgKey !== gh) {
-        hadForeign = true
+        needsRewrite = true
         continue
       }
     }
     clean.push(m)
   }
-  if (hadForeign) {
+  if (needsRewrite) {
     safeSet(KEYS.msgChannel(gh), JSON.stringify(clean.slice(-MAX_MESSAGES_PER_CHANNEL)))
   }
   return clean
@@ -740,18 +776,47 @@ export function clearChannelMessagesStorage(geohash: string): void {
 export function loadDmThreads(): DmThread[] {
   const parsed = safeJsonParse<DmThread[]>(safeGet(KEYS.dmThreads), [])
   if (!Array.isArray(parsed)) return []
-  return parsed
+  let needsRewrite = false
+  const cleaned = parsed
     .filter((t) => t && typeof t.peerPubkey === 'string' && Array.isArray(t.messages))
-    .map((t) => ({
-      ...t,
-      messages: t.messages
-        .filter((m) => m && typeof m.id === 'string' && typeof m.createdAt === 'number')
-        .map((m) => ({
+    .map((t) => {
+      let threadScrubbed = false
+      const validMessages: DmMessage[] = []
+      for (const m of t.messages) {
+        if (!m || typeof m.id !== 'string' || typeof m.createdAt !== 'number') continue
+        if (isStuckVoiceMemoPlaceholder(m)) {
+          threadScrubbed = true
+          needsRewrite = true
+          continue
+        }
+        validMessages.push({
           ...m,
           orderMs:
             typeof m.orderMs === 'number' && Number.isFinite(m.orderMs) ? m.orderMs : undefined,
-        })),
-    }))
+        })
+      }
+      const previewWasStuck = isStuckVoiceMemoPlaceholder({ content: t.lastPreview })
+      if (previewWasStuck) {
+        needsRewrite = true
+      }
+      if (threadScrubbed || previewWasStuck) {
+        const tail = validMessages[validMessages.length - 1]
+        return {
+          ...t,
+          messages: validMessages,
+          lastPreview: tail ? formatDmPreviewForStorage(tail) : '',
+          lastMessageAt: tail ? tail.createdAt : t.lastMessageAt,
+        }
+      }
+      return {
+        ...t,
+        messages: validMessages,
+      }
+    })
+  if (needsRewrite) {
+    saveDmThreads(cleaned)
+  }
+  return cleaned
 }
 
 export function saveDmThreads(threads: DmThread[]): void {

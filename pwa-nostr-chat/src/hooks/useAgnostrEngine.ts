@@ -112,6 +112,7 @@ import {
   clearChannelMessagesStorage,
   DEFAULT_SETTINGS,
   formatTranscriptExport,
+  isStuckVoiceMemoPlaceholder,
   loadActiveGeohash,
   loadBlockedPubkeys,
   loadBlossomServers,
@@ -2024,6 +2025,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       const validIncoming: GeoMessage[] = []
       for (const raw of incoming) {
         if (!raw || raw.isSystem || typeof raw.id !== 'string' || !raw.id) continue
+        if (isStuckVoiceMemoPlaceholder(raw)) continue
         const msgKey = normalizeRadioChannelKey(raw.geohash)
         if (msgKey !== gh) continue
         const pk = (raw.pubkey || '').toLowerCase()
@@ -3136,76 +3138,11 @@ export function useAgnostrEngine(): AgnostrEngine {
       const isTopic = isTopicChannel(gh)
       const nick = identityManager.getNickname()
       const activeKey = identityManager.getKeyMaterialForGeohash(gh)
-      const activePk = activeKey.pubkey.toLowerCase()
       const isTeleported = location.isTeleported
       const broadcastClientTag = settings.broadcastClientTag
       const lightningAddr = zapsEngine.lightningAddress
       const powEnabled = settings.powEnabled
       const powTargetBits = settings.powTargetBits
-
-      const tempId = `pending-radio-${Date.now()}-${++optimisticRadioSeqRef.current}`
-      const nowSec = Math.floor(Date.now() / 1000)
-      const optimisticBase: GeoMessage = {
-        id: tempId,
-        geohash: gh,
-        pubkey: activePk,
-        nickname: nick,
-        displayHandle: formatDisplayHandle(nick, activePk),
-        content: cleanCaption || 'Sending voice memo…',
-        createdAt: nowSec,
-        tags: [],
-        isOwn: true,
-        isTeleported: !isTopic && isTeleported,
-        isMeshBridge: false,
-        clientName: broadcastClientTag ? AGNOSTR_CLIENT_TAG : undefined,
-        isAgnostrClient: broadcastClientTag,
-        powBits: 0,
-        replyTo:
-          replyTarget && !replyTarget.isSystem
-            ? {
-                id: replyTarget.id,
-                pubkey: replyTarget.pubkey,
-                nickname: replyTarget.nickname,
-                preview: replyTarget.content.slice(0, 120),
-              }
-            : undefined,
-        reactions: [],
-        mentions: extractMentions(cleanCaption),
-        deliveryStatus: 'sending',
-      }
-
-      updateChannelMessages(
-        gh,
-        (prev) => {
-          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
-          return [...prev, { ...optimisticBase, createdAt: Math.max(nowSec, lastSec) }]
-        },
-        { allowBackgroundPersist: true }
-      )
-      const optimisticVoicePreview = formatRadioPreviewText({
-        content: cleanCaption,
-        hasVoice: true,
-      })
-      upsertChannelPreview(
-        gh,
-        {
-          id: tempId,
-          preview: optimisticVoicePreview,
-          sender: nick,
-          senderPubkey: activePk,
-          createdAt: nowSec,
-        },
-        { force: true }
-      )
-      recordRoomMessage({
-        id: tempId,
-        geohash: gh,
-        pubkey: activePk,
-        sender: nick,
-        preview: optimisticVoicePreview,
-        createdAtSec: nowSec,
-        isAuthoritative: activeGeohashRef.current === gh,
-      })
 
       adjustInFlightSend(1)
       try {
@@ -3213,7 +3150,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           `radio:${gh}`,
           async () => {
             if (identityManager.getWipeGeneration() !== wipeGen) return false
-            let activeMsgId = tempId
+            let signedMsgId: string | null = null
             try {
               const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
 
@@ -3283,7 +3220,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               const signed = await identityManager.signEvent(template, gh)
               if (identityManager.getWipeGeneration() !== wipeGen) return false
 
-              activeMsgId = signed.id
+              signedMsgId = signed.id
               const findParent = (id: string) =>
                 messagesChannelRef.current === gh
                   ? messagesRef.current.find((m) => m.id === id)
@@ -3296,7 +3233,13 @@ export function useAgnostrEngine(): AgnostrEngine {
                 parsed.isOwn = true
                 updateChannelMessages(
                   gh,
-                  (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-radio-'),
+                  (prev) => {
+                    if (prev.some((m) => m.id === parsed.id)) return null
+                    return sortChannelMessagesWithPending(
+                      [...prev, parsed],
+                      'pending-radio-'
+                    ).slice(-350)
+                  },
                   { allowBackgroundPersist: true }
                 )
                 const signedVoicePreview = formatRadioPreviewText({
@@ -3309,7 +3252,6 @@ export function useAgnostrEngine(): AgnostrEngine {
                   gh,
                   {
                     id: parsed.id,
-                    replaceId: tempId,
                     preview: signedVoicePreview,
                     sender: parsed.nickname || nick,
                     senderPubkey: parsed.pubkey,
@@ -3319,7 +3261,6 @@ export function useAgnostrEngine(): AgnostrEngine {
                 )
                 recordRoomMessage({
                   id: parsed.id,
-                  replaceId: tempId,
                   geohash: gh,
                   pubkey: parsed.pubkey,
                   sender: parsed.nickname || nick,
@@ -3364,22 +3305,24 @@ export function useAgnostrEngine(): AgnostrEngine {
               return ok
             } catch (err) {
               if (identityManager.getWipeGeneration() === wipeGen) {
-                updateChannelMessages(
-                  gh,
-                  (prev) => {
-                    let changed = false
-                    const next = prev.map((m) => {
-                      if (m.id !== activeMsgId && m.id !== tempId) return m
-                      changed = true
-                      return {
-                        ...m,
-                        deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
-                      }
-                    })
-                    return changed ? next : null
-                  },
-                  { allowBackgroundPersist: true }
-                )
+                if (signedMsgId) {
+                  updateChannelMessages(
+                    gh,
+                    (prev) => {
+                      let changed = false
+                      const next = prev.map((m) => {
+                        if (m.id !== signedMsgId) return m
+                        changed = true
+                        return {
+                          ...m,
+                          deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
+                        }
+                      })
+                      return changed ? next : null
+                    },
+                    { allowBackgroundPersist: true }
+                  )
+                }
                 pushToast(
                   'error',
                   'Voice memo failed',
