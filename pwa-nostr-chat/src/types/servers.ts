@@ -17,6 +17,7 @@ export interface ServerChannel {
   name: string
   topic?: string
   unreadCount?: number
+  mentionCount?: number
 }
 
 export interface VirtualServerManifest {
@@ -185,6 +186,9 @@ export interface ServersEngine {
   replyingTo: ServerMessage | null
   setReplyingTo: (msg: ServerMessage | null) => void
   totalServerUnread: number
+  totalServerMentions: number
+  getServerUnreadCount: (serverId: string) => number
+  getServerMentionCount: (serverId: string) => number
 
   // Invite URL detection (#invite=...)
   pendingInvite: ServerInvite | null

@@ -31,6 +31,7 @@ import {
 import { revokeImagePreviewUrl } from '../lib/imageProcessor.ts'
 import {
   clampTimestamp,
+  doesContentMentionUser,
   extractMentions,
   getTagValue,
   KIND_EPHEMERAL_REACTION,
@@ -224,6 +225,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const joinedServersRef = useRef<ServerSummary[]>(joinedServers)
   const ownPubkeysRef = useRef<Set<string>>(ownPubkeys)
   const blockedSetRef = useRef<Set<string>>(blockedSet)
+  const trustedSetRef = useRef<Set<string>>(trustedSet)
+  const strictWhitelistRef = useRef<boolean>(settings.strictWhitelistMode)
+  const activeViewRef = useRef<ActiveView>(activeView)
+  const bgSeenIdsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     rawMessagesRef.current = rawMessages
@@ -241,6 +246,83 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   useEffect(() => {
     blockedSetRef.current = blockedSet
   }, [blockedSet])
+
+  useEffect(() => {
+    trustedSetRef.current = trustedSet
+  }, [trustedSet])
+
+  useEffect(() => {
+    strictWhitelistRef.current = settings.strictWhitelistMode
+  }, [settings.strictWhitelistMode])
+
+  useEffect(() => {
+    activeViewRef.current = activeView
+  }, [activeView])
+
+  const incrementServerChannelUnread = useCallback(
+    (serverId: string, channelId: string, isDirectPing: boolean) => {
+      setJoinedServers((prev) =>
+        prev.map((s) => {
+          if (s.id !== serverId) return s
+          let matched = false
+          const nextChannels = s.channels.map((c) => {
+            if (c.id !== channelId) return c
+            matched = true
+            return {
+              ...c,
+              unreadCount: (c.unreadCount ?? 0) + 1,
+              mentionCount: (c.mentionCount ?? 0) + (isDirectPing ? 1 : 0),
+            }
+          })
+          if (!matched) {
+            return {
+              ...s,
+              unreadCount: s.unreadCount + 1,
+              mentionCount: s.mentionCount + (isDirectPing ? 1 : 0),
+            }
+          }
+          const totalUnread = nextChannels.reduce((acc, c) => acc + (c.unreadCount ?? 0), 0)
+          const totalMentions = nextChannels.reduce((acc, c) => acc + (c.mentionCount ?? 0), 0)
+          return {
+            ...s,
+            channels: nextChannels,
+            unreadCount: totalUnread,
+            mentionCount: totalMentions,
+          }
+        })
+      )
+    },
+    []
+  )
+
+  const clearServerChannelUnread = useCallback((serverId: string, channelId: string) => {
+    setJoinedServers((prev) => {
+      let changed = false
+      const next = prev.map((s) => {
+        if (s.id !== serverId) return s
+        const target = s.channels.find((c) => c.id === channelId)
+        const hasTargetUnread = Boolean(
+          target && ((target.unreadCount ?? 0) > 0 || (target.mentionCount ?? 0) > 0)
+        )
+        const hasServerDrift =
+          !target && (s.unreadCount > 0 || s.mentionCount > 0)
+        if (!hasTargetUnread && !hasServerDrift) return s
+        changed = true
+        const nextChannels = s.channels.map((c) =>
+          c.id === channelId ? { ...c, unreadCount: 0, mentionCount: 0 } : c
+        )
+        const totalUnread = nextChannels.reduce((acc, c) => acc + (c.unreadCount ?? 0), 0)
+        const totalMentions = nextChannels.reduce((acc, c) => acc + (c.mentionCount ?? 0), 0)
+        return {
+          ...s,
+          channels: nextChannels,
+          unreadCount: totalUnread,
+          mentionCount: totalMentions,
+        }
+      })
+      return changed ? next : prev
+    })
+  }, [])
 
   // Watch window.location.hash for `#invite=...` deep links (never silently auto-join!)
   useEffect(() => {
@@ -283,11 +365,15 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       for (const u of activeServer.relays) set.add(u)
       if (activeServer.relayUrl) set.add(activeServer.relayUrl)
     }
+    for (const s of joinedServers) {
+      for (const u of s.relays) set.add(u)
+      if (s.relayUrl) set.add(s.relayUrl)
+    }
     if (exploringRelay && exploredRelayUrl) {
       set.add(exploredRelayUrl)
     }
-    return Array.from(set)
-  }, [activeServer, exploringRelay, exploredRelayUrl])
+    return Array.from(set).slice(0, 14)
+  }, [activeServer, joinedServers, exploringRelay, exploredRelayUrl])
 
   // Live metadata sync for active server (Virtual kind 30078 OR NIP-29 kinds 39000/39001/39002)
   const activeServerKey = activeServer
@@ -317,6 +403,15 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             prev.map((s) => {
               if (s.id !== activeServer.id) return s
               if (manifest.rev < s.rev) return s
+              const existingById = new Map(s.channels.map((c) => [c.id, c]))
+              const mergedChannels = manifest.channels.map((c) => {
+                const prevChan = existingById.get(c.id)
+                return {
+                  ...c,
+                  unreadCount: prevChan?.unreadCount ?? 0,
+                  mentionCount: prevChan?.mentionCount ?? 0,
+                }
+              })
               return {
                 ...s,
                 name: manifest.name,
@@ -324,11 +419,13 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 icon: manifest.icon,
                 accentColor: manifest.accentColor,
                 founderPubkey: manifest.founderPubkey,
-                channels: manifest.channels,
+                channels: mergedChannels,
                 moderators: manifest.moderators,
                 bannedPubkeys: manifest.bannedPubkeys,
                 relays: manifest.relays,
                 rev: manifest.rev,
+                unreadCount: mergedChannels.reduce((acc, c) => acc + (c.unreadCount ?? 0), 0),
+                mentionCount: mergedChannels.reduce((acc, c) => acc + (c.mentionCount ?? 0), 0),
               }
             })
           )
@@ -368,7 +465,15 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                         isPrivate: meta.isPrivate,
                         isClosed: meta.isClosed,
                         isRestricted: meta.isRestricted,
-                        channels: [{ id: groupId, name: meta.name.toLowerCase().replace(/\s+/g, '-').slice(0, 24) || groupId, topic: meta.about }],
+                        channels: [
+                          {
+                            id: groupId,
+                            name: meta.name.toLowerCase().replace(/\s+/g, '-').slice(0, 24) || groupId,
+                            topic: meta.about,
+                            unreadCount: s.channels[0]?.unreadCount ?? s.unreadCount,
+                            mentionCount: s.channels[0]?.mentionCount ?? s.mentionCount,
+                          },
+                        ],
                       }
                     : s
                 )
@@ -462,12 +567,28 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
     const wipeGen = identityManager.getWipeGeneration()
     const subId = `agnostr-srv-chat-${serverSnapshot.id.slice(0, 14)}-${chanId.slice(0, 12)}`
+    const subStartSec = Math.floor(Date.now() / 1000)
+    let backfillDone = false
+    const eoseFallback = window.setTimeout(() => {
+      backfillDone = true
+    }, 2500)
 
-    return pool.subscribe(subId, targetRelays, filters, {
+    const unsub = pool.subscribe(subId, targetRelays, filters, {
+      onEose: () => {
+        backfillDone = true
+        window.clearTimeout(eoseFallback)
+      },
       onEvent: (ev) => {
         if (seenIds.has(ev.id)) return
         if (!verifyEventCached(ev)) return
         seenIds.add(ev.id)
+        const alreadyCountedUnread = bgSeenIdsRef.current.has(ev.id)
+        bgSeenIdsRef.current.add(ev.id)
+        if (bgSeenIdsRef.current.size > 1200) {
+          const first = bgSeenIdsRef.current.values().next().value
+          if (first) bgSeenIdsRef.current.delete(first)
+        }
+        const isHistoryReplay = !backfillDone || ev.created_at < subStartSec - 2
 
         const pk = ev.pubkey.toLowerCase()
 
@@ -576,6 +697,41 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               saveServerChannelMessages(serverSnapshot.id, chanId, next)
               return next
             })
+
+            if (!isHistoryReplay && !alreadyCountedUnread && !parsed.isOwn && !parsed.isSystem) {
+              const view = activeViewRef.current
+              const isViewingThisChan =
+                view.type === 'server' &&
+                view.serverId === serverSnapshot.id &&
+                view.channelId === chanId
+              if (
+                !isViewingThisChan &&
+                (!strictWhitelistRef.current || trustedSetRef.current.has(pk))
+              ) {
+                const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+                const mentionedMe = doesContentMentionUser(
+                  parsed.content,
+                  parsed.mentions,
+                  identityManager.getNickname(),
+                  masterPk
+                )
+                const repliedToMe = Boolean(
+                  parsed.replyTo &&
+                    ((parsed.replyTo.pubkey &&
+                      ownPubkeysRef.current.has(parsed.replyTo.pubkey.toLowerCase())) ||
+                      rawMessagesRef.current.some(
+                        (m) =>
+                          m.id === parsed.replyTo?.id &&
+                          (m.isOwn || ownPubkeysRef.current.has(m.pubkey.toLowerCase()))
+                      ))
+                )
+                incrementServerChannelUnread(
+                  serverSnapshot.id,
+                  chanId,
+                  mentionedMe || repliedToMe
+                )
+              }
+            }
           }
 
           if (isVirtual) {
@@ -597,8 +753,247 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         }
       },
     })
+
+    return () => {
+      window.clearTimeout(eoseFallback)
+      unsub()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pool, activeServerKey, activeChannelId, activeEncKey, activeBannedKey, identityManager, presenceTracker])
+  }, [pool, activeServerKey, activeChannelId, activeEncKey, activeBannedKey, identityManager, presenceTracker, incrementServerChannelUnread])
+
+  // Clear active server channel unread & mention badges whenever user focuses that channel
+  useEffect(() => {
+    if (activeView.type !== 'server') return
+    clearServerChannelUnread(activeView.serverId, activeView.channelId)
+  }, [activeView, clearServerChannelUnread])
+
+  // Background live post-EOSE unread & direct-ping watcher across ALL joined servers & channels
+  const bgWatchKey = useMemo(
+    () =>
+      joinedServers
+        .map((s) => {
+          const chans = s.channels.map((c) => c.id).sort().join(',')
+          return `${s.id}:${s.kind}:${s.encrypted ? '1' : '0'}:${s.groupId ?? ''}:${s.relayUrl ?? ''}:${chans}`
+        })
+        .sort()
+        .join('|'),
+    [joinedServers]
+  )
+
+  useEffect(() => {
+    if (!pool || !bgWatchKey) return
+    const currentServers = joinedServersRef.current
+    if (currentServers.length === 0) return
+
+    const unsubs: Array<() => void> = []
+    const timers: number[] = []
+    const wipeGen = identityManager.getWipeGeneration()
+    const since = Math.floor(Date.now() / 1000)
+
+    const handleBackgroundServerMessage = (
+      srv: ServerSummary,
+      chanId: string,
+      parsed: ServerMessage | null
+    ) => {
+      if (!parsed || parsed.isOwn || parsed.isSystem) return
+      if (identityManager.getWipeGeneration() !== wipeGen) return
+
+      const pk = parsed.pubkey.toLowerCase()
+      if (ownPubkeysRef.current.has(pk) || blockedSetRef.current.has(pk)) return
+      if (srv.bannedPubkeys.some((b) => b.toLowerCase() === pk)) return
+      if (strictWhitelistRef.current && !trustedSetRef.current.has(pk)) return
+
+      const view = activeViewRef.current
+      if (
+        view.type === 'server' &&
+        view.serverId === srv.id &&
+        view.channelId === chanId
+      ) {
+        return
+      }
+
+      const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const mentionedMe = doesContentMentionUser(
+        parsed.content,
+        parsed.mentions,
+        identityManager.getNickname(),
+        masterPk
+      )
+      let repliedToMe = Boolean(
+        parsed.replyTo?.pubkey &&
+          ownPubkeysRef.current.has(parsed.replyTo.pubkey.toLowerCase())
+      )
+      if (!repliedToMe && parsed.replyTo?.id) {
+        const cachedMsgs = loadServerChannelMessages(srv.id, chanId)
+        repliedToMe = cachedMsgs.some(
+          (m) =>
+            m.id === parsed.replyTo?.id &&
+            (m.isOwn || ownPubkeysRef.current.has(m.pubkey.toLowerCase()))
+        )
+      }
+
+      incrementServerChannelUnread(srv.id, chanId, mentionedMe || repliedToMe)
+    }
+
+    // 1. Virtual servers (public + E2EE)
+    const tagToTarget = new Map<string, { server: ServerSummary; channelId: string }>()
+    const virtualTags: string[] = []
+    const virtualRelaySet = new Set<string>()
+    for (const srv of currentServers) {
+      if (srv.kind !== 'virtual') continue
+      const srvRelays = srv.relays.length > 0 ? srv.relays : [...CORE_DM_RELAYS]
+      for (const r of srvRelays) virtualRelaySet.add(r)
+      for (const ch of srv.channels) {
+        const tag = getVirtualChannelTag(srv, ch.id)
+        tagToTarget.set(tag, { server: srv, channelId: ch.id })
+        virtualTags.push(tag)
+      }
+    }
+
+    if (virtualTags.length > 0 && virtualRelaySet.size > 0) {
+      let virtualBackfillDone = false
+      const virtualEoseTimer = window.setTimeout(() => {
+        virtualBackfillDone = true
+      }, 2500)
+      timers.push(virtualEoseTimer)
+
+      const unsubVirtual = pool.subscribe(
+        `agnostr-srv-bg-virtual-${virtualTags.length}`,
+        Array.from(virtualRelaySet).slice(0, 8),
+        [{ kinds: [KIND_VIRTUAL_CHAT], '#t': virtualTags, since }],
+        {
+          onEose: () => {
+            virtualBackfillDone = true
+            window.clearTimeout(virtualEoseTimer)
+          },
+          onEvent: (ev) => {
+            if (ev.kind !== KIND_VIRTUAL_CHAT) return
+            if (!virtualBackfillDone && ev.created_at < since - 2) return
+            if (bgSeenIdsRef.current.has(ev.id)) return
+            if (!verifyEventCached(ev)) return
+
+            let matched: { server: ServerSummary; channelId: string } | null = null
+            for (const tag of ev.tags) {
+              if (tag[0] === 't' && tag[1]) {
+                const found = tagToTarget.get(tag[1])
+                if (found) {
+                  matched = found
+                  break
+                }
+              }
+            }
+            if (!matched) return
+
+            // Skip active channel (handled by active subscription above)
+            const view = activeViewRef.current
+            if (
+              view.type === 'server' &&
+              view.serverId === matched.server.id &&
+              view.channelId === matched.channelId
+            ) {
+              return
+            }
+
+            bgSeenIdsRef.current.add(ev.id)
+            if (bgSeenIdsRef.current.size > 1200) {
+              const first = bgSeenIdsRef.current.values().next().value
+              if (first) bgSeenIdsRef.current.delete(first)
+            }
+
+            const latestSrv =
+              joinedServersRef.current.find((s) => s.id === matched.server.id) ?? matched.server
+            const targetChanId = matched.channelId
+            void parseVirtualChatEvent(ev, latestSrv, targetChanId, ownPubkeysRef.current).then(
+              (parsed) => handleBackgroundServerMessage(latestSrv, targetChanId, parsed)
+            )
+          },
+        }
+      )
+      unsubs.push(unsubVirtual)
+    }
+
+    // 2. NIP-29 relay-hosted communities (grouped per relayUrl)
+    const nip29ByRelay = new Map<string, ServerSummary[]>()
+    for (const srv of currentServers) {
+      if (srv.kind !== 'nip29' || !srv.relayUrl || !srv.groupId) continue
+      const list = nip29ByRelay.get(srv.relayUrl) ?? []
+      list.push(srv)
+      nip29ByRelay.set(srv.relayUrl, list)
+    }
+
+    for (const [relayUrl, srvList] of nip29ByRelay.entries()) {
+      const groupToSrv = new Map<string, ServerSummary>()
+      const groupIds: string[] = []
+      for (const srv of srvList) {
+        if (!srv.groupId) continue
+        groupToSrv.set(srv.groupId, srv)
+        groupIds.push(srv.groupId)
+      }
+      if (groupIds.length === 0) continue
+
+      let nip29BackfillDone = false
+      const nip29EoseTimer = window.setTimeout(() => {
+        nip29BackfillDone = true
+      }, 2500)
+      timers.push(nip29EoseTimer)
+
+      const unsubNip29 = pool.subscribe(
+        `agnostr-srv-bg-nip29-${relayUrl.slice(-14)}-${groupIds.length}`,
+        [relayUrl],
+        [{ kinds: [KIND_NIP29_CHAT], '#h': groupIds, since }],
+        {
+          onEose: () => {
+            nip29BackfillDone = true
+            window.clearTimeout(nip29EoseTimer)
+          },
+          onEvent: (ev) => {
+            if (ev.kind !== KIND_NIP29_CHAT) return
+            if (!nip29BackfillDone && ev.created_at < since - 2) return
+            if (bgSeenIdsRef.current.has(ev.id)) return
+            if (!verifyEventCached(ev)) return
+
+            const gid = getTagValue(ev.tags, 'h')
+            if (!gid) return
+            const matchedSrv = groupToSrv.get(gid)
+            if (!matchedSrv) return
+
+            const view = activeViewRef.current
+            if (
+              view.type === 'server' &&
+              view.serverId === matchedSrv.id &&
+              view.channelId === gid
+            ) {
+              return
+            }
+
+            bgSeenIdsRef.current.add(ev.id)
+            if (bgSeenIdsRef.current.size > 1200) {
+              const first = bgSeenIdsRef.current.values().next().value
+              if (first) bgSeenIdsRef.current.delete(first)
+            }
+
+            const latestSrv =
+              joinedServersRef.current.find((s) => s.id === matchedSrv.id) ?? matchedSrv
+            const parsed = parseNip29ChatEvent(
+              ev,
+              latestSrv.id,
+              gid,
+              ownPubkeysRef.current,
+              undefined,
+              (p) => presenceTracker.getNickname(p)
+            )
+            handleBackgroundServerMessage(latestSrv, gid, parsed)
+          },
+        }
+      )
+      unsubs.push(unsubNip29)
+    }
+
+    return () => {
+      for (const t of timers) window.clearTimeout(t)
+      for (const u of unsubs) u()
+    }
+  }, [pool, bgWatchKey, identityManager, presenceTracker, incrementServerChannelUnread])
 
   // Apply ban list + blocked list + Trusted Peers Only mode to visible server messages
   const { visibleMessages, hiddenByTrustCount } = useMemo(() => {
@@ -705,11 +1100,19 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           : target.lastActiveChannelId || target.channels[0]?.id || target.groupId || 'general'
 
       setJoinedServers((prev) =>
-        prev.map((s) =>
-          s.id === serverId
-            ? { ...s, lastActiveChannelId: nextChan, unreadCount: 0, mentionCount: 0 }
-            : s
-        )
+        prev.map((s) => {
+          if (s.id !== serverId) return s
+          const nextChannels = s.channels.map((c) =>
+            c.id === nextChan ? { ...c, unreadCount: 0, mentionCount: 0 } : c
+          )
+          return {
+            ...s,
+            lastActiveChannelId: nextChan,
+            channels: nextChannels,
+            unreadCount: nextChannels.reduce((acc, c) => acc + (c.unreadCount ?? 0), 0),
+            mentionCount: nextChannels.reduce((acc, c) => acc + (c.mentionCount ?? 0), 0),
+          }
+        })
       )
       setActiveView({ type: 'server', serverId, channelId: nextChan })
     },
@@ -1824,6 +2227,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const resetAllServers = useCallback(() => {
     exploreUnsubRef.current?.()
     exploreUnsubRef.current = null
+    bgSeenIdsRef.current.clear()
     setJoinedServers([])
     setRawMessages([])
     setReplyingTo(null)
@@ -1835,6 +2239,23 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
   const totalServerUnread = useMemo(
     () => joinedServers.reduce((sum, s) => sum + s.unreadCount, 0),
+    [joinedServers]
+  )
+
+  const totalServerMentions = useMemo(
+    () => joinedServers.reduce((sum, s) => sum + s.mentionCount, 0),
+    [joinedServers]
+  )
+
+  const getServerUnreadCount = useCallback(
+    (serverId: string): number =>
+      joinedServers.find((s) => s.id === serverId)?.unreadCount ?? 0,
+    [joinedServers]
+  )
+
+  const getServerMentionCount = useCallback(
+    (serverId: string): number =>
+      joinedServers.find((s) => s.id === serverId)?.mentionCount ?? 0,
     [joinedServers]
   )
 
@@ -1853,6 +2274,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       replyingTo,
       setReplyingTo,
       totalServerUnread,
+      totalServerMentions,
+      getServerUnreadCount,
+      getServerMentionCount,
       pendingInvite,
       clearPendingInvite,
       nip29Presets: [...DEFAULT_NIP29_RELAYS],
@@ -1898,6 +2322,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       creating,
       replyingTo,
       totalServerUnread,
+      totalServerMentions,
+      getServerUnreadCount,
+      getServerMentionCount,
       pendingInvite,
       clearPendingInvite,
       exploredRelayUrl,

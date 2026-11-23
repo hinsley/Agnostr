@@ -12,6 +12,7 @@ import {
   MessageCircle,
   Minus,
   Phone,
+  PhoneOff,
   Pin,
   PinOff,
   Plus,
@@ -342,6 +343,21 @@ export function RoomInfoSheet({
       ? 'Ephemeral · High-precision room'
       : `Ephemeral · ${presence.onlineCount} online`
 
+    const normalizedGh = activeGeohash.trim().toLowerCase()
+    const geoCallRoster = calls.getGeoCallPresence(normalizedGh)
+    const geoCallCount = calls.getGeoCallCount(normalizedGh)
+    const isInThisGeoCall =
+      calls.activeCall?.mode === 'geo' && calls.activeCall.geohash === normalizedGh
+    const isGeoCallFull = !isInThisGeoCall && geoCallCount >= calls.maxParticipants
+
+    const handleJoinGeoCall = async (media: 'audio' | 'video') => {
+      onPlaySound?.('click')
+      const ok = await calls.joinGeoCall(normalizedGh, media)
+      if (ok) {
+        onClose()
+      }
+    }
+
     return (
       <>
         {/* Hero */}
@@ -382,6 +398,83 @@ export function RoomInfoSheet({
             <span>{isPinned ? 'Unpin' : 'Pin Room'}</span>
           </button>
         </div>
+
+        {/* Geo Radio Group Call */}
+        <section className="ag-sheet-section">
+          <div className="ag-sheet-section-head">
+            <span className="ag-sheet-section-title">
+              <Radio size={13} />
+              <span>Radio Group Call</span>
+            </span>
+            <span className="ag-sheet-section-meta mono">
+              {geoCallCount > 0
+                ? `${geoCallCount}/${calls.maxParticipants} live`
+                : `Up to ${calls.maxParticipants} · P2P`}
+            </span>
+          </div>
+
+          <div className={`ag-sheet-call-card ${isInThisGeoCall ? 'in-call' : ''}`}>
+            {geoCallRoster.length > 0 && (
+              <div className="ag-sheet-call-roster" role="list" aria-label="Peers in radio call">
+                {geoCallRoster.map((p) => (
+                  <span key={p.pubkey} role="listitem" className="ag-sheet-call-pill">
+                    <img
+                      src={identiconDataUrl(p.pubkey)}
+                      alt=""
+                      width={18}
+                      height={18}
+                      className="ag-sheet-call-pill-avatar"
+                    />
+                    <span
+                      className="ag-sheet-call-pill-name truncate"
+                      style={{ color: pubkeyToColor(p.pubkey) }}
+                    >
+                      {p.displayHandle}
+                    </span>
+                    {p.hasVideo && <Video size={11} className="ag-sheet-call-pill-icon" />}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {isInThisGeoCall ? (
+              <button
+                type="button"
+                className="ag-sheet-util-btn danger"
+                onClick={() => {
+                  onPlaySound?.('call-leave')
+                  calls.leaveCall()
+                }}
+              >
+                <PhoneOff size={15} />
+                <span>Leave Radio Call</span>
+              </button>
+            ) : isGeoCallFull ? (
+              <p className="ag-sheet-call-note">
+                Call is full ({calls.maxParticipants}/{calls.maxParticipants} participants).
+              </p>
+            ) : (
+              <div className="ag-sheet-action-grid">
+                <button
+                  type="button"
+                  className="ag-sheet-action-btn primary"
+                  onClick={() => void handleJoinGeoCall('audio')}
+                >
+                  <Phone size={16} />
+                  <span>{geoCallCount > 0 ? 'Join Voice' : 'Voice Call'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="ag-sheet-action-btn"
+                  onClick={() => void handleJoinGeoCall('video')}
+                >
+                  <Video size={16} />
+                  <span>{geoCallCount > 0 ? 'Join Video' : 'Video Call'}</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
 
         {/* Precision Zoom Stepper */}
         <section className="ag-sheet-section">
@@ -484,11 +577,25 @@ export function RoomInfoSheet({
                         {peer.isOnline && <span className="ag-sheet-online-dot" />}
                       </span>
                       <span className="ag-sheet-person-text">
-                        <span
-                          className="ag-sheet-person-name truncate"
-                          style={{ color: pubkeyToColor(peer.pubkey) }}
-                        >
-                          {peer.displayHandle}
+                        <span className="ag-sheet-person-name-row">
+                          <span
+                            className="ag-sheet-person-name truncate"
+                            style={{ color: pubkeyToColor(peer.pubkey) }}
+                          >
+                            {peer.displayHandle}
+                          </span>
+                          {peer.isAgnostrClient && (
+                            <span
+                              className="ag-client-badge"
+                              title="Using Agnostr"
+                              aria-label="Using Agnostr"
+                            >
+                              <span className="ag-client-badge-mark" aria-hidden="true">
+                                A
+                              </span>
+                              <span className="ag-client-badge-text">Agnostr</span>
+                            </span>
+                          )}
                         </span>
                         <span className="ag-sheet-person-sub">
                           {peer.isSelf ? 'You' : peer.isOnline ? 'Online' : 'Recently active'}

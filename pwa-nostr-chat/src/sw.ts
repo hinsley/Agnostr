@@ -297,6 +297,28 @@ swSelf.addEventListener('push', (event) => {
       return
     }
 
+    if (data.category === 'geo-call') {
+      const tag =
+        data.tag ||
+        (data.geohash ? `agnostr-geocall-${data.geohash}` : 'agnostr-geocall')
+      const options: ExtendedNotificationOptions = {
+        body: payload.body || 'A group call started in a Geo Radio channel',
+        icon: APP_ICON,
+        badge: APP_ICON,
+        tag,
+        renotify: true,
+        requireInteraction: true,
+        vibrate: [180, 90, 180],
+        actions: [
+          { action: 'open', title: 'Accept' },
+          { action: 'decline', title: 'Decline' },
+        ],
+        data: { ...data, tag },
+      }
+      await showSwNotificationSafe(payload.title || 'Geo Radio Call Active', options)
+      return
+    }
+
     const tag =
       data.tag ||
       (data.peerPubkey

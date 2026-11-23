@@ -176,6 +176,42 @@
   flex-shrink: 0;
 }
 
+/* Subtle Tonal Electric-Blue Agnostr Client Micro-Badge (Geo Radio) */
+.ag-client-badge {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 5px 0 3px;
+  border-radius: var(--radius-xs);
+  background-color: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.ag-client-badge-mark {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  font-size: 8.5px;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
 /* --------------------------------------------------------------------------
    2. Unified Conversation List (280px Desktop Left Pane & Mobile Home List)
    -------------------------------------------------------------------------- */
@@ -304,22 +340,39 @@
   color: var(--dm-accent);
 }
 
+.ag-conv-tab .ag-tab-count,
 .ag-tab-count {
-  min-width: 16px;
-  height: 16px;
-  padding: 0 0.3rem;
+  position: static;
+  top: auto;
+  right: auto;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
   border-radius: var(--radius-full);
-  background-color: var(--accent);
-  color: var(--text-inverse);
+  background-color: var(--bg-active);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
   font-size: 10.5px;
   font-weight: 700;
+  line-height: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
+.ag-conv-tab .ag-tab-count.ping,
+.ag-tab-count.ping {
+  background-color: var(--status-danger, #ef4444);
+  border-color: transparent;
+  color: #ffffff;
+  box-shadow: 0 1px 4px rgba(239, 68, 68, 0.35);
+}
+
+.ag-conv-tab .ag-tab-count.dm,
 .ag-tab-count.dm {
-  background-color: var(--dm-accent);
+  background-color: var(--status-danger, #ef4444);
+  border-color: transparent;
   color: #ffffff;
 }
 
@@ -487,6 +540,12 @@
   color: var(--accent);
 }
 
+.ag-quick-tool-btn.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+
 .ag-quick-tool-btn.locating svg {
   animation: ag-spin 1s linear infinite;
 }
@@ -557,6 +616,7 @@
 }
 
 .ag-chat-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -577,6 +637,169 @@
 
 .ag-chat-row.dm.active {
   background-color: var(--dm-soft);
+}
+
+/* Geo Radio row wrapper allowing valid sibling Pin button without nested <button> */
+.ag-chat-row-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  border-radius: var(--radius-sm);
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-chat-row-wrap:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-chat-row-wrap.active {
+  background-color: var(--bg-active);
+}
+
+.ag-chat-row-wrap .ag-chat-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 4px;
+  background-color: transparent;
+}
+
+.ag-chat-row-wrap .ag-chat-row:hover,
+.ag-chat-row-wrap .ag-chat-row.active {
+  background-color: transparent;
+}
+
+.ag-row-pin-btn {
+  width: 28px;
+  height: 28px;
+  margin-right: 4px;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  opacity: 0.45;
+  transition:
+    opacity var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-chat-row-wrap:hover .ag-row-pin-btn,
+.ag-chat-row-wrap:focus-within .ag-row-pin-btn,
+.ag-row-pin-btn:focus-visible,
+.ag-row-pin-btn.pinned {
+  opacity: 1;
+}
+
+.ag-row-pin-btn:hover {
+  background-color: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.ag-row-pin-btn.pinned {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+.ag-row-pin-btn.pinned:hover {
+  background-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+/* People Tab Friend Quick-Call & 1-Tap Trust Controls */
+.ag-person-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease;
+}
+
+.ag-chat-row-wrap:hover .ag-person-row-actions,
+.ag-chat-row-wrap:focus-within .ag-person-row-actions {
+  opacity: 1;
+}
+
+.ag-person-trust-pill {
+  height: 24px;
+  padding: 0 8px;
+  margin-right: 6px;
+  border-radius: var(--radius-xs);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-person-trust-pill:hover {
+  background-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+.ag-chat-row-wrap.dm.active {
+  background-color: var(--dm-soft);
+}
+
+/* Unmistakable Unread Row Treatment (Discord-style left indicator rail + crisp bold title) */
+.ag-chat-row.is-unread::before,
+.ag-chat-row-wrap.is-unread::before,
+.ag-srv-ch-row.is-unread::before,
+.ag-srv-card.is-unread > .ag-srv-card-head::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: 0 3px 3px 0;
+  background-color: var(--text-primary);
+  pointer-events: none;
+}
+
+.ag-chat-row.has-pings::before,
+.ag-chat-row-wrap.has-pings::before,
+.ag-srv-ch-row.has-pings::before,
+.ag-srv-card.has-pings > .ag-srv-card-head::before {
+  background-color: var(--status-danger, #ef4444);
+}
+
+.ag-chat-row.is-unread .ag-chat-row-name,
+.ag-chat-row-wrap.is-unread .ag-chat-row-name,
+.ag-srv-card.is-unread .ag-srv-card-name {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-chat-row.is-unread .ag-chat-row-preview,
+.ag-chat-row-wrap.is-unread .ag-chat-row-preview {
+  color: var(--text-primary);
+  opacity: 0.86;
+}
+
+.ag-srv-ch-row {
+  position: relative;
+}
+
+.ag-srv-ch-row.is-unread {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-srv-card-head {
+  position: relative;
 }
 
 /* Sharp 32px rounded-square avatars */
@@ -683,13 +906,49 @@
   line-height: 1.3;
 }
 
+/* Discord-Style Red Numbered Ping Bubble & Neutral Unread Count Pill */
+.ag-ping-badge {
+  min-width: 19px;
+  height: 19px;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background-color: var(--status-danger, #ef4444);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 1px 4px rgba(239, 68, 68, 0.35);
+}
+
+.ag-unread-pill {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-active);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
 .ag-row-unread {
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
   border-radius: var(--radius-full);
-  background-color: var(--accent);
-  color: var(--text-inverse);
+  background-color: var(--bg-active);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
   font-size: 10.5px;
   font-weight: 700;
   display: inline-flex;
@@ -699,7 +958,8 @@
 }
 
 .ag-row-unread.dm {
-  background-color: var(--dm-accent);
+  background-color: var(--status-danger, #ef4444);
+  border-color: transparent;
   color: #ffffff;
 }
 
@@ -711,6 +971,32 @@
   padding: 0 6px;
   border-radius: var(--radius-xs);
   flex-shrink: 0;
+}
+
+.ag-row-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.ag-row-call-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.ag-row-call-pill.in-call {
+  background-color: var(--accent);
+  color: var(--text-inverse);
 }
 
 /* Empty states inside Conversation List */
@@ -1370,24 +1656,33 @@
   .ag-mtab-badge {
     position: absolute;
     top: -4px;
-    right: -11px;
-    min-width: 17px;
-    height: 17px;
-    padding: 0 4px;
+    right: -12px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
     border-radius: var(--radius-full);
-    background-color: var(--accent);
-    color: var(--text-inverse);
+    background-color: var(--bg-active);
+    color: var(--text-primary);
     font-size: 10.5px;
     font-weight: 700;
+    line-height: 1;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     border: 1.5px solid var(--bg-surface);
   }
 
+  .ag-mtab-badge.ping,
   .ag-mtab-badge.dm {
-    background-color: var(--dm-accent);
+    background-color: var(--status-danger, #ef4444);
     color: #ffffff;
+    box-shadow: 0 1px 4px rgba(239, 68, 68, 0.35);
+  }
+
+  .ag-mtab-badge.unread {
+    background-color: var(--bg-active);
+    color: var(--text-primary);
+    border-color: var(--border-default);
   }
 
   .ag-mtab-label {
@@ -1575,6 +1870,88 @@
 .ag-header-call-count {
   font-size: 12px;
   font-weight: 600;
+}
+
+/* Live Active Geo Radio Group Call Banner */
+.ag-geo-call-banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 16px;
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border-accent);
+}
+
+.ag-geo-call-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-geo-call-banner-count {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ag-geo-call-banner-peers {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.ag-geo-call-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ag-geo-call-join-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-geo-call-join-btn:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.ag-geo-call-join-btn.primary {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+.ag-geo-call-join-btn.primary:hover:not(:disabled) {
+  background-color: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.ag-geo-call-join-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* --------------------------------------------------------------------------
@@ -3988,13 +4365,30 @@
    -------------------------------------------------------------------------- */
 @media (max-width: 867px) {
   .ag-circle-btn {
-    width: 42px;
-    height: 42px;
+    width: 38px;
+    height: 38px;
   }
 
   .ag-header-call-btn {
-    min-width: 42px;
-    height: 42px;
+    min-width: 38px;
+    height: 38px;
+    padding: 0 7px;
+  }
+
+  .ag-row-pin-btn {
+    width: 34px;
+    height: 34px;
+    opacity: 0.78;
+  }
+
+  .ag-geo-call-banner {
+    padding: 6px 10px;
+    gap: 8px;
+  }
+
+  .ag-geo-call-join-btn {
+    height: 32px;
+    padding: 0 9px;
   }
 
   .ag-composer-input,

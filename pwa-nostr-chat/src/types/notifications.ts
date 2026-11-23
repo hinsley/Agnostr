@@ -19,6 +19,7 @@ export type NotificationCategory =
   | 'server-message'
   | 'server-call'
   | 'geo-message'
+  | 'geo-call'
   | 'location-note'
   | 'test'
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { EventTemplate, VerifiedEvent } from 'nostr-tools'
-import type { IncomingCallOffer, RoomCallPresence } from '../types/calls.ts'
+import type { GeoCallPresence, IncomingCallOffer, RoomCallPresence } from '../types/calls.ts'
 import type {
   NotificationPayloadData,
   NotificationPermissionState,
@@ -71,6 +71,9 @@ export interface UseNotificationsParams {
   isOutgoingDmRinging: boolean
   serverCallRosters: Record<string, RoomCallPresence[]>
   activeCallServerId: string | null
+  geoCallRosters: Record<string, GeoCallPresence[]>
+  activeCallGeohash: string | null
+  ownGeoCallPubkeys: Set<string>
   relayUrls: string[]
   pinnedGeohashes: string[]
   signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
@@ -117,6 +120,9 @@ export function useNotifications(
     isOutgoingDmRinging,
     serverCallRosters,
     activeCallServerId,
+    geoCallRosters,
+    activeCallGeohash,
+    ownGeoCallPubkeys,
     relayUrls,
     pinnedGeohashes,
     signEvent,
@@ -162,6 +168,7 @@ export function useNotifications(
   const seenServerMsgIdsRef = useRef<Set<string>>(new Set())
   const lastServerChanKeyRef = useRef<string>('')
   const seenRosterKeysRef = useRef<Set<string>>(new Set())
+  const seenGeoRosterKeysRef = useRef<Set<string>>(new Set())
   const rosterBootedRef = useRef<boolean>(false)
   const activeRingingCallIdRef = useRef<string | null>(null)
 
@@ -173,6 +180,8 @@ export function useNotifications(
   activeViewRef.current = activeView
   const ownPubkeysRef = useRef(ownPubkeys)
   ownPubkeysRef.current = ownPubkeys
+  const ownGeoCallPubkeysRef = useRef(ownGeoCallPubkeys)
+  ownGeoCallPubkeysRef.current = ownGeoCallPubkeys
   const masterPubkeyRef = useRef(masterPubkey)
   masterPubkeyRef.current = masterPubkey
   const nicknameRef = useRef(nickname)
@@ -655,6 +664,74 @@ export function useNotifications(
     rememberNotified,
   ])
 
+  // 5b. Live Geo Radio Group Call Joins across active & pinned Geo Radio rooms
+  useEffect(() => {
+    const nextKeys = new Set<string>()
+    const cfg = settingsRef.current
+
+    for (const [gh, list] of Object.entries(geoCallRosters)) {
+      for (const member of list) {
+        const memberPk = member.pubkey.toLowerCase()
+        const key = `${gh}:${member.roomId}:${memberPk}`
+        nextKeys.add(key)
+
+        if (!rosterBootedRef.current) continue
+        if (seenGeoRosterKeysRef.current.has(key)) continue
+        if (ownPubkeysRef.current.has(memberPk) || ownGeoCallPubkeysRef.current.has(memberPk)) {
+          continue
+        }
+        if (activeCallGeohash === gh) continue
+        if (!cfg.serverCalls) continue
+        if (!rememberNotified(`geocall:${key}:${Math.floor(Date.now() / 60_000)}`)) {
+          continue
+        }
+
+        const view = activeViewRef.current
+        const isViewingGeoRoom = view.type === 'channel' && view.geohash === gh
+        const docActive = isDocumentFocusedAndVisible()
+        if (docActive && isViewingGeoRoom) continue
+
+        if (cfg.soundEnabled) {
+          soundEngine.playNotificationChime('call', {
+            vibrate: cfg.vibrationEnabled,
+          })
+        }
+
+        if (canSendOsNotification()) {
+          void showOsNotification({
+            title: cfg.showPreviews
+              ? `#${gh} · Geo Radio Call`
+              : 'Geo Radio Call Active',
+            body: cfg.showPreviews
+              ? `${member.displayHandle} started a ${member.hasVideo ? 'video' : 'voice'} call`
+              : 'A group call started in one of your Geo Radio channels',
+            tag: `agnostr-geocall-${gh}`,
+            requireInteraction: true,
+            vibrate: cfg.vibrationEnabled ? [180, 90, 180] : undefined,
+            actions: [
+              { action: 'open', title: 'Accept' },
+              { action: 'decline', title: 'Decline' },
+            ],
+            data: {
+              category: 'geo-call',
+              geohash: gh,
+              mediaType: member.hasVideo ? 'video' : 'audio',
+            },
+            onDirectClick: handleDirectNotificationClick,
+          })
+        }
+      }
+    }
+
+    seenGeoRosterKeysRef.current = nextKeys
+  }, [
+    geoCallRosters,
+    activeCallGeohash,
+    canSendOsNotification,
+    handleDirectNotificationClick,
+    rememberNotified,
+  ])
+
   // 6. Live Geo Radio Messages & /drop Location Notes (invoked directly from live relay callbacks in useAgnostrEngine)
   const notifyGeoMessage = useCallback(
     (input: NotifyGeoMessageInput) => {
@@ -958,6 +1035,7 @@ export function useNotifications(
     seenDmIdsRef.current = null
     seenServerMsgIdsRef.current.clear()
     seenRosterKeysRef.current.clear()
+    seenGeoRosterKeysRef.current.clear()
     sessionBootSecRef.current = Math.floor(Date.now() / 1000)
     setIsRinging(false)
     setIsRingMuted(false)

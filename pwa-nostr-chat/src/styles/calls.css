@@ -53,6 +53,31 @@
   max-width: 220px;
 }
 
+.ag-call-float-title.clickable {
+  cursor: pointer;
+}
+
+.ag-call-float-title.clickable:hover {
+  color: var(--accent);
+}
+
+.ag-call-float-return {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  padding: 0;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ag-call-float-return:hover .ag-badge-accent {
+  background-color: var(--accent);
+  color: var(--text-inverse);
+}
+
 .ag-call-float-meta {
   font-size: 11px;
   color: var(--text-secondary);

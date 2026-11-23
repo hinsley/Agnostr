@@ -261,17 +261,26 @@ export class IdentityManager {
     return { mode: 'auto', pubkey: getPublicKey(this.deviceSeed), secretKey: this.deviceSeed }
   }
 
+  /**
+   * Always returns the deterministic HMAC-SHA256 derived identity for a geohash
+   * (independent of `perGeohashIdentity` / `signMode`), guaranteeing public Geo
+   * Radio call signaling NEVER exposes the user's primary DM `npub`.
+   */
+  getDerivedGeohashKeyMaterial(geohash: string): SigningKeyMaterial {
+    const gh = normalizeGeohash(geohash)
+    const cached = this.derivedCache.get(gh)
+    if (cached) {
+      return { mode: 'auto', pubkey: cached.pk, secretKey: cached.sk }
+    }
+    const sk = deriveGeohashSecretKey(this.deviceSeed, gh)
+    const pk = getPublicKey(sk)
+    this.derivedCache.set(gh, { sk, pk })
+    return { mode: 'auto', pubkey: pk, secretKey: sk }
+  }
+
   getKeyMaterialForGeohash(geohash?: string): SigningKeyMaterial {
     if (this.signMode === 'auto' && this.perGeohashIdentity && geohash) {
-      const gh = normalizeGeohash(geohash)
-      const cached = this.derivedCache.get(gh)
-      if (cached) {
-        return { mode: 'auto', pubkey: cached.pk, secretKey: cached.sk }
-      }
-      const sk = deriveGeohashSecretKey(this.deviceSeed, gh)
-      const pk = getPublicKey(sk)
-      this.derivedCache.set(gh, { sk, pk })
-      return { mode: 'auto', pubkey: pk, secretKey: sk }
+      return this.getDerivedGeohashKeyMaterial(geohash)
     }
     return this.getMasterKeyMaterial()
   }
@@ -314,8 +323,10 @@ export class IdentityManager {
     return null
   }
 
-  async signEvent(template: EventTemplate, geohash?: string): Promise<VerifiedEvent> {
-    const material = this.getKeyMaterialForGeohash(geohash)
+  async signEventWithMaterial(
+    template: EventTemplate,
+    material: SigningKeyMaterial
+  ): Promise<VerifiedEvent> {
     if (material.mode === 'extension') {
       if (!window.nostr) {
         throw new Error('NIP-07 browser extension not found')
@@ -326,6 +337,11 @@ export class IdentityManager {
       throw new Error('No signing key available')
     }
     return finalizeEvent(template, material.secretKey)
+  }
+
+  async signEvent(template: EventTemplate, geohash?: string): Promise<VerifiedEvent> {
+    const material = this.getKeyMaterialForGeohash(geohash)
+    return await this.signEventWithMaterial(template, material)
   }
 
   rotateEphemeral(): string {

@@ -12,6 +12,7 @@ interface PeerRecord {
   lastSeenAt: number
   isTeleported: boolean
   isMeshBridge: boolean
+  isAgnostrClient: boolean
   messageCount: number
   channels: Set<string>
 }
@@ -20,6 +21,7 @@ export class PresenceTracker {
   private byChannel = new Map<string, Map<string, PeerRecord>>()
   private globalNicknames = new Map<string, string>()
   private globalChannels = new Map<string, Set<string>>()
+  private agnostrPeers = new Set<string>()
 
   recordActivity(opts: {
     geohash: string
@@ -28,6 +30,7 @@ export class PresenceTracker {
     nickname?: string | null
     isTeleported?: boolean
     isMeshBridge?: boolean
+    isAgnostrClient?: boolean
     isMessage?: boolean
   }): void {
     const gh = normalizeGeohash(opts.geohash)
@@ -42,6 +45,9 @@ export class PresenceTracker {
     if (cleanNick) {
       this.globalNicknames.set(pk, cleanNick)
     }
+    if (opts.isAgnostrClient) {
+      this.agnostrPeers.add(pk)
+    }
 
     let peerChannels = this.globalChannels.get(pk)
     if (!peerChannels) {
@@ -50,12 +56,14 @@ export class PresenceTracker {
     }
     peerChannels.add(gh)
 
+    const knownAgnostr = Boolean(opts.isAgnostrClient || this.agnostrPeers.has(pk))
     const existing = channelMap.get(pk)
     if (existing) {
       existing.lastSeenAt = Math.max(existing.lastSeenAt, opts.seenAtSec)
       if (cleanNick) existing.nickname = cleanNick
       if (opts.isTeleported) existing.isTeleported = true
       if (opts.isMeshBridge) existing.isMeshBridge = true
+      if (knownAgnostr) existing.isAgnostrClient = true
       if (opts.isMessage) existing.messageCount += 1
       existing.channels.add(gh)
     } else {
@@ -65,9 +73,27 @@ export class PresenceTracker {
         lastSeenAt: opts.seenAtSec,
         isTeleported: Boolean(opts.isTeleported),
         isMeshBridge: Boolean(opts.isMeshBridge),
+        isAgnostrClient: knownAgnostr,
         messageCount: opts.isMessage ? 1 : 0,
         channels: new Set([gh]),
       })
+    }
+  }
+
+  isKnownAgnostrPeer(pubkey: string): boolean {
+    return this.agnostrPeers.has(pubkey.toLowerCase())
+  }
+
+  setSelfAgnostrFlag(pubkey: string, enabled: boolean): void {
+    const pk = pubkey.toLowerCase()
+    if (enabled) {
+      this.agnostrPeers.add(pk)
+    } else {
+      this.agnostrPeers.delete(pk)
+    }
+    for (const channelMap of this.byChannel.values()) {
+      const rec = channelMap.get(pk)
+      if (rec) rec.isAgnostrClient = enabled
     }
   }
 
@@ -99,6 +125,7 @@ export class PresenceTracker {
         isSelf: ownPubkeys.has(rec.pubkey),
         isTeleported: rec.isTeleported,
         isMeshBridge: rec.isMeshBridge,
+        isAgnostrClient: rec.isAgnostrClient || this.agnostrPeers.has(rec.pubkey),
         isBlocked: blockedPubkeys.has(rec.pubkey),
         messageCount: rec.messageCount,
         channels: Array.from(this.globalChannels.get(rec.pubkey) ?? rec.channels),
@@ -143,6 +170,7 @@ export class PresenceTracker {
       isSelf: ownPubkeys.has(pk),
       isTeleported: latest?.isTeleported ?? false,
       isMeshBridge: latest?.isMeshBridge ?? false,
+      isAgnostrClient: Boolean(latest?.isAgnostrClient || this.agnostrPeers.has(pk)),
       isBlocked: blockedPubkeys.has(pk),
       messageCount: totalMessages,
       channels: Array.from(this.globalChannels.get(pk) ?? []),
@@ -175,6 +203,7 @@ export class PresenceTracker {
     this.byChannel.clear()
     this.globalNicknames.clear()
     this.globalChannels.clear()
+    this.agnostrPeers.clear()
   }
 }
 

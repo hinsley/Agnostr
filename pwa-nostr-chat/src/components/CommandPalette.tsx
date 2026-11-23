@@ -32,12 +32,14 @@ import {
   ShieldCheck,
   Square,
   Terminal,
+  Video,
   Volume2,
   Wifi,
 } from 'lucide-react'
 import type { AgnostrEngine, ThemeId } from '../types/protocol'
 import type { PwaState } from '../hooks/usePwa'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
+import { formatHandle } from '../utils/identicon'
 import type { QrShareTarget } from './QrShareModal'
 import type { ServerHubTab } from './ServerHubModal'
 import type { SettingsTab } from './SettingsModal'
@@ -67,6 +69,7 @@ export interface CommandPaletteProps {
   engine: AgnostrEngine
   onClose: () => void
   onTuneChannel: (geohash: string) => void
+  onOpenDm?: (pubkey: string, nickname?: string) => void
   onSelectServerChannel?: (serverId: string, channelId: string) => void
   onOpenServerHub?: (initialTab?: ServerHubTab) => void
   onExpandRadar: () => void
@@ -88,6 +91,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   engine,
   onClose,
   onTuneChannel,
+  onOpenDm,
   onSelectServerChannel,
   onOpenServerHub,
   onExpandRadar,
@@ -161,6 +165,52 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         icon: <Hash size={15} />,
         run: () => {
           onTuneChannel(cleanHash)
+          onClose()
+        },
+      })
+    }
+
+    // People (Active DMs + Trusted Friends)
+    const seenPeople = new Set<string>()
+    for (const dm of engine.dmThreads) {
+      const pk = dm.peerPubkey.toLowerCase()
+      seenPeople.add(pk)
+      const isTrusted = engine.isExplicitlyTrusted(dm.peerPubkey)
+      list.push({
+        id: `person-dm-${pk}`,
+        group: 'People',
+        title: dm.peerDisplayHandle,
+        subtitle: dm.lastPreview || (isTrusted ? 'Trusted friend · Encrypted DM' : 'Encrypted DM'),
+        keywords: `people dm friend message ${dm.peerNickname} ${dm.peerDisplayHandle} ${dm.peerNpub}`,
+        badge: dm.unreadCount > 0 ? `${dm.unreadCount}` : isTrusted ? 'FRIEND' : 'DM',
+        icon: <MessageCircle size={15} style={{ color: 'var(--dm-accent)' }} />,
+        run: () => {
+          if (onOpenDm) onOpenDm(dm.peerPubkey, dm.peerNickname)
+          else engine.openDmThread(dm.peerPubkey, dm.peerNickname)
+          onClose()
+        },
+      })
+    }
+    const selfMaster = engine.identity.masterPubkey.toLowerCase()
+    const selfActive = engine.identity.activePubkey.toLowerCase()
+    for (const entry of engine.trustedPubkeys) {
+      const pk = entry.pubkey.toLowerCase()
+      if (seenPeople.has(pk) || pk === selfMaster || pk === selfActive) continue
+      seenPeople.add(pk)
+      const livePeer = engine.getPeerByPubkey(entry.pubkey)
+      const nick = entry.label?.trim() || livePeer?.nickname || 'anon'
+      const handle = formatHandle(nick, entry.pubkey)
+      list.push({
+        id: `person-friend-${pk}`,
+        group: 'People',
+        title: handle.full,
+        subtitle: 'Trusted friend · Tap to message',
+        keywords: `people dm friend trusted ${handle.base} ${handle.full} ${entry.npub}`,
+        badge: 'FRIEND',
+        icon: <ShieldCheck size={15} style={{ color: 'var(--accent)' }} />,
+        run: () => {
+          if (onOpenDm) onOpenDm(entry.pubkey, handle.base)
+          else engine.openDmThread(entry.pubkey, handle.base)
           onClose()
         },
       })
@@ -344,6 +394,58 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           void engine.calls.startDmCall(dm.peerPubkey, 'audio', dm.peerNickname)
         },
       })
+    } else if (engine.activeView.type === 'channel') {
+      const gh = engine.activeGeohash
+      const count = engine.calls.getGeoCallCount(gh)
+      const isFull = count >= engine.calls.maxParticipants
+      list.push(
+        {
+          id: 'act-call-join-geo-voice',
+          group: 'Actions',
+          title:
+            count > 0 ? 'Join Geo Radio Voice Call' : 'Start Geo Radio Voice Call',
+          subtitle: isFull
+            ? `#${gh} call is full (${count}/${engine.calls.maxParticipants})`
+            : `#${gh} · P2P group audio (${count}/${engine.calls.maxParticipants})`,
+          keywords: `start join geo radio voice call audio #${gh} webrtc p2p talk`,
+          badge: `${count}/${engine.calls.maxParticipants}`,
+          icon: <Phone size={15} />,
+          run: () => {
+            onClose()
+            if (isFull) {
+              engine.pushToast(
+                'warning',
+                `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+              )
+              return
+            }
+            void engine.calls.joinGeoCall(gh, 'audio')
+          },
+        },
+        {
+          id: 'act-call-join-geo-video',
+          group: 'Actions',
+          title:
+            count > 0 ? 'Join Geo Radio Video Call' : 'Start Geo Radio Video Call',
+          subtitle: isFull
+            ? `#${gh} call is full (${count}/${engine.calls.maxParticipants})`
+            : `#${gh} · P2P group video (${count}/${engine.calls.maxParticipants})`,
+          keywords: `start join geo radio video call camera #${gh} webrtc p2p`,
+          badge: `${count}/${engine.calls.maxParticipants}`,
+          icon: <Video size={15} />,
+          run: () => {
+            onClose()
+            if (isFull) {
+              engine.pushToast(
+                'warning',
+                `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+              )
+              return
+            }
+            void engine.calls.joinGeoCall(gh, 'video')
+          },
+        }
+      )
     }
 
     list.push(
@@ -748,6 +850,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     query,
     engine,
     onTuneChannel,
+    onOpenDm,
     onSelectServerChannel,
     onOpenServerHub,
     onExpandRadar,

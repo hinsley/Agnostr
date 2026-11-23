@@ -1,7 +1,8 @@
 export const MAX_CALL_PARTICIPANTS = 6
 export const DEFAULT_SERVER_VOICE_ROOM_ID = 'lounge'
+export const DEFAULT_GEO_VOICE_ROOM_ID = 'radio'
 
-export type CallMode = 'dm' | 'server'
+export type CallMode = 'dm' | 'server' | 'geo'
 
 export type CallMediaType = 'audio' | 'video'
 
@@ -57,6 +58,7 @@ export interface ActiveCallSession {
   title: string
   peerPubkey?: string
   serverId?: string
+  geohash?: string
   roomId?: string
   startedAt: number // unix ms
   connectedAt: number | null // unix ms
@@ -96,6 +98,18 @@ export interface RoomCallPresence {
   lastSeenAt: number // unix ms
 }
 
+export interface GeoCallPresence {
+  geohash: string
+  roomId: string
+  pubkey: string
+  nickname: string
+  displayHandle: string
+  hasVideo: boolean
+  audioMuted: boolean
+  isRecording?: boolean
+  lastSeenAt: number // unix ms
+}
+
 export interface TurnServerConfig {
   url: string
   username?: string
@@ -109,6 +123,8 @@ export interface CallEngine {
   isOutgoingDmRinging: boolean
   /** Map of serverId -> active participants in that server's Voice & Video Lounge */
   serverCallRosters: Record<string, RoomCallPresence[]>
+  /** Map of normalized geohash -> active participants in that Geo Radio channel's group call */
+  geoCallRosters: Record<string, GeoCallPresence[]>
   maxParticipants: number
   recordingQuality: RecordingQualityPreset
   setRecordingQuality: (quality: RecordingQualityPreset) => void
@@ -119,6 +135,7 @@ export interface CallEngine {
   acceptIncomingCall: (media?: CallMediaType) => Promise<boolean>
   declineIncomingCall: () => void
   joinServerCall: (serverId: string, media: CallMediaType, roomId?: string) => Promise<boolean>
+  joinGeoCall: (geohash: string, media: CallMediaType) => Promise<boolean>
   leaveCall: () => void
   toggleMute: () => void
   toggleDeafen: () => void
@@ -126,4 +143,6 @@ export interface CallEngine {
   toggleScreenShare: () => Promise<boolean>
   toggleRecording: () => Promise<void>
   getServerCallCount: (serverId: string) => number
+  getGeoCallPresence: (geohash: string) => GeoCallPresence[]
+  getGeoCallCount: (geohash: string) => number
 }

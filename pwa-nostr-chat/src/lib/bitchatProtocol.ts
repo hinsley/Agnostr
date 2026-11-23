@@ -451,6 +451,17 @@ export function parseImageFromImeta(tags: string[][]): ImageAttachment | undefin
   return undefined
 }
 
+export const AGNOSTR_CLIENT_TAG = 'agnostr'
+
+export function parseClientTag(tags: string[][]): string | undefined {
+  const raw = getTagValue(tags, 'client')?.trim()
+  return raw || undefined
+}
+
+export function isAgnostrClientTag(tags: string[][]): boolean {
+  return parseClientTag(tags)?.toLowerCase() === AGNOSTR_CLIENT_TAG
+}
+
 export function buildGeohashChatTemplate(opts: {
   content: string
   geohash: string
@@ -459,6 +470,7 @@ export function buildGeohashChatTemplate(opts: {
   replyTo?: GeoMessage | null
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  broadcastClientTag?: boolean
 }): EventTemplate {
   const gh = normalizeGeohash(opts.geohash)
   const tags: string[][] = [['g', gh]]
@@ -468,6 +480,9 @@ export function buildGeohashChatTemplate(opts: {
   }
   if (opts.isTeleported) {
     tags.push(['t', 'teleport'])
+  }
+  if (opts.broadcastClientTag) {
+    tags.push(['client', AGNOSTR_CLIENT_TAG])
   }
   if (opts.replyTo && !opts.replyTo.isSystem) {
     tags.push(['e', opts.replyTo.id, '', 'reply'])
@@ -489,12 +504,19 @@ export function buildGeohashChatTemplate(opts: {
   }
 }
 
-export function buildPresenceTemplate(geohash: string): EventTemplate {
-  // Per docs/GeohashPresenceSpec.md: empty content, ["g", geohash] only, NO nickname tag
+export function buildPresenceTemplate(
+  geohash: string,
+  broadcastClientTag = false
+): EventTemplate {
+  // Per docs/GeohashPresenceSpec.md: empty content, ["g", geohash], optional NIP-89 client tag, NO nickname tag
+  const tags: string[][] = [['g', normalizeGeohash(geohash)]]
+  if (broadcastClientTag) {
+    tags.push(['client', AGNOSTR_CLIENT_TAG])
+  }
   return {
     kind: KIND_GEOHASH_PRESENCE,
     created_at: Math.floor(Date.now() / 1000),
-    tags: [['g', normalizeGeohash(geohash)]],
+    tags,
     content: '',
   }
 }
@@ -562,7 +584,8 @@ export function parseGeohashChatEvent(
   const displayHandle = formatDisplayHandle(nickname, pubkey)
 
   const isTeleported = hasTagPair(event.tags, 't', 'teleport')
-  const clientTag = getTagValue(event.tags, 'client') ?? undefined
+  const clientTag = parseClientTag(event.tags)
+  const isAgnostrClient = isAgnostrClientTag(event.tags)
   const proxyTag = event.tags.find((t) => t[0] === 'proxy')
   const isMeshBridge =
     Boolean(proxyTag && proxyTag.some((v) => v.toLowerCase().includes('mesh'))) ||
@@ -599,6 +622,7 @@ export function parseGeohashChatEvent(
     isTeleported,
     isMeshBridge,
     bridgeClient: clientTag,
+    isAgnostrClient,
     powBits: getValidatedPowBits(event.id, event.tags),
     replyTo,
     reactions: [],

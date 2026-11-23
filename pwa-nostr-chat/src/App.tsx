@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { RefreshCw, WifiOff, X } from 'lucide-react'
+import { Phone, RefreshCw, Video, WifiOff, X } from 'lucide-react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
 import { useBackNavigation } from './hooks/useBackNavigation'
 import { useMobileSwipeDrawers } from './hooks/useMobileSwipeDrawers'
@@ -115,11 +115,10 @@ export function App() {
   const activeChannel = engine.servers.activeChannel
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
 
-  // Total unread count across DMs, Servers, and pinned Geohash channels for PWA App Badge
+  // Total unread count across DMs, Servers, and Geo Radio rooms for PWA App Badge
   const totalUnreadBadge = useMemo(() => {
-    const pinnedUnread = engine.pinnedChannels.reduce((sum, ch) => sum + ch.unreadCount, 0)
-    return engine.totalDmUnread + engine.servers.totalServerUnread + pinnedUnread
-  }, [engine.totalDmUnread, engine.servers.totalServerUnread, engine.pinnedChannels])
+    return engine.totalDmUnread + engine.servers.totalServerUnread + engine.totalGeoUnread
+  }, [engine.totalDmUnread, engine.servers.totalServerUnread, engine.totalGeoUnread])
 
   const pwa = usePwa(totalUnreadBadge)
 
@@ -132,9 +131,47 @@ export function App() {
           (activeCall.peerPubkey ?? '').toLowerCase()) ||
         (activeCall.mode === 'server' &&
           engine.activeView.type === 'server' &&
-          engine.activeView.serverId === activeCall.serverId))
+          engine.activeView.serverId === activeCall.serverId) ||
+        (activeCall.mode === 'geo' &&
+          engine.activeView.type === 'channel' &&
+          (activeCall.geohash ?? '').toLowerCase() === engine.activeGeohash.toLowerCase()))
   )
   const callCompactFloating = Boolean(activeCall && !callExpanded && !viewingActiveCallContext)
+
+  const activeGeoKey = engine.activeGeohash.toLowerCase()
+  const inActiveGeoCallHere = Boolean(
+    !isDm &&
+      !isServer &&
+      activeCall?.mode === 'geo' &&
+      (activeCall.geohash ?? '').toLowerCase() === activeGeoKey
+  )
+  const activeGeoCallPresence = useMemo(
+    () => (!isDm && !isServer ? engine.calls.getGeoCallPresence(activeGeoKey) : []),
+    [isDm, isServer, engine.calls, activeGeoKey]
+  )
+  const activeGeoCallCount = activeGeoCallPresence.length
+  const showGeoCallJoinBanner = !isDm && !isServer && !inActiveGeoCallHere && activeGeoCallCount > 0
+  const isActiveGeoCallFull = activeGeoCallCount >= engine.calls.maxParticipants
+
+  const handleReturnToActiveCall = useCallback(() => {
+    if (!activeCall) return
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setRoomInfoOpen(false)
+    if (activeCall.mode === 'geo' && activeCall.geohash) {
+      engine.tuneGeohash(activeCall.geohash)
+      setListTab('radio')
+      setMobileScreen('chat')
+    } else if (activeCall.mode === 'server' && activeCall.serverId) {
+      engine.servers.selectServer(activeCall.serverId)
+      setListTab('servers')
+      setMobileScreen('chat')
+    } else if (activeCall.mode === 'dm' && activeCall.peerPubkey) {
+      engine.openDmThread(activeCall.peerPubkey)
+      setListTab('dms')
+      setMobileScreen('chat')
+    }
+  }, [activeCall, engine])
 
   // Handle Service Worker notification clicks & cold-launch `#notify=...` deep links
   const pendingNotifAction = engine.notifications.pendingAction
@@ -167,7 +204,9 @@ export function App() {
         setListTab('servers')
         setMobileScreen('chat')
       } else if (
-        (payload.category === 'geo-message' || payload.category === 'location-note') &&
+        (payload.category === 'geo-message' ||
+          payload.category === 'location-note' ||
+          payload.category === 'geo-call') &&
         payload.geohash
       ) {
         engine.tuneGeohash(payload.geohash)
@@ -179,6 +218,16 @@ export function App() {
     }
 
     if (action === 'open') {
+      engine.notifications.consumePendingAction()
+      return
+    }
+
+    // Handle Geo Radio call notification Accept / Decline actions immediately
+    if (payload.category === 'geo-call' && payload.geohash) {
+      if (action === 'answer' || action === 'answer-audio') {
+        const media = action === 'answer-audio' ? 'audio' : (payload.mediaType ?? 'audio')
+        void engine.calls.joinGeoCall(payload.geohash, media)
+      }
       engine.notifications.consumePendingAction()
       return
     }
@@ -1252,8 +1301,58 @@ export function App() {
             onToggleExpand={() => setCallExpanded((v) => !v)}
             onInspectPeer={setInspectedPeer}
             onOpenDm={handleOpenDm}
+            onReturnToCall={handleReturnToActiveCall}
             onPlaySound={playSound}
           />
+        )}
+
+        {/* Live Geo Radio Group Call Join Banner (shown when peers are in this room's call) */}
+        {showGeoCallJoinBanner && (
+          <div className="ag-geo-call-banner" role="region" aria-label="Active room call">
+            <div className="ag-geo-call-banner-left">
+              <span className="ag-live-dot" aria-hidden="true" />
+              <span className="ag-geo-call-banner-count tabular">
+                {activeGeoCallCount} in call
+              </span>
+              <span className="ag-geo-call-banner-peers truncate">
+                {activeGeoCallPresence
+                  .slice(0, 2)
+                  .map((p) => p.nickname || p.displayHandle)
+                  .join(', ')}
+                {activeGeoCallPresence.length > 2
+                  ? ` +${activeGeoCallPresence.length - 2}`
+                  : ''}
+              </span>
+            </div>
+            <div className="ag-geo-call-banner-actions">
+              <button
+                type="button"
+                className="ag-geo-call-join-btn primary"
+                disabled={isActiveGeoCallFull}
+                onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'audio')}
+                title={
+                  isActiveGeoCallFull
+                    ? `Call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                    : `Join #${engine.activeGeohash} voice call`
+                }
+              >
+                <Phone size={13} />
+                <span>{isActiveGeoCallFull ? 'Full 6/6' : 'Join Voice'}</span>
+              </button>
+              {!isActiveGeoCallFull && (
+                <button
+                  type="button"
+                  className="ag-geo-call-join-btn"
+                  onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'video')}
+                  title={`Join #${engine.activeGeohash} video call`}
+                  aria-label={`Join #${engine.activeGeohash} video call`}
+                >
+                  <Video size={13} />
+                  <span>Video</span>
+                </button>
+              )}
+            </div>
+          </div>
         )}
 
         <SearchBar
@@ -1356,8 +1455,11 @@ export function App() {
         activeTab={mobileNavActiveTab}
         mapActive={radarExpanded}
         settingsActive={settingsState.open}
+        radioUnread={engine.totalGeoUnread}
+        radioMentions={engine.totalGeoMentions}
         dmUnread={engine.totalDmUnread}
         serverUnread={engine.servers.totalServerUnread}
+        serverMentions={engine.servers.totalServerMentions}
         onSelectTab={handleMobileSelectTab}
         onOpenMap={handleMobileTabMap}
         onOpenSettings={handleMobileTabSettings}
@@ -1439,6 +1541,7 @@ export function App() {
         engine={engine}
         onClose={() => setCmdkOpen(false)}
         onTuneChannel={handleTuneChannel}
+        onOpenDm={handleOpenDm}
         onSelectServerChannel={handleSelectServerChannel}
         onOpenServerHub={handleOpenServerHub}
         onExpandRadar={handleExpandRadar}

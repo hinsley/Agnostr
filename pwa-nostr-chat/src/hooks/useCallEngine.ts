@@ -5,6 +5,7 @@ import {
   type ActiveCallSession,
   type CallEngine,
   type CallMediaType,
+  type GeoCallPresence,
   type IncomingCallOffer,
   type RecordingQualityPreset,
   type RoomCallPresence,
@@ -23,22 +24,32 @@ import {
 } from '../lib/callRecorder.ts'
 import {
   buildDirectCallSignalTemplate,
+  buildGeoCallSignalTemplate,
   buildRoomCallSignalTemplate,
   CALL_SIGNALING_RELAYS,
   DM_CALL_SIGNAL_TAG,
   generateCallId,
+  getGeoCallRoomId,
+  getGeoCallRoomTag,
   getRelaysForServerCall,
   getServerCallRoomTag,
   KIND_CALL_SIGNAL,
   MAX_SIGNAL_AGE_SEC,
   parseDirectCallSignalEvent,
+  parseGeoCallSignalEvent,
   parseRoomCallSignalEvent,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_PEER_TTL_MS,
   type DirectCallSignalPayload,
+  type GeoCallSignalPayload,
   type RoomCallSignalPayload,
 } from '../lib/callSignaling.ts'
-import { formatDisplayHandle, type IdentityManager } from '../lib/identity.ts'
+import { isValidGeohash, normalizeGeohash } from '../lib/geohash.ts'
+import {
+  formatDisplayHandle,
+  type IdentityManager,
+  type SigningKeyMaterial,
+} from '../lib/identity.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 import {
   loadRecordingQuality,
@@ -58,6 +69,8 @@ export interface UseCallEngineParams {
   pool: RelayPool | null
   identityManager: IdentityManager
   servers: ServerSummary[]
+  activeGeohash: string
+  pinnedGeohashes: string[]
   identityVersion: number
   blockedSet: Set<string>
   isExplicitlyTrusted: (pubkey: string) => boolean
@@ -77,6 +90,8 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     pool,
     identityManager,
     servers,
+    activeGeohash,
+    pinnedGeohashes,
     identityVersion,
     blockedSet,
     isExplicitlyTrusted,
@@ -88,6 +103,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const [activeCall, setActiveCall] = useState<ActiveCallSession | null>(null)
   const [incomingCall, setIncomingCall] = useState<IncomingCallOffer | null>(null)
   const [serverCallRosters, setServerCallRosters] = useState<Record<string, RoomCallPresence[]>>({})
+  const [geoCallRosters, setGeoCallRosters] = useState<Record<string, GeoCallPresence[]>>({})
   const [turnConfig, setTurnConfig] = useState<TurnServerConfig | null>(() => loadTurnConfig())
   const [recordingQuality, setRecordingQualityState] = useState<RecordingQualityPreset>(() => loadRecordingQuality())
 
@@ -127,7 +143,12 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const rostersRef = useRef<Record<string, RoomCallPresence[]>>(serverCallRosters)
   rostersRef.current = serverCallRosters
 
+  const geoRostersRef = useRef<Record<string, GeoCallPresence[]>>(geoCallRosters)
+  geoRostersRef.current = geoCallRosters
+
   const meshRef = useRef<WebRtcMesh | null>(null)
+  const activeGeoMaterialRef = useRef<SigningKeyMaterial | null>(null)
+  const geoDirectUnsubRef = useRef<(() => void) | null>(null)
   const recorderRef = useRef<CallRecorderController | null>(null)
   const recordingStartedAtRef = useRef<number | null>(null)
   const recordingModeRef = useRef<CallRecordingMode | null>(null)
@@ -143,6 +164,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const incomingRingTimerRef = useRef<number | null>(null)
   const roomHeartbeatTimerRef = useRef<number | null>(null)
   const lastRoomPongRef = useRef<number>(0)
+  const lastGeoRoomPongRef = useRef<number>(0)
 
   const masterPubkey = useMemo(() => {
     void identityVersion
@@ -252,18 +274,21 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     }
   }, [])
 
-  const publishDirectSignal = useCallback(
-    async (recipientPubkey: string, payload: DirectCallSignalPayload): Promise<void> => {
+  const publishDirectSignalWithMaterial = useCallback(
+    async (
+      material: SigningKeyMaterial,
+      recipientPubkey: string,
+      payload: DirectCallSignalPayload
+    ): Promise<void> => {
       const currentPool = poolRef.current
       if (!currentPool) return
       try {
-        const material = identityManager.getMasterKeyMaterial()
         const template = await buildDirectCallSignalTemplate({
           material,
           recipientPubkey,
           payload,
         })
-        const signed = await identityManager.signEvent(template)
+        const signed = await identityManager.signEventWithMaterial(template, material)
         await currentPool.publish(CALL_SIGNALING_RELAYS, signed, 2_000)
       } catch (err) {
         if (payload.action === 'call-invite' || payload.action === 'call-accept') {
@@ -278,6 +303,14 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     [identityManager]
   )
 
+  const publishDirectSignal = useCallback(
+    async (recipientPubkey: string, payload: DirectCallSignalPayload): Promise<void> => {
+      const material = identityManager.getMasterKeyMaterial()
+      await publishDirectSignalWithMaterial(material, recipientPubkey, payload)
+    },
+    [identityManager, publishDirectSignalWithMaterial]
+  )
+
   const publishRoomSignal = useCallback(
     async (
       server: ServerSummary,
@@ -290,6 +323,27 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         const template = await buildRoomCallSignalTemplate({ server, roomId, payload })
         const signed = await identityManager.signEvent(template)
         await currentPool.publish(getRelaysForServerCall(server), signed, 2_000)
+      } catch {
+        // Ignore transient publish failure
+      }
+    },
+    [identityManager]
+  )
+
+  const publishGeoRoomSignal = useCallback(
+    async (
+      geohash: string,
+      payload: GeoCallSignalPayload,
+      materialOverride?: SigningKeyMaterial
+    ): Promise<void> => {
+      const currentPool = poolRef.current
+      if (!currentPool) return
+      try {
+        const material =
+          materialOverride ?? identityManager.getDerivedGeohashKeyMaterial(geohash)
+        const template = buildGeoCallSignalTemplate({ geohash, payload })
+        const signed = await identityManager.signEventWithMaterial(template, material)
+        await currentPool.publish(CALL_SIGNALING_RELAYS, signed, 2_000)
       } catch {
         // Ignore transient publish failure
       }
@@ -331,11 +385,56 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     })
   }, [])
 
+  const upsertGeoRosterMember = useCallback((entry: GeoCallPresence) => {
+    const gh = normalizeGeohash(entry.geohash)
+    if (!gh) return
+    const normalized: GeoCallPresence = { ...entry, geohash: gh }
+    setGeoCallRosters((prev) => {
+      const list = prev[gh] ?? []
+      const idx = list.findIndex((p) => p.pubkey === normalized.pubkey)
+      let nextList: GeoCallPresence[]
+      if (idx >= 0) {
+        nextList = [...list]
+        nextList[idx] = normalized
+      } else {
+        nextList = [...list, normalized].slice(0, MAX_CALL_PARTICIPANTS + 2)
+      }
+      const next = { ...prev, [gh]: nextList }
+      geoRostersRef.current = next
+      return next
+    })
+  }, [])
+
+  const removeGeoRosterMember = useCallback((geohash: string, pubkey: string) => {
+    const gh = normalizeGeohash(geohash)
+    const pk = pubkey.toLowerCase()
+    if (!gh) return
+    setGeoCallRosters((prev) => {
+      const list = prev[gh]
+      if (!list || !list.some((p) => p.pubkey === pk)) return prev
+      const filtered = list.filter((p) => p.pubkey !== pk)
+      const next = { ...prev }
+      if (filtered.length > 0) {
+        next[gh] = filtered
+      } else {
+        delete next[gh]
+      }
+      geoRostersRef.current = next
+      return next
+    })
+  }, [])
+
   const teardownActiveCall = useCallback(
     (notifyNetwork: boolean, opts?: { abortRecording?: boolean }) => {
       const current = activeCallRef.current
       const meshToDispose = meshRef.current
+      const geoMaterialToUse = activeGeoMaterialRef.current
       meshRef.current = null
+      activeGeoMaterialRef.current = null
+      if (geoDirectUnsubRef.current) {
+        geoDirectUnsubRef.current()
+        geoDirectUnsubRef.current = null
+      }
       clearRingTimers()
       stopRoomHeartbeat()
       remoteRecordingRef.current.clear()
@@ -374,7 +473,31 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               ts: Date.now(),
             })
           }
+        } else if (current.mode === 'geo' && current.geohash) {
+          const gh = normalizeGeohash(current.geohash)
+          const geoMaterial =
+            geoMaterialToUse ?? identityManager.getDerivedGeohashKeyMaterial(gh)
+          const selfGeoPk = geoMaterial.pubkey.toLowerCase()
+          const roomId = current.roomId ?? getGeoCallRoomId(gh)
+          removeGeoRosterMember(gh, selfGeoPk)
+          void publishGeoRoomSignal(
+            gh,
+            {
+              v: 1,
+              action: 'room-leave',
+              geohash: gh,
+              roomId,
+              ts: Date.now(),
+            },
+            geoMaterial
+          )
         }
+      } else if (current?.mode === 'geo' && current.geohash) {
+        const gh = normalizeGeohash(current.geohash)
+        const selfGeoPk = (
+          geoMaterialToUse ?? identityManager.getDerivedGeohashKeyMaterial(gh)
+        ).pubkey.toLowerCase()
+        removeGeoRosterMember(gh, selfGeoPk)
       }
 
       activeCallRef.current = null
@@ -405,7 +528,16 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         meshToDispose?.dispose()
       }
     },
-    [clearRingTimers, stopRoomHeartbeat, identityManager, publishDirectSignal, publishRoomSignal, removeRosterMember]
+    [
+      clearRingTimers,
+      stopRoomHeartbeat,
+      identityManager,
+      publishDirectSignal,
+      publishGeoRoomSignal,
+      publishRoomSignal,
+      removeGeoRosterMember,
+      removeRosterMember,
+    ]
   )
 
   const leaveCall = useCallback(() => {
@@ -415,12 +547,17 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const createMeshForCall = useCallback(
     (sessionMeta: {
       callId: string
-      mode: 'dm' | 'server'
+      mode: 'dm' | 'server' | 'geo'
       peerPubkey?: string
       server?: ServerSummary
+      geohash?: string
+      geoMaterial?: SigningKeyMaterial
       roomId?: string
     }): WebRtcMesh => {
-      const selfPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const selfPk =
+        sessionMeta.mode === 'geo' && sessionMeta.geoMaterial
+          ? sessionMeta.geoMaterial.pubkey.toLowerCase()
+          : identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
       const selfNick = identityManager.getNickname()
 
       const mesh = new WebRtcMesh({
@@ -435,6 +572,19 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 v: 1,
                 action: 'offer',
                 callId: sessionMeta.callId,
+                nickname: nick,
+                sdp,
+                ts: Date.now(),
+              })
+            } else if (sessionMeta.mode === 'geo' && sessionMeta.geohash && sessionMeta.geoMaterial) {
+              const gh = sessionMeta.geohash
+              const roomId = sessionMeta.roomId ?? getGeoCallRoomId(gh)
+              void publishDirectSignalWithMaterial(sessionMeta.geoMaterial, targetPk, {
+                v: 1,
+                action: 'offer',
+                callId: sessionMeta.callId,
+                geohash: gh,
+                roomId,
                 nickname: nick,
                 sdp,
                 ts: Date.now(),
@@ -477,6 +627,19 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 sdp,
                 ts: Date.now(),
               })
+            } else if (sessionMeta.mode === 'geo' && sessionMeta.geohash && sessionMeta.geoMaterial) {
+              const gh = sessionMeta.geohash
+              const roomId = sessionMeta.roomId ?? getGeoCallRoomId(gh)
+              void publishDirectSignalWithMaterial(sessionMeta.geoMaterial, targetPk, {
+                v: 1,
+                action: 'answer',
+                callId: sessionMeta.callId,
+                geohash: gh,
+                roomId,
+                nickname: nick,
+                sdp,
+                ts: Date.now(),
+              })
             } else if (sessionMeta.server) {
               const roomId = sessionMeta.roomId ?? DEFAULT_SERVER_VOICE_ROOM_ID
               if (sessionMeta.server.encrypted) {
@@ -513,6 +676,18 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 candidate,
                 ts: Date.now(),
               })
+            } else if (sessionMeta.mode === 'geo' && sessionMeta.geohash && sessionMeta.geoMaterial) {
+              const gh = sessionMeta.geohash
+              const roomId = sessionMeta.roomId ?? getGeoCallRoomId(gh)
+              void publishDirectSignalWithMaterial(sessionMeta.geoMaterial, targetPk, {
+                v: 1,
+                action: 'ice',
+                callId: sessionMeta.callId,
+                geohash: gh,
+                roomId,
+                candidate,
+                ts: Date.now(),
+              })
             } else if (sessionMeta.server) {
               const roomId = sessionMeta.roomId ?? DEFAULT_SERVER_VOICE_ROOM_ID
               if (sessionMeta.server.encrypted) {
@@ -546,6 +721,19 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 v: 1,
                 action: 'ice',
                 callId: sessionMeta.callId,
+                candidate: first,
+                candidates,
+                ts: Date.now(),
+              })
+            } else if (sessionMeta.mode === 'geo' && sessionMeta.geohash && sessionMeta.geoMaterial) {
+              const gh = sessionMeta.geohash
+              const roomId = sessionMeta.roomId ?? getGeoCallRoomId(gh)
+              void publishDirectSignalWithMaterial(sessionMeta.geoMaterial, targetPk, {
+                v: 1,
+                action: 'ice',
+                callId: sessionMeta.callId,
+                geohash: gh,
+                roomId,
                 candidate: first,
                 candidates,
                 ts: Date.now(),
@@ -605,6 +793,36 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 recording: mediaState.recording,
                 ts: Date.now(),
               })
+            } else if (sessionMeta.mode === 'geo' && sessionMeta.geohash && sessionMeta.geoMaterial) {
+              const gh = sessionMeta.geohash
+              const roomId = sessionMeta.roomId ?? getGeoCallRoomId(gh)
+              upsertGeoRosterMember({
+                geohash: gh,
+                roomId,
+                pubkey: selfPk,
+                nickname: nick,
+                displayHandle: formatDisplayHandle(nick, selfPk),
+                hasVideo: mediaState.videoEnabled || mediaState.screenSharing,
+                audioMuted: mediaState.audioMuted,
+                isRecording: mediaState.recording,
+                lastSeenAt: Date.now(),
+              })
+              void publishGeoRoomSignal(
+                gh,
+                {
+                  v: 1,
+                  action: 'media-state',
+                  geohash: gh,
+                  roomId,
+                  nickname: nick,
+                  audioMuted: mediaState.audioMuted,
+                  videoEnabled: mediaState.videoEnabled,
+                  screenSharing: mediaState.screenSharing,
+                  recording: mediaState.recording,
+                  ts: Date.now(),
+                },
+                sessionMeta.geoMaterial
+              )
             } else if (sessionMeta.server) {
               const roomId = sessionMeta.roomId ?? DEFAULT_SERVER_VOICE_ROOM_ID
               upsertRosterMember({
@@ -654,6 +872,25 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 recording: state.recording,
                 ts: Date.now(),
               })
+            } else if (sessionMeta.mode === 'geo' && sessionMeta.geohash && sessionMeta.geoMaterial) {
+              const gh = sessionMeta.geohash
+              const roomId = sessionMeta.roomId ?? getGeoCallRoomId(gh)
+              void publishGeoRoomSignal(
+                gh,
+                {
+                  v: 1,
+                  action: 'media-state',
+                  geohash: gh,
+                  roomId,
+                  nickname: nick,
+                  audioMuted: state.audioMuted,
+                  videoEnabled: state.videoEnabled,
+                  screenSharing: state.screenSharing,
+                  recording: state.recording,
+                  ts: Date.now(),
+                },
+                sessionMeta.geoMaterial
+              )
             } else if (sessionMeta.server) {
               const roomId = sessionMeta.roomId ?? DEFAULT_SERVER_VOICE_ROOM_ID
               void publishRoomSignal(sessionMeta.server, roomId, {
@@ -685,7 +922,16 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
       return mesh
     },
-    [identityManager, publishDirectSignal, publishRoomSignal, syncActiveCallFromMesh, upsertRosterMember]
+    [
+      identityManager,
+      publishDirectSignal,
+      publishDirectSignalWithMaterial,
+      publishGeoRoomSignal,
+      publishRoomSignal,
+      syncActiveCallFromMesh,
+      upsertGeoRosterMember,
+      upsertRosterMember,
+    ]
   )
 
   // Start 1-on-1 encrypted DM Voice/Video Call
@@ -1106,6 +1352,289 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       syncActiveCallFromMesh,
       teardownActiveCall,
       upsertRosterMember,
+    ]
+  )
+
+  // Dedicated NIP-44 kind:25050 subscription for the active Geo Radio call's derived geohash pubkey.
+  // Opened synchronously inside joinGeoCall BEFORE room-join so TCP FIFO delivers REQ before EVENT
+  // and keeps the derived geohash pubkey completely isolated from the masterPubkey DM subscription.
+  const openGeoDirectSubscription = useCallback(
+    (geohash: string, geoMaterial: SigningKeyMaterial) => {
+      if (geoDirectUnsubRef.current) {
+        geoDirectUnsubRef.current()
+        geoDirectUnsubRef.current = null
+      }
+      const currentPool = poolRef.current
+      if (!currentPool) return
+
+      const gh = normalizeGeohash(geohash)
+      const selfGeoPk = geoMaterial.pubkey.toLowerCase()
+      const subId = `call-geo-direct:${gh}:${selfGeoPk.slice(0, 8)}`
+      const since = Math.floor(Date.now() / 1000) - 15
+
+      geoDirectUnsubRef.current = currentPool.subscribe(
+        subId,
+        CALL_SIGNALING_RELAYS,
+        [
+          {
+            kinds: [KIND_CALL_SIGNAL],
+            '#p': [selfGeoPk],
+            '#t': [DM_CALL_SIGNAL_TAG],
+            since,
+          },
+        ],
+        {
+          onEvent: (event) => {
+            if (seenEventIdsRef.current.has(event.id)) return
+            seenEventIdsRef.current.add(event.id)
+            if (seenEventIdsRef.current.size > MAX_SEEN_SIGNALS) {
+              const first = seenEventIdsRef.current.values().next().value
+              if (first) seenEventIdsRef.current.delete(first)
+            }
+
+            const sender = event.pubkey.toLowerCase()
+            if (sender === selfGeoPk) return
+            if (blockedSetRef.current.has(sender)) return
+            if (Math.abs(Math.floor(Date.now() / 1000) - event.created_at) > MAX_SIGNAL_AGE_SEC) return
+            if (!verifyEventCached(event)) return
+
+            const currentActive = activeCallRef.current
+            if (!currentActive || currentActive.mode !== 'geo' || currentActive.geohash !== gh) {
+              return
+            }
+            if (strictWhitelistRef.current && !isExplicitlyTrustedRef.current(sender)) {
+              return
+            }
+
+            void (async () => {
+              const payload = await parseDirectCallSignalEvent(event, geoMaterial)
+              if (!payload || payload.geohash !== gh) return
+
+              const active = activeCallRef.current
+              const mesh = meshRef.current
+              if (!active || !mesh || active.mode !== 'geo' || active.geohash !== gh) return
+              if (strictWhitelistRef.current && !isExplicitlyTrustedRef.current(sender)) return
+
+              const eventTs =
+                typeof payload.ts === 'number' && Number.isFinite(payload.ts) && payload.ts > 0
+                  ? payload.ts
+                  : event.created_at * 1000
+              const lastLeaveTs =
+                lastLeaveTsByRoomPeerRef.current.get(`geo:${gh}:${sender}`) ?? 0
+              if (eventTs <= lastLeaveTs) return
+
+              if (payload.action === 'offer' && payload.sdp) {
+                await mesh.handleRemoteOffer(sender, payload.sdp, payload.nickname)
+              } else if (payload.action === 'answer' && payload.sdp) {
+                await mesh.handleRemoteAnswer(sender, payload.sdp)
+              } else if (payload.action === 'ice') {
+                const iceList =
+                  payload.candidates && payload.candidates.length > 0
+                    ? payload.candidates
+                    : payload.candidate
+                      ? [payload.candidate]
+                      : []
+                if (iceList.length > 0) {
+                  await mesh.handleRemoteIceBatch(sender, iceList)
+                }
+              } else if (payload.action === 'media-state') {
+                mesh.updatePeerMetadata(sender, {
+                  nickname: payload.nickname,
+                  audioMuted: payload.audioMuted,
+                  videoEnabled: payload.videoEnabled,
+                  screenSharing: payload.screenSharing,
+                  isRecording: payload.recording,
+                })
+                notifyRemoteRecordingChange(sender, payload.nickname, payload.recording)
+              }
+            })()
+          },
+        }
+      )
+    },
+    [notifyRemoteRecordingChange]
+  )
+
+  // Join a Geo Radio Group Voice/Video Call (hard cap: 6 participants; ALWAYS signed with HMAC-derived geohash identity)
+  const joinGeoCall = useCallback(
+    async (rawGeohash: string, media: CallMediaType): Promise<boolean> => {
+      if (!isValidGeohash(rawGeohash)) {
+        pushToastRef.current('warning', 'Invalid Geo Radio channel', 'Tune to a valid geohash channel first.')
+        return false
+      }
+      const gh = normalizeGeohash(rawGeohash)
+
+      if (
+        activeCallRef.current?.mode === 'geo' &&
+        activeCallRef.current.geohash === gh
+      ) {
+        return true
+      }
+
+      const geoMaterial = identityManager.getDerivedGeohashKeyMaterial(gh)
+      const selfGeoPk = geoMaterial.pubkey.toLowerCase()
+      const currentRoster = (geoRostersRef.current[gh] ?? []).filter(
+        (p) => p.pubkey !== selfGeoPk && Date.now() - p.lastSeenAt < ROOM_PEER_TTL_MS
+      )
+
+      if (currentRoster.length >= MAX_CALL_PARTICIPANTS) {
+        pushToastRef.current(
+          'warning',
+          `#${gh} radio call is full (${MAX_CALL_PARTICIPANTS}/${MAX_CALL_PARTICIPANTS})`,
+          'P2P group calls are capped at 6 participants for low-latency stability.'
+        )
+        return false
+      }
+
+      if (activeCallRef.current) {
+        teardownActiveCall(true)
+      }
+
+      const roomId = getGeoCallRoomId(gh)
+      const callId = roomId
+      const mesh = createMeshForCall({
+        callId,
+        mode: 'geo',
+        geohash: gh,
+        roomId,
+        geoMaterial,
+      })
+
+      try {
+        await mesh.initLocalMedia(media)
+      } catch (err) {
+        mesh.dispose()
+        pushToastRef.current(
+          'error',
+          'Unable to join radio call',
+          err instanceof Error ? err.message : 'Microphone access is required.'
+        )
+        return false
+      }
+
+      meshRef.current = mesh
+      activeGeoMaterialRef.current = geoMaterial
+      poolRef.current?.ensureRelaysAlive(CALL_SIGNALING_RELAYS)
+      const now = Date.now()
+      const selfNick = identityManager.getNickname()
+
+      const session: ActiveCallSession = {
+        callId,
+        mode: 'geo',
+        status: 'active',
+        mediaType: mesh.getLocalCameraOn() ? 'video' : 'audio',
+        encrypted: true,
+        title: `#${gh} · Geo Radio`,
+        geohash: gh,
+        roomId,
+        startedAt: now,
+        connectedAt: now,
+        localMuted: mesh.getLocalMuted(),
+        localDeafened: mesh.getLocalDeafened(),
+        localCameraOn: mesh.getLocalCameraOn(),
+        localScreenSharing: mesh.getLocalScreenSharing(),
+        localRecording: false,
+        localRecordingStartedAt: null,
+        localRecordingMode: null,
+        localRecordingQuality: null,
+        localRecordingBytes: 0,
+        recordingSupported: isCallRecordingSupported(),
+        screenShareSupported: isScreenShareSupported(),
+        participants: mesh.getParticipantsSnapshot(),
+        maxParticipants: MAX_CALL_PARTICIPANTS,
+      }
+      activeCallRef.current = session
+      setActiveCall(session)
+
+      upsertGeoRosterMember({
+        geohash: gh,
+        roomId,
+        pubkey: selfGeoPk,
+        nickname: selfNick,
+        displayHandle: formatDisplayHandle(selfNick, selfGeoPk),
+        hasVideo: mesh.getLocalCameraOn(),
+        audioMuted: mesh.getLocalMuted(),
+        isRecording: false,
+        lastSeenAt: now,
+      })
+
+      // Open direct NIP-44 subscription for selfGeoPk BEFORE publishing room-join or offers
+      openGeoDirectSubscription(gh, geoMaterial)
+
+      // Synchronously create peer entries before broadcasting room-join so incoming offers never race
+      for (const peer of currentRoster) {
+        const pk = peer.pubkey.toLowerCase()
+        if (blockedSetRef.current.has(pk)) continue
+        if (strictWhitelistRef.current && !isExplicitlyTrustedRef.current(pk)) continue
+        if (!mesh.canAddPeer(pk)) break
+        mesh.connectToPeer(pk, peer.nickname)
+        mesh.updatePeerMetadata(pk, {
+          nickname: peer.nickname,
+          audioMuted: peer.audioMuted,
+          videoEnabled: peer.hasVideo,
+          isRecording: Boolean(peer.isRecording),
+        })
+        if (peer.isRecording) {
+          notifyRemoteRecordingChange(pk, peer.nickname, true)
+        }
+      }
+      syncActiveCallFromMesh()
+
+      // Broadcast initial room-join + start 12s heartbeat using the derived geohash keypair
+      const sendGeoPresence = (action: 'room-join' | 'room-ping') => {
+        const m = meshRef.current
+        if (!m || activeCallRef.current?.mode !== 'geo' || activeCallRef.current.geohash !== gh) {
+          return
+        }
+        const nick = identityManager.getNickname()
+        const hasVid = m.getLocalCameraOn() || m.getLocalScreenSharing()
+        const isRec = m.getLocalRecording()
+        upsertGeoRosterMember({
+          geohash: gh,
+          roomId,
+          pubkey: selfGeoPk,
+          nickname: nick,
+          displayHandle: formatDisplayHandle(nick, selfGeoPk),
+          hasVideo: hasVid,
+          audioMuted: m.getLocalMuted(),
+          isRecording: isRec,
+          lastSeenAt: Date.now(),
+        })
+        void publishGeoRoomSignal(
+          gh,
+          {
+            v: 1,
+            action,
+            geohash: gh,
+            roomId,
+            nickname: nick,
+            media: hasVid ? 'video' : 'audio',
+            audioMuted: m.getLocalMuted(),
+            videoEnabled: m.getLocalCameraOn(),
+            screenSharing: m.getLocalScreenSharing(),
+            recording: isRec,
+            ts: Date.now(),
+          },
+          geoMaterial
+        )
+      }
+
+      sendGeoPresence('room-join')
+      roomHeartbeatTimerRef.current = window.setInterval(() => {
+        sendGeoPresence('room-ping')
+      }, ROOM_HEARTBEAT_INTERVAL_MS)
+
+      return true
+    },
+    [
+      createMeshForCall,
+      identityManager,
+      notifyRemoteRecordingChange,
+      openGeoDirectSubscription,
+      publishGeoRoomSignal,
+      syncActiveCallFromMesh,
+      teardownActiveCall,
+      upsertGeoRosterMember,
     ]
   )
 
@@ -1631,11 +2160,241 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pool, serverRoomTagsKey, callSignalingRelays, identityManager, publishRoomSignal, removeRosterMember, upsertRosterMember])
 
-  // Expire stale room presence entries after 30s
+  // Passive Geo Radio call presence subscription (active geohash + pinned rooms + any active geo call).
+  // Zero RTCPeerConnections or STUN/ICE traffic until user explicitly clicks Join.
+  const activeGeoCallHash = activeCall?.mode === 'geo' ? activeCall.geohash ?? '' : ''
+  const watchedGeoCallKey = useMemo(() => {
+    const set = new Set<string>()
+    if (isValidGeohash(activeGeohash)) set.add(normalizeGeohash(activeGeohash))
+    for (const gh of pinnedGeohashes) {
+      if (isValidGeohash(gh)) set.add(normalizeGeohash(gh))
+    }
+    if (activeGeoCallHash && isValidGeohash(activeGeoCallHash)) {
+      set.add(normalizeGeohash(activeGeoCallHash))
+    }
+    return Array.from(set).sort().join('|')
+  }, [activeGeohash, pinnedGeohashes, activeGeoCallHash])
+
+  useEffect(() => {
+    if (!pool || !watchedGeoCallKey) return
+    const watchedHashes = watchedGeoCallKey.split('|').filter(Boolean)
+    if (watchedHashes.length === 0) return
+
+    const tagToGeohash = new Map<string, string>()
+    const geoTags: string[] = []
+    for (const gh of watchedHashes) {
+      const tag = getGeoCallRoomTag(gh)
+      tagToGeohash.set(tag, gh)
+      geoTags.push(tag)
+    }
+
+    const subId = `call-geo-rooms:${geoTags.length}`
+    const since = Math.floor(Date.now() / 1000) - 35
+
+    const unsub = pool.subscribe(
+      subId,
+      CALL_SIGNALING_RELAYS,
+      [
+        {
+          kinds: [KIND_CALL_SIGNAL],
+          '#t': geoTags,
+          since,
+        },
+      ],
+      {
+        onEvent: (event) => {
+          if (seenEventIdsRef.current.has(event.id)) return
+          seenEventIdsRef.current.add(event.id)
+          if (seenEventIdsRef.current.size > MAX_SEEN_SIGNALS) {
+            const first = seenEventIdsRef.current.values().next().value
+            if (first) seenEventIdsRef.current.delete(first)
+          }
+
+          const sender = event.pubkey.toLowerCase()
+          if (blockedSetRef.current.has(sender)) return
+          if (Math.abs(Math.floor(Date.now() / 1000) - event.created_at) > MAX_SIGNAL_AGE_SEC) return
+          if (!verifyEventCached(event)) return
+
+          let matchedGh: string | null = null
+          for (const tag of event.tags) {
+            if (tag[0] === 't' && tag[1]) {
+              const found = tagToGeohash.get(tag[1])
+              if (found) {
+                matchedGh = found
+                break
+              }
+            }
+          }
+          if (!matchedGh) return
+          const gh = matchedGh
+
+          const selfGeoPk = (
+            activeCallRef.current?.mode === 'geo' &&
+            activeCallRef.current.geohash === gh &&
+            activeGeoMaterialRef.current
+              ? activeGeoMaterialRef.current.pubkey
+              : identityManager.getDerivedGeohashKeyMaterial(gh).pubkey
+          ).toLowerCase()
+          if (sender === selfGeoPk) return
+
+          const payload = parseGeoCallSignalEvent(event, gh)
+          if (!payload) return
+
+          const roomId = payload.roomId || getGeoCallRoomId(gh)
+          const roomPeerKey = `geo:${gh}:${sender}`
+          const eventTs =
+            typeof payload.ts === 'number' && Number.isFinite(payload.ts) && payload.ts > 0
+              ? payload.ts
+              : event.created_at * 1000
+
+          if (payload.action === 'room-leave') {
+            const prevLeaveTs = lastLeaveTsByRoomPeerRef.current.get(roomPeerKey) ?? 0
+            lastLeaveTsByRoomPeerRef.current.set(roomPeerKey, Math.max(prevLeaveTs, eventTs))
+
+            const lastPresenceTs = lastPresenceTsByRoomPeerRef.current.get(roomPeerKey) ?? 0
+            if (eventTs < lastPresenceTs) return
+
+            removeGeoRosterMember(gh, sender)
+            remoteRecordingRef.current.delete(sender)
+            const active = activeCallRef.current
+            if (active?.mode === 'geo' && active.geohash === gh) {
+              meshRef.current?.removePeer(sender)
+            }
+            return
+          }
+
+          const lastLeaveTs = lastLeaveTsByRoomPeerRef.current.get(roomPeerKey) ?? 0
+          if (eventTs <= lastLeaveTs) return
+
+          if (payload.action === 'room-join' || payload.action === 'room-ping') {
+            const prevPresenceTs = lastPresenceTsByRoomPeerRef.current.get(roomPeerKey) ?? 0
+            if (eventTs < prevPresenceTs) return
+            if (Date.now() - event.created_at * 1000 > ROOM_PEER_TTL_MS) return
+            lastPresenceTsByRoomPeerRef.current.set(roomPeerKey, eventTs)
+
+            const nick =
+              payload.nickname?.trim() ||
+              getPeerNicknameRef.current(sender) ||
+              `anon${sender.slice(-4)}`
+            upsertGeoRosterMember({
+              geohash: gh,
+              roomId,
+              pubkey: sender,
+              nickname: nick,
+              displayHandle: formatDisplayHandle(nick, sender),
+              hasVideo: Boolean(
+                payload.videoEnabled || payload.screenSharing || payload.media === 'video'
+              ),
+              audioMuted: Boolean(payload.audioMuted),
+              isRecording: Boolean(payload.recording),
+              lastSeenAt: Date.now(),
+            })
+
+            const active = activeCallRef.current
+            const mesh = meshRef.current
+            if (active?.mode === 'geo' && active.geohash === gh && mesh) {
+              if (strictWhitelistRef.current && !isExplicitlyTrustedRef.current(sender)) {
+                return
+              }
+              if (!mesh.hasPeer(sender) && mesh.canAddPeer(sender)) {
+                mesh.connectToPeer(sender, nick)
+              }
+              mesh.updatePeerMetadata(sender, {
+                nickname: nick,
+                audioMuted: payload.audioMuted,
+                videoEnabled: payload.videoEnabled,
+                screenSharing: payload.screenSharing,
+                isRecording: payload.recording,
+              })
+              notifyRemoteRecordingChange(sender, nick, payload.recording)
+
+              // Throttled room-ping echo on room-join so newcomers discover us quickly
+              if (payload.action === 'room-join' && Date.now() - lastGeoRoomPongRef.current > 1500) {
+                lastGeoRoomPongRef.current = Date.now()
+                const myNick = identityManager.getNickname()
+                const hasVid = mesh.getLocalCameraOn() || mesh.getLocalScreenSharing()
+                void publishGeoRoomSignal(
+                  gh,
+                  {
+                    v: 1,
+                    action: 'room-ping',
+                    geohash: gh,
+                    roomId,
+                    nickname: myNick,
+                    media: hasVid ? 'video' : 'audio',
+                    audioMuted: mesh.getLocalMuted(),
+                    videoEnabled: mesh.getLocalCameraOn(),
+                    screenSharing: mesh.getLocalScreenSharing(),
+                    recording: mesh.getLocalRecording(),
+                    ts: Date.now(),
+                  },
+                  activeGeoMaterialRef.current ?? undefined
+                )
+              }
+            }
+            return
+          }
+
+          if (payload.action === 'media-state') {
+            const prevPresenceTs = lastPresenceTsByRoomPeerRef.current.get(roomPeerKey) ?? 0
+            if (eventTs < prevPresenceTs) return
+            if (Date.now() - event.created_at * 1000 > ROOM_PEER_TTL_MS) return
+            lastPresenceTsByRoomPeerRef.current.set(roomPeerKey, eventTs)
+
+            const existing = (geoRostersRef.current[gh] ?? []).find((p) => p.pubkey === sender)
+            const nick =
+              payload.nickname?.trim() ||
+              existing?.nickname ||
+              getPeerNicknameRef.current(sender) ||
+              `anon${sender.slice(-4)}`
+            upsertGeoRosterMember({
+              geohash: gh,
+              roomId,
+              pubkey: sender,
+              nickname: nick,
+              displayHandle: formatDisplayHandle(nick, sender),
+              hasVideo: Boolean(payload.videoEnabled || payload.screenSharing),
+              audioMuted: Boolean(payload.audioMuted),
+              isRecording:
+                typeof payload.recording === 'boolean' ? payload.recording : existing?.isRecording,
+              lastSeenAt: Date.now(),
+            })
+
+            const active = activeCallRef.current
+            if (active?.mode === 'geo' && active.geohash === gh) {
+              meshRef.current?.updatePeerMetadata(sender, {
+                nickname: nick,
+                audioMuted: payload.audioMuted,
+                videoEnabled: payload.videoEnabled,
+                screenSharing: payload.screenSharing,
+                isRecording: payload.recording,
+              })
+              notifyRemoteRecordingChange(sender, nick, payload.recording)
+            }
+          }
+        },
+      }
+    )
+
+    return () => {
+      unsub()
+    }
+  }, [
+    pool,
+    watchedGeoCallKey,
+    identityManager,
+    notifyRemoteRecordingChange,
+    publishGeoRoomSignal,
+    removeGeoRosterMember,
+    upsertGeoRosterMember,
+  ])
+
+  // Expire stale room presence entries after 30s (Servers + Geo Radio)
   useEffect(() => {
     const timer = window.setInterval(() => {
       const now = Date.now()
       const selfPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const activeGeoSelfPk = activeGeoMaterialRef.current?.pubkey.toLowerCase() ?? null
       const currentActive = activeCallRef.current
 
       setServerCallRosters((prev) => {
@@ -1663,6 +2422,39 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         }
         if (!changed) return prev
         rostersRef.current = next
+        return next
+      })
+
+      setGeoCallRosters((prev) => {
+        let changed = false
+        const next: Record<string, GeoCallPresence[]> = {}
+        for (const [gh, list] of Object.entries(prev)) {
+          const kept = list.filter((p) => {
+            if (
+              activeGeoSelfPk &&
+              p.pubkey === activeGeoSelfPk &&
+              currentActive?.mode === 'geo' &&
+              currentActive.geohash === gh
+            ) {
+              return true
+            }
+            const fresh = now - p.lastSeenAt < ROOM_PEER_TTL_MS
+            if (!fresh) {
+              changed = true
+              if (currentActive?.mode === 'geo' && currentActive.geohash === gh) {
+                meshRef.current?.removePeer(p.pubkey)
+              }
+            }
+            return fresh
+          })
+          if (kept.length > 0) {
+            next[gh] = kept
+          } else if (list.length > 0) {
+            changed = true
+          }
+        }
+        if (!changed) return prev
+        geoRostersRef.current = next
         return next
       })
       // Prune old timestamp ledger entries (> 5 min) so maps stay bounded
@@ -1850,6 +2642,22 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     [serverCallRosters]
   )
 
+  const getGeoCallPresence = useCallback(
+    (geohash: string): GeoCallPresence[] => {
+      const gh = normalizeGeohash(geohash)
+      return gh ? (geoCallRosters[gh] ?? []) : []
+    },
+    [geoCallRosters]
+  )
+
+  const getGeoCallCount = useCallback(
+    (geohash: string): number => {
+      const gh = normalizeGeohash(geohash)
+      return gh ? (geoCallRosters[gh]?.length ?? 0) : 0
+    },
+    [geoCallRosters]
+  )
+
   const resetAllCalls = useCallback(() => {
     recordingBytesRef.current = 0
     recordingQualityActiveRef.current = null
@@ -1859,6 +2667,8 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     setIncomingCall(null)
     rostersRef.current = {}
     setServerCallRosters({})
+    geoRostersRef.current = {}
+    setGeoCallRosters({})
     turnConfigRef.current = null
     setTurnConfig(null)
     recordingQualityRef.current = DEFAULT_RECORDING_QUALITY
@@ -1880,6 +2690,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       incomingCall,
       isOutgoingDmRinging,
       serverCallRosters,
+      geoCallRosters,
       maxParticipants: MAX_CALL_PARTICIPANTS,
       recordingQuality,
       setRecordingQuality,
@@ -1890,6 +2701,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       acceptIncomingCall,
       declineIncomingCall,
       joinServerCall,
+      joinGeoCall,
       leaveCall,
       toggleMute,
       toggleDeafen,
@@ -1897,12 +2709,15 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       toggleScreenShare,
       toggleRecording,
       getServerCallCount,
+      getGeoCallPresence,
+      getGeoCallCount,
     }),
     [
       activeCall,
       incomingCall,
       isOutgoingDmRinging,
       serverCallRosters,
+      geoCallRosters,
       recordingQuality,
       setRecordingQuality,
       turnConfig,
@@ -1912,6 +2727,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       acceptIncomingCall,
       declineIncomingCall,
       joinServerCall,
+      joinGeoCall,
       leaveCall,
       toggleMute,
       toggleDeafen,
@@ -1919,6 +2735,8 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       toggleScreenShare,
       toggleRecording,
       getServerCallCount,
+      getGeoCallPresence,
+      getGeoCallCount,
     ]
   )
 

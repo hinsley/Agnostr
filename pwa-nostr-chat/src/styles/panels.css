@@ -118,7 +118,7 @@
   line-height: 1;
 }
 
-.ag-tab-dot {
+.ag-inspector-tab .ag-tab-dot {
   position: absolute;
   top: -3px;
   right: -6px;
@@ -127,7 +127,7 @@
   border: 1px solid var(--bg-surface);
 }
 
-.ag-tab-count {
+.ag-inspector-tab .ag-tab-count {
   position: absolute;
   top: -6px;
   right: -12px;
@@ -2962,14 +2962,32 @@
 .ag-sheet-person-text {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   min-width: 0;
   gap: 0.06rem;
+}
+
+.ag-sheet-person-name-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .ag-sheet-person-name {
   font-size: var(--text-sm);
   font-weight: 600;
   line-height: 1.3;
+  min-width: 0;
+}
+
+.ag-sheet-person-name-row .ag-sheet-person-name {
+  flex: 0 1 auto;
+}
+
+.ag-sheet-person-name-row .ag-client-badge {
+  flex-shrink: 0;
 }
 
 .ag-sheet-person-sub {
@@ -4327,6 +4345,65 @@
 
 .ag-sheet-action-btn.span-full {
   grid-column: 1 / -1;
+}
+
+.ag-sheet-call-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.65rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-sheet-call-card.in-call {
+  border-color: var(--border-accent);
+  background: linear-gradient(180deg, var(--accent-soft) 0%, var(--bg-elevated) 72%);
+}
+
+.ag-sheet-call-roster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.34rem;
+}
+
+.ag-sheet-call-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  max-width: 100%;
+  padding: 0.18rem 0.48rem 0.18rem 0.24rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-sheet-call-pill-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-full);
+  display: block;
+  flex-shrink: 0;
+}
+
+.ag-sheet-call-pill-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  max-width: 150px;
+}
+
+.ag-sheet-call-pill-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-sheet-call-note {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--status-warn);
+  text-align: center;
+  padding: 0.35rem 0.5rem;
 }
 
 .ag-srv-join-head {

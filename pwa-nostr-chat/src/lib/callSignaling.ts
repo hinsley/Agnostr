@@ -2,6 +2,7 @@ import { sha256 } from '@noble/hashes/sha256'
 import { nip44, type Event as NostrEvent, type EventTemplate } from 'nostr-tools'
 import type { CallMediaType } from '../types/calls.ts'
 import type { ServerSummary } from '../types/servers.ts'
+import { isValidGeohash, normalizeGeohash } from './geohash.ts'
 import { bytesToHex, type SigningKeyMaterial } from './identity.ts'
 
 /** Ephemeral Nostr event kind for WebRTC call signaling (live-verified on 5 relays) */
@@ -9,6 +10,9 @@ export const KIND_CALL_SIGNAL = 25050
 
 /** Shared `#t` tag for NIP-44 encrypted direct call signaling events */
 export const DM_CALL_SIGNAL_TAG = 'agnostr-call-v1'
+
+/** Isolated `#t` tag prefix for Geo Radio group call presence (keeps legacy kind:20000 #g clients clean) */
+export const GEO_CALL_TAG_PREFIX = 'agnostr-call-geo-'
 
 /** Prefix for AES-256-GCM encrypted signaling payloads inside E2EE Private Servers */
 export const E2EE_CALL_PAYLOAD_PREFIX = 'agnostr-call-e2ee-v1:'
@@ -58,6 +62,8 @@ export interface DirectCallSignalPayload {
   callId: string
   /** Present when direct NIP-44 signaling carries WebRTC SDP/ICE for a public/NIP-29 server room */
   serverId?: string
+  /** Present when direct NIP-44 signaling carries WebRTC SDP/ICE for a Geo Radio group call */
+  geohash?: string
   roomId?: string
   media?: CallMediaType
   nickname?: string
@@ -69,6 +75,20 @@ export interface DirectCallSignalPayload {
   screenSharing?: boolean
   recording?: boolean
   reason?: string
+  ts: number
+}
+
+export interface GeoCallSignalPayload {
+  v: 1
+  action: RoomCallAction
+  geohash: string
+  roomId: string
+  nickname?: string
+  media?: CallMediaType
+  audioMuted?: boolean
+  videoEnabled?: boolean
+  screenSharing?: boolean
+  recording?: boolean
   ts: number
 }
 
@@ -149,6 +169,16 @@ export function getServerCallRoomTag(
     }
   }
   return `agnostr-call:${server.id}:${cleanRoom}`
+}
+
+export function getGeoCallRoomId(geohash: string): string {
+  const gh = normalizeGeohash(geohash)
+  return `geo:${gh}`
+}
+
+export function getGeoCallRoomTag(geohash: string): string {
+  const gh = normalizeGeohash(geohash)
+  return `${GEO_CALL_TAG_PREFIX}${gh}`
 }
 
 /**
@@ -320,11 +350,16 @@ export function validateDirectSignalPayload(
   if (!raw || raw.v !== 1) return null
   if (!raw.action || !VALID_DIRECT_ACTIONS.has(raw.action)) return null
   if (typeof raw.callId !== 'string' || !raw.callId.trim()) return null
+  const normalizedGeo =
+    typeof raw.geohash === 'string' && isValidGeohash(raw.geohash)
+      ? normalizeGeohash(raw.geohash)
+      : undefined
   return {
     v: 1,
     action: raw.action,
     callId: raw.callId.trim().slice(0, 64),
     serverId: typeof raw.serverId === 'string' && raw.serverId.trim() ? raw.serverId.trim().slice(0, 96) : undefined,
+    geohash: normalizedGeo,
     roomId: typeof raw.roomId === 'string' && raw.roomId.trim() ? raw.roomId.trim().slice(0, 48) : undefined,
     media: raw.media === 'audio' || raw.media === 'video' ? raw.media : undefined,
     nickname: typeof raw.nickname === 'string' ? raw.nickname.trim().slice(0, 32) : undefined,
@@ -361,6 +396,32 @@ export function validateRoomSignalPayload(
     sdp: typeof raw.sdp === 'string' && raw.sdp.length <= 65_536 ? raw.sdp : undefined,
     candidate: raw.candidate && typeof raw.candidate === 'object' && !Array.isArray(raw.candidate) ? raw.candidate : undefined,
     candidates: sanitizeCandidateList(raw.candidates),
+    audioMuted: typeof raw.audioMuted === 'boolean' ? raw.audioMuted : undefined,
+    videoEnabled: typeof raw.videoEnabled === 'boolean' ? raw.videoEnabled : undefined,
+    screenSharing: typeof raw.screenSharing === 'boolean' ? raw.screenSharing : undefined,
+    recording: typeof raw.recording === 'boolean' ? raw.recording : undefined,
+    ts: typeof raw.ts === 'number' && Number.isFinite(raw.ts) ? raw.ts : Date.now(),
+  }
+}
+
+export function validateGeoSignalPayload(
+  raw: Partial<GeoCallSignalPayload> | null | undefined
+): GeoCallSignalPayload | null {
+  if (!raw || raw.v !== 1) return null
+  if (!raw.action || !VALID_ROOM_ACTIONS.has(raw.action)) return null
+  if (typeof raw.geohash !== 'string' || !isValidGeohash(raw.geohash)) return null
+  const gh = normalizeGeohash(raw.geohash)
+  const roomId =
+    typeof raw.roomId === 'string' && raw.roomId.trim()
+      ? raw.roomId.trim().slice(0, 48)
+      : getGeoCallRoomId(gh)
+  return {
+    v: 1,
+    action: raw.action,
+    geohash: gh,
+    roomId,
+    nickname: typeof raw.nickname === 'string' ? raw.nickname.trim().slice(0, 32) : undefined,
+    media: raw.media === 'audio' || raw.media === 'video' ? raw.media : undefined,
     audioMuted: typeof raw.audioMuted === 'boolean' ? raw.audioMuted : undefined,
     videoEnabled: typeof raw.videoEnabled === 'boolean' ? raw.videoEnabled : undefined,
     screenSharing: typeof raw.screenSharing === 'boolean' ? raw.screenSharing : undefined,
@@ -456,6 +517,45 @@ export async function parseRoomCallSignalEvent(
     const parsed = JSON.parse(event.content) as Partial<RoomCallSignalPayload>
     const validated = validateRoomSignalPayload(parsed)
     if (!validated || validated.serverId !== server.id) return null
+    return validated
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Builds an unsigned kind:25050 event template for a Geo Radio room presence/state signal.
+ * Uses an isolated `['t', 'agnostr-call-geo-<geohash>']` tag (never `#g`) so legacy
+ * Bitchat kind:20000 clients never see call signaling.
+ */
+export function buildGeoCallSignalTemplate(opts: {
+  geohash: string
+  payload: GeoCallSignalPayload
+}): EventTemplate {
+  const roomTag = getGeoCallRoomTag(opts.geohash)
+  return {
+    kind: KIND_CALL_SIGNAL,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [['t', roomTag]],
+    content: JSON.stringify(opts.payload),
+  }
+}
+
+/**
+ * Parses and validates an incoming kind:25050 Geo Radio room presence/state signal event.
+ */
+export function parseGeoCallSignalEvent(
+  event: NostrEvent,
+  expectedGeohash: string
+): GeoCallSignalPayload | null {
+  if (event.kind !== KIND_CALL_SIGNAL) return null
+  const nowSec = Math.floor(Date.now() / 1000)
+  if (Math.abs(nowSec - event.created_at) > MAX_SIGNAL_AGE_SEC) return null
+  const expected = normalizeGeohash(expectedGeohash)
+  try {
+    const parsed = JSON.parse(event.content) as Partial<GeoCallSignalPayload>
+    const validated = validateGeoSignalPayload(parsed)
+    if (!validated || validated.geohash !== expected) return null
     return validated
   } catch {
     return null

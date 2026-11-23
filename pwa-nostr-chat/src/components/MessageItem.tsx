@@ -598,6 +598,19 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 </span>
               )}
 
+              {!isDmMode && message.isAgnostrClient && (
+                <span
+                  className="ag-client-badge"
+                  title="Using Agnostr"
+                  aria-label="Using Agnostr"
+                >
+                  <span className="ag-client-badge-mark" aria-hidden="true">
+                    A
+                  </span>
+                  <span className="ag-client-badge-text">Agnostr</span>
+                </span>
+              )}
+
               {!isDmMode && showBridgeBadges && message.isMeshBridge && (
                 <span
                   className="ag-mesh-inline-icon"

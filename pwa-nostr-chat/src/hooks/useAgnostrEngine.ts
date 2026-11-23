@@ -40,6 +40,7 @@ import {
   extractMentions,
   getTagValue,
   hasTagPair,
+  isAgnostrClientTag,
   KIND_EPHEMERAL_REACTION,
   KIND_GEOHASH_CHAT,
   KIND_GEOHASH_PRESENCE,
@@ -361,6 +362,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   const [replyingTo, setReplyingTo] = useState<GeoMessage | null>(null)
 
   const [pinnedChannels, setPinnedChannels] = useState<PinnedChannel[]>(() => loadPinnedChannels())
+  const [geoUnreadCounts, setGeoUnreadCounts] = useState<Record<string, number>>({})
+  const [geoMentionCounts, setGeoMentionCounts] = useState<Record<string, number>>({})
   const [recentChannels, setRecentChannels] = useState<string[]>(() => {
     const loaded = loadRecentChannels()
     return loaded.includes(activeGeohash) ? loaded : [activeGeohash, ...loaded].slice(0, 12)
@@ -373,6 +376,84 @@ export function useAgnostrEngine(): AgnostrEngine {
   const trustedSet = useMemo(() => new Set(trustedPubkeys.map((t) => t.pubkey)), [trustedPubkeys])
   const [blossomServers, setBlossomServers] = useState<string[]>(() => loadBlossomServers())
   const [voiceSendPhase, setVoiceSendPhase] = useState<VoiceSendPhase>('idle')
+
+  const geoUnreadCountsRef = useRef<Record<string, number>>(geoUnreadCounts)
+  geoUnreadCountsRef.current = geoUnreadCounts
+  const geoMentionCountsRef = useRef<Record<string, number>>(geoMentionCounts)
+  geoMentionCountsRef.current = geoMentionCounts
+  const geoSeenIdsRef = useRef<Set<string>>(new Set())
+
+  const incrementGeoUnread = useCallback((rawGh: string, isDirectPing: boolean) => {
+    const gh = normalizeGeohash(rawGh)
+    if (!gh) return
+    setGeoUnreadCounts((prev) => {
+      const next = { ...prev, [gh]: (prev[gh] ?? 0) + 1 }
+      geoUnreadCountsRef.current = next
+      return next
+    })
+    if (isDirectPing) {
+      setGeoMentionCounts((prev) => {
+        const next = { ...prev, [gh]: (prev[gh] ?? 0) + 1 }
+        geoMentionCountsRef.current = next
+        return next
+      })
+    }
+    setPinnedChannels((prev) => {
+      if (!prev.some((p) => p.geohash === gh)) return prev
+      return prev.map((p) =>
+        p.geohash === gh
+          ? {
+              ...p,
+              unreadCount: p.unreadCount + 1,
+              mentionCount: p.mentionCount + (isDirectPing ? 1 : 0),
+            }
+          : p
+      )
+    })
+  }, [])
+
+  const clearGeoUnread = useCallback((rawGh: string) => {
+    const gh = normalizeGeohash(rawGh)
+    if (!gh) return
+    setGeoUnreadCounts((prev) => {
+      if (!prev[gh]) return prev
+      const next = { ...prev }
+      delete next[gh]
+      geoUnreadCountsRef.current = next
+      return next
+    })
+    setGeoMentionCounts((prev) => {
+      if (!prev[gh]) return prev
+      const next = { ...prev }
+      delete next[gh]
+      geoMentionCountsRef.current = next
+      return next
+    })
+    setPinnedChannels((prev) => {
+      const target = prev.find((p) => p.geohash === gh)
+      if (!target || (target.unreadCount === 0 && target.mentionCount === 0)) return prev
+      return prev.map((p) =>
+        p.geohash === gh ? { ...p, unreadCount: 0, mentionCount: 0 } : p
+      )
+    })
+  }, [])
+
+  const refreshTrustedPeerLabel = useCallback((pubkey: string, rawNickname?: string | null) => {
+    const pk = pubkey.toLowerCase()
+    if (!trustedSetRef.current.has(pk)) return
+    const clean = rawNickname?.trim().slice(0, 48)
+    if (!clean || /^anon[0-9a-f]{4}$/i.test(clean)) return
+    setTrustedPubkeys((prev) => {
+      const idx = prev.findIndex((t) => t.pubkey === pk)
+      if (idx === -1) return prev
+      const existing = prev[idx]
+      if (existing.label === clean) return prev
+      const next = [...prev]
+      next[idx] = { ...existing, label: clean }
+      saveTrustedPubkeys(next)
+      return next
+    })
+  }, [])
 
   const voiceCacheRef = useRef<VoiceBlobCache | null>(null)
   if (!voiceCacheRef.current) {
@@ -442,15 +523,25 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   // Record self in presence tracker for active geohash
   useEffect(() => {
+    presenceTracker.setSelfAgnostrFlag(identity.activePubkey, settings.broadcastClientTag)
     presenceTracker.recordActivity({
       geohash: activeGeohash,
       pubkey: identity.activePubkey,
       seenAtSec: Math.floor(Date.now() / 1000),
       nickname: identity.nickname,
       isTeleported: location.isTeleported,
+      isAgnostrClient: settings.broadcastClientTag,
     })
     refreshPeers(activeGeohash)
-  }, [activeGeohash, identity.activePubkey, identity.nickname, location.isTeleported, presenceTracker, refreshPeers])
+  }, [
+    activeGeohash,
+    identity.activePubkey,
+    identity.nickname,
+    location.isTeleported,
+    settings.broadcastClientTag,
+    presenceTracker,
+    refreshPeers,
+  ])
 
   // Active geohash subscription (kind 20000 chat + kind 20001 presence + kind 20007 reactions)
   useEffect(() => {
@@ -472,6 +563,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         nickname: m.nickname,
         isTeleported: m.isTeleported,
         isMeshBridge: m.isMeshBridge,
+        isAgnostrClient: m.isAgnostrClient,
         isMessage: true,
       })
     }
@@ -507,6 +599,12 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (seenIds.has(ev.id)) return
           if (!verifyEventCached(ev)) return
           seenIds.add(ev.id)
+          const alreadyCountedUnread = geoSeenIdsRef.current.has(ev.id)
+          geoSeenIdsRef.current.add(ev.id)
+          if (geoSeenIdsRef.current.size > 1200) {
+            const first = geoSeenIdsRef.current.values().next().value
+            if (first) geoSeenIdsRef.current.delete(first)
+          }
 
           const pk = ev.pubkey.toLowerCase()
           if (blockedSetRef.current.has(pk)) return
@@ -543,11 +641,27 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (ev.kind === KIND_GEOHASH_PRESENCE) {
             const evGh = extractGeohashTag(ev.tags)
             if (evGh !== gh) return
+            const isAgnostr = isAgnostrClientTag(ev.tags)
             presenceTracker.recordActivity({
               geohash: gh,
               pubkey: pk,
               seenAtSec: isHistoryReplay ? ev.created_at : Math.floor(Date.now() / 1000),
+              isAgnostrClient: isAgnostr,
             })
+            if (isAgnostr) {
+              setMessages((prev) => {
+                let changed = false
+                const next = prev.map((m) => {
+                  if (m.pubkey.toLowerCase() === pk && !m.isAgnostrClient) {
+                    changed = true
+                    return { ...m, isAgnostrClient: true }
+                  }
+                  return m
+                })
+                if (changed) saveChannelMessages(gh, next)
+                return changed ? next : prev
+              })
+            }
             refreshPeers(gh)
             return
           }
@@ -567,12 +681,17 @@ export function useAgnostrEngine(): AgnostrEngine {
                   seenAtSec: isHistoryReplay ? ev.created_at : Math.floor(Date.now() / 1000),
                   nickname: getTagValue(ev.tags, 'n'),
                   isTeleported: hasTagPair(ev.tags, 't', 'teleport'),
+                  isAgnostrClient: isAgnostrClientTag(ev.tags),
                 })
                 refreshPeers(gh)
               }
               return
             }
 
+            const knownAgnostr = Boolean(
+              parsed.isAgnostrClient ||
+                (!parsed.isOwn && presenceTracker.isKnownAgnostrPeer(pk))
+            )
             presenceTracker.recordActivity({
               geohash: gh,
               pubkey: pk,
@@ -580,6 +699,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               nickname: parsed.nickname,
               isTeleported: parsed.isTeleported,
               isMeshBridge: parsed.isMeshBridge,
+              isAgnostrClient: knownAgnostr,
               isMessage: true,
             })
             refreshPeers(gh)
@@ -588,7 +708,9 @@ export function useAgnostrEngine(): AgnostrEngine {
               if (prev.some((m) => m.id === parsed.id)) return prev
 
               // Resolve incoming replyTo against latest prev state
-              let hydrated: GeoMessage = parsed
+              let hydrated: GeoMessage = knownAgnostr
+                ? { ...parsed, isAgnostrClient: true }
+                : parsed
               if (hydrated.replyTo && (!hydrated.replyTo.preview || !hydrated.replyTo.nickname)) {
                 const parent = prev.find((m) => m.id === hydrated.replyTo!.id)
                 if (parent) {
@@ -614,10 +736,12 @@ export function useAgnostrEngine(): AgnostrEngine {
               }
 
               // Backfill any earlier-arrived replies referencing this newly arrived parent
+              // and propagate newly discovered Agnostr client flag to earlier messages from this peer
               const backfilledPrev = prev.map((m) => {
+                let updated = m
                 if (m.replyTo?.id === hydrated.id && (!m.replyTo.preview || !m.replyTo.nickname)) {
-                  return {
-                    ...m,
+                  updated = {
+                    ...updated,
                     replyTo: {
                       ...m.replyTo,
                       pubkey: hydrated.pubkey,
@@ -626,7 +750,10 @@ export function useAgnostrEngine(): AgnostrEngine {
                     },
                   }
                 }
-                return m
+                if (knownAgnostr && !hydrated.isOwn && updated.pubkey.toLowerCase() === pk && !updated.isAgnostrClient) {
+                  updated = { ...updated, isAgnostrClient: true }
+                }
+                return updated
               })
 
               const next = [...backfilledPrev, hydrated]
@@ -637,7 +764,10 @@ export function useAgnostrEngine(): AgnostrEngine {
             })
 
             if (!isHistoryReplay && !parsed.isOwn) {
-              if (activeViewRef.current.type === 'dm') {
+              refreshTrustedPeerLabel(pk, parsed.nickname)
+              const view = activeViewRef.current
+              const isViewingThisGeo = view.type === 'channel' && view.geohash === gh
+              if (!isViewingThisGeo) {
                 setUnreadDividerId((curr) => curr ?? parsed.id)
               }
               if (!strictWhitelistRef.current || trustedSetRef.current.has(pk)) {
@@ -658,6 +788,9 @@ export function useAgnostrEngine(): AgnostrEngine {
                           (m.isOwn || ownPubkeysRef.current.has(m.pubkey.toLowerCase()))
                       ))
                 )
+                if (!isViewingThisGeo && !alreadyCountedUnread) {
+                  incrementGeoUnread(gh, mentionedMe || repliedToMe)
+                }
                 notifyGeoMessageRef.current({
                   id: parsed.id,
                   geohash: gh,
@@ -679,7 +812,16 @@ export function useAgnostrEngine(): AgnostrEngine {
       window.clearTimeout(eoseFallback)
       unsub()
     }
-  }, [pool, activeGeohash, relaySelection.channelRelays, presenceTracker, refreshPeers, identityManager])
+  }, [
+    pool,
+    activeGeohash,
+    relaySelection.channelRelays,
+    presenceTracker,
+    refreshPeers,
+    identityManager,
+    incrementGeoUnread,
+    refreshTrustedPeerLabel,
+  ])
 
   // Location dead-drop notes subscription (kind 1 + NIP-40 expiration)
   useEffect(() => {
@@ -737,65 +879,103 @@ export function useAgnostrEngine(): AgnostrEngine {
     }
   }, [pool, activeGeohash, relaySelection.dmRelays, notesRefreshNonce])
 
-  // Background unread watcher for pinned channels (excluding currently viewed channel)
-  const watchedPinnedGeos = useMemo(() => {
-    const viewingGh = activeView.type === 'channel' ? activeView.geohash : null
-    return pinnedChannels.map((p) => p.geohash).filter((g) => g !== viewingGh)
-  }, [pinnedChannels, activeView])
+  // Background unread watcher for pinned channels (excluding activeGeohash, which has its own live subscription).
+  // Depend on a stable sorted primitive key so unread/mention increments NEVER tear down & re-subscribe!
+  const watchedPinnedKey = useMemo(
+    () =>
+      pinnedChannels
+        .map((p) => p.geohash)
+        .filter((g) => g !== activeGeohash)
+        .sort()
+        .join(','),
+    [pinnedChannels, activeGeohash]
+  )
 
   useEffect(() => {
-    if (!pool || watchedPinnedGeos.length === 0) return
-    const seen = new Set<string>()
+    if (!pool || !watchedPinnedKey) return
+    const watchedGeos = watchedPinnedKey.split(',').filter(Boolean)
+    if (watchedGeos.length === 0) return
+
     const since = Math.floor(Date.now() / 1000)
+    let backfillDone = false
+    const eoseFallback = window.setTimeout(() => {
+      backfillDone = true
+    }, 2500)
 
     const unsub = pool.subscribe(
       'agnostr-pinned-watch',
       CORE_DM_RELAYS,
-      [{ kinds: [KIND_GEOHASH_CHAT], '#g': watchedPinnedGeos, since }],
+      [{ kinds: [KIND_GEOHASH_CHAT], '#g': watchedGeos, since }],
       {
+        onEose: () => {
+          backfillDone = true
+          window.clearTimeout(eoseFallback)
+        },
         onEvent: (ev) => {
-          if (ev.kind !== KIND_GEOHASH_CHAT || seen.has(ev.id)) return
+          if (ev.kind !== KIND_GEOHASH_CHAT || geoSeenIdsRef.current.has(ev.id)) return
+          if (!backfillDone && ev.created_at < since - 2) return
           if (!verifyEventCached(ev)) return
-          seen.add(ev.id)
+          geoSeenIdsRef.current.add(ev.id)
+          if (geoSeenIdsRef.current.size > 1200) {
+            const first = geoSeenIdsRef.current.values().next().value
+            if (first) geoSeenIdsRef.current.delete(first)
+          }
           const pk = ev.pubkey.toLowerCase()
-          if (ownPubkeysRef.current.has(pk) || blockedSetRef.current.has(pk)) return
-          if (strictWhitelistRef.current && !trustedSetRef.current.has(pk)) return
           const gh = extractGeohashTag(ev.tags)
           if (!gh || !(ev.content ?? '').trim()) return
 
+          // Never double-count if user just switched onto this geohash
+          if (activeViewRef.current.type === 'channel' && activeViewRef.current.geohash === gh) {
+            return
+          }
+
+          const geoPubkey = identityManager.getKeyMaterialForGeohash(gh).pubkey.toLowerCase()
+          const masterPubkey = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+          if (
+            pk === geoPubkey ||
+            pk === masterPubkey ||
+            ownPubkeysRef.current.has(pk) ||
+            blockedSetRef.current.has(pk)
+          ) {
+            return
+          }
+          if (strictWhitelistRef.current && !trustedSetRef.current.has(pk)) return
+
+          const rawNick = getTagValue(ev.tags, 'n')
+          refreshTrustedPeerLabel(pk, rawNick)
+
           const mentions = extractMentions(ev.content)
           const myNick = identityManager.getNickname()
-          const geoPubkey = identityManager.getKeyMaterialForGeohash(gh).pubkey
-          const masterPubkey = identityManager.getMasterKeyMaterial().pubkey
           const mentionedMe =
             doesContentMentionUser(ev.content, mentions, myNick, geoPubkey) ||
             (masterPubkey !== geoPubkey && doesContentMentionUser(ev.content, mentions, myNick, masterPubkey))
-          const hasReplyTag = ev.tags.some(
-            (t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16
-          )
-          const replyTargetPubkey = hasReplyTag
-            ? getTagValue(ev.tags, 'p')?.toLowerCase()
-            : undefined
-          const repliedToMe = Boolean(
-            replyTargetPubkey && ownPubkeysRef.current.has(replyTargetPubkey)
-          )
 
-          setPinnedChannels((prev) =>
-            prev.map((p) =>
-              p.geohash === gh
-                ? {
-                    ...p,
-                    unreadCount: p.unreadCount + 1,
-                    mentionCount: p.mentionCount + (mentionedMe || repliedToMe ? 1 : 0),
-                  }
-                : p
-            )
+          const eTag = ev.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16)
+          const replyTargetPubkey = eTag ? getTagValue(ev.tags, 'p')?.toLowerCase() : undefined
+          let repliedToMe = Boolean(
+            replyTargetPubkey &&
+              (replyTargetPubkey === geoPubkey ||
+                replyTargetPubkey === masterPubkey ||
+                ownPubkeysRef.current.has(replyTargetPubkey))
           )
+          if (!repliedToMe && eTag) {
+            const cachedMsgs = loadChannelMessages(gh)
+            repliedToMe = cachedMsgs.some(
+              (m) =>
+                m.id === eTag[1] &&
+                (m.isOwn ||
+                  m.pubkey.toLowerCase() === geoPubkey ||
+                  m.pubkey.toLowerCase() === masterPubkey ||
+                  ownPubkeysRef.current.has(m.pubkey.toLowerCase()))
+            )
+          }
+
+          incrementGeoUnread(gh, mentionedMe || repliedToMe)
 
           notifyGeoMessageRef.current({
             id: ev.id,
             geohash: gh,
-            senderHandle: formatDisplayHandle(getTagValue(ev.tags, 'n'), pk),
+            senderHandle: formatDisplayHandle(rawNick, pk),
             content: ev.content,
             mentionedMe,
             repliedToMe,
@@ -804,8 +984,11 @@ export function useAgnostrEngine(): AgnostrEngine {
       }
     )
 
-    return () => unsub()
-  }, [pool, watchedPinnedGeos, identityManager])
+    return () => {
+      window.clearTimeout(eoseFallback)
+      unsub()
+    }
+  }, [pool, watchedPinnedKey, identityManager, incrementGeoUnread, refreshTrustedPeerLabel])
 
   // Privacy-safe kind 20001 presence heartbeat (strictly precision <= 5 per GeohashPresenceSpec.md)
   useEffect(() => {
@@ -820,7 +1003,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     const broadcastOnce = async () => {
       if (cancelled) return
       try {
-        const template = buildPresenceTemplate(activeGeohash)
+        const template = buildPresenceTemplate(activeGeohash, settings.broadcastClientTag)
         const signed = await identityManager.signEvent(template, activeGeohash)
         if (!cancelled) {
           void pool.publish(relaySelection.channelRelays, signed, 3500)
@@ -840,7 +1023,15 @@ export function useAgnostrEngine(): AgnostrEngine {
       cancelled = true
       if (timerId !== null) window.clearTimeout(timerId)
     }
-  }, [pool, activeGeohash, settings.presenceEnabled, relaySelection.channelRelays, identityManager, identityVersion])
+  }, [
+    pool,
+    activeGeohash,
+    settings.presenceEnabled,
+    settings.broadcastClientTag,
+    relaySelection.channelRelays,
+    identityManager,
+    identityVersion,
+  ])
 
   // Global Pulse Radar
   const { pulseRooms, clearPulse } = useGlobalPulse(pool, true)
@@ -918,6 +1109,11 @@ export function useAgnostrEngine(): AgnostrEngine {
     []
   )
 
+  const pinnedGeohashList = useMemo(
+    () => pinnedChannels.map((p) => p.geohash),
+    [pinnedChannels]
+  )
+
   const {
     calls: callsEngine,
     callSignalingRelays,
@@ -926,6 +1122,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     pool,
     identityManager,
     servers: serversEngine.joinedServers,
+    activeGeohash,
+    pinnedGeohashes: pinnedGeohashList,
     identityVersion,
     blockedSet,
     isExplicitlyTrusted: checkExplicitlyTrusted,
@@ -987,13 +1185,16 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   // Channel navigation & pins
+  useEffect(() => {
+    if (activeView.type !== 'channel') return
+    clearGeoUnread(activeView.geohash)
+  }, [activeView, clearGeoUnread])
+
   const markChannelRead = useCallback((geohash?: string) => {
     const target = normalizeGeohash(geohash ?? activeGeohash)
     setUnreadDividerId(null)
-    setPinnedChannels((prev) =>
-      prev.map((p) => (p.geohash === target ? { ...p, unreadCount: 0, mentionCount: 0 } : p))
-    )
-  }, [activeGeohash])
+    clearGeoUnread(target)
+  }, [activeGeohash, clearGeoUnread])
 
   const tuneGeohash = useCallback((geohashOrCity: string): boolean => {
     const resolved = resolveGeohashOrCity(geohashOrCity)
@@ -1009,11 +1210,9 @@ export function useAgnostrEngine(): AgnostrEngine {
       saveRecentChannels(next)
       return next
     })
-    setPinnedChannels((prev) =>
-      prev.map((p) => (p.geohash === resolved ? { ...p, unreadCount: 0, mentionCount: 0 } : p))
-    )
+    clearGeoUnread(resolved)
     return true
-  }, [pushToast])
+  }, [pushToast, clearGeoUnread])
 
   const locateMe = useCallback(async (): Promise<string | null> => {
     const gh = await rawLocateMe()
@@ -1039,7 +1238,16 @@ export function useAgnostrEngine(): AgnostrEngine {
         const exists = prev.some((p) => p.geohash === gh)
         const next = exists
           ? prev.filter((p) => p.geohash !== gh)
-          : [{ geohash: gh, label, pinnedAt: Date.now(), unreadCount: 0, mentionCount: 0 }, ...prev]
+          : [
+              {
+                geohash: gh,
+                label,
+                pinnedAt: Date.now(),
+                unreadCount: geoUnreadCountsRef.current[gh] ?? 0,
+                mentionCount: geoMentionCountsRef.current[gh] ?? 0,
+              },
+              ...prev,
+            ]
         savePinnedChannels(next)
         return next
       })
@@ -1075,6 +1283,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           nickname: nick,
           isTeleported: location.isTeleported,
           replyTo: replyTarget,
+          broadcastClientTag: settings.broadcastClientTag,
         })
 
         // Mine 8-bit NIP-13 PoW non-blocking when enabled and pubkey is known
@@ -1138,6 +1347,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       location.isTeleported,
       settings.powEnabled,
       settings.powTargetBits,
+      settings.broadcastClientTag,
       relaySelection.channelRelays,
       pushToast,
     ]
@@ -1311,8 +1521,24 @@ export function useAgnostrEngine(): AgnostrEngine {
         pushToast('warning', 'Invalid pubkey', 'Expected npub1… or 64-character hex pubkey.')
         return false
       }
+      const pickRealName = (raw?: string | null): string | undefined => {
+        const clean = raw?.trim().slice(0, 48)
+        return clean && !/^anon[0-9a-f]{4}$/i.test(clean) ? clean : undefined
+      }
+      const dmNick = dmThreads.find((t) => t.peerPubkey === pk)?.peerNickname
+      const serverNick = serversEngine.members.find((m) => m.pubkey === pk)?.nickname
+      const msgNick = messagesRef.current.find((m) => m.pubkey.toLowerCase() === pk)?.nickname
+      const callNick = callsEngine.activeCall?.participants.find(
+        (p) => p.pubkey.toLowerCase() === pk
+      )?.nickname
       const cleanLabel =
-        label?.trim() || presenceTracker.getNickname(pk) || undefined
+        pickRealName(label) ||
+        pickRealName(presenceTracker.getNickname(pk)) ||
+        pickRealName(dmNick) ||
+        pickRealName(serverNick) ||
+        pickRealName(msgNick) ||
+        pickRealName(callNick) ||
+        undefined
       // Synchronously update trustedSetRef before next render / child useEffect mounts
       if (!trustedSetRef.current.has(pk)) {
         const nextTrusted = new Set(trustedSetRef.current)
@@ -1354,8 +1580,40 @@ export function useAgnostrEngine(): AgnostrEngine {
       )
       return true
     },
-    [presenceTracker, pushToast]
+    [presenceTracker, dmThreads, serversEngine.members, callsEngine.activeCall, pushToast]
   )
+
+  // Keep persisted trusted peer labels fresh when real nicknames arrive from DMs or Server rosters
+  useEffect(() => {
+    if (trustedPubkeys.length === 0) return
+    const updates = new Map<string, string>()
+    const pickReal = (raw?: string | null): string | null => {
+      const clean = raw?.trim().slice(0, 48)
+      return clean && !/^anon[0-9a-f]{4}$/i.test(clean) ? clean : null
+    }
+    for (const entry of trustedPubkeys) {
+      const currentReal = pickReal(entry.label)
+      const fromDm = pickReal(dmThreads.find((t) => t.peerPubkey === entry.pubkey)?.peerNickname)
+      const fromPresence = pickReal(presenceTracker.getNickname(entry.pubkey))
+      const fromServer = pickReal(serversEngine.members.find((m) => m.pubkey === entry.pubkey)?.nickname)
+      const best = fromDm || fromPresence || fromServer
+      if (best && (!currentReal || currentReal !== best)) {
+        updates.set(entry.pubkey, best)
+      }
+    }
+    if (updates.size === 0) return
+    setTrustedPubkeys((prev) => {
+      let changed = false
+      const next = prev.map((t) => {
+        const nextLabel = updates.get(t.pubkey)
+        if (!nextLabel || t.label === nextLabel) return t
+        changed = true
+        return { ...t, label: nextLabel }
+      })
+      if (changed) saveTrustedPubkeys(next)
+      return changed ? next : prev
+    })
+  }, [trustedPubkeys, dmThreads, serversEngine.members, presenceTracker])
 
   const untrustPubkey = useCallback(
     (pubkey: string) => {
@@ -1508,6 +1766,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           isTeleported: location.isTeleported,
           replyTo: replyingTo,
           voiceMemo: attachment,
+          broadcastClientTag: settings.broadcastClientTag,
         })
 
         if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
@@ -1578,6 +1837,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       replyingTo,
       settings.powEnabled,
       settings.powTargetBits,
+      settings.broadcastClientTag,
       relaySelection.channelRelays,
       pushToast,
     ]
@@ -1623,10 +1883,21 @@ export function useAgnostrEngine(): AgnostrEngine {
       ),
     [relaySelection.dmRelays, relaySelection.channelRelays, callSignalingRelays]
   )
-  const pinnedGeohashList = useMemo(
-    () => pinnedChannels.map((p) => p.geohash),
-    [pinnedChannels]
-  )
+  const ownGeoCallPubkeys = useMemo(() => {
+    void identityVersion
+    const set = new Set<string>()
+    const hashes = new Set<string>([activeGeohash, ...pinnedGeohashList])
+    if (callsEngine.activeCall?.mode === 'geo' && callsEngine.activeCall.geohash) {
+      hashes.add(callsEngine.activeCall.geohash)
+    }
+    for (const gh of hashes) {
+      if (isValidGeohash(gh)) {
+        set.add(identityManager.getDerivedGeohashKeyMaterial(gh).pubkey.toLowerCase())
+      }
+    }
+    return set
+  }, [identityManager, identityVersion, activeGeohash, pinnedGeohashList, callsEngine.activeCall])
+
   const signNotificationEvent = useCallback(
     (tmpl: Parameters<IdentityManager['signEvent']>[0]) =>
       identityManager.signEvent(tmpl),
@@ -1656,6 +1927,12 @@ export function useAgnostrEngine(): AgnostrEngine {
       callsEngine.activeCall?.mode === 'server'
         ? callsEngine.activeCall.serverId ?? null
         : null,
+    geoCallRosters: callsEngine.geoCallRosters,
+    activeCallGeohash:
+      callsEngine.activeCall?.mode === 'geo'
+        ? callsEngine.activeCall.geohash ?? null
+        : null,
+    ownGeoCallPubkeys,
     relayUrls: notificationRelayUrls,
     pinnedGeohashes: pinnedGeohashList,
     signEvent: signNotificationEvent,
@@ -1750,6 +2027,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           isTeleported: location.isTeleported,
           replyTo: replyingTo,
           imageAttachment: attachment,
+          broadcastClientTag: settings.broadcastClientTag,
         })
 
         if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
@@ -1820,6 +2098,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       replyingTo,
       settings.powEnabled,
       settings.powTargetBits,
+      settings.broadcastClientTag,
       relaySelection.channelRelays,
       pushToast,
     ]
@@ -1948,6 +2227,13 @@ export function useAgnostrEngine(): AgnostrEngine {
     [updateSettings]
   )
 
+  const setBroadcastClientTag = useCallback(
+    (enabled: boolean) => {
+      updateSettings({ broadcastClientTag: enabled })
+    },
+    [updateSettings]
+  )
+
   const setStrictWhitelistMode = useCallback(
     (enabled: boolean) => {
       updateSettings({ strictWhitelistMode: enabled })
@@ -1985,6 +2271,11 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     setSettings(DEFAULT_SETTINGS)
     setPinnedChannels([])
+    geoSeenIdsRef.current.clear()
+    geoUnreadCountsRef.current = {}
+    setGeoUnreadCounts({})
+    geoMentionCountsRef.current = {}
+    setGeoMentionCounts({})
     setRecentChannels([DEFAULT_GEOHASH])
     setBlockedPubkeys([])
     setTrustedPubkeys([])
@@ -2111,6 +2402,15 @@ export function useAgnostrEngine(): AgnostrEngine {
     return Math.round(samples.reduce((a, b) => a + b, 0) / samples.length)
   }, [connectedRelays])
 
+  const totalGeoUnread = useMemo(
+    () => Object.values(geoUnreadCounts).reduce((sum, n) => sum + n, 0),
+    [geoUnreadCounts]
+  )
+  const totalGeoMentions = useMemo(
+    () => Object.values(geoMentionCounts).reduce((sum, n) => sum + n, 0),
+    [geoMentionCounts]
+  )
+
   return {
     activeView,
     activeGeohash,
@@ -2131,6 +2431,10 @@ export function useAgnostrEngine(): AgnostrEngine {
     pulseRooms,
     pinnedChannels,
     recentChannels,
+    unreadCounts: geoUnreadCounts,
+    mentionCounts: geoMentionCounts,
+    totalGeoUnread,
+    totalGeoMentions,
     isChannelPinned,
     togglePinChannel,
 
@@ -2186,6 +2490,8 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     identity,
     settings,
+    broadcastClientTag: settings.broadcastClientTag,
+    setBroadcastClientTag,
     setNickname,
     setSignMode,
     setLocalSecret,

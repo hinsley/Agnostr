@@ -7,6 +7,8 @@ import {
   Map as MapIcon,
   PanelLeft,
   Phone,
+  Pin,
+  PinOff,
   Radio,
   Search,
   ShieldCheck,
@@ -80,6 +82,17 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   )
   const isServerCallFull =
     isServer && !inThisServerCall && serverCallCount >= engine.calls.maxParticipants
+  const activeGeoKey = engine.activeGeohash.toLowerCase()
+  const geoCallCount = !isDm && !isServer ? engine.calls.getGeoCallCount(activeGeoKey) : 0
+  const inThisGeoCall = Boolean(
+    !isDm &&
+      !isServer &&
+      activeCall?.mode === 'geo' &&
+      activeCall.geohash?.toLowerCase() === activeGeoKey
+  )
+  const isGeoCallFull =
+    !isDm && !isServer && !inThisGeoCall && geoCallCount >= engine.calls.maxParticipants
+  const isGeoPinned = !isDm && !isServer && engine.isChannelPinned(engine.activeGeohash)
   const isDisconnected = engine.connectedRelayCount === 0
 
   const handleDmCallClick = (media: 'audio' | 'video') => {
@@ -114,6 +127,22 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
       return
     }
     void engine.calls.joinServerCall(activeServer.id, 'audio')
+  }
+
+  const handleGeoCallClick = (media: 'audio' | 'video') => {
+    if (inThisGeoCall) {
+      onFocusActiveCall?.()
+      return
+    }
+    if (isGeoCallFull) {
+      engine.pushToast(
+        'warning',
+        `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`,
+        'Group calls support up to 6 participants at once.'
+      )
+      return
+    }
+    void engine.calls.joinGeoCall(engine.activeGeohash, media)
   }
 
   const onlineSubtitle = engine.presence.isUncertainCount
@@ -362,7 +391,84 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
             <>
               <button
                 type="button"
-                className="ag-circle-btn"
+                className={`ag-circle-btn ${isGeoPinned ? 'active' : ''}`}
+                onClick={() =>
+                  engine.togglePinChannel(
+                    engine.activeGeohash,
+                    engine.cell.nearestCity || undefined
+                  )
+                }
+                title={
+                  isGeoPinned
+                    ? `Unpin #${engine.activeGeohash} from Radio tab`
+                    : `Pin #${engine.activeGeohash} to Radio tab`
+                }
+                aria-label={
+                  isGeoPinned
+                    ? `Unpin #${engine.activeGeohash}`
+                    : `Pin #${engine.activeGeohash}`
+                }
+                aria-pressed={isGeoPinned}
+              >
+                {isGeoPinned ? <PinOff size={17} /> : <Pin size={17} />}
+              </button>
+
+              <button
+                type="button"
+                className={`ag-header-call-btn ${inThisGeoCall || geoCallCount > 0 ? 'has-peers' : ''} ${inThisGeoCall ? 'active-ok' : ''}`}
+                onClick={() => handleGeoCallClick('audio')}
+                disabled={isGeoCallFull}
+                title={
+                  inThisGeoCall
+                    ? `Focus active #${engine.activeGeohash} call`
+                    : isGeoCallFull
+                      ? `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                      : geoCallCount > 0
+                        ? `Join #${engine.activeGeohash} Voice Call (${geoCallCount}/${engine.calls.maxParticipants})`
+                        : `Start Voice Call in #${engine.activeGeohash}`
+                }
+                aria-label={
+                  inThisGeoCall
+                    ? 'Focus active voice call'
+                    : geoCallCount > 0
+                      ? `Join voice call (${geoCallCount} of ${engine.calls.maxParticipants})`
+                      : `Start voice call in #${engine.activeGeohash}`
+                }
+              >
+                <Phone size={17} />
+                {(geoCallCount > 0 || inThisGeoCall) && (
+                  <span className="ag-header-call-count tabular">
+                    {geoCallCount}/{engine.calls.maxParticipants}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ${inThisGeoCall && activeCall?.mediaType === 'video' ? 'active-ok' : ''}`}
+                onClick={() => handleGeoCallClick('video')}
+                disabled={isGeoCallFull}
+                title={
+                  inThisGeoCall
+                    ? `Focus active #${engine.activeGeohash} call`
+                    : isGeoCallFull
+                      ? `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                      : geoCallCount > 0
+                        ? `Join #${engine.activeGeohash} Video Call (${geoCallCount}/${engine.calls.maxParticipants})`
+                        : `Start Video Call in #${engine.activeGeohash}`
+                }
+                aria-label={
+                  inThisGeoCall
+                    ? 'Focus active video call'
+                    : `Start video call in #${engine.activeGeohash}`
+                }
+              >
+                <Video size={18} />
+              </button>
+
+              <button
+                type="button"
+                className="ag-circle-btn ag-desktop-only"
                 onClick={onExpandRadar}
                 title="Open Full Map"
                 aria-label="Open Geohash Map"

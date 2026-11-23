@@ -175,6 +175,7 @@ export interface GeoMessage {
   isTeleported: boolean
   isMeshBridge: boolean
   bridgeClient?: string
+  isAgnostrClient?: boolean
   powBits: number
   replyTo?: ReplyReference
   reactions: ReactionSummary[]
@@ -195,6 +196,7 @@ export interface PeerInfo {
   isSelf: boolean
   isTeleported: boolean
   isMeshBridge: boolean
+  isAgnostrClient?: boolean
   isBlocked: boolean
   isTrusted?: boolean
   messageCount: number
@@ -318,6 +320,8 @@ export interface AppSettings {
   presenceEnabled: boolean
   perGeohashIdentity: boolean
   showBridgeBadges: boolean
+  /** When true, appends NIP-89 ["client", "agnostr"] tag to Geo Radio messages & presence */
+  broadcastClientTag: boolean
   /** When true, hides text messages from unwhitelisted pubkeys too (media/voice is ALWAYS whitelist-gated) */
   strictWhitelistMode: boolean
 }
@@ -380,10 +384,14 @@ export interface AgnostrEngine {
   replyingTo: GeoMessage | null
   setReplyingTo: (msg: GeoMessage | null) => void
 
-  // Discovery & pins
+  // Discovery, pins & per-geohash unread/direct-ping counters
   pulseRooms: PulseRoom[]
   pinnedChannels: PinnedChannel[]
   recentChannels: string[]
+  unreadCounts: Record<string, number>
+  mentionCounts: Record<string, number>
+  totalGeoUnread: number
+  totalGeoMentions: number
   isChannelPinned: (geohash: string) => boolean
   togglePinChannel: (geohash: string, label?: string) => void
 
@@ -450,6 +458,8 @@ export interface AgnostrEngine {
   // Identity & settings
   identity: IdentityState
   settings: AppSettings
+  broadcastClientTag: boolean
+  setBroadcastClientTag: (enabled: boolean) => void
   setNickname: (nickname: string) => void
   setSignMode: (mode: SignMode) => void
   setLocalSecret: (nsecOrHex: string) => boolean

@@ -25,6 +25,7 @@ import {
   PhoneCall,
   Plus,
   QrCode,
+  Radio,
   RefreshCw,
   RotateCcw,
   Server,
@@ -177,6 +178,7 @@ export function SettingsModal({
     trustedPubkeys,
     blockedPubkeys,
     strictWhitelistMode,
+    broadcastClientTag,
     relays,
     customRelays,
     connectedRelayCount,
@@ -1124,9 +1126,9 @@ export function SettingsModal({
 
             <label className="ag-set-notif-row">
               <div className="ag-set-notif-row-copy">
-                <span className="ag-set-notif-row-title">Server Calls</span>
+                <span className="ag-set-notif-row-title">Room &amp; Community Calls</span>
                 <span className="ag-set-notif-row-desc">
-                  Alert when peers start a Voice &amp; Video Lounge call
+                  Alert when peers start a group call in a Server channel or Geo Radio room
                 </span>
               </div>
               <input
@@ -1419,6 +1421,28 @@ export function SettingsModal({
           checked={strictWhitelistMode}
           onChange={() => {
             engine.setStrictWhitelistMode(!strictWhitelistMode)
+            onPlaySound?.('click')
+          }}
+        />
+      </label>
+
+      <label className="ag-set-toggle-card">
+        <div className="ag-set-toggle-copy">
+          <span className="ag-set-toggle-title">
+            <Radio size={16} />
+            <span>Broadcast Agnostr client badge</span>
+          </span>
+          <span className="ag-set-toggle-desc">
+            Includes a standard NIP-89 client tag on Geo Radio messages and presence so other
+            Agnostr users see a badge on your name. Turn off for a wider Bitchat anonymity set.
+          </span>
+        </div>
+        <input
+          type="checkbox"
+          className="ag-switch"
+          checked={broadcastClientTag}
+          onChange={() => {
+            engine.setBroadcastClientTag(!broadcastClientTag)
             onPlaySound?.('click')
           }}
         />

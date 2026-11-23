@@ -65,6 +65,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   presenceEnabled: true,
   perGeohashIdentity: false,
   showBridgeBadges: true,
+  broadcastClientTag: true,
   strictWhitelistMode: false,
 }
 
@@ -125,6 +126,10 @@ export function loadSettings(): AppSettings {
         : DEFAULT_SETTINGS.perGeohashIdentity,
     showBridgeBadges:
       typeof parsed.showBridgeBadges === 'boolean' ? parsed.showBridgeBadges : DEFAULT_SETTINGS.showBridgeBadges,
+    broadcastClientTag:
+      typeof parsed.broadcastClientTag === 'boolean'
+        ? parsed.broadcastClientTag
+        : DEFAULT_SETTINGS.broadcastClientTag,
     strictWhitelistMode:
       typeof parsed.strictWhitelistMode === 'boolean'
         ? parsed.strictWhitelistMode
@@ -508,7 +513,11 @@ export function loadJoinedServers(): ServerSummary[] {
     .filter((s) => s && typeof s.id === 'string' && (s.kind === 'virtual' || s.kind === 'nip29') && typeof s.name === 'string')
     .map((s) => ({
       ...s,
-      channels: Array.isArray(s.channels) && s.channels.length > 0 ? s.channels : [{ id: s.groupId || 'general', name: s.groupId || 'general' }],
+      channels: (
+        Array.isArray(s.channels) && s.channels.length > 0
+          ? s.channels
+          : [{ id: s.groupId || 'general', name: s.groupId || 'general' }]
+      ).map((c) => ({ ...c, unreadCount: 0, mentionCount: 0 })),
       moderators: Array.isArray(s.moderators) ? s.moderators : [],
       bannedPubkeys: Array.isArray(s.bannedPubkeys) ? s.bannedPubkeys : [],
       relays: Array.isArray(s.relays) ? s.relays : [],
@@ -520,6 +529,11 @@ export function loadJoinedServers(): ServerSummary[] {
 export function saveJoinedServers(servers: ServerSummary[]): void {
   const clean = servers.slice(0, 40).map((s) => ({
     ...s,
+    channels: s.channels.map((c) => ({
+      id: c.id,
+      name: c.name,
+      topic: c.topic,
+    })),
     unreadCount: 0,
     mentionCount: 0,
   }))

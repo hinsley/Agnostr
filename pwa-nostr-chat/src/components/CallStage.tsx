@@ -54,6 +54,7 @@ export interface CallStageProps {
   onPlaySound?: (cue: SoundCue) => void
   onInspectPeer?: (peer: PeerInfo) => void
   onOpenDm?: (pubkey: string, nickname?: string) => void
+  onReturnToCall?: () => void
 }
 
 function formatCallDuration(startedAtMs: number, nowMs: number): string {
@@ -429,6 +430,7 @@ export function CallStage({
   onPlaySound,
   onInspectPeer,
   onOpenDm,
+  onReturnToCall,
 }: CallStageProps) {
   const { activeCall } = calls
   const { transcription } = engine
@@ -599,6 +601,23 @@ export function CallStage({
     </span>
   ) : null
 
+  const isGeoCall = activeCall.mode === 'geo'
+  const isGroupCall = activeCall.mode === 'server' || isGeoCall
+  const geoTag = activeCall.geohash ? `#${activeCall.geohash}` : null
+
+  const handleReturnToCall = () => {
+    onPlaySound?.('click')
+    if (onReturnToCall) {
+      onReturnToCall()
+      return
+    }
+    if (isGeoCall && activeCall.geohash) {
+      engine.tuneGeohash(activeCall.geohash)
+    } else {
+      onToggleExpand()
+    }
+  }
+
   // Compact Floating Bar when user is browsing another channel/server
   if (compactFloating && !expanded) {
     return (
@@ -619,12 +638,36 @@ export function CallStage({
                   : 'ag-led-warn ag-led-pulse'
               }`}
             />
-            <span className="ag-call-float-title truncate">{activeCall.title}</span>
-            {activeCall.encrypted && (
-              <span className="ag-badge ag-badge-dm ag-hide-xs">
-                <Lock size={9} />
-                <span>E2EE P2P</span>
-              </span>
+            {isGeoCall ? (
+              <button
+                type="button"
+                className="ag-call-float-return"
+                onClick={handleReturnToCall}
+                title={`Return to ${geoTag ?? activeCall.title}`}
+              >
+                <span className="ag-badge ag-badge-accent mono">
+                  <Radio size={9} />
+                  <span>{geoTag ?? activeCall.title}</span>
+                </span>
+                <span className="ag-badge ag-badge-muted ag-hide-xs">
+                  Public Radio · P2P
+                </span>
+              </button>
+            ) : (
+              <>
+                <span
+                  className={`ag-call-float-title truncate ${onReturnToCall ? 'clickable' : ''}`}
+                  onClick={onReturnToCall ? handleReturnToCall : undefined}
+                >
+                  {activeCall.title}
+                </span>
+                {activeCall.encrypted && (
+                  <span className="ag-badge ag-badge-dm ag-hide-xs">
+                    <Lock size={9} />
+                    <span>E2EE P2P</span>
+                  </span>
+                )}
+              </>
             )}
             {isOutgoingRinging ? (
               <span className="ag-call-ringing-pill" role="status">
@@ -678,8 +721,8 @@ export function CallStage({
               type="button"
               className="ag-call-float-btn hangup"
               onClick={handleLeave}
-              title="Hang up"
-              aria-label="Hang up call"
+              title={isGroupCall ? 'Leave call' : 'Hang up'}
+              aria-label={isGroupCall ? 'Leave call' : 'Hang up call'}
             >
               <PhoneOff size={14} />
             </button>
@@ -917,11 +960,30 @@ export function CallStage({
                 : 'ag-led-warn ag-led-pulse'
             }`}
           />
-          <span className="ag-call-title truncate">{activeCall.title}</span>
-          <span className={`ag-badge ag-hide-xs ${activeCall.encrypted ? 'ag-badge-dm' : 'ag-badge-accent'}`}>
-            <Lock size={9} />
-            <span>{activeCall.encrypted ? 'E2EE P2P' : 'P2P'}</span>
-          </span>
+          {isGeoCall ? (
+            <>
+              <span className="ag-badge ag-badge-accent mono">
+                <Radio size={10} />
+                <span>{geoTag ?? activeCall.title}</span>
+              </span>
+              <span className="ag-call-title truncate ag-hide-xs">Geo Radio</span>
+              <span className="ag-badge ag-badge-muted ag-hide-xs">
+                Public Radio · P2P
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="ag-call-title truncate">{activeCall.title}</span>
+              <span
+                className={`ag-badge ag-hide-xs ${
+                  activeCall.encrypted ? 'ag-badge-dm' : 'ag-badge-accent'
+                }`}
+              >
+                <Lock size={9} />
+                <span>{activeCall.encrypted ? 'E2EE P2P' : 'P2P'}</span>
+              </span>
+            </>
+          )}
           <span className="ag-chip ag-chip-mono">
             <Users size={10} />
             <span>
@@ -1339,11 +1401,23 @@ export function CallStage({
           type="button"
           className="ag-call-ctrl-btn ag-call-hangup-btn"
           onClick={handleLeave}
-          aria-label={activeCall.mode === 'server' ? 'Leave voice lounge' : 'Hang up call'}
-          title={activeCall.mode === 'server' ? 'Leave voice lounge' : 'Hang up call'}
+          aria-label={
+            isGeoCall
+              ? 'Leave radio call'
+              : activeCall.mode === 'server'
+                ? 'Leave voice lounge'
+                : 'Hang up call'
+          }
+          title={
+            isGeoCall
+              ? 'Leave radio call'
+              : activeCall.mode === 'server'
+                ? 'Leave voice lounge'
+                : 'Hang up call'
+          }
         >
           <PhoneOff size={17} />
-          <span>{activeCall.mode === 'server' ? 'Leave' : 'Hang Up'}</span>
+          <span>{isGroupCall ? 'Leave' : 'Hang Up'}</span>
         </button>
       </div>
     </section>

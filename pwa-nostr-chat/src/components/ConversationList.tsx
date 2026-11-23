@@ -19,6 +19,8 @@ import {
   MessageCircle,
   Phone,
   PhoneOff,
+  Pin,
+  PinOff,
   Plus,
   QrCode,
   Radio,
@@ -45,11 +47,16 @@ import type { ServerHubTab } from './ServerHubModal'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { SettingsTab } from './SettingsModal'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu'
+import { isValidGeohash, normalizeGeohash } from '../lib/geohash'
 import { encodeNpubSafe } from '../lib/identity'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
-import { identiconDataUrl } from '../utils/identicon'
+import { formatHandle, identiconDataUrl } from '../utils/identicon'
 
 export type ListTab = 'radio' | 'dms' | 'servers'
+
+function formatBadgeCount(count: number): string {
+  return count > 99 ? '99+' : String(count)
+}
 
 function formatRelativeTime(tsMsOrSec: number): string {
   const tsMs = tsMsOrSec > 1e12 ? tsMsOrSec : tsMsOrSec * 1000
@@ -177,6 +184,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     label?: string
   ) => {
     const pinned = engine.isChannelPinned(geohash)
+    const callCount = engine.calls.getGeoCallCount(geohash)
+    const inThisGeoCall =
+      activeCall?.mode === 'geo' &&
+      (activeCall.geohash ?? '').toLowerCase() === geohash.toLowerCase()
+    const isFull = !inThisGeoCall && callCount >= engine.calls.maxParticipants
     const roomUrl = `${window.location.origin}${window.location.pathname}#${geohash}`
     openContextMenu(e, {
       header: `#${geohash}${label ? ` · ${label}` : ''}`,
@@ -188,9 +200,51 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           onSelect: () => onTuneChannel(geohash),
         },
         {
+          id: `room-call-voice-${geohash}`,
+          label: inThisGeoCall
+            ? 'Focus Active Call'
+            : isFull
+              ? `Voice Call Full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+              : callCount > 0
+                ? `Join Voice Call (${callCount}/${engine.calls.maxParticipants})`
+                : 'Join Voice Call',
+          icon: <Phone size={15} />,
+          disabled: isFull,
+          dividerBefore: true,
+          onSelect: () => {
+            onTuneChannel(geohash)
+            if (inThisGeoCall) {
+              onFocusActiveCall?.()
+              return
+            }
+            void engine.calls.joinGeoCall(geohash, 'audio')
+          },
+        },
+        {
+          id: `room-call-video-${geohash}`,
+          label: inThisGeoCall
+            ? 'Focus Active Video Call'
+            : isFull
+              ? `Video Call Full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+              : callCount > 0
+                ? `Join Video Call (${callCount}/${engine.calls.maxParticipants})`
+                : 'Join Video Call',
+          icon: <Video size={15} />,
+          disabled: isFull,
+          onSelect: () => {
+            onTuneChannel(geohash)
+            if (inThisGeoCall) {
+              onFocusActiveCall?.()
+              return
+            }
+            void engine.calls.joinGeoCall(geohash, 'video')
+          },
+        },
+        {
           id: `room-copy-${geohash}`,
           label: 'Copy Room Link',
           icon: <Link2 size={15} />,
+          dividerBefore: true,
           onSelect: () => {
             navigator.clipboard?.writeText(roomUrl).catch(() => {})
             engine.pushToast('info', `Copied #${geohash} room link`)
@@ -216,36 +270,45 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     })
   }
 
-  const openDmContextMenu = (e: React.MouseEvent, thread: DmThread) => {
-    const trusted = engine.isExplicitlyTrusted(thread.peerPubkey)
-    const blocked = engine.isPeerBlocked(thread.peerPubkey)
-    const npub = encodeNpubSafe(thread.peerPubkey)
-    const dmUrl = buildDmShareUrl(thread.peerPubkey, thread.peerNickname)
+  const openPeerDmContextMenu = (
+    e: React.MouseEvent,
+    peer: {
+      peerPubkey: string
+      peerNickname: string
+      peerDisplayHandle: string
+      lastMessageAt?: number
+      messageCount?: number
+    }
+  ) => {
+    const trusted = engine.isExplicitlyTrusted(peer.peerPubkey)
+    const blocked = engine.isPeerBlocked(peer.peerPubkey)
+    const npub = encodeNpubSafe(peer.peerPubkey)
+    const dmUrl = buildDmShareUrl(peer.peerPubkey, peer.peerNickname)
     const items: ContextMenuItem[] = [
       {
-        id: `dm-open-${thread.peerPubkey}`,
+        id: `dm-open-${peer.peerPubkey}`,
         label: 'Open DM',
         icon: <MessageCircle size={15} />,
-        onSelect: () => onOpenDm(thread.peerPubkey, thread.peerNickname),
+        onSelect: () => onOpenDm(peer.peerPubkey, peer.peerNickname),
       },
     ]
 
     if (trusted) {
       items.push(
         {
-          id: `dm-voice-${thread.peerPubkey}`,
+          id: `dm-voice-${peer.peerPubkey}`,
           label: 'Voice Call',
           icon: <Phone size={15} />,
           onSelect: () => {
-            void engine.calls.startDmCall(thread.peerPubkey, 'audio', thread.peerNickname)
+            void engine.calls.startDmCall(peer.peerPubkey, 'audio', peer.peerNickname)
           },
         },
         {
-          id: `dm-video-${thread.peerPubkey}`,
+          id: `dm-video-${peer.peerPubkey}`,
           label: 'Video Call',
           icon: <Video size={15} />,
           onSelect: () => {
-            void engine.calls.startDmCall(thread.peerPubkey, 'video', thread.peerNickname)
+            void engine.calls.startDmCall(peer.peerPubkey, 'video', peer.peerNickname)
           },
         }
       )
@@ -253,29 +316,29 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
     if (onInspectPeer) {
       items.push({
-        id: `dm-profile-${thread.peerPubkey}`,
+        id: `dm-profile-${peer.peerPubkey}`,
         label: 'View Profile',
         icon: <User size={15} />,
         dividerBefore: true,
         onSelect: () => {
-          const existing = engine.getPeerByPubkey(thread.peerPubkey)
+          const existing = engine.getPeerByPubkey(peer.peerPubkey)
           if (existing) {
             onInspectPeer(existing)
             return
           }
           onInspectPeer({
-            pubkey: thread.peerPubkey,
+            pubkey: peer.peerPubkey,
             npub,
-            nickname: thread.peerNickname,
-            displayHandle: thread.peerDisplayHandle,
-            lastSeenAt: thread.lastMessageAt || Math.floor(Date.now() / 1000),
+            nickname: peer.peerNickname,
+            displayHandle: peer.peerDisplayHandle,
+            lastSeenAt: peer.lastMessageAt || Math.floor(Date.now() / 1000),
             isOnline: false,
             isSelf: false,
             isTeleported: false,
             isMeshBridge: false,
             isBlocked: blocked,
-            isTrusted: engine.isTrusted(thread.peerPubkey),
-            messageCount: thread.messages.length,
+            isTrusted: engine.isTrusted(peer.peerPubkey),
+            messageCount: peer.messageCount ?? 0,
             channels: [],
           })
         },
@@ -283,7 +346,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     }
 
     items.push({
-      id: `dm-copy-link-${thread.peerPubkey}`,
+      id: `dm-copy-link-${peer.peerPubkey}`,
       label: 'Copy DM Link',
       icon: <Link2 size={15} />,
       dividerBefore: !onInspectPeer,
@@ -295,14 +358,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
     if (onShowQr) {
       items.push({
-        id: `dm-qr-${thread.peerPubkey}`,
+        id: `dm-qr-${peer.peerPubkey}`,
         label: 'Show DM QR',
         icon: <QrCode size={15} />,
         onSelect: () => {
           onShowQr({
             kind: 'dm',
-            title: `${thread.peerNickname} — DM QR`,
-            subtitle: thread.peerDisplayHandle,
+            title: `${peer.peerNickname} — DM QR`,
+            subtitle: peer.peerDisplayHandle,
             url: dmUrl,
             codeLabel: 'Public Key (npub)',
             codeValue: npub,
@@ -313,17 +376,17 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
     items.push(
       {
-        id: `dm-trust-${thread.peerPubkey}`,
+        id: `dm-trust-${peer.peerPubkey}`,
         label: trusted ? 'Remove Trust' : 'Trust Peer',
         icon: trusted ? <ShieldOff size={15} /> : <ShieldCheck size={15} />,
         dividerBefore: true,
         onSelect: () => {
-          if (trusted) engine.untrustPubkey(thread.peerPubkey)
-          else engine.trustPubkey(thread.peerPubkey, thread.peerNickname)
+          if (trusted) engine.untrustPubkey(peer.peerPubkey)
+          else engine.trustPubkey(peer.peerPubkey, peer.peerNickname)
         },
       },
       {
-        id: `dm-npub-${thread.peerPubkey}`,
+        id: `dm-npub-${peer.peerPubkey}`,
         label: 'Copy npub',
         icon: <Copy size={15} />,
         onSelect: () => {
@@ -332,17 +395,27 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         },
       },
       {
-        id: `dm-block-${thread.peerPubkey}`,
+        id: `dm-block-${peer.peerPubkey}`,
         label: blocked ? 'Unblock Peer' : 'Block Peer',
         icon: <Ban size={15} />,
         danger: !blocked,
-        onSelect: () => engine.toggleBlockPeer(thread.peerPubkey, thread.peerDisplayHandle),
+        onSelect: () => engine.toggleBlockPeer(peer.peerPubkey, peer.peerDisplayHandle),
       }
     )
 
     openContextMenu(e, {
-      header: thread.peerDisplayHandle,
+      header: peer.peerDisplayHandle,
       items,
+    })
+  }
+
+  const openDmContextMenu = (e: React.MouseEvent, thread: DmThread) => {
+    openPeerDmContextMenu(e, {
+      peerPubkey: thread.peerPubkey,
+      peerNickname: thread.peerNickname,
+      peerDisplayHandle: thread.peerDisplayHandle,
+      lastMessageAt: thread.lastMessageAt,
+      messageCount: thread.messages.length,
     })
   }
 
@@ -587,19 +660,21 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             onClick={() => onTabChange('radio')}
           >
             <span>Radio</span>
-          </button>
-
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'dms'}
-            className={`ag-conv-tab dm ${activeTab === 'dms' ? 'active' : ''}`}
-            onClick={() => onTabChange('dms')}
-          >
-            <span>DMs</span>
-            {engine.totalDmUnread > 0 && (
-              <span className="ag-tab-count dm tabular">{engine.totalDmUnread}</span>
-            )}
+            {engine.totalGeoMentions > 0 ? (
+              <span
+                className="ag-tab-count ping tabular"
+                title={`${engine.totalGeoMentions} pings · ${engine.totalGeoUnread} unread`}
+              >
+                {formatBadgeCount(engine.totalGeoMentions)}
+              </span>
+            ) : engine.totalGeoUnread > 0 ? (
+              <span
+                className="ag-tab-count tabular"
+                title={`${engine.totalGeoUnread} unread`}
+              >
+                {formatBadgeCount(engine.totalGeoUnread)}
+              </span>
+            ) : null}
           </button>
 
           <button
@@ -610,8 +685,35 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             onClick={() => onTabChange('servers')}
           >
             <span>Servers</span>
-            {engine.servers.totalServerUnread > 0 && (
-              <span className="ag-tab-count tabular">{engine.servers.totalServerUnread}</span>
+            {engine.servers.totalServerMentions > 0 ? (
+              <span
+                className="ag-tab-count ping tabular"
+                title={`${engine.servers.totalServerMentions} pings · ${engine.servers.totalServerUnread} unread`}
+              >
+                {formatBadgeCount(engine.servers.totalServerMentions)}
+              </span>
+            ) : engine.servers.totalServerUnread > 0 ? (
+              <span
+                className="ag-tab-count tabular"
+                title={`${engine.servers.totalServerUnread} unread`}
+              >
+                {formatBadgeCount(engine.servers.totalServerUnread)}
+              </span>
+            ) : null}
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'dms'}
+            className={`ag-conv-tab dm ${activeTab === 'dms' ? 'active' : ''}`}
+            onClick={() => onTabChange('dms')}
+          >
+            <span>People</span>
+            {engine.totalDmUnread > 0 && (
+              <span className="ag-tab-count ping tabular">
+                {formatBadgeCount(engine.totalDmUnread)}
+              </span>
             )}
           </button>
         </div>
@@ -622,7 +724,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         {/* ================= RADIO TAB ================= */}
         {activeTab === 'radio' && (
           <div className="ag-conv-section-stack">
-            {/* Compact #geohash jump + GPS + Open Map */}
+            {/* Compact #geohash jump + Quick Pin + GPS + Open Map */}
             <div className="ag-radio-quickbar">
               <form className="ag-jump-form" onSubmit={handleQuickTune}>
                 <span className="ag-jump-hash">#</span>
@@ -640,6 +742,38 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   </button>
                 )}
               </form>
+
+              {(() => {
+                const normalizedDraft = normalizeGeohash(freqDraft)
+                const targetGh =
+                  normalizedDraft && isValidGeohash(normalizedDraft)
+                    ? normalizedDraft
+                    : engine.activeGeohash
+                const targetPinned = engine.isChannelPinned(targetGh)
+                return (
+                  <button
+                    type="button"
+                    className={`ag-quick-tool-btn ${targetPinned ? 'active' : ''}`}
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      engine.togglePinChannel(
+                        targetGh,
+                        targetGh === engine.activeGeohash
+                          ? engine.cell.nearestCity || undefined
+                          : undefined
+                      )
+                      if (normalizedDraft && isValidGeohash(normalizedDraft)) {
+                        setFreqDraft('')
+                      }
+                    }}
+                    title={targetPinned ? `Unpin #${targetGh}` : `Pin #${targetGh}`}
+                    aria-label={targetPinned ? `Unpin #${targetGh}` : `Pin #${targetGh}`}
+                    aria-pressed={targetPinned}
+                  >
+                    {targetPinned ? <PinOff size={15} /> : <Pin size={15} />}
+                  </button>
+                )
+              })()}
 
               <button
                 type="button"
@@ -664,80 +798,174 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             </div>
 
             {/* Active Room (if not already listed in Pinned or Live) */}
-            {showActiveRoomCard && (
+            {showActiveRoomCard && (() => {
+              const gh = engine.activeGeohash
+              const ghKey = gh.toLowerCase()
+              const active = isChannelActive(gh)
+              const pinned = engine.isChannelPinned(gh)
+              const unread = engine.unreadCounts[ghKey] ?? 0
+              const mentions = engine.mentionCounts[ghKey] ?? 0
+              const hasUnread = unread > 0 || mentions > 0
+              const callCount = engine.calls.getGeoCallCount(gh)
+              const inCall =
+                activeCall?.mode === 'geo' &&
+                (activeCall.geohash ?? '').toLowerCase() === ghKey
+              return (
               <section className="ag-conv-group" aria-label="Current room">
                 <div className="ag-conv-group-label">Current Room</div>
-                <button
-                  type="button"
-                  className={`ag-chat-row ${isChannelActive(engine.activeGeohash) ? 'active' : ''}`}
-                  onClick={() => onTuneChannel(engine.activeGeohash)}
+                <div
+                  className={`ag-chat-row-wrap ${active ? 'active' : ''} ${hasUnread ? 'is-unread' : ''} ${mentions > 0 ? 'has-pings' : ''}`}
                   onContextMenu={(e) =>
-                    openRoomContextMenu(
-                      e,
-                      engine.activeGeohash,
-                      engine.cell.nearestCity || undefined
-                    )
+                    openRoomContextMenu(e, gh, engine.cell.nearestCity || undefined)
                   }
                 >
-                  <div className="ag-chat-row-avatar radio">
-                    <Radio size={18} />
-                  </div>
-                  <div className="ag-chat-row-body">
-                    <div className="ag-chat-row-top">
-                      <span className="ag-chat-row-name truncate">
-                        <span className="mono">#{engine.activeGeohash}</span>
-                        {engine.cell.nearestCity && (
-                          <span className="ag-chat-row-city"> · {engine.cell.nearestCity}</span>
-                        )}
-                      </span>
-                      <span className="ag-chat-row-time">live</span>
+                  <button
+                    type="button"
+                    className="ag-chat-row"
+                    onClick={() => onTuneChannel(gh)}
+                  >
+                    <div className="ag-chat-row-avatar radio">
+                      <Radio size={18} />
                     </div>
-                    <div className="ag-chat-row-bottom">
-                      <span className="ag-chat-row-preview truncate">
-                        {engine.presence.isUncertainCount
-                          ? 'Ephemeral room'
-                          : `${engine.presence.onlineCount} online · Ephemeral`}
-                      </span>
+                    <div className="ag-chat-row-body">
+                      <div className="ag-chat-row-top">
+                        <span className="ag-chat-row-name truncate">
+                          <span className="mono">#{gh}</span>
+                          {engine.cell.nearestCity && (
+                            <span className="ag-chat-row-city"> · {engine.cell.nearestCity}</span>
+                          )}
+                        </span>
+                        <span className="ag-chat-row-time">live</span>
+                      </div>
+                      <div className="ag-chat-row-bottom">
+                        <span className="ag-chat-row-preview truncate">
+                          {engine.presence.isUncertainCount
+                            ? 'Ephemeral room'
+                            : `${engine.presence.onlineCount} online · Ephemeral`}
+                        </span>
+                        <span className="ag-row-badges">
+                          {callCount > 0 && (
+                            <span
+                              className={`ag-row-call-pill tabular ${inCall ? 'in-call' : ''}`}
+                              title={`${callCount} in live call`}
+                            >
+                              <span className="ag-live-dot" aria-hidden="true" />
+                              <span>{callCount}</span>
+                            </span>
+                          )}
+                          {mentions > 0 ? (
+                            <span
+                              className="ag-ping-badge tabular"
+                              title={`${mentions} ${mentions === 1 ? 'ping' : 'pings'} · ${unread} unread`}
+                            >
+                              {formatBadgeCount(mentions)}
+                            </span>
+                          ) : unread > 0 ? (
+                            <span className="ag-unread-pill tabular" title={`${unread} unread`}>
+                              {formatBadgeCount(unread)}
+                            </span>
+                          ) : null}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                </button>
+                  </button>
+                  <button
+                    type="button"
+                    className={`ag-row-pin-btn ${pinned ? 'pinned' : ''}`}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onPlaySound?.('click')
+                      engine.togglePinChannel(gh, engine.cell.nearestCity || undefined)
+                    }}
+                    title={pinned ? `Unpin #${gh}` : `Pin #${gh}`}
+                    aria-label={pinned ? `Unpin #${gh}` : `Pin #${gh}`}
+                    aria-pressed={pinned}
+                  >
+                    {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+                  </button>
+                </div>
               </section>
-            )}
+              )
+            })()}
 
             {/* Pinned Rooms */}
             {engine.pinnedChannels.length > 0 && (
               <section className="ag-conv-group" aria-label="Pinned rooms">
                 <div className="ag-conv-group-label">Pinned</div>
                 {engine.pinnedChannels.map((pin) => {
+                  const ghKey = pin.geohash.toLowerCase()
                   const active = isChannelActive(pin.geohash)
+                  const unread = Math.max(pin.unreadCount, engine.unreadCounts[ghKey] ?? 0)
+                  const mentions = Math.max(pin.mentionCount, engine.mentionCounts[ghKey] ?? 0)
+                  const hasUnread = unread > 0 || mentions > 0
+                  const callCount = engine.calls.getGeoCallCount(pin.geohash)
+                  const inCall =
+                    activeCall?.mode === 'geo' &&
+                    (activeCall.geohash ?? '').toLowerCase() === ghKey
                   return (
-                    <button
+                    <div
                       key={pin.geohash}
-                      type="button"
-                      className={`ag-chat-row ${active ? 'active' : ''}`}
-                      onClick={() => onTuneChannel(pin.geohash)}
+                      className={`ag-chat-row-wrap ${active ? 'active' : ''} ${hasUnread ? 'is-unread' : ''} ${mentions > 0 ? 'has-pings' : ''}`}
                       onContextMenu={(e) => openRoomContextMenu(e, pin.geohash, pin.label)}
                     >
-                      <div className="ag-chat-row-avatar pinned">
-                        <Star size={17} fill="currentColor" />
-                      </div>
-                      <div className="ag-chat-row-body">
-                        <div className="ag-chat-row-top">
-                          <span className="ag-chat-row-name truncate">
-                            <span className="mono">#{pin.geohash}</span>
-                            {pin.label && <span className="ag-chat-row-city"> · {pin.label}</span>}
-                          </span>
+                      <button
+                        type="button"
+                        className="ag-chat-row"
+                        onClick={() => onTuneChannel(pin.geohash)}
+                      >
+                        <div className="ag-chat-row-avatar pinned">
+                          <Star size={17} fill="currentColor" />
                         </div>
-                        <div className="ag-chat-row-bottom">
-                          <span className="ag-chat-row-preview truncate">Pinned room · Ephemeral</span>
-                          {(pin.unreadCount > 0 || pin.mentionCount > 0) && (
-                            <span className="ag-row-unread tabular">
-                              {pin.mentionCount > 0 ? `@${pin.mentionCount}` : pin.unreadCount}
+                        <div className="ag-chat-row-body">
+                          <div className="ag-chat-row-top">
+                            <span className="ag-chat-row-name truncate">
+                              <span className="mono">#{pin.geohash}</span>
+                              {pin.label && <span className="ag-chat-row-city"> · {pin.label}</span>}
                             </span>
-                          )}
+                          </div>
+                          <div className="ag-chat-row-bottom">
+                            <span className="ag-chat-row-preview truncate">Pinned room · Ephemeral</span>
+                            <span className="ag-row-badges">
+                              {callCount > 0 && (
+                                <span
+                                  className={`ag-row-call-pill tabular ${inCall ? 'in-call' : ''}`}
+                                  title={`${callCount} in live call`}
+                                >
+                                  <span className="ag-live-dot" aria-hidden="true" />
+                                  <span>{callCount}</span>
+                                </span>
+                              )}
+                              {mentions > 0 ? (
+                                <span
+                                  className="ag-ping-badge tabular"
+                                  title={`${mentions} ${mentions === 1 ? 'ping' : 'pings'} · ${unread} unread`}
+                                >
+                                  {formatBadgeCount(mentions)}
+                                </span>
+                              ) : unread > 0 ? (
+                                <span className="ag-unread-pill tabular" title={`${unread} unread`}>
+                                  {formatBadgeCount(unread)}
+                                </span>
+                              ) : null}
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    </button>
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-row-pin-btn pinned"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onPlaySound?.('click')
+                          engine.togglePinChannel(pin.geohash, pin.label)
+                        }}
+                        title={`Unpin #${pin.geohash}`}
+                        aria-label={`Unpin #${pin.geohash}`}
+                        aria-pressed={true}
+                      >
+                        <PinOff size={14} />
+                      </button>
+                    </div>
                   )
                 })}
               </section>
@@ -765,45 +993,94 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 </div>
               ) : (
                 liveRooms.map((room) => {
+                  const ghKey = room.geohash.toLowerCase()
                   const active = isChannelActive(room.geohash)
+                  const pinned = engine.isChannelPinned(room.geohash)
+                  const unread = engine.unreadCounts[ghKey] ?? 0
+                  const mentions = engine.mentionCounts[ghKey] ?? 0
+                  const hasUnread = unread > 0 || mentions > 0
+                  const callCount = engine.calls.getGeoCallCount(room.geohash)
+                  const inCall =
+                    activeCall?.mode === 'geo' &&
+                    (activeCall.geohash ?? '').toLowerCase() === ghKey
                   const subtitle = room.lastPreview
                     ? room.lastPreview
                     : room.peerCount > 0
                       ? `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'} active`
                       : `${room.messageCount} recent ${room.messageCount === 1 ? 'message' : 'messages'}`
                   return (
-                    <button
+                    <div
                       key={room.geohash}
-                      type="button"
-                      className={`ag-chat-row ${active ? 'active' : ''}`}
-                      onClick={() => onTuneChannel(room.geohash)}
+                      className={`ag-chat-row-wrap ${active ? 'active' : ''} ${hasUnread ? 'is-unread' : ''} ${mentions > 0 ? 'has-pings' : ''}`}
                       onContextMenu={(e) =>
                         openRoomContextMenu(e, room.geohash, room.nearestCity || undefined)
                       }
                     >
-                      <div className="ag-chat-row-avatar radio">
-                        <Radio size={18} />
-                      </div>
-                      <div className="ag-chat-row-body">
-                        <div className="ag-chat-row-top">
-                          <span className="ag-chat-row-name truncate">
-                            <span className="mono">#{room.geohash}</span>
-                            {room.nearestCity && (
-                              <span className="ag-chat-row-city"> · {room.nearestCity}</span>
-                            )}
-                          </span>
-                          <span className="ag-chat-row-time tabular">
-                            {formatRelativeTime(room.lastActivityAt)}
-                          </span>
+                      <button
+                        type="button"
+                        className="ag-chat-row"
+                        onClick={() => onTuneChannel(room.geohash)}
+                      >
+                        <div className="ag-chat-row-avatar radio">
+                          <Radio size={18} />
                         </div>
-                        <div className="ag-chat-row-bottom">
-                          <span className="ag-chat-row-preview truncate">{subtitle}</span>
-                          {room.peerCount > 0 && (
-                            <span className="ag-row-peer-count tabular">{room.peerCount}</span>
-                          )}
+                        <div className="ag-chat-row-body">
+                          <div className="ag-chat-row-top">
+                            <span className="ag-chat-row-name truncate">
+                              <span className="mono">#{room.geohash}</span>
+                              {room.nearestCity && (
+                                <span className="ag-chat-row-city"> · {room.nearestCity}</span>
+                              )}
+                            </span>
+                            <span className="ag-chat-row-time tabular">
+                              {formatRelativeTime(room.lastActivityAt)}
+                            </span>
+                          </div>
+                          <div className="ag-chat-row-bottom">
+                            <span className="ag-chat-row-preview truncate">{subtitle}</span>
+                            <span className="ag-row-badges">
+                              {callCount > 0 && (
+                                <span
+                                  className={`ag-row-call-pill tabular ${inCall ? 'in-call' : ''}`}
+                                  title={`${callCount} in live call`}
+                                >
+                                  <span className="ag-live-dot" aria-hidden="true" />
+                                  <span>{callCount}</span>
+                                </span>
+                              )}
+                              {mentions > 0 ? (
+                                <span
+                                  className="ag-ping-badge tabular"
+                                  title={`${mentions} ${mentions === 1 ? 'ping' : 'pings'} · ${unread} unread`}
+                                >
+                                  {formatBadgeCount(mentions)}
+                                </span>
+                              ) : unread > 0 ? (
+                                <span className="ag-unread-pill tabular" title={`${unread} unread`}>
+                                  {formatBadgeCount(unread)}
+                                </span>
+                              ) : room.peerCount > 0 ? (
+                                <span className="ag-row-peer-count tabular">{room.peerCount}</span>
+                              ) : null}
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    </button>
+                      </button>
+                      <button
+                        type="button"
+                        className={`ag-row-pin-btn ${pinned ? 'pinned' : ''}`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onPlaySound?.('click')
+                          engine.togglePinChannel(room.geohash, room.nearestCity || undefined)
+                        }}
+                        title={pinned ? `Unpin #${room.geohash}` : `Pin #${room.geohash}`}
+                        aria-label={pinned ? `Unpin #${room.geohash}` : `Pin #${room.geohash}`}
+                        aria-pressed={pinned}
+                      >
+                        {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+                      </button>
+                    </div>
                   )
                 })
               )}
@@ -811,8 +1088,77 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           </div>
         )}
 
-        {/* ================= DMs TAB ================= */}
-        {activeTab === 'dms' && (
+        {/* ================= PEOPLE TAB (Messages + Trusted Friends) ================= */}
+        {activeTab === 'dms' && (() => {
+          const filterQuery = dmDraft.trim().toLowerCase()
+          const isShareableInput =
+            dmDraft.trim().length >= 8 && parseShareTarget(dmDraft.trim()) !== null
+          const selfMaster = engine.identity.masterPubkey.toLowerCase()
+          const selfActive = engine.identity.activePubkey.toLowerCase()
+
+          const dmPubkeys = new Set(engine.dmThreads.map((t) => t.peerPubkey.toLowerCase()))
+
+          const sortedThreads = [...engine.dmThreads]
+            .sort((a, b) => {
+              if ((b.unreadCount > 0 ? 1 : 0) !== (a.unreadCount > 0 ? 1 : 0)) {
+                return (b.unreadCount > 0 ? 1 : 0) - (a.unreadCount > 0 ? 1 : 0)
+              }
+              return b.lastMessageAt - a.lastMessageAt
+            })
+            .filter((t) => {
+              if (!filterQuery || isShareableInput) return true
+              return (
+                t.peerNickname.toLowerCase().includes(filterQuery) ||
+                t.peerDisplayHandle.toLowerCase().includes(filterQuery) ||
+                t.peerNpub.toLowerCase().includes(filterQuery) ||
+                t.peerPubkey.toLowerCase().includes(filterQuery)
+              )
+            })
+
+          const seenFriends = new Set<string>()
+          const trustedFriends = engine.trustedPubkeys
+            .filter((entry) => {
+              const pk = entry.pubkey.toLowerCase()
+              if (dmPubkeys.has(pk) || seenFriends.has(pk) || pk === selfMaster || pk === selfActive) {
+                return false
+              }
+              seenFriends.add(pk)
+              return true
+            })
+            .map((entry) => {
+              const livePeer = engine.getPeerByPubkey(entry.pubkey)
+              const srvMember = engine.servers.members.find(
+                (m) => m.pubkey.toLowerCase() === entry.pubkey.toLowerCase()
+              )
+              const rawLabel = entry.label?.trim()
+              const bestName =
+                (rawLabel && !/^anon[0-9a-f]{0,4}$/i.test(rawLabel) ? rawLabel : null) ??
+                livePeer?.nickname ??
+                srvMember?.nickname ??
+                rawLabel ??
+                'anon'
+              const handle = formatHandle(bestName, entry.pubkey)
+              return {
+                entry,
+                nickname: handle.base,
+                displayHandle: handle.full,
+              }
+            })
+            .filter((friend) => {
+              if (!filterQuery || isShareableInput) return true
+              return (
+                friend.nickname.toLowerCase().includes(filterQuery) ||
+                friend.displayHandle.toLowerCase().includes(filterQuery) ||
+                friend.entry.npub.toLowerCase().includes(filterQuery) ||
+                friend.entry.pubkey.toLowerCase().includes(filterQuery)
+              )
+            })
+            .sort((a, b) => b.entry.addedAt - a.entry.addedAt)
+
+          const hasAnyPeople = engine.dmThreads.length > 0 || engine.trustedPubkeys.length > 0
+          const hasVisiblePeople = sortedThreads.length > 0 || trustedFriends.length > 0
+
+          return (
           <div className="ag-conv-section-stack">
             {(onShowQr || onOpenScanner) && (
               <div className="ag-dm-actions-row">
@@ -850,8 +1196,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 className="ag-jump-input"
                 value={dmDraft}
                 onChange={(e) => setDmDraft(e.target.value)}
-                placeholder="Paste DM link or npub…"
-                aria-label="Start DM by pasting a DM link or npub"
+                placeholder="Search people, paste DM link or npub…"
+                aria-label="Search people or paste a DM link or npub"
               />
               {dmDraft.trim() && (
                 <button type="submit" className="ag-jump-go-btn dm" aria-label="Open DM">
@@ -860,68 +1206,213 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               )}
             </form>
 
-            {engine.dmThreads.length === 0 ? (
+            {!hasVisiblePeople ? (
               <div className="ag-conv-empty-large">
                 <div className="ag-conv-empty-icon dm">
-                  <MessageCircle size={24} />
+                  <Users size={24} />
                 </div>
-                <h3>No direct messages yet</h3>
+                <h3>{hasAnyPeople ? 'No matching people' : 'No friends or messages yet'}</h3>
                 <p>
-                  Tap any person in a room or server to start an end-to-end encrypted conversation.
+                  {hasAnyPeople
+                    ? 'Try another name, or paste a DM link / npub and press Open.'
+                    : 'Trust someone in a room or server to add them as a friend, or share your DM link & QR code.'}
                 </p>
               </div>
             ) : (
-              <section className="ag-conv-group" aria-label="Encrypted direct messages">
-                {engine.dmThreads.map((thread) => {
-                  const active = isDmActive(thread.peerPubkey)
-                  const trusted = engine.isExplicitlyTrusted(thread.peerPubkey)
-                  return (
-                    <button
-                      key={thread.peerPubkey}
-                      type="button"
-                      className={`ag-chat-row dm ${active ? 'active' : ''}`}
-                      onClick={() => onOpenDm(thread.peerPubkey, thread.peerNickname)}
-                      onContextMenu={(e) => openDmContextMenu(e, thread)}
-                    >
-                      <div className="ag-chat-row-avatar-img-wrap">
-                        <img
-                          src={identiconDataUrl(thread.peerPubkey)}
-                          alt=""
-                          className="ag-chat-row-avatar-img"
-                        />
-                        {trusted && (
-                          <span className="ag-avatar-trust-badge" title="Trusted peer">
-                            <ShieldCheck size={11} />
-                          </span>
-                        )}
-                      </div>
-                      <div className="ag-chat-row-body">
-                        <div className="ag-chat-row-top">
-                          <span className="ag-chat-row-name truncate">
-                            {thread.peerDisplayHandle}
-                          </span>
-                          {thread.lastMessageAt > 0 && (
-                            <span className="ag-chat-row-time tabular">
-                              {formatRelativeTime(thread.lastMessageAt)}
-                            </span>
+              <>
+                {sortedThreads.length > 0 && (
+                  <section className="ag-conv-group" aria-label="Messages">
+                    <div className="ag-conv-group-label">Messages</div>
+                    {sortedThreads.map((thread) => {
+                      const active = isDmActive(thread.peerPubkey)
+                      const trusted = engine.isExplicitlyTrusted(thread.peerPubkey)
+                      const hasUnread = thread.unreadCount > 0
+                      return (
+                        <div
+                          key={thread.peerPubkey}
+                          className={`ag-chat-row-wrap dm ${active ? 'active' : ''} ${hasUnread ? 'is-unread has-pings' : ''}`}
+                          onContextMenu={(e) => openDmContextMenu(e, thread)}
+                        >
+                          <button
+                            type="button"
+                            className="ag-chat-row dm"
+                            onClick={() => onOpenDm(thread.peerPubkey, thread.peerNickname)}
+                          >
+                            <div className="ag-chat-row-avatar-img-wrap">
+                              <img
+                                src={identiconDataUrl(thread.peerPubkey)}
+                                alt=""
+                                className="ag-chat-row-avatar-img"
+                              />
+                              {trusted && (
+                                <span className="ag-avatar-trust-badge" title="Trusted friend">
+                                  <ShieldCheck size={11} />
+                                </span>
+                              )}
+                            </div>
+                            <div className="ag-chat-row-body">
+                              <div className="ag-chat-row-top">
+                                <span className="ag-chat-row-name truncate">
+                                  {thread.peerDisplayHandle}
+                                </span>
+                                {thread.lastMessageAt > 0 && (
+                                  <span className="ag-chat-row-time tabular">
+                                    {formatRelativeTime(thread.lastMessageAt)}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="ag-chat-row-bottom">
+                                <span className="ag-chat-row-preview truncate">
+                                  {thread.lastPreview || 'Encrypted conversation'}
+                                </span>
+                                {thread.unreadCount > 0 && (
+                                  <span
+                                    className="ag-ping-badge tabular"
+                                    title={`${thread.unreadCount} unread`}
+                                  >
+                                    {formatBadgeCount(thread.unreadCount)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </button>
+
+                          {trusted ? (
+                            <div className="ag-person-row-actions ag-desktop-only">
+                              <button
+                                type="button"
+                                className="ag-mini-circle-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  void engine.calls.startDmCall(
+                                    thread.peerPubkey,
+                                    'audio',
+                                    thread.peerNickname
+                                  )
+                                }}
+                                title={`Voice call ${thread.peerNickname}`}
+                                aria-label={`Voice call ${thread.peerNickname}`}
+                              >
+                                <Phone size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                className="ag-mini-circle-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  void engine.calls.startDmCall(
+                                    thread.peerPubkey,
+                                    'video',
+                                    thread.peerNickname
+                                  )
+                                }}
+                                title={`Video call ${thread.peerNickname}`}
+                                aria-label={`Video call ${thread.peerNickname}`}
+                              >
+                                <Video size={13} />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="ag-person-trust-pill"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                onPlaySound?.('click')
+                                engine.trustPubkey(thread.peerPubkey, thread.peerNickname)
+                              }}
+                              title={`Trust ${thread.peerDisplayHandle} as a friend`}
+                            >
+                              <ShieldCheck size={11} />
+                              <span>Trust</span>
+                            </button>
                           )}
                         </div>
-                        <div className="ag-chat-row-bottom">
-                          <span className="ag-chat-row-preview truncate">
-                            {thread.lastPreview || 'Encrypted conversation'}
-                          </span>
-                          {thread.unreadCount > 0 && (
-                            <span className="ag-row-unread dm tabular">{thread.unreadCount}</span>
-                          )}
+                      )
+                    })}
+                  </section>
+                )}
+
+                {trustedFriends.length > 0 && (
+                  <section className="ag-conv-group" aria-label="Trusted friends">
+                    <div className="ag-conv-group-label">Trusted Friends</div>
+                    {trustedFriends.map(({ entry, nickname, displayHandle }) => {
+                      const active = isDmActive(entry.pubkey)
+                      return (
+                        <div
+                          key={entry.pubkey}
+                          className={`ag-chat-row-wrap dm ${active ? 'active' : ''}`}
+                          onContextMenu={(e) =>
+                            openPeerDmContextMenu(e, {
+                              peerPubkey: entry.pubkey,
+                              peerNickname: nickname,
+                              peerDisplayHandle: displayHandle,
+                            })
+                          }
+                        >
+                          <button
+                            type="button"
+                            className="ag-chat-row dm"
+                            onClick={() => onOpenDm(entry.pubkey, nickname)}
+                          >
+                            <div className="ag-chat-row-avatar-img-wrap">
+                              <img
+                                src={identiconDataUrl(entry.pubkey)}
+                                alt=""
+                                className="ag-chat-row-avatar-img"
+                              />
+                              <span className="ag-avatar-trust-badge" title="Trusted friend">
+                                <ShieldCheck size={11} />
+                              </span>
+                            </div>
+                            <div className="ag-chat-row-body">
+                              <div className="ag-chat-row-top">
+                                <span className="ag-chat-row-name truncate">{displayHandle}</span>
+                              </div>
+                              <div className="ag-chat-row-bottom">
+                                <span className="ag-chat-row-preview truncate">
+                                  Trusted · Tap to message
+                                </span>
+                              </div>
+                            </div>
+                          </button>
+
+                          <div className="ag-person-row-actions ag-desktop-only">
+                            <button
+                              type="button"
+                              className="ag-mini-circle-btn"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                void engine.calls.startDmCall(entry.pubkey, 'audio', nickname)
+                              }}
+                              title={`Voice call ${nickname}`}
+                              aria-label={`Voice call ${nickname}`}
+                            >
+                              <Phone size={13} />
+                            </button>
+                            <button
+                              type="button"
+                              className="ag-mini-circle-btn"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                void engine.calls.startDmCall(entry.pubkey, 'video', nickname)
+                              }}
+                              title={`Video call ${nickname}`}
+                              aria-label={`Video call ${nickname}`}
+                            >
+                              <Video size={13} />
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    </button>
-                  )
-                })}
-              </section>
+                      )
+                    })}
+                  </section>
+                )}
+              </>
             )}
           </div>
-        )}
+          )
+        })()}
 
         {/* ================= SERVERS TAB ================= */}
         {activeTab === 'servers' && (
@@ -1009,11 +1500,20 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   const accentStyle = {
                     '--srv-accent': server.accentColor || 'var(--accent)',
                   } as CSSProperties
+                  const srvUnread = Math.max(
+                    server.unreadCount,
+                    engine.servers.getServerUnreadCount(server.id)
+                  )
+                  const srvMentions = Math.max(
+                    server.mentionCount,
+                    engine.servers.getServerMentionCount(server.id)
+                  )
+                  const srvHasUnread = srvUnread > 0 || srvMentions > 0
 
                   return (
                     <div
                       key={server.id}
-                      className={`ag-srv-card ${isActiveServer ? 'active' : ''}`}
+                      className={`ag-srv-card ${isActiveServer ? 'active' : ''} ${srvHasUnread ? 'is-unread' : ''} ${srvMentions > 0 ? 'has-pings' : ''}`}
                       style={accentStyle}
                     >
                       <div
@@ -1069,13 +1569,21 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                               {voiceCount > 0 ? ` · ${voiceCount} in voice` : ''}
                             </span>
                           </div>
-                          {!isExpanded && server.unreadCount > 0 && (
+                          {srvMentions > 0 ? (
                             <span
-                              className={`ag-row-unread ${server.encrypted ? 'dm' : ''} tabular`}
+                              className="ag-ping-badge tabular"
+                              title={`${srvMentions} ${srvMentions === 1 ? 'ping' : 'pings'} · ${srvUnread} unread`}
                             >
-                              {server.unreadCount}
+                              {formatBadgeCount(srvMentions)}
                             </span>
-                          )}
+                          ) : !isExpanded && srvUnread > 0 ? (
+                            <span
+                              className="ag-unread-pill tabular"
+                              title={`${srvUnread} unread`}
+                            >
+                              {formatBadgeCount(srvUnread)}
+                            </span>
+                          ) : null}
                           <span className="ag-srv-chevron" aria-hidden="true">
                             {isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                           </span>
@@ -1135,11 +1643,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           <div className="ag-srv-channels">
                             {server.channels.map((ch) => {
                               const active = isServerChannelActive(server.id, ch.id)
+                              const chUnread = ch.unreadCount ?? 0
+                              const chMentions = ch.mentionCount ?? 0
+                              const chHasUnread = chUnread > 0 || chMentions > 0
                               return (
                                 <button
                                   key={ch.id}
                                   type="button"
-                                  className={`ag-srv-ch-row ${server.encrypted ? 'dm' : ''} ${active ? 'active' : ''}`}
+                                  className={`ag-srv-ch-row ${server.encrypted ? 'dm' : ''} ${active ? 'active' : ''} ${chHasUnread ? 'is-unread' : ''} ${chMentions > 0 ? 'has-pings' : ''}`}
                                   onClick={() => {
                                     onPlaySound?.('click')
                                     onSelectServerChannel(server.id, ch.id)
@@ -1154,13 +1665,21 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                                     )}
                                     <span className="truncate">{ch.name}</span>
                                   </span>
-                                  {(ch.unreadCount ?? 0) > 0 && (
+                                  {chMentions > 0 ? (
                                     <span
-                                      className={`ag-row-unread ${server.encrypted ? 'dm' : ''} tabular`}
+                                      className="ag-ping-badge tabular"
+                                      title={`${chMentions} ${chMentions === 1 ? 'ping' : 'pings'} · ${chUnread} unread`}
                                     >
-                                      {ch.unreadCount}
+                                      {formatBadgeCount(chMentions)}
                                     </span>
-                                  )}
+                                  ) : chUnread > 0 ? (
+                                    <span
+                                      className="ag-unread-pill tabular"
+                                      title={`${chUnread} unread`}
+                                    >
+                                      {formatBadgeCount(chUnread)}
+                                    </span>
+                                  ) : null}
                                 </button>
                               )
                             })}
