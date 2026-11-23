@@ -72,6 +72,26 @@ const OUTGOING_INVITE_REBROADCAST_MS = 3_500
 const ROSTER_SWEEP_INTERVAL_MS = 5_000
 const MAX_SEEN_SIGNALS = 600
 
+interface MediaDevicesWithAudioOutput extends MediaDevices {
+  selectAudioOutput?: (options?: { deviceId?: string }) => Promise<MediaDeviceInfo>
+}
+
+function detectAudioOutputSelectionSupport(): boolean {
+  if (typeof document === 'undefined') return false
+  try {
+    const el = document.createElement('audio') as unknown as { setSinkId?: unknown }
+    return typeof el.setSinkId === 'function'
+  } catch {
+    return false
+  }
+}
+
+function detectSystemAudioOutputPickerSupport(): boolean {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices) return false
+  const md = navigator.mediaDevices as MediaDevicesWithAudioOutput
+  return typeof md.selectAudioOutput === 'function'
+}
+
 export interface UseCallEngineParams {
   pool: RelayPool | null
   identityManager: IdentityManager
@@ -114,6 +134,19 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const [geoCallRosters, setGeoCallRosters] = useState<Record<string, GeoCallPresence[]>>({})
   const [turnConfig, setTurnConfig] = useState<TurnServerConfig | null>(() => loadTurnConfig())
   const [recordingQuality, setRecordingQualityState] = useState<RecordingQualityPreset>(() => loadRecordingQuality())
+  const [audioOutputDevices, setAudioOutputDevices] = useState<MediaDeviceInfo[]>([])
+  const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([])
+  const [selectedAudioOutputId, setSelectedAudioOutputId] = useState<string>('default')
+  const [selectedAudioInputId, setSelectedAudioInputId] = useState<string>('default')
+
+  const supportsAudioOutputSelection = useMemo(() => detectAudioOutputSelectionSupport(), [])
+  const supportsSystemAudioOutputPicker = useMemo(() => detectSystemAudioOutputPickerSupport(), [])
+
+  const selectedAudioOutputIdRef = useRef<string>(selectedAudioOutputId)
+  selectedAudioOutputIdRef.current = selectedAudioOutputId
+
+  const selectedAudioInputIdRef = useRef<string>(selectedAudioInputId)
+  selectedAudioInputIdRef.current = selectedAudioInputId
 
   const poolRef = useRef<RelayPool | null>(pool)
   poolRef.current = pool
@@ -1045,7 +1078,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       const callId = generateCallId()
       const mesh = createMeshForCall({ callId, mode: 'dm', peerPubkey: pk })
       try {
-        await mesh.initLocalMedia(media)
+        await mesh.initLocalMedia(media, selectedAudioInputIdRef.current)
       } catch (err) {
         mesh.dispose()
         pushToastRef.current(
@@ -1161,7 +1194,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       })
 
       try {
-        await mesh.initLocalMedia(desiredMedia)
+        await mesh.initLocalMedia(desiredMedia, selectedAudioInputIdRef.current)
       } catch (err) {
         mesh.dispose()
         pushToastRef.current(
@@ -1307,7 +1340,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       })
 
       try {
-        await mesh.initLocalMedia(media)
+        await mesh.initLocalMedia(media, selectedAudioInputIdRef.current)
       } catch (err) {
         mesh.dispose()
         pushToastRef.current(
@@ -1585,7 +1618,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       })
 
       try {
-        await mesh.initLocalMedia(media)
+        await mesh.initLocalMedia(media, selectedAudioInputIdRef.current)
       } catch (err) {
         mesh.dispose()
         pushToastRef.current(
@@ -2724,6 +2757,175 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     return await meshRef.current.toggleScreenShare()
   }, [])
 
+  // Audio output (speaker / earpiece / Bluetooth) & microphone input device enumeration + live switching
+  const refreshAudioDevices = useCallback(async (): Promise<void> => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
+      return
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const outputs: MediaDeviceInfo[] = []
+      const inputs: MediaDeviceInfo[] = []
+      const seenOut = new Set<string>()
+      const seenIn = new Set<string>()
+
+      for (const dev of devices) {
+        if (!dev.deviceId) continue
+        if (dev.kind === 'audiooutput' && !seenOut.has(dev.deviceId)) {
+          seenOut.add(dev.deviceId)
+          outputs.push(dev)
+        } else if (dev.kind === 'audioinput' && !seenIn.has(dev.deviceId)) {
+          seenIn.add(dev.deviceId)
+          inputs.push(dev)
+        }
+      }
+
+      setAudioOutputDevices(outputs)
+      setAudioInputDevices(inputs)
+
+      const liveMicId = meshRef.current?.getLocalAudioDeviceId() ?? ''
+      if (liveMicId && inputs.some((d) => d.deviceId === liveMicId)) {
+        selectedAudioInputIdRef.current = liveMicId
+        setSelectedAudioInputId(liveMicId)
+      } else if (
+        selectedAudioInputIdRef.current !== 'default' &&
+        inputs.length > 0 &&
+        !inputs.some((d) => d.deviceId === selectedAudioInputIdRef.current)
+      ) {
+        selectedAudioInputIdRef.current = 'default'
+        setSelectedAudioInputId('default')
+      }
+
+      if (
+        selectedAudioOutputIdRef.current !== 'default' &&
+        outputs.length > 0 &&
+        !outputs.some((d) => d.deviceId === selectedAudioOutputIdRef.current)
+      ) {
+        selectedAudioOutputIdRef.current = 'default'
+        setSelectedAudioOutputId('default')
+      }
+    } catch {
+      // Ignore permission/enumeration errors
+    }
+  }, [])
+
+  const hasActiveCall = Boolean(activeCall)
+  useEffect(() => {
+    if (!hasActiveCall) return
+    void refreshAudioDevices()
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.addEventListener) {
+      return
+    }
+    const handleDeviceChange = () => {
+      void refreshAudioDevices()
+    }
+    navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange)
+    return () => {
+      navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange)
+    }
+  }, [hasActiveCall, refreshAudioDevices])
+
+  const selectAudioOutput = useCallback((deviceId: string) => {
+    const next = deviceId.trim() || 'default'
+    selectedAudioOutputIdRef.current = next
+    setSelectedAudioOutputId(next)
+  }, [])
+
+  const promptSystemAudioOutput = useCallback(async (): Promise<boolean> => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices) return false
+    const md = navigator.mediaDevices as MediaDevicesWithAudioOutput
+    if (typeof md.selectAudioOutput !== 'function') return false
+    try {
+      const chosen = await md.selectAudioOutput()
+      if (chosen && typeof chosen.deviceId === 'string' && chosen.deviceId) {
+        selectedAudioOutputIdRef.current = chosen.deviceId
+        setSelectedAudioOutputId(chosen.deviceId)
+        await refreshAudioDevices()
+        return true
+      }
+      return false
+    } catch {
+      // User dismissed OS picker or unsupported context
+      return false
+    }
+  }, [refreshAudioDevices])
+
+  const selectAudioInput = useCallback(
+    async (deviceId: string): Promise<boolean> => {
+      const targetId = deviceId.trim() || 'default'
+      const mesh = meshRef.current
+      if (!mesh) {
+        selectedAudioInputIdRef.current = targetId
+        setSelectedAudioInputId(targetId)
+        return true
+      }
+
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+        pushToastRef.current('warning', 'Microphone switch unavailable', 'Audio device API is not available.')
+        return false
+      }
+
+      const baseConstraints: MediaTrackConstraints = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      }
+
+      let stream: MediaStream | null = null
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio:
+            targetId === 'default'
+              ? baseConstraints
+              : { ...baseConstraints, deviceId: { exact: targetId } },
+          video: false,
+        })
+      } catch (err) {
+        if (targetId !== 'default' && err instanceof DOMException && err.name === 'OverconstrainedError') {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: { ...baseConstraints, deviceId: { ideal: targetId } },
+              video: false,
+            })
+          } catch (retryErr) {
+            pushToastRef.current(
+              'warning',
+              'Could not switch microphone',
+              retryErr instanceof Error ? retryErr.message : 'Selected microphone is unavailable.'
+            )
+            return false
+          }
+        } else {
+          pushToastRef.current(
+            'warning',
+            'Could not switch microphone',
+            err instanceof Error ? err.message : 'Selected microphone is unavailable.'
+          )
+          return false
+        }
+      }
+
+      const nextTrack = stream?.getAudioTracks()[0]
+      if (!nextTrack) {
+        stream?.getTracks().forEach((t) => t.stop())
+        return false
+      }
+
+      const replaced = await mesh.replaceAudioTrack(nextTrack)
+      if (!replaced) {
+        nextTrack.stop()
+        return false
+      }
+
+      const liveId = nextTrack.getSettings?.().deviceId || targetId
+      selectedAudioInputIdRef.current = liveId
+      setSelectedAudioInputId(liveId)
+      await refreshAudioDevices()
+      return true
+    },
+    [refreshAudioDevices]
+  )
+
   const setRecordingQuality = useCallback((quality: RecordingQualityPreset) => {
     if (!isValidRecordingQuality(quality)) return
     const changed = recordingQualityRef.current !== quality
@@ -2934,6 +3136,16 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       toggleCamera,
       toggleScreenShare,
       toggleRecording,
+      audioOutputDevices,
+      audioInputDevices,
+      selectedAudioOutputId,
+      selectedAudioInputId,
+      supportsAudioOutputSelection,
+      supportsSystemAudioOutputPicker,
+      refreshAudioDevices,
+      selectAudioOutput,
+      promptSystemAudioOutput,
+      selectAudioInput,
       getServerCallCount,
       getGeoCallPresence,
       getGeoCallCount,
@@ -2960,6 +3172,16 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       toggleCamera,
       toggleScreenShare,
       toggleRecording,
+      audioOutputDevices,
+      audioInputDevices,
+      selectedAudioOutputId,
+      selectedAudioInputId,
+      supportsAudioOutputSelection,
+      supportsSystemAudioOutputPicker,
+      refreshAudioDevices,
+      selectAudioOutput,
+      promptSystemAudioOutput,
+      selectAudioInput,
       getServerCallCount,
       getGeoCallPresence,
       getGeoCallCount,

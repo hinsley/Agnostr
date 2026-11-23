@@ -404,6 +404,7 @@ export interface AgnostrEngine {
   totalGeoMentions: number
   isChannelPinned: (geohash: string) => boolean
   togglePinChannel: (geohash: string, label?: string) => void
+  reorderPinnedChannels: (fromIndex: number, toIndex: number) => void
 
   // Direct Messages (dual-stack: Bitchat v2 + NIP-17)
   dmThreads: DmThread[]

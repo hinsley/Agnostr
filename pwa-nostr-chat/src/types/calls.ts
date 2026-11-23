@@ -144,6 +144,18 @@ export interface CallEngine {
   toggleCamera: () => Promise<boolean>
   toggleScreenShare: () => Promise<boolean>
   toggleRecording: () => Promise<void>
+  audioOutputDevices: MediaDeviceInfo[]
+  audioInputDevices: MediaDeviceInfo[]
+  selectedAudioOutputId: string
+  selectedAudioInputId: string
+  /** True when HTMLMediaElement.prototype.setSinkId is supported (Chrome/Edge/Android/Firefox desktop) */
+  supportsAudioOutputSelection: boolean
+  /** True when navigator.mediaDevices.selectAudioOutput() OS picker is available */
+  supportsSystemAudioOutputPicker: boolean
+  refreshAudioDevices: () => Promise<void>
+  selectAudioOutput: (deviceId: string) => void
+  promptSystemAudioOutput: () => Promise<boolean>
+  selectAudioInput: (deviceId: string) => Promise<boolean>
   getServerCallCount: (serverId: string) => number
   getGeoCallPresence: (geohash: string) => GeoCallPresence[]
   getGeoCallCount: (geohash: string) => number

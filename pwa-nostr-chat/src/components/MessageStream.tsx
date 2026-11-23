@@ -677,8 +677,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   </h2>
                   <p className="ag-empty-sub">
                     {activeIsTopic
-                      ? 'Live ephemeral topic channel (kind 23333) — say hello to start chatting.'
-                      : 'Messages here are live and ephemeral — say hello to start chatting nearby.'}
+                      ? 'Live topic channel (kind 23333) — say hello to start chatting.'
+                      : 'Say hello to start chatting with people nearby.'}
                   </p>
                 </div>
 

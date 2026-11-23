@@ -8,8 +8,6 @@ import {
   Map as MapIcon,
   PanelLeft,
   Phone,
-  Pin,
-  PinOff,
   Radio,
   Search,
   ShieldCheck,
@@ -96,7 +94,6 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   )
   const isGeoCallFull =
     !isDm && !isServer && !inThisGeoCall && geoCallCount >= engine.calls.maxParticipants
-  const isGeoPinned = !isDm && !isServer && engine.isChannelPinned(engine.activeGeohash)
   const isDisconnected = engine.connectedRelayCount === 0
 
   const handleDmCallClick = (media: 'audio' | 'video') => {
@@ -150,10 +147,10 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   }
 
   const onlineSubtitle = isTopicRadio
-    ? 'Named Radio · Ephemeral'
+    ? 'Named Radio'
     : engine.presence.isUncertainCount
-      ? 'Private precision · Ephemeral'
-      : `${engine.presence.onlineCount} online · Ephemeral`
+      ? 'Private precision'
+      : `${engine.presence.onlineCount} online`
 
   return (
     <header className="ag-header">
@@ -401,30 +398,6 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
             </>
           ) : (
             <>
-              <button
-                type="button"
-                className={`ag-circle-btn ${isGeoPinned ? 'active' : ''}`}
-                onClick={() =>
-                  engine.togglePinChannel(
-                    engine.activeGeohash,
-                    isTopicRadio ? undefined : engine.cell.nearestCity || undefined
-                  )
-                }
-                title={
-                  isGeoPinned
-                    ? `Unpin ${radioLabel} from Radio tab`
-                    : `Pin ${radioLabel} to Radio tab`
-                }
-                aria-label={
-                  isGeoPinned
-                    ? `Unpin ${radioLabel}`
-                    : `Pin ${radioLabel}`
-                }
-                aria-pressed={isGeoPinned}
-              >
-                {isGeoPinned ? <PinOff size={17} /> : <Pin size={17} />}
-              </button>
-
               <button
                 type="button"
                 className={`ag-header-call-btn ${inThisGeoCall || geoCallCount > 0 ? 'has-peers' : ''} ${inThisGeoCall ? 'active-ok' : ''}`}

@@ -32,21 +32,21 @@
   font-family: var(--font-sans) !important;
 }
 
-/* Subtle theme-matched basemap tinting (neutral cool dark-slate on Carbon) */
+/* Crisp basemap clarity (lift Esri dark canvas slightly so streets/labels shine; native on Light) */
 .ag-radar-map-host[data-map-theme='phosphor'] .leaflet-tile-pane {
-  filter: brightness(0.92) contrast(1.08) saturate(0.85);
+  filter: brightness(1.16) contrast(1.06) saturate(0.95);
 }
 
 .ag-radar-map-host[data-map-theme='amber'] .leaflet-tile-pane {
-  filter: sepia(0.36) hue-rotate(-12deg) saturate(1.12) brightness(0.92) contrast(1.06);
+  filter: sepia(0.2) hue-rotate(-10deg) saturate(1.05) brightness(1.14) contrast(1.05);
 }
 
 .ag-radar-map-host[data-map-theme='obsidian'] .leaflet-tile-pane {
-  filter: sepia(0.18) hue-rotate(196deg) saturate(1.18) brightness(0.94) contrast(1.06);
+  filter: sepia(0.1) hue-rotate(196deg) saturate(1.08) brightness(1.15) contrast(1.05);
 }
 
 .ag-radar-map-host[data-map-theme='daylight'] .leaflet-tile-pane {
-  filter: saturate(0.84) contrast(1.03) brightness(0.99);
+  filter: none;
 }
 
 /* Compact unobtrusive Leaflet attribution */
@@ -75,18 +75,19 @@
 
 /* --------------------------------------------------------------------------
    Geohash Grid Rectangles, Sub-Zones, Pulse Zones & Focus Highlights
+   Ultra-transparent fills + crisp hairline strokes so Esri basemap stays legible
    -------------------------------------------------------------------------- */
 .ag-gh-rect {
-  stroke: color-mix(in srgb, var(--accent) 40%, var(--border-strong));
-  stroke-opacity: 0.55;
+  stroke: color-mix(in srgb, var(--accent) 44%, var(--border-strong));
+  stroke-opacity: 0.22;
   fill: var(--accent);
-  fill-opacity: 0.025;
+  fill-opacity: 0;
   transition: fill-opacity 120ms ease, stroke-opacity 120ms ease;
 }
 
 .ag-gh-rect:hover {
-  stroke-opacity: 0.92;
-  fill-opacity: 0.11;
+  stroke-opacity: 0.62;
+  fill-opacity: 0.06;
 }
 
 .ag-gh-rect-under-focus {
@@ -95,75 +96,75 @@
 }
 
 [data-theme='daylight'] .ag-gh-rect {
-  stroke: rgba(37, 99, 235, 0.5);
-  stroke-opacity: 0.62;
-  fill: rgba(37, 99, 235, 0.04);
+  stroke: rgba(37, 99, 235, 0.42);
+  stroke-opacity: 0.26;
+  fill: rgba(37, 99, 235, 0.06);
+  fill-opacity: 0;
 }
 
 [data-theme='daylight'] .ag-gh-rect:hover {
-  fill-opacity: 0.14;
+  stroke-opacity: 0.62;
+  fill-opacity: 0.07;
 }
 
 /* Sub-Zone 32× Base32 Drill-Down Cells */
 .ag-gh-sub-rect {
   stroke: var(--accent-secondary);
-  stroke-opacity: 0.78;
+  stroke-opacity: 0.48;
   fill: var(--accent-secondary);
-  fill-opacity: 0.06;
-  transition: fill-opacity 110ms ease;
+  fill-opacity: 0.025;
+  transition: fill-opacity 110ms ease, stroke-opacity 110ms ease;
 }
 
 .ag-gh-sub-rect:hover {
-  fill-opacity: 0.18;
-  stroke-opacity: 1;
+  fill-opacity: 0.09;
+  stroke-opacity: 0.82;
 }
 
 .ag-gh-sub-rect.selected {
-  fill-opacity: 0.2;
+  fill-opacity: 0.11;
 }
 
 /* Live Global Pulse Zones */
 .ag-gh-pulse-rect {
   stroke: var(--accent);
-  stroke-opacity: 0.72;
+  stroke-opacity: 0.45;
   fill: var(--accent);
-  fill-opacity: 0.13;
+  fill-opacity: 0.07;
 }
 
 .ag-gh-pulse-rect:hover {
-  fill-opacity: 0.22;
-  stroke-opacity: 1;
+  fill-opacity: 0.12;
+  stroke-opacity: 0.72;
 }
 
 .ag-gh-pulse-rect.active {
-  fill-opacity: 0.16;
+  fill-opacity: 0.1;
 }
 
 /* Active Tuned Geohash Cell */
 .ag-gh-active-rect {
   stroke: var(--accent);
-  stroke-opacity: 1;
+  stroke-opacity: 0.85;
   fill: var(--accent);
-  fill-opacity: 0.18;
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 55%, transparent));
+  fill-opacity: 0.1;
 }
 
 /* Selected / Inspected Geohash Cell (distinct from active tuned cell) */
 .ag-gh-selected-rect {
   stroke: var(--accent-secondary);
-  stroke-opacity: 1;
+  stroke-opacity: 0.85;
   fill: var(--accent-secondary);
-  fill-opacity: 0.18;
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent-secondary) 55%, transparent));
+  fill-opacity: 0.1;
 }
 
 /* Teleport Dashed Vector Line */
 .ag-gh-teleport-line {
   stroke: var(--accent-secondary);
-  stroke-opacity: 0.85;
+  stroke-opacity: 0.8;
 }
 
-/* Centered Geohash Zone Labels (Non-Cluttered DivIcons) */
+/* Centered Geohash Zone Labels (Subtle & Unobtrusive when Unselected) */
 .ag-gh-label-host {
   background: transparent !important;
   border: none !important;
@@ -175,20 +176,22 @@
   left: 0;
   top: 0;
   transform: translate(-50%, -50%);
-  padding: 1px 4px;
+  padding: 0 3px;
   border-radius: 3px;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 9px;
+  font-weight: 500;
   letter-spacing: 0.02em;
-  color: color-mix(in srgb, var(--text-primary) 82%, transparent);
-  background-color: color-mix(in srgb, var(--bg-canvas) 62%, transparent);
+  opacity: 0.56;
+  color: var(--text-secondary);
+  background-color: color-mix(in srgb, var(--bg-canvas) 38%, transparent);
   white-space: nowrap;
   pointer-events: none;
 }
 
 [data-theme='daylight'] .ag-gh-label {
-  color: #0f172a;
-  background-color: rgba(255, 255, 255, 0.78);
+  color: rgba(15, 23, 42, 0.72);
+  background-color: rgba(255, 255, 255, 0.52);
+  opacity: 0.66;
 }
 
 .ag-gh-sub-label {
@@ -198,17 +201,18 @@
   transform: translate(-50%, -50%);
   padding: 0 3px;
   border-radius: 3px;
-  font-size: 9.5px;
-  font-weight: 700;
+  font-size: 9px;
+  font-weight: 600;
+  opacity: 0.76;
   color: var(--accent-secondary);
-  background-color: color-mix(in srgb, var(--bg-canvas) 74%, transparent);
+  background-color: color-mix(in srgb, var(--bg-canvas) 52%, transparent);
   white-space: nowrap;
   pointer-events: none;
 }
 
 [data-theme='daylight'] .ag-gh-sub-label {
   color: #0369a1;
-  background-color: rgba(255, 255, 255, 0.82);
+  background-color: rgba(255, 255, 255, 0.66);
 }
 
 .ag-gh-active-label,

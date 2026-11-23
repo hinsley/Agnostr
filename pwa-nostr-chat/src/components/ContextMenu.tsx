@@ -66,6 +66,12 @@ const EDITABLE_INPUT_TYPES = new Set([
 ])
 
 const VIEWPORT_EDGE_PAD = 8
+const LONG_PRESS_DURATION_MS = 480
+const LONG_PRESS_MOVE_TOLERANCE_PX = 10
+const LONG_PRESS_CLICK_SUPPRESS_MS = 700
+const LONG_PRESS_NATIVE_CTX_GUARD_MS = 380
+const LONG_PRESS_SKIP_SELECTOR =
+  'input, textarea, select, [contenteditable="true"], [contenteditable=""], [data-drag-handle="true"], [data-no-long-press="true"], .leaflet-container'
 
 const ContextMenuContext = createContext<ContextMenuApi | null>(null)
 
@@ -327,6 +333,7 @@ export function ContextMenuProvider({
 
   const menuRef = useRef<HTMLDivElement | null>(null)
   const handledEventsRef = useRef<WeakSet<Event>>(new WeakSet())
+  const openedEventsRef = useRef<WeakSet<Event>>(new WeakSet())
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([])
 
   const closeContextMenu = useCallback(() => {
@@ -348,6 +355,7 @@ export function ContextMenuProvider({
         return
       }
 
+      openedEventsRef.current.add(nativeEvent)
       setCoords({ left: e.clientX, top: e.clientY })
       setFocusedIndex(-1)
       setMenuState({
@@ -381,6 +389,7 @@ export function ContextMenuProvider({
       }
 
       handledEventsRef.current.add(e)
+      openedEventsRef.current.add(e)
       setCoords({ left: e.clientX, top: e.clientY })
       setFocusedIndex(-1)
       setMenuState({
@@ -395,6 +404,163 @@ export function ContextMenuProvider({
       document.removeEventListener('contextmenu', handleGlobalContextMenu)
     }
   }, [closeContextMenu])
+
+  // Global mobile touch long-press synthesis (480ms stillness within 10px -> synthetic contextmenu)
+  // Cancels immediately on scroll/swipe (>10px), multi-touch, or editable/drag-handle targets.
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return
+
+    let timerId: number | null = null
+    let startX = 0
+    let startY = 0
+    let lastX = 0
+    let lastY = 0
+    let pressTarget: Element | null = null
+    let openedOnCurrentTouch = false
+    let suppressClickUntil = 0
+    let lastSynthesizedAt = 0
+
+    const clearPending = () => {
+      if (timerId !== null) {
+        window.clearTimeout(timerId)
+        timerId = null
+      }
+      pressTarget = null
+    }
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        clearPending()
+        return
+      }
+      const rawTarget = e.target
+      if (!(rawTarget instanceof Element)) {
+        clearPending()
+        return
+      }
+      if (menuRef.current && menuRef.current.contains(rawTarget)) {
+        clearPending()
+        return
+      }
+      if (rawTarget.closest(LONG_PRESS_SKIP_SELECTOR)) {
+        clearPending()
+        return
+      }
+
+      clearPending()
+      const touch = e.touches[0]
+      startX = touch.clientX
+      startY = touch.clientY
+      lastX = touch.clientX
+      lastY = touch.clientY
+      pressTarget = rawTarget
+      openedOnCurrentTouch = false
+
+      timerId = window.setTimeout(() => {
+        const target = pressTarget
+        timerId = null
+        pressTarget = null
+        if (!target || !target.isConnected) return
+
+        const syntheticEvent = new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: lastX,
+          clientY: lastY,
+          screenX: lastX,
+          screenY: lastY,
+          button: 2,
+          buttons: 2,
+          view: window,
+        })
+        target.dispatchEvent(syntheticEvent)
+
+        if (openedEventsRef.current.has(syntheticEvent)) {
+          openedOnCurrentTouch = true
+          lastSynthesizedAt = Date.now()
+          suppressClickUntil = lastSynthesizedAt + LONG_PRESS_CLICK_SUPPRESS_MS
+          try {
+            navigator.vibrate?.(12)
+          } catch {
+            // Ignore unsupported/blocked vibration
+          }
+          try {
+            window.getSelection?.()?.removeAllRanges?.()
+          } catch {
+            // Ignore selection errors
+          }
+        }
+      }, LONG_PRESS_DURATION_MS)
+    }
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (timerId === null) return
+      if (e.touches.length !== 1) {
+        clearPending()
+        return
+      }
+      const touch = e.touches[0]
+      const dx = touch.clientX - startX
+      const dy = touch.clientY - startY
+      if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_TOLERANCE_PX) {
+        clearPending()
+        return
+      }
+      lastX = touch.clientX
+      lastY = touch.clientY
+    }
+
+    const onTouchEnd = (e: TouchEvent) => {
+      clearPending()
+      if (openedOnCurrentTouch) {
+        openedOnCurrentTouch = false
+        suppressClickUntil = Date.now() + LONG_PRESS_CLICK_SUPPRESS_MS
+        if (e.cancelable) {
+          e.preventDefault()
+        }
+      }
+    }
+
+    const onTouchCancel = () => {
+      clearPending()
+      openedOnCurrentTouch = false
+    }
+
+    const onCaptureClick = (e: MouseEvent) => {
+      if (Date.now() >= suppressClickUntil) return
+      if (menuRef.current && e.target instanceof Node && menuRef.current.contains(e.target)) {
+        suppressClickUntil = 0
+        return
+      }
+      suppressClickUntil = 0
+      e.preventDefault()
+      e.stopPropagation()
+    }
+
+    const onCaptureContextMenu = (e: MouseEvent) => {
+      if (e.isTrusted && Date.now() - lastSynthesizedAt < LONG_PRESS_NATIVE_CTX_GUARD_MS) {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+      }
+    }
+
+    document.addEventListener('touchstart', onTouchStart, { passive: true })
+    document.addEventListener('touchmove', onTouchMove, { passive: true })
+    document.addEventListener('touchend', onTouchEnd, { passive: false })
+    document.addEventListener('touchcancel', onTouchCancel, { passive: true })
+    document.addEventListener('click', onCaptureClick, true)
+    document.addEventListener('contextmenu', onCaptureContextMenu, true)
+
+    return () => {
+      clearPending()
+      document.removeEventListener('touchstart', onTouchStart)
+      document.removeEventListener('touchmove', onTouchMove)
+      document.removeEventListener('touchend', onTouchEnd)
+      document.removeEventListener('touchcancel', onTouchCancel)
+      document.removeEventListener('click', onCaptureClick, true)
+      document.removeEventListener('contextmenu', onCaptureContextMenu, true)
+    }
+  }, [])
 
   // Clamp rendered menu strictly inside the visual viewport
   useLayoutEffect(() => {

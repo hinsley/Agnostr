@@ -10,7 +10,9 @@ import {
   getGeohashCellsInBounds,
   getRecommendedPrecisionForZoom,
   getZoomForPrecision,
+  isValidGeohash,
 } from '../lib/geohash.ts'
+import { isTopicChannel } from '../lib/radioChannel.ts'
 
 export type PrecisionSelection = 'auto' | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
 
@@ -98,12 +100,21 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     const [viewportTick, setViewportTick] = useState(0)
 
     // Keep latest callbacks & props in refs so Leaflet event listeners never go stale
+    const safeActiveGeohash =
+      activeGeohash && !isTopicChannel(activeGeohash) && isValidGeohash(activeGeohash)
+        ? activeGeohash
+        : '9q8y'
+    const safeSelectedGeohash =
+      selectedGeohash && !isTopicChannel(selectedGeohash) && isValidGeohash(selectedGeohash)
+        ? selectedGeohash
+        : null
+
     const onSelectRef = useRef(onSelectGeohash)
     const onTuneRef = useRef(onTuneGeohash)
     const onViewportInfoRef = useRef(onViewportInfoChange)
     const precisionModeRef = useRef(precisionMode)
     const modeRef = useRef(mode)
-    const prevActiveRef = useRef<string>(activeGeohash)
+    const prevActiveRef = useRef<string>(safeActiveGeohash)
     const tileKindRef = useRef<'dark' | 'light'>(theme === 'daylight' ? 'light' : 'dark')
 
     useEffect(() => {
@@ -120,12 +131,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       options?: { animate?: boolean; zoom?: number },
     ) => {
       const center = decodeCenter(geohash)
-      const targetZoom =
+        const targetZoom =
         options?.zoom ??
         Math.max(
           2,
           Math.min(
-            18,
+            19,
             modeRef.current === 'compact'
               ? Math.max(2, getZoomForPrecision(geohash.length) - 1)
               : getZoomForPrecision(geohash.length),
@@ -145,20 +156,20 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       ref,
       () => ({
         zoomIn() {
-          mapRef.current?.zoomIn()
+          mapRef.current?.zoomIn(0.75)
         },
         zoomOut() {
-          mapRef.current?.zoomOut()
+          mapRef.current?.zoomOut(0.75)
         },
         flyToGeohash(geohash: string, options?: { animate?: boolean; zoom?: number }) {
           const map = mapRef.current
-          if (!map || !geohash) return
+          if (!map || !geohash || isTopicChannel(geohash) || !isValidGeohash(geohash)) return
           flyToCellInternal(map, geohash, options)
         },
         flyToCoords(lat: number, lon: number, zoom = 11) {
           const map = mapRef.current
           if (!map) return
-          map.flyTo([lat, lon], Math.max(2, Math.min(18, zoom)), {
+          map.flyTo([lat, lon], Math.max(2, Math.min(19, zoom)), {
             duration: 0.65,
             easeLinearity: 0.25,
           })
@@ -180,19 +191,23 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const el = containerRef.current
       if (!el) return
 
-      const initialCenter = decodeCenter(activeGeohash)
+      const initialCenter = decodeCenter(safeActiveGeohash)
       const initialZoom =
         mode === 'compact'
-          ? Math.max(2, getZoomForPrecision(activeGeohash.length) - 1)
-          : getZoomForPrecision(activeGeohash.length)
+          ? Math.max(2, getZoomForPrecision(safeActiveGeohash.length) - 1)
+          : getZoomForPrecision(safeActiveGeohash.length)
 
       const map = L.map(el, {
         center: [initialCenter.lat, initialCenter.lon],
         zoom: initialZoom,
         minZoom: 2,
-        maxZoom: 18,
-        zoomSnap: 1,
-        zoomDelta: 1,
+        maxZoom: 19,
+        zoomSnap: 0,
+        zoomDelta: 0.5,
+        wheelPxPerZoomLevel: 90,
+        wheelDebounceTime: 25,
+        zoomAnimation: true,
+        inertia: true,
         zoomControl: false,
         attributionControl: true,
         doubleClickZoom: false,
@@ -209,8 +224,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       const isLight = tileKindRef.current === 'light'
       const tileLayer = L.tileLayer(isLight ? ESRI_TOPO_URL : ESRI_DARK_BASE_URL, {
-        maxNativeZoom: isLight ? 18 : 16,
-        maxZoom: 18,
+        maxNativeZoom: isLight ? 17 : 16,
+        maxZoom: 19,
         attribution: TILE_ATTRIBUTION,
       }).addTo(map)
 
@@ -218,8 +233,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         ? null
         : L.tileLayer(ESRI_DARK_REF_URL, {
             maxNativeZoom: 16,
-            maxZoom: 18,
-            opacity: 0.8,
+            maxZoom: 19,
+            opacity: 0.95,
             attribution: '',
           }).addTo(map)
 
@@ -339,10 +354,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const map = mapRef.current
       if (!map) return
 
-      // Halt any in-flight flyTo animation and snap to an integer zoom to prevent fractional-zoom 404s
       map.stop()
-      const snappedZoom = Math.max(2, Math.min(18, Math.round(map.getZoom())))
-      map.setView(map.getCenter(), snappedZoom, { animate: false })
 
       if (tileLayerRef.current) {
         tileLayerRef.current.remove()
@@ -355,16 +367,16 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       const isLight = nextKind === 'light'
       tileLayerRef.current = L.tileLayer(isLight ? ESRI_TOPO_URL : ESRI_DARK_BASE_URL, {
-        maxNativeZoom: isLight ? 18 : 16,
-        maxZoom: 18,
+        maxNativeZoom: isLight ? 17 : 16,
+        maxZoom: 19,
         attribution: TILE_ATTRIBUTION,
       }).addTo(map)
 
       if (!isLight) {
         refTileLayerRef.current = L.tileLayer(ESRI_DARK_REF_URL, {
           maxNativeZoom: 16,
-          maxZoom: 18,
-          opacity: 0.8,
+          maxZoom: 19,
+          opacity: 0.95,
           attribution: '',
         }).addTo(map)
       }
@@ -372,12 +384,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
     // 3. Smoothly re-frame map whenever activeGeohash changes externally
     useEffect(() => {
-      if (prevActiveRef.current === activeGeohash) return
-      prevActiveRef.current = activeGeohash
+      if (prevActiveRef.current === safeActiveGeohash) return
+      prevActiveRef.current = safeActiveGeohash
       const map = mapRef.current
       if (!map) return
-      flyToCellInternal(map, activeGeohash, { animate: true })
-    }, [activeGeohash])
+      flyToCellInternal(map, safeActiveGeohash, { animate: true })
+    }, [safeActiveGeohash])
 
     // 4. Emit updated effective precision when precisionMode changes
     useEffect(() => {
@@ -412,13 +424,15 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         mode === 'compact' ? 96 : 180,
       )
 
-      const focusSet = new Set<string>([activeGeohash])
-      if (selectedGeohash) focusSet.add(selectedGeohash)
+      const focusSet = new Set<string>([safeActiveGeohash])
+      if (safeSelectedGeohash) focusSet.add(safeSelectedGeohash)
 
       // Skip plain center cell labels whenever a visible Global Pulse badge occupies the exact geohash
       const pulseOccupiedSet = new Set<string>()
       if (showPulse && pulseRooms.length > 0) {
-        const visiblePulse = pulseRooms.slice(0, mode === 'compact' ? 24 : 44)
+        const visiblePulse = pulseRooms
+          .filter((r) => !isTopicChannel(r.geohash) && isValidGeohash(r.geohash))
+          .slice(0, mode === 'compact' ? 24 : 44)
         for (const room of visiblePulse) {
           pulseOccupiedSet.add(room.geohash)
         }
@@ -435,7 +449,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           ],
           {
             className: isFocus ? 'ag-gh-rect ag-gh-rect-under-focus' : 'ag-gh-rect',
-            weight: 1,
+            weight: 0.75,
             interactive: true,
           },
         )
@@ -475,7 +489,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
         }
       }
-    }, [viewportTick, precisionMode, activeGeohash, selectedGeohash, showPulse, pulseRooms, mode])
+    }, [viewportTick, precisionMode, safeActiveGeohash, safeSelectedGeohash, showPulse, pulseRooms, mode])
 
     // 6. Render Sub-Zone 32× Drill-Down Overlay
     useEffect(() => {
@@ -486,15 +500,15 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       layer.clearLayers()
       if (!showSubZones) return
 
-      const parentHash = selectedGeohash || activeGeohash
+      const parentHash = safeSelectedGeohash || safeActiveGeohash
       if (!parentHash || parentHash.length >= 8) return
 
       const children = getChildGeohashes(parentHash)
       for (const child of children) {
         const latMin = Math.max(-85, child.bounds.latMin)
         const latMax = Math.min(85, child.bounds.latMax)
-        const isChildActive = child.geohash === activeGeohash
-        const isChildSelected = child.geohash === selectedGeohash
+        const isChildActive = child.geohash === safeActiveGeohash
+        const isChildSelected = child.geohash === safeSelectedGeohash
 
         const rect = L.rectangle(
           [
@@ -503,7 +517,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           ],
           {
             className: `ag-gh-sub-rect${isChildActive ? ' active' : ''}${isChildSelected ? ' selected' : ''}`,
-            weight: 1.15,
+            weight: 0.9,
             dashArray: '3 3',
             interactive: true,
           },
@@ -548,7 +562,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }).addTo(layer)
         }
       }
-    }, [viewportTick, showSubZones, activeGeohash, selectedGeohash, mode])
+    }, [viewportTick, showSubZones, safeActiveGeohash, safeSelectedGeohash, mode])
 
     // 7. Render Live Global Pulse Zones & Sonar Beacons
     useEffect(() => {
@@ -559,9 +573,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       layer.clearLayers()
       if (!showPulse || pulseRooms.length === 0) return
 
-      const visible = pulseRooms.slice(0, mode === 'compact' ? 24 : 44)
+      const visible = pulseRooms
+        .filter((r) => !isTopicChannel(r.geohash) && isValidGeohash(r.geohash))
+        .slice(0, mode === 'compact' ? 24 : 44)
       const z = map.getZoom()
-      const subZoneCandidate = showSubZones ? selectedGeohash || activeGeohash : null
+      const subZoneCandidate = showSubZones ? safeSelectedGeohash || safeActiveGeohash : null
       const subZoneParent =
         subZoneCandidate && subZoneCandidate.length < 8 ? subZoneCandidate : null
 
@@ -569,8 +585,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         const b = decodeBounds(room.geohash)
         const latMin = Math.max(-85, b.latMin)
         const latMax = Math.min(85, b.latMax)
-        const isCurrent = room.geohash === activeGeohash
-        const isFocused = isCurrent || room.geohash === selectedGeohash
+        const isCurrent = room.geohash === safeActiveGeohash
+        const isFocused = isCurrent || room.geohash === safeSelectedGeohash
 
         // Highlight the live geohash zone polygon itself
         const poly = L.rectangle(
@@ -580,7 +596,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           ],
           {
             className: isCurrent ? 'ag-gh-pulse-rect active' : 'ag-gh-pulse-rect',
-            weight: 1.4,
+            weight: 1.15,
             interactive: true,
           },
         )
@@ -626,7 +642,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
         beacon.addTo(layer)
       }
-    }, [viewportTick, showPulse, showSubZones, pulseRooms, activeGeohash, selectedGeohash, mode])
+    }, [viewportTick, showPulse, showSubZones, pulseRooms, safeActiveGeohash, safeSelectedGeohash, mode])
 
     // 8. Render Active Tuned Zone & Selected / Inspected Zone
     useEffect(() => {
@@ -637,28 +653,28 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       layer.clearLayers()
 
       // When 32x sub-zones are overlaid on a cell, hide its centered parent pill so center Base32 children stay clear
-      const subZoneCandidate = showSubZones ? selectedGeohash || activeGeohash : null
+      const subZoneCandidate = showSubZones ? safeSelectedGeohash || safeActiveGeohash : null
       const subZoneParent =
         subZoneCandidate && subZoneCandidate.length < 8 ? subZoneCandidate : null
 
       // Active tuned geohash rectangle + badge
-      if (activeGeohash) {
-        const activeCenter = decodeCenter(activeGeohash)
-        const activeRect = L.rectangle(getBoundsTuple(activeGeohash), {
+      if (safeActiveGeohash) {
+        const activeCenter = decodeCenter(safeActiveGeohash)
+        const activeRect = L.rectangle(getBoundsTuple(safeActiveGeohash), {
           className: 'ag-gh-active-rect',
-          weight: 2.2,
+          weight: 2,
           interactive: false,
         })
         activeRect.addTo(layer)
 
-        if (subZoneParent !== activeGeohash) {
+        if (subZoneParent !== safeActiveGeohash) {
           L.marker([activeCenter.lat, activeCenter.lon], {
             interactive: false,
             keyboard: false,
             zIndexOffset: 300,
             icon: L.divIcon({
               className: 'ag-gh-label-host',
-              html: `<span class="ag-gh-active-label mono">#${escapeHtml(activeGeohash)}</span>`,
+              html: `<span class="ag-gh-active-label mono">#${escapeHtml(safeActiveGeohash)}</span>`,
               iconSize: [0, 0],
             }),
           }).addTo(layer)
@@ -666,30 +682,30 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       }
 
       // Selected / Inspected geohash rectangle + badge (distinct from active tuned cell)
-      if (selectedGeohash && selectedGeohash !== activeGeohash) {
-        const selCenter = decodeCenter(selectedGeohash)
-        const selRect = L.rectangle(getBoundsTuple(selectedGeohash), {
+      if (safeSelectedGeohash && safeSelectedGeohash !== safeActiveGeohash) {
+        const selCenter = decodeCenter(safeSelectedGeohash)
+        const selRect = L.rectangle(getBoundsTuple(safeSelectedGeohash), {
           className: 'ag-gh-selected-rect',
-          weight: 2.2,
+          weight: 2,
           dashArray: '6 4',
           interactive: false,
         })
         selRect.addTo(layer)
 
-        if (subZoneParent !== selectedGeohash) {
+        if (subZoneParent !== safeSelectedGeohash) {
           L.marker([selCenter.lat, selCenter.lon], {
             interactive: false,
             keyboard: false,
             zIndexOffset: 400,
             icon: L.divIcon({
               className: 'ag-gh-label-host',
-              html: `<span class="ag-gh-selected-label mono">#${escapeHtml(selectedGeohash)}</span>`,
+              html: `<span class="ag-gh-selected-label mono">#${escapeHtml(safeSelectedGeohash)}</span>`,
               iconSize: [0, 0],
             }),
           }).addTo(layer)
         }
       }
-    }, [activeGeohash, selectedGeohash, showSubZones, viewportTick])
+    }, [safeActiveGeohash, safeSelectedGeohash, showSubZones, viewportTick])
 
     // 9. Render Physical GPS Beacon + Teleport Vector Polyline
     useEffect(() => {
@@ -699,8 +715,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       layer.clearLayers()
       if (!userCoords) return
 
-      if (isTeleported && activeGeohash) {
-        const activeCenter = decodeCenter(activeGeohash)
+      if (isTeleported && safeActiveGeohash) {
+        const activeCenter = decodeCenter(safeActiveGeohash)
         L.polyline(
           [
             [userCoords.lat, userCoords.lon],
@@ -726,7 +742,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           iconAnchor: [9, 9],
         }),
       }).addTo(layer)
-    }, [userCoords, isTeleported, activeGeohash])
+    }, [userCoords, isTeleported, safeActiveGeohash])
 
     return (
       <div
@@ -736,7 +752,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         <div
           ref={containerRef}
           className="ag-radar-leaflet-canvas"
-          aria-label={`Interactive zoomable geohash map centered on #${activeGeohash}`}
+          aria-label={`Interactive zoomable geohash map centered on #${safeActiveGeohash}`}
         />
 
         {/* Desktop hover coordinate & live geohash readout */}

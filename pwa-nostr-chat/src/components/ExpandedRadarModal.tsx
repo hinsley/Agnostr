@@ -24,8 +24,10 @@ import {
   formatCellDimensions,
   formatCoords,
   getZoomForPrecision,
+  isValidGeohash,
   resolveGeohashOrCity,
 } from '../lib/geohash.ts'
+import { isTopicChannel } from '../lib/radioChannel.ts'
 import {
   TacticalGeohashMap,
   type PrecisionSelection,
@@ -63,9 +65,19 @@ export function ExpandedRadarModal({
   const { activeGeohash, location, pulseRooms, settings } = engine
   const mapRef = useRef<TacticalGeohashMapHandle | null>(null)
 
-  const [selectedGeohash, setSelectedGeohash] = useState<string>(activeGeohash)
+  const safeActiveGeo =
+    activeGeohash && !isTopicChannel(activeGeohash) && isValidGeohash(activeGeohash)
+      ? activeGeohash
+      : location.localGeohashes[4] || '9q8y'
+
+  const geoPulseRooms = useMemo(
+    () => pulseRooms.filter((r) => !isTopicChannel(r.geohash) && isValidGeohash(r.geohash)),
+    [pulseRooms],
+  )
+
+  const [selectedGeohash, setSelectedGeohash] = useState<string>(safeActiveGeo)
   const [precisionMode, setPrecisionMode] = useState<PrecisionSelection>('auto')
-  const [effectivePrecision, setEffectivePrecision] = useState<number>(activeGeohash.length)
+  const [effectivePrecision, setEffectivePrecision] = useState<number>(safeActiveGeo.length)
   const [showSubZones, setShowSubZones] = useState(false)
   const [pulseDrawerOpen, setPulseDrawerOpen] = useState(false)
   const [searchDraft, setSearchDraft] = useState('')
@@ -74,10 +86,10 @@ export function ExpandedRadarModal({
   // Reset inspection focus when modal opens
   useEffect(() => {
     if (!open) return
-    setSelectedGeohash(activeGeohash)
+    setSelectedGeohash(safeActiveGeo)
     setPulseDrawerOpen(false)
     setSearchError(null)
-  }, [open, activeGeohash])
+  }, [open, safeActiveGeo])
 
   // Escape closes pulse drawer first, then modal
   useEffect(() => {
@@ -96,7 +108,10 @@ export function ExpandedRadarModal({
     return () => window.removeEventListener('keydown', onKey)
   }, [open, pulseDrawerOpen, onClose])
 
-  const inspectedHash = selectedGeohash || activeGeohash
+  const inspectedHash =
+    selectedGeohash && !isTopicChannel(selectedGeohash) && isValidGeohash(selectedGeohash)
+      ? selectedGeohash
+      : safeActiveGeo
   const localFullGeohash = location.localGeohashes[8] || location.localGeohashes[7]
 
   const inspectedCell = useMemo(
@@ -115,16 +130,16 @@ export function ExpandedRadarModal({
   }, [location.localGeohashes, inspectedCell.precision, inspectedCell.geohash])
 
   const matchingPulse: PulseRoom | null = useMemo(() => {
-    const exact = pulseRooms.find((r) => r.geohash === inspectedCell.geohash)
+    const exact = geoPulseRooms.find((r) => r.geohash === inspectedCell.geohash)
     if (exact) return exact
     return (
-      pulseRooms.find(
+      geoPulseRooms.find(
         (r) =>
           r.geohash.startsWith(inspectedCell.geohash) ||
           inspectedCell.geohash.startsWith(r.geohash),
       ) ?? null
     )
-  }, [pulseRooms, inspectedCell.geohash])
+  }, [geoPulseRooms, inspectedCell.geohash])
 
   const handleViewportInfoChange = useCallback(
     (info: { zoom: number; effectivePrecision: number }) => {
@@ -212,9 +227,9 @@ export function ExpandedRadarModal({
   }
 
   const handleCenterActive = () => {
-    setSelectedGeohash(activeGeohash)
+    setSelectedGeohash(safeActiveGeo)
     onPlaySound?.('click')
-    mapRef.current?.flyToGeohash(activeGeohash, { animate: true })
+    mapRef.current?.flyToGeohash(safeActiveGeo, { animate: true })
   }
 
   const handleLocateMe = async () => {
@@ -262,12 +277,12 @@ export function ExpandedRadarModal({
           ref={mapRef}
           mode="expanded"
           theme={settings.theme}
-          activeGeohash={activeGeohash}
+          activeGeohash={safeActiveGeo}
           selectedGeohash={inspectedHash}
           precisionMode={precisionMode}
           showSubZones={showSubZones}
           showPulse={true}
-          pulseRooms={pulseRooms}
+          pulseRooms={geoPulseRooms}
           userCoords={location.coords}
           isTeleported={engine.isTeleported}
           onSelectGeohash={handleSelectZone}
@@ -313,7 +328,7 @@ export function ExpandedRadarModal({
               title="Browse live Global Pulse channels"
             >
               <span className="ag-led ag-led-ok ag-led-pulse" />
-              <span>{pulseRooms.length} live</span>
+              <span>{geoPulseRooms.length} live</span>
             </button>
 
             <button
@@ -378,13 +393,13 @@ export function ExpandedRadarModal({
               </button>
             </div>
 
-            {pulseRooms.length === 0 ? (
+            {geoPulseRooms.length === 0 ? (
               <p className="ag-field-hint" style={{ padding: '0.5rem' }}>
                 Listening across global relays for active geohash channels…
               </p>
             ) : (
               <div className="ag-radar-pulse-pop-list">
-                {pulseRooms.slice(0, 20).map((room) => (
+                {geoPulseRooms.slice(0, 20).map((room) => (
                   <button
                     key={room.geohash}
                     type="button"

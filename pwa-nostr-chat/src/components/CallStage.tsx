@@ -1,8 +1,15 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type TouchEvent as ReactTouchEvent,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { nip19 } from 'nostr-tools'
 import {
   AlertCircle,
+  Bluetooth,
   Captions,
   Check,
   ChevronUp,
@@ -25,15 +32,19 @@ import {
   MonitorUp,
   PhoneCall,
   PhoneOff,
+  Pin,
+  PinOff,
   Radio,
   ShieldAlert,
   ShieldCheck,
+  Smartphone,
   Square,
   Trash2,
   User,
   Users,
   Video,
   VideoOff,
+  Volume2,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
@@ -116,17 +127,68 @@ function iceLedClass(state: PeerIceConnectionState): string {
   return 'ag-led-muted'
 }
 
+type AudioRouteKind = 'bluetooth' | 'headphones' | 'earpiece' | 'speaker'
+
+function classifyAudioRoute(label: string): AudioRouteKind {
+  const lower = label.toLowerCase()
+  if (
+    /bluetooth|airpods|buds|bose|beats|jabra|jbl|sony|wf-|wh-|hands-free|headset/.test(lower)
+  ) {
+    return 'bluetooth'
+  }
+  if (/earpiece|receiver|handset|phone speaker/.test(lower)) {
+    return 'earpiece'
+  }
+  if (/headphone|earphone|earbud|usb audio|aux|wired|jack/.test(lower)) {
+    return 'headphones'
+  }
+  return 'speaker'
+}
+
+function formatAudioDeviceLabel(
+  device: MediaDeviceInfo,
+  index: number,
+  kind: 'audiooutput' | 'audioinput',
+): string {
+  const clean = device.label.trim()
+  if (clean) return clean
+  if (device.deviceId === 'default' || device.deviceId === '') {
+    return kind === 'audiooutput' ? 'System Default' : 'Default Microphone'
+  }
+  if (device.deviceId === 'communications') {
+    return kind === 'audiooutput' ? 'Communications Output' : 'Communications Mic'
+  }
+  return kind === 'audiooutput' ? `Audio Output ${index + 1}` : `Microphone ${index + 1}`
+}
+
+function renderAudioRouteIcon(route: AudioRouteKind, size: number, isInput = false) {
+  if (route === 'bluetooth') return <Bluetooth size={size} />
+  if (route === 'headphones') return <Headphones size={size} />
+  if (route === 'earpiece') return <Smartphone size={size} />
+  return isInput ? <Mic size={size} /> : <Volume2 size={size} />
+}
+
+function hasParticipantLiveVideo(participant: CallParticipant, shielded: boolean): boolean {
+  if (shielded || !participant.stream || (!participant.videoEnabled && !participant.screenSharing)) {
+    return false
+  }
+  return participant.stream.getVideoTracks().some((t) => t.readyState === 'live')
+}
+
 /**
  * Persistent remote audio sink so audio playback never interrupts when switching
  * between docked, full-screen expanded, and compact floating call bar modes.
- * Hardened for iOS Safari / Android PWA async remote-track arrival & autoplay unlock.
+ * Hardened for iOS Safari / Android PWA async remote-track arrival, autoplay unlock,
+ * and live setSinkId() output device routing (speakerphone / earpiece / Bluetooth).
  */
 function RemoteAudioTrack({
   stream,
   deafened,
+  sinkId,
 }: {
   stream: MediaStream | null
   deafened: boolean
+  sinkId?: string
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const liveAudioTrack =
@@ -239,6 +301,16 @@ function RemoteAudioTrack({
     }
   }, [stream, audioTrackId, liveAudioTrack, deafened])
 
+  useEffect(() => {
+    const el = audioRef.current as
+      | (HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> })
+      | null
+    if (!el || typeof el.setSinkId !== 'function') return
+    el.setSinkId(sinkId || '').catch(() => {
+      // Browser may reject unavailable/unpermitted sinkId; keep default route silently
+    })
+  }, [sinkId, audioTrackId])
+
   return <audio ref={audioRef} autoPlay playsInline className="sr-only" />
 }
 
@@ -254,16 +326,24 @@ function ParticipantTile({
   participant,
   compact,
   shielded,
+  isPinned = false,
+  stripMode = false,
+  onTogglePin,
   onTrustPeer,
   onContextMenu,
 }: {
   participant: CallParticipant
   compact: boolean
   shielded: boolean
+  isPinned?: boolean
+  stripMode?: boolean
+  onTogglePin?: () => void
   onTrustPeer?: () => void
   onContextMenu?: (e: ReactMouseEvent) => void
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  const lastTapRef = useRef<{ time: number; x: number; y: number } | null>(null)
+  const lastTouchToggleAtRef = useRef<number>(0)
 
   const liveVideoTrack =
     !shielded && participant.stream && (participant.videoEnabled || participant.screenSharing)
@@ -364,7 +444,9 @@ function ParticipantTile({
   if (shielded) {
     return (
       <div
-        className={`ag-call-tile is-shielded ${compact ? 'is-compact' : ''}`}
+        className={`ag-call-tile is-shielded ${compact || stripMode ? 'is-compact' : ''} ${
+          stripMode ? 'is-strip' : ''
+        }`}
         onContextMenu={onContextMenu}
       >
         <div className="ag-call-shield-body">
@@ -372,12 +454,12 @@ function ParticipantTile({
             <img
               src={identiconDataUrl(participant.pubkey)}
               alt=""
-              width={compact ? 30 : 40}
-              height={compact ? 30 : 40}
+              width={compact || stripMode ? 30 : 40}
+              height={compact || stripMode ? 30 : 40}
               className="ag-call-shield-avatar"
             />
             <span className="ag-call-shield-icon-badge" aria-hidden="true">
-              <ShieldAlert size={compact ? 11 : 13} />
+              <ShieldAlert size={compact || stripMode ? 11 : 13} />
             </span>
           </div>
           <span className="ag-call-shield-name truncate" style={{ color: handleColor }}>
@@ -404,8 +486,41 @@ function ParticipantTile({
     )
   }
 
-  const avatarSize = compact ? 44 : 60
+  const avatarSize = stripMode ? 34 : compact ? 44 : 60
   const levelScale = 1 + Math.min(0.32, participant.audioLevel * 0.45)
+  const canPinVideo = hasLiveVideo && Boolean(onTogglePin)
+
+  const handleTileDoubleClick = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (!canPinVideo || !onTogglePin) return
+    if ((e.target as HTMLElement | null)?.closest('button')) return
+    if (Date.now() - lastTouchToggleAtRef.current < 450) return
+    e.preventDefault()
+    onTogglePin()
+  }
+
+  const handleTileTouchEnd = (e: ReactTouchEvent<HTMLDivElement>) => {
+    if (!canPinVideo || !onTogglePin) return
+    if (e.changedTouches.length !== 1) {
+      lastTapRef.current = null
+      return
+    }
+    if ((e.target as HTMLElement | null)?.closest('button')) return
+    const touch = e.changedTouches[0]
+    const now = Date.now()
+    const prev = lastTapRef.current
+    if (
+      prev &&
+      now - prev.time < 320 &&
+      Math.hypot(touch.clientX - prev.x, touch.clientY - prev.y) < 28
+    ) {
+      e.preventDefault()
+      lastTapRef.current = null
+      lastTouchToggleAtRef.current = now
+      onTogglePin()
+    } else {
+      lastTapRef.current = { time: now, x: touch.clientX, y: touch.clientY }
+    }
+  }
 
   return (
     <div
@@ -413,8 +528,19 @@ function ParticipantTile({
         hasLiveVideo ? 'has-video' : 'audio-only'
       } ${participant.screenSharing ? 'is-screen' : ''} ${
         participant.isRecording ? 'is-recording' : ''
+      } ${isPinned ? 'is-pinned' : ''} ${stripMode ? 'is-strip' : ''} ${
+        canPinVideo ? 'is-pinnable' : ''
       }`}
       onContextMenu={onContextMenu}
+      onDoubleClick={handleTileDoubleClick}
+      onTouchEnd={handleTileTouchEnd}
+      title={
+        canPinVideo
+          ? isPinned
+            ? 'Double-click or double-tap to unpin video'
+            : 'Double-click or double-tap to pin video solo'
+          : undefined
+      }
     >
       {hasLiveVideo ? (
         <video
@@ -424,7 +550,7 @@ function ParticipantTile({
           muted
           className={`ag-call-video ${
             participant.isSelf && !participant.screenSharing ? 'mirrored' : ''
-          } ${participant.screenSharing ? 'contain' : ''}`}
+          } ${participant.screenSharing || isPinned ? 'contain' : ''}`}
         />
       ) : (
         <div className="ag-call-avatar-stage">
@@ -447,9 +573,15 @@ function ParticipantTile({
         </div>
       )}
 
-      {/* Top-left telemetry corner (SCREEN + ICE/RTT) */}
-      {(participant.screenSharing || !participant.isSelf) && (
+      {/* Top-left telemetry / Pinned Stage banner */}
+      {(isPinned || participant.screenSharing || !participant.isSelf) && (
         <div className="ag-call-tile-top ag-call-tile-net">
+          {isPinned && (
+            <span className="ag-call-pinned-pill">
+              <Pin size={10} />
+              <span>Pinned · Double-tap to unpin</span>
+            </span>
+          )}
           {participant.screenSharing && (
             <span className="ag-call-micro-pill ag-call-pill-screen mono">SCREEN</span>
           )}
@@ -465,10 +597,26 @@ function ParticipantTile({
         </div>
       )}
 
+      {/* Top-right 1-click Unpin button when pinned */}
+      {isPinned && onTogglePin && (
+        <button
+          type="button"
+          className="ag-call-unpin-btn"
+          onClick={(e) => {
+            e.stopPropagation()
+            onTogglePin()
+          }}
+          title="Unpin video"
+          aria-label="Unpin video"
+        >
+          <X size={13} />
+        </button>
+      )}
+
       {/* Top-right pulsing crimson recording dot */}
       {participant.isRecording && (
         <span
-          className="ag-call-rec-dot"
+          className={`ag-call-rec-dot ${isPinned ? 'with-unpin' : ''}`}
           role="status"
           title={`${participant.displayHandle} is recording this call`}
           aria-label="Recording"
@@ -510,11 +658,15 @@ export function CallStage({
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [togglingRec, setTogglingRec] = useState(false)
   const [qualityMenuOpen, setQualityMenuOpen] = useState(false)
+  const [audioMenuOpen, setAudioMenuOpen] = useState(false)
+  const [switchingAudioInput, setSwitchingAudioInput] = useState(false)
+  const [pinnedVideoPubkey, setPinnedVideoPubkey] = useState<string | null>(null)
   const [transcriptOpen, setTranscriptOpen] = useState(false)
   const [copiedTranscript, setCopiedTranscript] = useState(false)
   const [promptCopied, setPromptCopied] = useState(false)
   const [promptSaved, setPromptSaved] = useState(false)
   const qualityWrapRef = useRef<HTMLDivElement | null>(null)
+  const audioWrapRef = useRef<HTMLDivElement | null>(null)
   const transcriptListRef = useRef<HTMLDivElement | null>(null)
   const promptDismissTimerRef = useRef<number | null>(null)
   const promptCopyTimerRef = useRef<number | null>(null)
@@ -548,11 +700,29 @@ export function CallStage({
   }, [activeCall, endedTranscript, transcription])
 
   useEffect(() => {
-    if (!activeCall) return
+    if (!activeCall) {
+      setAudioMenuOpen(false)
+      setPinnedVideoPubkey(null)
+      return
+    }
     setNowMs(Date.now())
     const id = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => window.clearInterval(id)
   }, [activeCall])
+
+  // Auto-clear pinned solo video if participant leaves, stops video, or becomes untrusted/shielded
+  useEffect(() => {
+    if (!pinnedVideoPubkey || !activeCall) return
+    const target = activeCall.participants.find((p) => p.pubkey === pinnedVideoPubkey)
+    if (!target) {
+      setPinnedVideoPubkey(null)
+      return
+    }
+    const shielded = !target.isSelf && (Boolean(target.isUntrusted) || !engine.isTrusted(target.pubkey))
+    if (!hasParticipantLiveVideo(target, shielded)) {
+      setPinnedVideoPubkey(null)
+    }
+  }, [pinnedVideoPubkey, activeCall, engine])
 
   useEffect(() => {
     if (!transcriptOpen) return
@@ -563,10 +733,13 @@ export function CallStage({
 
   const isQualityPopoverVisible =
     qualityMenuOpen && Boolean(activeCall) && !activeCall?.localRecording
+  const isAudioPopoverVisible = audioMenuOpen && Boolean(activeCall)
 
-  // Android / PWA Back button closes CallStage overlays (LIFO: quality menu -> transcript)
+  // Android / PWA Back button closes CallStage overlays (LIFO: audio -> quality -> pinned -> transcript)
   useBackHandler(Boolean(activeCall) && transcriptOpen, () => setTranscriptOpen(false))
+  useBackHandler(Boolean(activeCall) && Boolean(pinnedVideoPubkey), () => setPinnedVideoPubkey(null))
   useBackHandler(isQualityPopoverVisible, () => setQualityMenuOpen(false))
+  useBackHandler(isAudioPopoverVisible, () => setAudioMenuOpen(false))
 
   useEffect(() => {
     if (!isQualityPopoverVisible) return
@@ -580,12 +753,36 @@ export function CallStage({
   }, [isQualityPopoverVisible])
 
   useEffect(() => {
-    if (!activeCall || (!expanded && !isQualityPopoverVisible && !transcriptOpen)) return
+    if (!isAudioPopoverVisible) return
+    const onPointerDown = (e: PointerEvent) => {
+      if (audioWrapRef.current && !audioWrapRef.current.contains(e.target as Node)) {
+        setAudioMenuOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [isAudioPopoverVisible])
+
+  useEffect(() => {
+    if (
+      !activeCall ||
+      (!expanded &&
+        !isAudioPopoverVisible &&
+        !isQualityPopoverVisible &&
+        !pinnedVideoPubkey &&
+        !transcriptOpen)
+    ) {
+      return
+    }
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
-        if (isQualityPopoverVisible) {
+        if (isAudioPopoverVisible) {
+          setAudioMenuOpen(false)
+        } else if (isQualityPopoverVisible) {
           setQualityMenuOpen(false)
+        } else if (pinnedVideoPubkey) {
+          setPinnedVideoPubkey(null)
         } else if (transcriptOpen) {
           setTranscriptOpen(false)
         } else if (expanded) {
@@ -595,7 +792,15 @@ export function CallStage({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [expanded, activeCall, isQualityPopoverVisible, transcriptOpen, onToggleExpand])
+  }, [
+    expanded,
+    activeCall,
+    isAudioPopoverVisible,
+    isQualityPopoverVisible,
+    pinnedVideoPubkey,
+    transcriptOpen,
+    onToggleExpand,
+  ])
 
   if (!activeCall) {
     if (!endedTranscript) return null
@@ -794,6 +999,7 @@ export function CallStage({
           key={p.pubkey}
           stream={p.stream}
           deafened={activeCall.localDeafened}
+          sinkId={calls.selectedAudioOutputId}
         />
       ))}
     </div>
@@ -989,9 +1195,26 @@ export function CallStage({
     }
   }
 
+  const togglePinVideo = (pubkey: string) => {
+    onPlaySound?.('click')
+    setPinnedVideoPubkey((prev) => (prev === pubkey ? null : pubkey))
+  }
+
   const openParticipantContextMenu = (e: ReactMouseEvent, participant: CallParticipant) => {
     const npub = safeEncodeNpub(participant.pubkey)
     const items: ContextMenuItem[] = []
+    const shielded = isParticipantShielded(participant)
+    const liveVideo = hasParticipantLiveVideo(participant, shielded)
+
+    if (liveVideo) {
+      const pinned = pinnedVideoPubkey === participant.pubkey
+      items.push({
+        id: 'pin-video',
+        label: pinned ? 'Unpin Video' : 'Pin Video to Stage',
+        icon: pinned ? <PinOff size={14} /> : <Pin size={14} />,
+        onSelect: () => togglePinVideo(participant.pubkey),
+      })
+    }
 
     if (participant.isSelf) {
       items.push(
@@ -999,6 +1222,7 @@ export function CallStage({
           id: 'toggle-mute',
           label: activeCall.localMuted ? 'Unmute Microphone' : 'Mute Microphone',
           icon: activeCall.localMuted ? <Mic size={14} /> : <MicOff size={14} />,
+          dividerBefore: liveVideo,
           onSelect: handleToggleMute,
         },
         {
@@ -1160,6 +1384,78 @@ export function CallStage({
     })
   }
 
+  // Stage priority ordering: active trusted screen/camera feeds FIRST, then trusted audio, then shielded
+  const stageParticipants = activeCall.participants
+    .map((participant, index) => {
+      const shielded = isParticipantShielded(participant)
+      const liveVideo = hasParticipantLiveVideo(participant, shielded)
+      return { participant, shielded, liveVideo, index }
+    })
+    .sort((a, b) => {
+      const rank = (item: {
+        participant: CallParticipant
+        shielded: boolean
+        liveVideo: boolean
+      }) => {
+        if (item.liveVideo && item.participant.screenSharing) return 0
+        if (item.liveVideo) return 1
+        if (!item.shielded) return 2
+        return 3
+      }
+      const diff = rank(a) - rank(b)
+      return diff !== 0 ? diff : a.index - b.index
+    })
+
+  const pinnedStageItem = pinnedVideoPubkey
+    ? (stageParticipants.find(
+        (item) => item.participant.pubkey === pinnedVideoPubkey && item.liveVideo,
+      ) ?? null)
+    : null
+  const videoStageItems = stageParticipants.filter((item) => item.liveVideo)
+  const audioStageItems = stageParticipants.filter((item) => !item.liveVideo)
+  const useVideoPrioritySplit =
+    !pinnedStageItem && videoStageItems.length > 0 && audioStageItems.length > 0
+
+  const selectedOutputDevice =
+    calls.audioOutputDevices.find((d) => d.deviceId === calls.selectedAudioOutputId) ?? null
+  const selectedInputDevice =
+    calls.audioInputDevices.find((d) => d.deviceId === calls.selectedAudioInputId) ?? null
+  const activeOutputRoute: AudioRouteKind = selectedOutputDevice
+    ? classifyAudioRoute(selectedOutputDevice.label)
+    : selectedInputDevice && classifyAudioRoute(selectedInputDevice.label) === 'bluetooth'
+      ? 'bluetooth'
+      : 'speaker'
+
+  const hasDefaultOutputEntry = calls.audioOutputDevices.some(
+    (d) => d.deviceId === '' || d.deviceId === 'default',
+  )
+
+  const renderParticipantTile = (
+    item: (typeof stageParticipants)[number],
+    opts?: { compact?: boolean; isPinned?: boolean; stripMode?: boolean },
+  ) => (
+    <ParticipantTile
+      key={item.participant.pubkey}
+      participant={item.participant}
+      compact={opts?.compact ?? (!expanded && count > 2)}
+      shielded={item.shielded}
+      isPinned={opts?.isPinned ?? false}
+      stripMode={opts?.stripMode ?? false}
+      onTogglePin={
+        item.liveVideo ? () => togglePinVideo(item.participant.pubkey) : undefined
+      }
+      onTrustPeer={
+        item.shielded
+          ? () => {
+              onPlaySound?.('click')
+              engine.trustPubkey(item.participant.pubkey, item.participant.nickname)
+            }
+          : undefined
+      }
+      onContextMenu={(e) => openParticipantContextMenu(e, item.participant)}
+    />
+  )
+
   const stageContent = (
     <section
       className={`ag-call-stage ${expanded ? 'ag-call-stage-expanded' : 'ag-call-stage-docked'}`}
@@ -1272,29 +1568,34 @@ export function CallStage({
             </div>
           )}
 
-          {/* Responsive 1–6 Participant Tile Grid */}
-          <div className="ag-call-grid" data-count={count}>
-            {activeCall.participants.map((participant) => {
-              const shielded = isParticipantShielded(participant)
-              return (
-                <ParticipantTile
-                  key={participant.pubkey}
-                  participant={participant}
-                  compact={!expanded && count > 2}
-                  shielded={shielded}
-                  onTrustPeer={
-                    shielded
-                      ? () => {
-                          onPlaySound?.('click')
-                          engine.trustPubkey(participant.pubkey, participant.nickname)
-                        }
-                      : undefined
-                  }
-                  onContextMenu={(e) => openParticipantContextMenu(e, participant)}
-                />
-              )
-            })}
-          </div>
+          {/* Video-Priority Stage / Solo Pinned Video / Responsive 1–6 Grid */}
+          {pinnedStageItem ? (
+            <div className="ag-call-stage-pinned">
+              {renderParticipantTile(pinnedStageItem, { compact: false, isPinned: true })}
+            </div>
+          ) : useVideoPrioritySplit ? (
+            <div className="ag-call-stage-split">
+              <div
+                className="ag-call-video-stage"
+                data-video-count={Math.min(6, videoStageItems.length)}
+              >
+                {videoStageItems.map((item) =>
+                  renderParticipantTile(item, {
+                    compact: !expanded && videoStageItems.length > 2,
+                  }),
+                )}
+              </div>
+              <div className="ag-call-audio-strip" role="list" aria-label="Audio participants">
+                {audioStageItems.map((item) =>
+                  renderParticipantTile(item, { compact: true, stripMode: true }),
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="ag-call-grid" data-count={count}>
+              {stageParticipants.map((item) => renderParticipantTile(item))}
+            </div>
+          )}
 
           {/* Live Captions & Model Download Progress Overlay */}
           {transcription.liveCaptionsEnabled && (
@@ -1468,6 +1769,171 @@ export function CallStage({
           <span>{activeCall.localDeafened ? 'Deafened' : 'Deafen'}</span>
         </button>
 
+        {/* Audio Output & Microphone Device Picker (Speakerphone / Earpiece / Bluetooth) */}
+        <div className={`ag-call-audio-wrap ${isAudioPopoverVisible ? 'open' : ''}`} ref={audioWrapRef}>
+          <button
+            type="button"
+            className={`ag-call-ctrl-btn ${
+              isAudioPopoverVisible || activeOutputRoute !== 'speaker' ? 'active-accent' : ''
+            }`}
+            onClick={() => {
+              onPlaySound?.('click')
+              setQualityMenuOpen(false)
+              setAudioMenuOpen((prev) => {
+                const next = !prev
+                if (next) {
+                  void calls.refreshAudioDevices()
+                }
+                return next
+              })
+            }}
+            aria-haspopup="menu"
+            aria-expanded={isAudioPopoverVisible}
+            aria-label="Audio output and microphone devices"
+            title="Audio devices (Speaker / Earpiece / Bluetooth / Mic)"
+          >
+            {renderAudioRouteIcon(activeOutputRoute, 17)}
+            <span>Audio</span>
+          </button>
+
+          {isAudioPopoverVisible && (
+            <div
+              className="ag-call-audio-menu"
+              role="menu"
+              aria-label="Audio output and microphone selection"
+            >
+              <div className="ag-call-audio-sec-head mono">AUDIO OUTPUT</div>
+              {calls.supportsAudioOutputSelection ? (
+                <div className="ag-call-audio-list">
+                  {!hasDefaultOutputEntry && (
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={calls.selectedAudioOutputId === ''}
+                      className={`ag-call-audio-opt ${
+                        calls.selectedAudioOutputId === '' ? 'selected' : ''
+                      }`}
+                      onClick={() => {
+                        calls.selectAudioOutput('')
+                        onPlaySound?.('click')
+                        setAudioMenuOpen(false)
+                      }}
+                    >
+                      <span className="ag-call-audio-opt-left">
+                        <Volume2 size={14} />
+                        <span className="truncate">System Default</span>
+                      </span>
+                      {calls.selectedAudioOutputId === '' && (
+                        <Check size={13} className="ag-call-quality-check" />
+                      )}
+                    </button>
+                  )}
+                  {calls.audioOutputDevices.map((dev, idx) => {
+                    const label = formatAudioDeviceLabel(dev, idx, 'audiooutput')
+                    const route = classifyAudioRoute(label)
+                    const selected =
+                      calls.selectedAudioOutputId === dev.deviceId ||
+                      (calls.selectedAudioOutputId === '' && dev.deviceId === 'default')
+                    return (
+                      <button
+                        key={dev.deviceId || `out-${idx}`}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={selected}
+                        className={`ag-call-audio-opt ${selected ? 'selected' : ''}`}
+                        onClick={() => {
+                          calls.selectAudioOutput(dev.deviceId)
+                          onPlaySound?.('click')
+                          setAudioMenuOpen(false)
+                        }}
+                      >
+                        <span className="ag-call-audio-opt-left">
+                          {renderAudioRouteIcon(route, 14)}
+                          <span className="truncate">{label}</span>
+                        </span>
+                        {selected && <Check size={13} className="ag-call-quality-check" />}
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : !calls.supportsSystemAudioOutputPicker ? (
+                <p className="ag-call-audio-note">
+                  Speaker &amp; Bluetooth output is routed via your device&apos;s system audio
+                  picker.
+                </p>
+              ) : null}
+
+              {calls.supportsSystemAudioOutputPicker && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="ag-call-audio-sys-btn"
+                  onClick={() => {
+                    onPlaySound?.('click')
+                    void calls.promptSystemAudioOutput().then((ok) => {
+                      if (ok) setAudioMenuOpen(false)
+                    })
+                  }}
+                >
+                  <Volume2 size={13} />
+                  <span>Choose System Output…</span>
+                </button>
+              )}
+
+              <div className="ag-call-audio-sec-head mono ag-call-audio-sec-divider">
+                MICROPHONE / INPUT
+              </div>
+              <div className="ag-call-audio-list">
+                {calls.audioInputDevices.length === 0 ? (
+                  <div className="ag-call-audio-opt selected">
+                    <span className="ag-call-audio-opt-left">
+                      <Mic size={14} />
+                      <span className="truncate">Default Microphone</span>
+                    </span>
+                    <Check size={13} className="ag-call-quality-check" />
+                  </div>
+                ) : (
+                  calls.audioInputDevices.map((dev, idx) => {
+                    const label = formatAudioDeviceLabel(dev, idx, 'audioinput')
+                    const route = classifyAudioRoute(label)
+                    const selected =
+                      calls.selectedAudioInputId === dev.deviceId ||
+                      (calls.selectedAudioInputId === '' &&
+                        (dev.deviceId === 'default' || idx === 0))
+                    return (
+                      <button
+                        key={dev.deviceId || `in-${idx}`}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={selected}
+                        disabled={switchingAudioInput}
+                        className={`ag-call-audio-opt ${selected ? 'selected' : ''}`}
+                        onClick={() => {
+                          if (switchingAudioInput) return
+                          onPlaySound?.('click')
+                          setSwitchingAudioInput(true)
+                          void calls
+                            .selectAudioInput(dev.deviceId)
+                            .then((ok) => {
+                              if (ok) setAudioMenuOpen(false)
+                            })
+                            .finally(() => setSwitchingAudioInput(false))
+                        }}
+                      >
+                        <span className="ag-call-audio-opt-left">
+                          {renderAudioRouteIcon(route, 14, true)}
+                          <span className="truncate">{label}</span>
+                        </span>
+                        {selected && <Check size={13} className="ag-call-quality-check" />}
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
         <button
           type="button"
           className={`ag-call-ctrl-btn ${activeCall.localCameraOn ? 'active-accent' : ''}`}
@@ -1567,6 +2033,7 @@ export function CallStage({
               disabled={activeCall.localRecording}
               onClick={() => {
                 onPlaySound?.('click')
+                setAudioMenuOpen(false)
                 setQualityMenuOpen((v) => !v)
               }}
               aria-haspopup="listbox"

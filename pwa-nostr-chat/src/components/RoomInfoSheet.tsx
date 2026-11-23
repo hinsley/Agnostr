@@ -14,8 +14,6 @@ import {
   Minus,
   Phone,
   PhoneOff,
-  Pin,
-  PinOff,
   Plus,
   QrCode,
   Radio,
@@ -347,13 +345,12 @@ export function RoomInfoSheet({
   const renderGeoBody = () => {
     const isTopic = isTopicChannel(activeGeohash)
     const channelLabel = formatRadioChannelLabel(activeGeohash)
-    const isPinned = engine.isChannelPinned(activeGeohash)
     const cityLabel = isTopic ? null : cell.nearestCity || cell.label
     const subtitle = isTopic
-      ? 'Topic Radio · kind 23333 · Ephemeral'
+      ? 'Topic Radio · kind 23333'
       : presence.isUncertainCount
-        ? 'Ephemeral · High-precision room'
-        : `Ephemeral · ${presence.onlineCount} online`
+        ? 'High-precision room'
+        : `${presence.onlineCount} online`
 
     const normalizedGh = activeGeohash.trim().toLowerCase()
     const geoCallRoster = calls.getGeoCallPresence(normalizedGh)
@@ -385,23 +382,8 @@ export function RoomInfoSheet({
         </div>
 
         {/* Primary Actions */}
-        <div className="ag-sheet-action-grid">
-          {isTopic ? (
-            <button
-              type="button"
-              className="ag-sheet-action-btn primary"
-              onClick={() =>
-                void copyText(
-                  'room-link',
-                  buildRadioChannelShareUrl(activeGeohash),
-                  `Copied ${channelLabel} link`,
-                )
-              }
-            >
-              {copiedId === 'room-link' ? <Check size={17} /> : <Link2 size={17} />}
-              <span>{copiedId === 'room-link' ? 'Copied Link' : 'Copy Room Link'}</span>
-            </button>
-          ) : (
+        <div className={`ag-sheet-action-grid ${isTopic ? 'single' : ''}`}>
+          {!isTopic && (
             <button
               type="button"
               className="ag-sheet-action-btn primary"
@@ -417,14 +399,17 @@ export function RoomInfoSheet({
           )}
           <button
             type="button"
-            className={`ag-sheet-action-btn ${isPinned ? 'active' : ''}`}
-            onClick={() => {
-              onPlaySound?.('click')
-              engine.togglePinChannel(activeGeohash, isTopic ? undefined : cell.nearestCity || undefined)
-            }}
+            className={`ag-sheet-action-btn ${isTopic ? 'primary' : ''}`}
+            onClick={() =>
+              void copyText(
+                'room-link',
+                buildRadioChannelShareUrl(activeGeohash),
+                `Copied ${channelLabel} link`,
+              )
+            }
           >
-            {isPinned ? <PinOff size={17} /> : <Pin size={17} />}
-            <span>{isPinned ? 'Unpin' : 'Pin Room'}</span>
+            {copiedId === 'room-link' ? <Check size={17} /> : <Link2 size={17} />}
+            <span>{copiedId === 'room-link' ? 'Copied Link' : 'Copy Room Link'}</span>
           </button>
         </div>
 

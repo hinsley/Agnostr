@@ -2736,6 +2736,10 @@
   gap: 0.55rem;
 }
 
+.ag-sheet-action-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .ag-sheet-action-btn {
   display: inline-flex;
   align-items: center;

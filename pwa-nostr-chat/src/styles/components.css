@@ -847,6 +847,80 @@
   color: var(--status-danger);
 }
 
+/* Pinned Radio Channels Drag-and-Drop Reordering (Desktop HTML5 DnD + Mobile Touch Grip) */
+.ag-pinned-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-pinned-row[draggable='true'] {
+  cursor: grab;
+}
+
+.ag-pinned-row.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.ag-pinned-row.drop-before::after,
+.ag-pinned-row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.ag-pinned-row.drop-before::after {
+  top: -1px;
+}
+
+.ag-pinned-row.drop-after::after {
+  bottom: -1px;
+}
+
+.ag-row-drag-handle {
+  width: 24px;
+  height: 28px;
+  margin-right: 4px;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  opacity: 0.36;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transition:
+    opacity var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-chat-row-wrap:hover .ag-row-drag-handle,
+.ag-chat-row-wrap:focus-within .ag-row-drag-handle,
+.ag-row-drag-handle:focus-visible {
+  opacity: 0.92;
+}
+
+.ag-row-drag-handle:hover {
+  background-color: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.ag-row-drag-handle:active {
+  cursor: grabbing;
+  color: var(--accent);
+}
+
 /* People Tab Friend Quick-Call & 1-Tap Trust Controls */
 .ag-person-row-actions {
   display: inline-flex;
@@ -4854,6 +4928,12 @@
     width: 32px;
     height: 32px;
     opacity: 0.72;
+  }
+
+  .ag-row-drag-handle {
+    width: 32px;
+    height: 34px;
+    opacity: 0.65;
   }
 
   .ag-geo-call-banner {

@@ -1,6 +1,8 @@
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import type { CSSProperties, FormEvent } from 'react'
 import {
+  ArrowDown,
+  ArrowUp,
   Ban,
   ChevronDown,
   ChevronRight,
@@ -9,6 +11,7 @@ import {
   Crosshair,
   Download,
   Globe,
+  GripVertical,
   Hash,
   Headphones,
   Link2,
@@ -31,7 +34,6 @@ import {
   ShieldCheck,
   ShieldOff,
   Star,
-  StarOff,
   User,
   UserPlus,
   Users,
@@ -82,6 +84,17 @@ function getServerMonogram(name: string): string {
   if (words.length === 0) return 'SV'
   if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
   return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
+}
+
+function computeReorderToIndex(
+  fromIndex: number,
+  targetIndex: number,
+  position: 'before' | 'after',
+  total: number
+): number {
+  const slot = position === 'after' ? targetIndex + 1 : targetIndex
+  const adjusted = fromIndex < slot ? slot - 1 : slot
+  return Math.max(0, Math.min(total - 1, adjusted))
 }
 
 export interface ConversationListProps {
@@ -143,6 +156,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const [creatingChannel, setCreatingChannel] = useState(false)
   const [joiningVoiceServerId, setJoiningVoiceServerId] = useState<string | null>(null)
   const [joiningNip29ServerId, setJoiningNip29ServerId] = useState<string | null>(null)
+  const [dragPinIndex, setDragPinIndex] = useState<number | null>(null)
+  const [dropPinTarget, setDropPinTarget] = useState<{
+    index: number
+    position: 'before' | 'after'
+  } | null>(null)
+  const pinnedListRef = useRef<HTMLDivElement | null>(null)
+  const touchDragRef = useRef<{
+    pointerId: number
+    fromIndex: number
+    targetIndex: number
+    position: 'before' | 'after'
+  } | null>(null)
 
   const handleQuickTune = (e: FormEvent) => {
     e.preventDefault()
@@ -205,6 +230,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     const isTopic = isTopicChannel(channelKey)
     const displayLabel = formatRadioChannelLabel(channelKey)
     const pinned = engine.isChannelPinned(channelKey)
+    const pinIndex = engine.pinnedChannels.findIndex(
+      (p) => p.geohash.toLowerCase() === channelKey.toLowerCase()
+    )
+    const canReorderPins = pinIndex !== -1 && engine.pinnedChannels.length > 1
     const callCount = engine.calls.getGeoCallCount(channelKey)
     const inThisGeoCall =
       activeCall?.mode === 'geo' &&
@@ -213,9 +242,47 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     const roomUrl = buildRadioChannelShareUrl(channelKey)
     const items: ContextMenuItem[] = [
       {
+        id: `room-pin-${channelKey}`,
+        label: pinned ? 'Unpin Channel' : 'Pin Channel',
+        icon: pinned ? <PinOff size={15} /> : <Pin size={15} />,
+        onSelect: () => {
+          onPlaySound?.('click')
+          engine.togglePinChannel(channelKey, isTopic ? undefined : label)
+        },
+      },
+    ]
+
+    if (canReorderPins) {
+      if (pinIndex > 0) {
+        items.push({
+          id: `room-move-up-${channelKey}`,
+          label: 'Move Up',
+          icon: <ArrowUp size={15} />,
+          onSelect: () => {
+            onPlaySound?.('click')
+            engine.reorderPinnedChannels(pinIndex, pinIndex - 1)
+          },
+        })
+      }
+      if (pinIndex < engine.pinnedChannels.length - 1) {
+        items.push({
+          id: `room-move-down-${channelKey}`,
+          label: 'Move Down',
+          icon: <ArrowDown size={15} />,
+          onSelect: () => {
+            onPlaySound?.('click')
+            engine.reorderPinnedChannels(pinIndex, pinIndex + 1)
+          },
+        })
+      }
+    }
+
+    items.push(
+      {
         id: `room-tune-${channelKey}`,
         label: `Tune to ${displayLabel}`,
         icon: isTopic ? <Hash size={15} /> : <Radio size={15} />,
+        dividerBefore: true,
         onSelect: () => onTuneChannel(channelKey),
       },
       {
@@ -268,8 +335,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           navigator.clipboard?.writeText(roomUrl).catch(() => {})
           engine.pushToast('info', `Copied ${displayLabel} room link`)
         },
-      },
-    ]
+      }
+    )
 
     if (!isTopic) {
       items.push({
@@ -282,14 +349,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         },
       })
     }
-
-    items.push({
-      id: `room-pin-${channelKey}`,
-      label: pinned ? 'Remove Bookmark' : 'Bookmark Room',
-      icon: pinned ? <StarOff size={15} /> : <Star size={15} />,
-      dividerBefore: true,
-      onSelect: () => engine.togglePinChannel(channelKey, isTopic ? undefined : label),
-    })
 
     openContextMenu(e, {
       header: `${displayLabel}${isTopic ? ' · Topic 23333' : label ? ` · ${label}` : ''}`,
@@ -864,39 +923,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     </button>
                   )}
                 </form>
-
-                {(() => {
-                  const resolvedDraft = freqDraft.trim()
-                    ? parseQuickTuneInput(freqDraft, tuneMode)
-                    : null
-                  const targetKey = resolvedDraft ? resolvedDraft.key : engine.activeGeohash
-                  const targetLabel = formatRadioChannelLabel(targetKey)
-                  const targetIsTopic = isTopicChannel(targetKey)
-                  const targetPinned = engine.isChannelPinned(targetKey)
-                  return (
-                    <button
-                      type="button"
-                      className={`ag-quick-tool-btn ${targetPinned ? 'active' : ''}`}
-                      onClick={() => {
-                        onPlaySound?.('click')
-                        engine.togglePinChannel(
-                          targetKey,
-                          !targetIsTopic && targetKey === engine.activeGeohash
-                            ? engine.cell.nearestCity || undefined
-                            : undefined
-                        )
-                        if (resolvedDraft) {
-                          setFreqDraft('')
-                        }
-                      }}
-                      title={targetPinned ? `Unpin ${targetLabel}` : `Pin ${targetLabel}`}
-                      aria-label={targetPinned ? `Unpin ${targetLabel}` : `Pin ${targetLabel}`}
-                      aria-pressed={targetPinned}
-                    >
-                      {targetPinned ? <PinOff size={15} /> : <Pin size={15} />}
-                    </button>
-                  )
-                })()}
               </div>
 
               {tuneMode === 'topic' && (
@@ -931,7 +957,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               const isTopic = isTopicChannel(gh)
               const displayLabel = formatRadioChannelLabel(gh)
               const active = isChannelActive(gh)
-              const pinned = engine.isChannelPinned(gh)
               const unread = engine.unreadCounts[ghKey] ?? 0
               const mentions = engine.mentionCounts[ghKey] ?? 0
               const hasUnread = unread > 0 || mentions > 0
@@ -942,8 +967,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               const currentSubtitle = isTopic
                 ? 'Topic Radio · kind 23333'
                 : engine.presence.isUncertainCount
-                  ? 'Ephemeral room'
-                  : `${engine.presence.onlineCount} online · Ephemeral`
+                  ? 'Geo Radio room'
+                  : `${engine.presence.onlineCount} online`
               return (
               <section className="ag-conv-group" aria-label="Current room">
                 <div className="ag-conv-group-label">Current Room</div>
@@ -1001,30 +1026,17 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       </div>
                     </div>
                   </button>
-                  <button
-                    type="button"
-                    className={`ag-row-pin-btn ${pinned ? 'pinned' : ''}`}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onPlaySound?.('click')
-                      engine.togglePinChannel(gh, isTopic ? undefined : engine.cell.nearestCity || undefined)
-                    }}
-                    title={pinned ? `Unpin ${displayLabel}` : `Pin ${displayLabel}`}
-                    aria-label={pinned ? `Unpin ${displayLabel}` : `Pin ${displayLabel}`}
-                    aria-pressed={pinned}
-                  >
-                    {pinned ? <PinOff size={14} /> : <Pin size={14} />}
-                  </button>
                 </div>
               </section>
               )
             })()}
 
-            {/* Pinned Rooms */}
+            {/* Pinned Rooms (Draggable + Touch Grip Handle + Context Menu Move Up/Down) */}
             {engine.pinnedChannels.length > 0 && (
               <section className="ag-conv-group" aria-label="Pinned rooms">
                 <div className="ag-conv-group-label">Pinned</div>
-                {engine.pinnedChannels.map((pin) => {
+                <div ref={pinnedListRef} className="ag-pinned-list">
+                {engine.pinnedChannels.map((pin, idx) => {
                   const ghKey = pin.geohash.toLowerCase()
                   const isTopic = isTopicChannel(pin.geohash)
                   const displayLabel = formatRadioChannelLabel(pin.geohash)
@@ -1038,6 +1050,20 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     activeCall?.mode === 'geo' &&
                     (activeCall.geohash ?? '').toLowerCase() === ghKey
                   const displayCity = isTopic ? undefined : (pin.label || livePulse?.nearestCity || undefined)
+                  const canReorder = engine.pinnedChannels.length > 1
+                  const isDragging = dragPinIndex === idx
+                  const isDropBefore =
+                    dropPinTarget !== null &&
+                    dropPinTarget.index === idx &&
+                    dropPinTarget.position === 'before' &&
+                    dragPinIndex !== null &&
+                    dragPinIndex !== idx
+                  const isDropAfter =
+                    dropPinTarget !== null &&
+                    dropPinTarget.index === idx &&
+                    dropPinTarget.position === 'after' &&
+                    dragPinIndex !== null &&
+                    dragPinIndex !== idx
                   const subtitle = livePulse?.lastPreview
                     ? livePulse.lastPreview
                     : livePulse && livePulse.peerCount > 0
@@ -1048,12 +1074,60 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           ? 'Pinned topic · kind 23333'
                           : active && !engine.presence.isUncertainCount && engine.presence.onlineCount > 0
                             ? `${engine.presence.onlineCount} online · Pinned`
-                            : 'Pinned room · Ephemeral'
+                            : 'Pinned room'
                   return (
                     <div
                       key={pin.geohash}
-                      className={`ag-chat-row-wrap ${active ? 'active' : ''} ${hasUnread ? 'is-unread' : ''} ${mentions > 0 ? 'has-pings' : ''}`}
+                      data-pin-index={idx}
+                      draggable={canReorder}
+                      className={`ag-chat-row-wrap ag-pinned-row ${active ? 'active' : ''} ${hasUnread ? 'is-unread' : ''} ${mentions > 0 ? 'has-pings' : ''} ${isDragging ? 'is-dragging' : ''} ${isDropBefore ? 'drop-before' : ''} ${isDropAfter ? 'drop-after' : ''}`}
                       onContextMenu={(e) => openRoomContextMenu(e, pin.geohash, displayCity)}
+                      onDragStart={(e) => {
+                        if (!canReorder) return
+                        setDragPinIndex(idx)
+                        e.dataTransfer.effectAllowed = 'move'
+                        try {
+                          e.dataTransfer.setData('text/plain', pin.geohash)
+                        } catch {
+                          // Ignore browser dataTransfer restrictions
+                        }
+                      }}
+                      onDragOver={(e) => {
+                        if (dragPinIndex === null || !canReorder) return
+                        e.preventDefault()
+                        e.dataTransfer.dropEffect = 'move'
+                        const rect = e.currentTarget.getBoundingClientRect()
+                        const pos: 'before' | 'after' =
+                          e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+                        setDropPinTarget((prev) =>
+                          prev && prev.index === idx && prev.position === pos
+                            ? prev
+                            : { index: idx, position: pos }
+                        )
+                      }}
+                      onDrop={(e) => {
+                        if (dragPinIndex === null || !canReorder) return
+                        e.preventDefault()
+                        const rect = e.currentTarget.getBoundingClientRect()
+                        const pos: 'before' | 'after' =
+                          e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+                        const toIndex = computeReorderToIndex(
+                          dragPinIndex,
+                          idx,
+                          pos,
+                          engine.pinnedChannels.length
+                        )
+                        if (toIndex !== dragPinIndex) {
+                          onPlaySound?.('click')
+                          engine.reorderPinnedChannels(dragPinIndex, toIndex)
+                        }
+                        setDragPinIndex(null)
+                        setDropPinTarget(null)
+                      }}
+                      onDragEnd={() => {
+                        setDragPinIndex(null)
+                        setDropPinTarget(null)
+                      }}
                     >
                       <button
                         type="button"
@@ -1111,23 +1185,119 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           </div>
                         </div>
                       </button>
-                      <button
-                        type="button"
-                        className="ag-row-pin-btn pinned"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onPlaySound?.('click')
-                          engine.togglePinChannel(pin.geohash, isTopic ? undefined : pin.label)
-                        }}
-                        title={`Unpin ${displayLabel}`}
-                        aria-label={`Unpin ${displayLabel}`}
-                        aria-pressed={true}
-                      >
-                        <PinOff size={14} />
-                      </button>
+
+                      {canReorder && (
+                        <button
+                          type="button"
+                          className="ag-row-drag-handle"
+                          data-drag-handle="true"
+                          data-no-swipe="true"
+                          title={`Drag to reorder ${displayLabel}`}
+                          aria-label={`Reorder ${displayLabel} (use Up/Down arrows or drag)`}
+                          onClick={(e) => e.stopPropagation()}
+                          onPointerDown={(e) => {
+                            if (e.pointerType === 'mouse') return
+                            e.stopPropagation()
+                            e.preventDefault()
+                            try {
+                              e.currentTarget.setPointerCapture(e.pointerId)
+                            } catch {
+                              // Ignore capture errors
+                            }
+                            touchDragRef.current = {
+                              pointerId: e.pointerId,
+                              fromIndex: idx,
+                              targetIndex: idx,
+                              position: 'before',
+                            }
+                            setDragPinIndex(idx)
+                            setDropPinTarget({ index: idx, position: 'before' })
+                            try {
+                              navigator.vibrate?.(8)
+                            } catch {
+                              // Ignore unsupported vibrate
+                            }
+                          }}
+                          onPointerMove={(e) => {
+                            const drag = touchDragRef.current
+                            if (!drag || drag.pointerId !== e.pointerId) return
+                            e.preventDefault()
+                            const rows = pinnedListRef.current?.querySelectorAll<HTMLElement>(
+                              '[data-pin-index]'
+                            )
+                            if (!rows || rows.length === 0) return
+                            let bestIdx = 0
+                            let bestPos: 'before' | 'after' = 'before'
+                            for (let i = 0; i < rows.length; i++) {
+                              const row = rows[i]
+                              const rect = row.getBoundingClientRect()
+                              const rowIdx = Number(row.dataset.pinIndex)
+                              if (e.clientY < rect.top + rect.height / 2) {
+                                bestIdx = rowIdx
+                                bestPos = 'before'
+                                break
+                              }
+                              bestIdx = rowIdx
+                              bestPos = 'after'
+                            }
+                            drag.targetIndex = bestIdx
+                            drag.position = bestPos
+                            setDropPinTarget((prev) =>
+                              prev && prev.index === bestIdx && prev.position === bestPos
+                                ? prev
+                                : { index: bestIdx, position: bestPos }
+                            )
+                          }}
+                          onPointerUp={(e) => {
+                            const drag = touchDragRef.current
+                            if (!drag || drag.pointerId !== e.pointerId) return
+                            e.stopPropagation()
+                            if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                              e.currentTarget.releasePointerCapture(e.pointerId)
+                            }
+                            const toIndex = computeReorderToIndex(
+                              drag.fromIndex,
+                              drag.targetIndex,
+                              drag.position,
+                              engine.pinnedChannels.length
+                            )
+                            if (toIndex !== drag.fromIndex) {
+                              onPlaySound?.('click')
+                              engine.reorderPinnedChannels(drag.fromIndex, toIndex)
+                            }
+                            touchDragRef.current = null
+                            setDragPinIndex(null)
+                            setDropPinTarget(null)
+                          }}
+                          onPointerCancel={(e) => {
+                            const drag = touchDragRef.current
+                            if (!drag || drag.pointerId !== e.pointerId) return
+                            if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                              e.currentTarget.releasePointerCapture(e.pointerId)
+                            }
+                            touchDragRef.current = null
+                            setDragPinIndex(null)
+                            setDropPinTarget(null)
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'ArrowUp' && idx > 0) {
+                              e.preventDefault()
+                              onPlaySound?.('click')
+                              engine.reorderPinnedChannels(idx, idx - 1)
+                            } else if (e.key === 'ArrowDown' && idx < engine.pinnedChannels.length - 1) {
+                              e.preventDefault()
+                              onPlaySound?.('click')
+                              engine.reorderPinnedChannels(idx, idx + 1)
+                            }
+                          }}
+                        >
+                          <GripVertical size={14} />
+                        </button>
+                      )}
                     </div>
                   )
                 })}
+                </div>
               </section>
             )}
 
@@ -1153,7 +1323,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   const isTopic = isTopicChannel(room.geohash)
                   const displayLabel = formatRadioChannelLabel(room.geohash)
                   const active = isChannelActive(room.geohash)
-                  const pinned = engine.isChannelPinned(room.geohash)
                   const unread = engine.unreadCounts[ghKey] ?? 0
                   const mentions = engine.mentionCounts[ghKey] ?? 0
                   const hasUnread = unread > 0 || mentions > 0
@@ -1229,23 +1398,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                             </span>
                           </div>
                         </div>
-                      </button>
-                      <button
-                        type="button"
-                        className={`ag-row-pin-btn ${pinned ? 'pinned' : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onPlaySound?.('click')
-                          engine.togglePinChannel(
-                            room.geohash,
-                            isTopic ? undefined : room.nearestCity || undefined
-                          )
-                        }}
-                        title={pinned ? `Unpin ${displayLabel}` : `Pin ${displayLabel}`}
-                        aria-label={pinned ? `Unpin ${displayLabel}` : `Pin ${displayLabel}`}
-                        aria-pressed={pinned}
-                      >
-                        {pinned ? <PinOff size={14} /> : <Pin size={14} />}
                       </button>
                     </div>
                   )

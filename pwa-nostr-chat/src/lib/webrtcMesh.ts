@@ -246,6 +246,70 @@ export class WebRtcMesh {
     return this.localRecording
   }
 
+  getLocalAudioDeviceId(): string {
+    try {
+      return this.localAudioTrack?.getSettings?.().deviceId ?? ''
+    } catch {
+      return ''
+    }
+  }
+
+  async replaceAudioTrack(nextTrack: MediaStreamTrack): Promise<boolean> {
+    if (this.disposed) {
+      nextTrack.stop()
+      return false
+    }
+
+    nextTrack.enabled = !this.localMuted
+    const prevTrack = this.localAudioTrack
+    this.localAudioTrack = nextTrack
+    this.rebuildLocalStream()
+
+    const tasks: Promise<void>[] = []
+    for (const entry of this.peers.values()) {
+      tasks.push(
+        (async () => {
+          if (this.disposed) return
+          try {
+            if (entry.audioSender) {
+              await entry.audioSender.replaceTrack(nextTrack)
+              return
+            }
+            const existingAudioSender = entry.pc
+              .getSenders()
+              .find((s) => s.track?.kind === 'audio' || s.dtmf !== null)
+            if (existingAudioSender) {
+              await existingAudioSender.replaceTrack(nextTrack)
+              entry.audioSender = existingAudioSender
+              return
+            }
+            if (this.localStream) {
+              entry.audioSender = entry.pc.addTrack(nextTrack, this.localStream)
+              await this.enqueuePeerSignal(entry.pubkey, () =>
+                this.initiateOfferInternal(entry, false)
+              )
+            }
+          } catch {
+            // Peer may have closed mid-transition
+          }
+        })()
+      )
+    }
+
+    await Promise.all(tasks)
+
+    if (prevTrack && prevTrack !== nextTrack) {
+      try {
+        prevTrack.stop()
+      } catch {
+        // Ignore stop error
+      }
+    }
+
+    this.emitState()
+    return true
+  }
+
   getLocalMediaState(): {
     audioMuted: boolean
     videoEnabled: boolean
@@ -302,7 +366,10 @@ export class WebRtcMesh {
     this.iceServers = buildIceServers(turnConfig)
   }
 
-  async initLocalMedia(media: CallMediaType): Promise<{ audioOk: boolean; videoOk: boolean }> {
+  async initLocalMedia(
+    media: CallMediaType,
+    preferredAudioInputId?: string
+  ): Promise<{ audioOk: boolean; videoOk: boolean }> {
     if (this.disposed) return { audioOk: false, videoOk: false }
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       throw new Error('WebRTC media capture is unavailable in this browser context (requires HTTPS or localhost).')
@@ -313,6 +380,9 @@ export class WebRtcMesh {
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
+      ...(preferredAudioInputId && preferredAudioInputId !== 'default'
+        ? { deviceId: { ideal: preferredAudioInputId } }
+        : {}),
     }
 
     let stream: MediaStream

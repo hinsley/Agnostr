@@ -34,46 +34,55 @@ export const KIND_NIP29_GROUP_MEMBERS = 39002
 export const KIND_NIP42_AUTH = 22242
 
 /**
- * Live-verified 2026 public NIP-29 relays.
- * First two verified to support instant kind 9007 group creation + kind 9002 edit + kind 9 chat!
+ * Live-audited public NIP-29 relays (verified active, readable, and low-spam).
  */
 export const DEFAULT_NIP29_RELAYS: readonly Nip29RelayPreset[] = [
   {
-    url: 'wss://relay.epochshield.com',
-    name: 'EpochShield Groups',
-    description: 'Open NIP-29 relay supporting instant group creation, moderation & delete.',
-    supportsCreate: true,
-  },
-  {
-    url: 'wss://groups.yugoatobe.com',
-    name: 'Yugoatobe Groups',
-    description: 'Active open NIP-29 relay (90+ groups) supporting instant group creation.',
-    supportsCreate: true,
-  },
-  {
     url: 'wss://pyramid.fiatjaf.com',
     name: 'Fiatjaf Pyramid',
-    description: 'Community NIP-29 relay (Bitfest, Table Mesh, dev groups; NIP-42 AUTH).',
+    description: 'Popular Nostr & Bitcoin NIP-29 communities (Bitfest, Table Mesh, nak, grimoire, pyramid runners).',
+    supportsCreate: false,
+    requiresAuth: true,
+  },
+  {
+    url: 'wss://relay.nostr-proto.org',
+    name: 'Nostr Proto',
+    description: 'Clean Nostr community rooms for Protocol, Relays, Apps, Help, and Agora discussion.',
     supportsCreate: false,
     requiresAuth: true,
   },
   {
     url: 'wss://groups.hzrd149.com',
     name: "hzrd149's Groups",
-    description: 'Developer NIP-29 communities (nsite, TollGate, test; NIP-42 AUTH).',
+    description: 'Nostr developer communities (nsite, applesauce, blossom, TollGate, RxJS).',
     supportsCreate: false,
     requiresAuth: true,
   },
   {
-    url: 'wss://relay.zapclub.io',
-    name: 'ZapClub Communities',
-    description: 'Public NIP-29 communities (Def Dev, Dust Circuit, Mesh Lounge).',
+    url: 'wss://spatia-arcana.com',
+    name: 'Spatia-Arcana',
+    description: 'Active community spaces (Nostr Study Group, Hearts in Nature, Center for the Arts, general).',
     supportsCreate: false,
+    requiresAuth: true,
   },
   {
-    url: 'wss://chat.bitcoinwalk.org',
-    name: 'BitcoinWalk Chat',
-    description: 'Bitcoin & Nostr community rooms hosted over NIP-29.',
+    url: 'wss://support.flotilla.social',
+    name: 'Flotilla Community',
+    description: 'Active Nostr spaces & client community (General, Calls, Guides; NIP-42 AUTH).',
+    supportsCreate: false,
+    requiresAuth: true,
+  },
+  {
+    url: 'wss://basspistol.org',
+    name: 'Basspistol Syndicate',
+    description: 'Independent music & city communities (Berlin, Barcelona, Stockholm, DubHeads, Mix Tape).',
+    supportsCreate: false,
+    requiresAuth: true,
+  },
+  {
+    url: 'wss://inner.sebastix.social',
+    name: 'Sebastix Community',
+    description: 'Active developer & self-hosting rooms (Omarchy, Nuxtstack, Nostr-PHP, SebastixChat).',
     supportsCreate: false,
     requiresAuth: true,
   },

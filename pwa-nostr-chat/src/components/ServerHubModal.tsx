@@ -86,7 +86,7 @@ export function ServerHubModal({
   const [descDraft, setDescDraft] = useState('')
   const [iconDraft, setIconDraft] = useState('📡')
   const [accentDraft, setAccentDraft] = useState<string>(ACCENT_CHOICES[0].hex)
-  const [channelsDraft, setChannelsDraft] = useState<string[]>(['general', 'voice-drops', 'off-topic'])
+  const [channelsDraft, setChannelsDraft] = useState<string[]>(['general', 'off-topic'])
   const [newChannelDraft, setNewChannelDraft] = useState('')
   const [nip29CreateRelay, setNip29CreateRelay] = useState('')
   const [nip29Private, setNip29Private] = useState(false)
@@ -122,10 +122,11 @@ export function ServerHubModal({
 
   // Default NIP-29 creation relay
   useEffect(() => {
-    if (!nip29CreateRelay && createSupportedPresets.length > 0) {
-      setNip29CreateRelay(createSupportedPresets[0].url)
+    if (!nip29CreateRelay) {
+      const fallback = createSupportedPresets[0]?.url ?? servers.nip29Presets[0]?.url
+      if (fallback) setNip29CreateRelay(fallback)
     }
-  }, [nip29CreateRelay, createSupportedPresets])
+  }, [nip29CreateRelay, createSupportedPresets, servers.nip29Presets])
 
   // Auto-load Explore relay when switching to Explore tab
   useEffect(() => {
@@ -629,7 +630,7 @@ export function ServerHubModal({
                     id="ag-nip29-create-relay"
                     type="text"
                     className="ag-input mono"
-                    placeholder="wss://relay.epochshield.com"
+                    placeholder="wss://pyramid.fiatjaf.com"
                     value={nip29CreateRelay}
                     onChange={(e) => setNip29CreateRelay(e.target.value)}
                   />
@@ -758,7 +759,7 @@ export function ServerHubModal({
                         )}
                         <span
                           className="ag-badge ag-srv-saved-badge"
-                          title="Persistent history stored on relays — not ephemeral"
+                          title="Persistent history stored on relays"
                         >
                           <Database size={9} />
                           <span>SAVED</span>

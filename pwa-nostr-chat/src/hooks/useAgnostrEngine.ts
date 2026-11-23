@@ -1383,6 +1383,26 @@ export function useAgnostrEngine(): AgnostrEngine {
     []
   )
 
+  const reorderPinnedChannels = useCallback((fromIndex: number, toIndex: number) => {
+    setPinnedChannels((prev) => {
+      if (
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= prev.length ||
+        toIndex >= prev.length ||
+        fromIndex === toIndex
+      ) {
+        return prev
+      }
+      const next = [...prev]
+      const [moved] = next.splice(fromIndex, 1)
+      if (!moved) return prev
+      next.splice(toIndex, 0, moved)
+      savePinnedChannels(next)
+      return next
+    })
+  }, [])
+
   const openDmThread = useCallback(
     (peerPubkey: string, nicknameHint?: string, preferredProtocol?: DmProtocol) => {
       const pk = peerPubkey.toLowerCase()
@@ -2700,6 +2720,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     totalGeoMentions,
     isChannelPinned,
     togglePinChannel,
+    reorderPinnedChannels,
 
     dmThreads,
     activeDmThread,
