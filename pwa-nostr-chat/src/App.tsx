@@ -18,6 +18,7 @@ import {
 } from './lib/shareLinks'
 import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
 import type { ServerMessage, ServerSummary } from './types/servers'
+import type { WalletInitialIntent, ZapTarget } from './types/wallet'
 import { radioAudio, type SoundCue } from './utils/sound'
 import ConversationList, { type ListTab } from './components/ConversationList'
 import MobileTabBar from './components/MobileTabBar'
@@ -40,6 +41,8 @@ import ImageLightboxModal, { type LightboxImagePayload } from './components/Imag
 import QrShareModal, { type QrShareTarget } from './components/QrShareModal'
 import QrScannerModal from './components/QrScannerModal'
 import TrustConfirmModal from './components/TrustConfirmModal'
+import WalletModal from './components/WalletModal'
+import ZapModal from './components/ZapModal'
 import { ContextMenuProvider } from './components/ContextMenu'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
@@ -96,6 +99,11 @@ export function App() {
   const [lightboxImage, setLightboxImage] = useState<LightboxImagePayload | null>(null)
   const [qrShareTarget, setQrShareTarget] = useState<QrShareTarget | null>(null)
   const [qrScannerOpen, setQrScannerOpen] = useState(false)
+  const [walletState, setWalletState] = useState<{
+    open: boolean
+    intent?: WalletInitialIntent
+  }>({ open: false, intent: undefined })
+  const [zapTarget, setZapTarget] = useState<ZapTarget | null>(null)
   const [serverHubState, setServerHubState] = useState<{ open: boolean; tab: ServerHubTab }>({
     open: false,
     tab: 'create',
@@ -444,6 +452,8 @@ export function App() {
       setLightboxImage(null)
       setQrShareTarget(null)
       setQrScannerOpen(false)
+      setWalletState({ open: false, intent: undefined })
+      setZapTarget(null)
       setPanicFlash(true)
       const t = window.setTimeout(() => setPanicFlash(false), 700)
       prevMasterPkRef.current = engine.identity.masterPubkey
@@ -540,6 +550,10 @@ export function App() {
           engine.cancelPendingTrust()
         } else if (qrScannerOpen) {
           setQrScannerOpen(false)
+        } else if (zapTarget) {
+          setZapTarget(null)
+        } else if (walletState.open) {
+          setWalletState({ open: false, intent: undefined })
         } else if (qrShareTarget) {
           setQrShareTarget(null)
         } else if (cmdkOpen) {
@@ -573,6 +587,8 @@ export function App() {
   }, [
     engine,
     qrScannerOpen,
+    zapTarget,
+    walletState.open,
     qrShareTarget,
     cmdkOpen,
     lightboxImage,
@@ -619,6 +635,8 @@ export function App() {
   const swipeDisabled =
     !isMobileViewport ||
     Boolean(engine.pendingTrustRequest) ||
+    walletState.open ||
+    Boolean(zapTarget) ||
     settingsState.open ||
     radarExpanded ||
     serverHubState.open ||
@@ -689,6 +707,14 @@ export function App() {
       setQrScannerOpen(false)
       return true
     }
+    if (zapTarget) {
+      setZapTarget(null)
+      return true
+    }
+    if (walletState.open) {
+      setWalletState({ open: false, intent: undefined })
+      return true
+    }
     if (qrShareTarget) {
       setQrShareTarget(null)
       return true
@@ -746,6 +772,8 @@ export function App() {
   }, [
     engine,
     qrScannerOpen,
+    zapTarget,
+    walletState.open,
     qrShareTarget,
     lightboxImage,
     cmdkOpen,
@@ -777,6 +805,8 @@ export function App() {
   const hasActiveBackTarget =
     Boolean(engine.pendingTrustRequest) ||
     qrScannerOpen ||
+    Boolean(zapTarget) ||
+    walletState.open ||
     Boolean(qrShareTarget) ||
     Boolean(lightboxImage) ||
     cmdkOpen ||
@@ -859,9 +889,85 @@ export function App() {
     setQrScannerOpen(true)
   }, [])
 
+  const handleOpenWallet = useCallback((intent?: WalletInitialIntent) => {
+    setZapTarget(null)
+    setInspectedPeer(null)
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setRoomInfoOpen(false)
+    setWalletState({ open: true, intent })
+  }, [])
+
+  const handleOpenZap = useCallback((target: ZapTarget) => {
+    setWalletState({ open: false, intent: undefined })
+    setZapTarget(target)
+  }, [])
+
+  const handleClaimCashuToken = useCallback(
+    (token: string) => {
+      handleOpenWallet({ tab: 'receive', receiveMode: 'cashu', payload: token })
+    },
+    [handleOpenWallet]
+  )
+
+  const activeChatLabel = useMemo(() => {
+    if (isDm && engine.activeDmThread) {
+      return engine.activeDmThread.peerDisplayHandle
+    }
+    if (isServer && activeServer && activeChannel) {
+      return `${activeServer.name} · #${activeChannel.name}`
+    }
+    return formatRadioChannelLabel(engine.activeGeohash)
+  }, [isDm, engine.activeDmThread, isServer, activeServer, activeChannel, engine.activeGeohash])
+
+  const handleSendCashuToChat = useCallback(
+    async (token: string, amountSats: number, memo?: string): Promise<boolean> => {
+      const cleanToken = token.trim()
+      if (!cleanToken) return false
+      const body = memo?.trim()
+        ? `⚡ ${amountSats.toLocaleString()} sats — ${memo.trim()}\n${cleanToken}`
+        : cleanToken
+      let ok = false
+      if (isServer && activeServer && activeChannel) {
+        ok = await engine.servers.sendMessage(body)
+      } else if (isDm && engine.activeDmThread) {
+        ok = await engine.sendDirectMessage(
+          engine.activeDmThread.peerPubkey,
+          body,
+          engine.activeDmThread.protocol
+        )
+      } else {
+        ok = await engine.sendInput(body)
+      }
+      if (ok) {
+        radioAudio.play(isDm || isServerE2ee ? 'dm' : 'send')
+        setWalletState({ open: false, intent: undefined })
+        setMobileScreen('chat')
+      }
+      return ok
+    },
+    [isServer, activeServer, activeChannel, isDm, isServerE2ee, engine]
+  )
+
   const handleResolvedShareTarget = useCallback(
     (target: ParsedShareTarget) => {
       setQrScannerOpen(false)
+      if (target.kind === 'cashu') {
+        handleOpenWallet({
+          tab: 'receive',
+          receiveMode: 'cashu',
+          payload: target.token,
+        })
+        return
+      }
+      if (target.kind === 'lightning') {
+        handleOpenWallet({
+          tab: 'send',
+          sendMode: 'lightning',
+          payload: target.payload,
+        })
+        return
+      }
       if (target.kind === 'dm') {
         const myMaster = engine.identity.masterPubkey.toLowerCase()
         const myActive = engine.identity.activePubkey.toLowerCase()
@@ -876,6 +982,8 @@ export function App() {
           )
           return
         }
+        setWalletState({ open: false, intent: undefined })
+        setZapTarget(null)
         setRadarExpanded(false)
         setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
         setRoomInfoOpen(false)
@@ -900,6 +1008,8 @@ export function App() {
         )
         return
       }
+      setWalletState({ open: false, intent: undefined })
+      setZapTarget(null)
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setRoomInfoOpen(false)
@@ -910,7 +1020,7 @@ export function App() {
         }
       })
     },
-    [engine, handleJoinedServer]
+    [engine, handleJoinedServer, handleOpenWallet]
   )
 
   // Listen on mount + hashchange for `#dm=npub1...(&name=...)` deep links
@@ -1264,6 +1374,8 @@ export function App() {
             onOpenCommandPalette={() => setCmdkOpen(true)}
             onExpandRadar={handleExpandRadar}
             onOpenSettings={handleOpenSettings}
+            onOpenWallet={handleOpenWallet}
+            onOpenZap={handleOpenZap}
             onLocateMe={() => void handleLocateMe()}
             onFocusActiveCall={() => {
               setMobileScreen('chat')
@@ -1301,6 +1413,7 @@ export function App() {
           }}
           onExpandRadar={handleExpandRadar}
           onFocusActiveCall={() => setCallExpanded(true)}
+          onOpenZap={handleOpenZap}
         />
 
         {/* Compact PWA Offline & Update-Ready Status Strips */}
@@ -1441,6 +1554,8 @@ export function App() {
           onExpandRadar={handleExpandRadar}
           onOpenServerSettings={handleOpenServerSettings}
           onOpenLightbox={setLightboxImage}
+          onOpenZap={handleOpenZap}
+          onClaimCashuToken={handleClaimCashuToken}
         />
 
         <Composer
@@ -1468,6 +1583,7 @@ export function App() {
           onLeftServer={handleLeftServer}
           onShowQr={setQrShareTarget}
           onOpenScanner={handleOpenScanner}
+          onOpenZap={handleOpenZap}
           onPlaySound={playSound}
         />
 
@@ -1491,6 +1607,7 @@ export function App() {
             initialTab={settingsState.tab}
             onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
             onOpenInstall={handleOpenInstall}
+            onOpenWallet={() => handleOpenWallet({ tab: 'overview' })}
             onShowQr={setQrShareTarget}
             onOpenScanner={handleOpenScanner}
             onPlaySound={playSound}
@@ -1523,6 +1640,7 @@ export function App() {
           initialTab={settingsState.tab}
           onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
           onOpenInstall={handleOpenInstall}
+          onOpenWallet={() => handleOpenWallet({ tab: 'overview' })}
           onShowQr={setQrShareTarget}
           onOpenScanner={handleOpenScanner}
           onPlaySound={playSound}
@@ -1536,6 +1654,7 @@ export function App() {
         onClose={() => setInspectedPeer(null)}
         onStartDm={handleOpenDm}
         onMentionPeer={handleMentionPeer}
+        onOpenZap={handleOpenZap}
       />
 
       {/* Desktop Full-Screen Expandable Geohash Map Modal */}
@@ -1596,6 +1715,7 @@ export function App() {
         onLocateMe={() => void handleLocateMe()}
         onOpenRoomInfo={() => handleRightDrawerOpenChange(true)}
         onOpenSettings={handleOpenSettings}
+        onOpenWallet={handleOpenWallet}
         onToggleSound={handleToggleSound}
         onRunCommand={handleRunCommand}
         onExport={handleExport}
@@ -1655,6 +1775,27 @@ export function App() {
           }}
         />
       )}
+
+      {/* Built-In Multi-Mint Cashu Ecash Wallet & Boltz On-Chain Swap Modal */}
+      <WalletModal
+        open={walletState.open}
+        onClose={() => setWalletState({ open: false, intent: undefined })}
+        wallet={engine.wallet}
+        zaps={engine.zaps}
+        initialIntent={walletState.intent}
+        onOpenScanner={handleOpenScanner}
+        onSendToChat={handleSendCashuToChat}
+        activeChatLabel={activeChatLabel}
+      />
+
+      {/* NIP-57 / Nymchat Lightning Zap Modal */}
+      <ZapModal
+        target={zapTarget}
+        onClose={() => setZapTarget(null)}
+        wallet={engine.wallet}
+        zaps={engine.zaps}
+        onOpenWallet={handleOpenWallet}
+      />
 
       {/* Global Trust Peer Security Warning Confirmation Dialog */}
       <TrustConfirmModal

@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ArrowDownLeft,
+  ArrowUpRight,
   Bell,
   BellRing,
   Captions,
@@ -10,6 +12,7 @@ import {
   Hash,
   Info,
   Key,
+  Languages,
   Link2,
   Lock,
   Map as MapIcon,
@@ -29,14 +32,18 @@ import {
   Server,
   Settings,
   Shield,
+  ShieldAlert,
   ShieldCheck,
   Square,
   Terminal,
   Video,
   Volume2,
+  Wallet,
   Wifi,
+  Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, ThemeId } from '../types/protocol'
+import type { WalletInitialIntent } from '../types/wallet'
 import type { PwaState } from '../hooks/usePwa'
 import {
   formatRadioChannelLabel,
@@ -83,6 +90,7 @@ export interface CommandPaletteProps {
   onLocateMe: () => void
   onOpenRoomInfo: () => void
   onOpenSettings: (tab?: SettingsTab) => void
+  onOpenWallet?: (intent?: WalletInitialIntent) => void
   onToggleSound: () => void
   onRunCommand: (cmdLine: string) => void
   onExport: (format: 'md' | 'json') => void
@@ -105,6 +113,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onLocateMe,
   onOpenRoomInfo,
   onOpenSettings,
+  onOpenWallet,
   onToggleSound,
   onRunCommand,
   onExport,
@@ -131,25 +140,51 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     const cleanHash = q.replace(/^#/, '')
     const list: PaletteEntry[] = []
 
-    // Direct jump whenever query is a DM link / npub / community invite
+    // Direct jump whenever query is a DM link / npub / community invite / Cashu token / Lightning invoice
     const parsedShare = query.trim().length >= 8 ? parseShareTarget(query.trim()) : null
     if (parsedShare && onResolvedShareTarget) {
       list.push({
         id: `direct-share-${parsedShare.kind}`,
-        group: parsedShare.kind === 'dm' ? 'Direct Message' : 'Community Invite',
+        group:
+          parsedShare.kind === 'dm'
+            ? 'Direct Message'
+            : parsedShare.kind === 'cashu'
+              ? 'Cashu Ecash'
+              : parsedShare.kind === 'lightning'
+                ? 'Lightning'
+                : 'Community Invite',
         title:
           parsedShare.kind === 'dm'
             ? `Start DM with ${parsedShare.nickname || `${parsedShare.npub.slice(0, 14)}…`}`
-            : 'Join Community from Invite',
+            : parsedShare.kind === 'cashu'
+              ? 'Claim Cashu Ecash Token'
+              : parsedShare.kind === 'lightning'
+                ? parsedShare.lightningKind === 'lud16'
+                  ? `Pay Lightning Address (${parsedShare.payload})`
+                  : 'Pay Lightning Invoice'
+                : 'Join Community from Invite',
         subtitle:
           parsedShare.kind === 'dm'
             ? parsedShare.npub
-            : 'Open & join this community invite immediately',
+            : parsedShare.kind === 'cashu'
+              ? 'Open Cashu Wallet to verify & claim this ecash token'
+              : parsedShare.kind === 'lightning'
+                ? 'Open Cashu Wallet to melt & pay via Lightning'
+                : 'Open & join this community invite immediately',
         keywords: query.trim().toLowerCase(),
-        badge: parsedShare.kind === 'dm' ? 'DM' : 'INVITE',
+        badge:
+          parsedShare.kind === 'dm'
+            ? 'DM'
+            : parsedShare.kind === 'cashu'
+              ? 'CASHU'
+              : parsedShare.kind === 'lightning'
+                ? 'LN'
+                : 'INVITE',
         icon:
           parsedShare.kind === 'dm' ? (
             <MessageCircle size={15} style={{ color: 'var(--dm-accent)' }} />
+          ) : parsedShare.kind === 'cashu' || parsedShare.kind === 'lightning' ? (
+            <Zap size={15} style={{ color: 'var(--status-warn)' }} />
           ) : (
             <Server size={15} style={{ color: 'var(--accent)' }} />
           ),
@@ -750,6 +785,89 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           engine.notifications.testRingtone()
         },
       },
+      ...(onOpenWallet
+        ? [
+            {
+              id: 'act-wallet-open',
+              group: 'Wallet & Zaps',
+              title: 'Open Cashu Wallet',
+              subtitle: `${engine.wallet.totalBalanceSats.toLocaleString()} sats across ${engine.wallet.mints.length} ${engine.wallet.mints.length === 1 ? 'mint' : 'mints'}`,
+              keywords: 'open cashu ecash wallet bitcoin sats lightning mint boltz balance zap',
+              badge: `${engine.wallet.totalBalanceSats.toLocaleString()} sats`,
+              icon: <Wallet size={15} style={{ color: 'var(--status-warn)' }} />,
+              run: () => {
+                onClose()
+                onOpenWallet({ tab: 'overview' })
+              },
+            },
+            {
+              id: 'act-wallet-receive',
+              group: 'Wallet & Zaps',
+              title: 'Receive Sats (Cashu / Lightning / On-Chain)',
+              subtitle: 'Claim Cashu token, generate Lightning invoice, or swap On-Chain BTC via Boltz',
+              keywords: 'receive sats deposit cashu ecash token lightning invoice onchain btc bitcoin boltz swap',
+              badge: 'RECEIVE',
+              icon: <ArrowDownLeft size={15} style={{ color: 'var(--status-warn)' }} />,
+              run: () => {
+                onClose()
+                onOpenWallet({ tab: 'receive' })
+              },
+            },
+            {
+              id: 'act-wallet-send',
+              group: 'Wallet & Zaps',
+              title: 'Send Sats',
+              subtitle: 'Mint Cashu ecash token, pay Lightning invoice/address, or send On-Chain BTC',
+              keywords: 'send sats pay cashu ecash token lightning invoice address onchain btc bitcoin boltz',
+              badge: 'SEND',
+              icon: <ArrowUpRight size={15} style={{ color: 'var(--status-warn)' }} />,
+              run: () => {
+                onClose()
+                onOpenWallet({ tab: 'send' })
+              },
+            },
+          ]
+        : []),
+      {
+        id: 'act-translator-toggle',
+        group: 'Actions',
+        title: engine.translator.settings.enabled
+          ? 'Exit Double-Column Translator'
+          : 'Open Double-Column Translator',
+        subtitle: `On-device LFM3-1.7B · Reading in ${engine.translator.settings.myLanguage}`,
+        keywords: 'translate translator language double column lfm3 liquid bilingual spanish french japanese',
+        badge: engine.translator.settings.enabled ? 'ON' : 'OFF',
+        icon: <Languages size={15} />,
+        run: () => {
+          engine.translator.updateSettings({ enabled: !engine.translator.settings.enabled })
+          onClose()
+        },
+      },
+      {
+        id: 'act-settings-content-filter',
+        group: 'Settings',
+        title: 'Content Filter Settings',
+        subtitle: `Liquid AI d1-2B · Media: ${engine.contentFilter.settings.mediaScope} · Text: ${engine.contentFilter.settings.textScope}`,
+        keywords: 'content filter settings liquid d1-2b nsfw illegal moderation media safety ai',
+        badge: engine.contentFilter.settings.enabled ? 'ON' : 'OFF',
+        icon: <ShieldAlert size={15} />,
+        run: () => {
+          onClose()
+          onOpenSettings('content-filter')
+        },
+      },
+      {
+        id: 'act-settings-translator',
+        group: 'Settings',
+        title: 'Translator Settings (LFM3-1.7B)',
+        subtitle: `My language: ${engine.translator.settings.myLanguage}${engine.translator.settings.outgoingEnabled ? ` · Outgoing → ${engine.translator.settings.outgoingLanguage}` : ''}`,
+        keywords: 'translator translation settings language lfm3 liquid model cache outgoing',
+        icon: <Languages size={15} />,
+        run: () => {
+          onClose()
+          onOpenSettings('translator')
+        },
+      },
       {
         id: 'act-settings-notifications',
         group: 'Settings',
@@ -965,6 +1083,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     onLocateMe,
     onOpenRoomInfo,
     onOpenSettings,
+    onOpenWallet,
     onToggleSound,
     onExport,
     onRunCommand,

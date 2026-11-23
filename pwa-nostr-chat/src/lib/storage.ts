@@ -1,4 +1,13 @@
 import type { RecordingQualityPreset, TurnServerConfig } from '../types/calls.ts'
+import {
+  DEFAULT_CONTENT_FILTER_SETTINGS,
+  type ContentFilterCallVideoMode,
+  type ContentFilterCategory,
+  type ContentFilterMediaScope,
+  type ContentFilterSettings,
+  type ContentFilterTextScope,
+  type ContentFilterVerdict,
+} from '../types/contentFilter.ts'
 import type {
   NotificationFilterMode,
   NotificationSettings,
@@ -51,6 +60,8 @@ const KEYS = {
   recordingQuality: `${PREFIX}recording_quality`,
   transcription: `${PREFIX}transcription`,
   memoTranscripts: `${PREFIX}memo_transcripts`,
+  contentFilterSettings: `${PREFIX}content_filter_settings`,
+  filterVerdicts: `${PREFIX}filter_verdicts`,
   notifications: `${PREFIX}notifications`,
   servers: `${PREFIX}servers`,
   serverMsgChannel: (serverId: string, channelId: string) => `${PREFIX}smsgs:${serverId}:${channelId}`,
@@ -751,6 +762,117 @@ export function loadGeoDirectoryCache(): GeoRelayEntry[] | null {
 export function saveGeoDirectoryCache(entries: GeoRelayEntry[]): void {
   const payload: GeoDirectoryCache = { fetchedAt: Date.now(), entries }
   safeSet(KEYS.geoDirectory, JSON.stringify(payload))
+}
+
+const MAX_FILTER_VERDICTS = 400
+
+function isValidMediaScope(v: unknown): v is ContentFilterMediaScope {
+  return v === 'untrusted' || v === 'all' || v === 'off'
+}
+
+function isValidTextScope(v: unknown): v is ContentFilterTextScope {
+  return v === 'off' || v === 'untrusted' || v === 'all'
+}
+
+function isValidCallVideoMode(v: unknown): v is ContentFilterCallVideoMode {
+  return v === 'trusted-only' || v === 'screen-untrusted' || v === 'screen-all'
+}
+
+export function loadContentFilterSettings(): ContentFilterSettings {
+  const parsed = safeJsonParse<Partial<ContentFilterSettings>>(
+    safeGet(KEYS.contentFilterSettings),
+    {}
+  )
+  return {
+    enabled:
+      typeof parsed.enabled === 'boolean'
+        ? parsed.enabled
+        : DEFAULT_CONTENT_FILTER_SETTINGS.enabled,
+    filterNsfw:
+      typeof parsed.filterNsfw === 'boolean'
+        ? parsed.filterNsfw
+        : DEFAULT_CONTENT_FILTER_SETTINGS.filterNsfw,
+    filterIllegal:
+      typeof parsed.filterIllegal === 'boolean'
+        ? parsed.filterIllegal
+        : DEFAULT_CONTENT_FILTER_SETTINGS.filterIllegal,
+    customRulesEnabled:
+      typeof parsed.customRulesEnabled === 'boolean'
+        ? parsed.customRulesEnabled
+        : DEFAULT_CONTENT_FILTER_SETTINGS.customRulesEnabled,
+    customInstructions:
+      typeof parsed.customInstructions === 'string'
+        ? parsed.customInstructions.slice(0, 600)
+        : DEFAULT_CONTENT_FILTER_SETTINGS.customInstructions,
+    mediaScope: isValidMediaScope(parsed.mediaScope)
+      ? parsed.mediaScope
+      : DEFAULT_CONTENT_FILTER_SETTINGS.mediaScope,
+    textScope: isValidTextScope(parsed.textScope)
+      ? parsed.textScope
+      : DEFAULT_CONTENT_FILTER_SETTINGS.textScope,
+    callVideoMode: isValidCallVideoMode(parsed.callVideoMode)
+      ? parsed.callVideoMode
+      : DEFAULT_CONTENT_FILTER_SETTINGS.callVideoMode,
+  }
+}
+
+export function saveContentFilterSettings(settings: ContentFilterSettings): void {
+  safeSet(KEYS.contentFilterSettings, JSON.stringify(settings))
+}
+
+interface PersistedFilterVerdictsPayload {
+  rulesFingerprint: string
+  entries: Record<string, ContentFilterVerdict>
+}
+
+export function loadFilterVerdicts(expectedFingerprint: string): Record<string, ContentFilterVerdict> {
+  const parsed = safeJsonParse<PersistedFilterVerdictsPayload | null>(
+    safeGet(KEYS.filterVerdicts),
+    null
+  )
+  if (!parsed || typeof parsed !== 'object' || parsed.rulesFingerprint !== expectedFingerprint) {
+    return {}
+  }
+  if (!parsed.entries || typeof parsed.entries !== 'object') return {}
+  const out: Record<string, ContentFilterVerdict> = {}
+  for (const [key, val] of Object.entries(parsed.entries)) {
+    if (!val || typeof val !== 'object') continue
+    if (val.status !== 'safe' && val.status !== 'flagged') continue
+    const categories = Array.isArray(val.categories)
+      ? val.categories.filter(
+          (c): c is ContentFilterCategory => c === 'nsfw' || c === 'illegal' || c === 'custom'
+        )
+      : []
+    out[key] = {
+      status: val.status,
+      safe: val.status === 'safe' && Boolean(val.safe),
+      flagged: val.status === 'flagged' && Boolean(val.flagged),
+      categories,
+      reason: typeof val.reason === 'string' ? val.reason : undefined,
+      scores: val.scores && typeof val.scores === 'object' ? val.scores : undefined,
+      checkedAt: typeof val.checkedAt === 'number' && Number.isFinite(val.checkedAt) ? val.checkedAt : Date.now(),
+    }
+  }
+  return out
+}
+
+export function saveFilterVerdicts(
+  rulesFingerprint: string,
+  verdicts: Record<string, ContentFilterVerdict>
+): void {
+  const settled = Object.entries(verdicts)
+    .filter(([, v]) => v.status === 'safe' || v.status === 'flagged')
+    .sort((a, b) => b[1].checkedAt - a[1].checkedAt)
+    .slice(0, MAX_FILTER_VERDICTS)
+  const payload: PersistedFilterVerdictsPayload = {
+    rulesFingerprint,
+    entries: Object.fromEntries(settled),
+  }
+  safeSet(KEYS.filterVerdicts, JSON.stringify(payload))
+}
+
+export function clearFilterVerdictsStorage(): void {
+  safeRemove(KEYS.filterVerdicts)
 }
 
 export function panicWipeStorage(): void {

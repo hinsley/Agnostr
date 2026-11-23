@@ -1,9 +1,10 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import type { CSSProperties } from 'react'
 import {
   ArrowLeft,
   Hash,
   Info,
+  Languages,
   Lock,
   Map as MapIcon,
   PanelLeft,
@@ -12,8 +13,10 @@ import {
   Search,
   ShieldCheck,
   Video,
+  Zap,
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol'
+import type { ZapTarget } from '../types/wallet'
 import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel'
 import { identiconDataUrl } from '../utils/identicon'
 
@@ -37,6 +40,7 @@ export interface ChannelHeaderProps {
   onToggleSearch: () => void
   onExpandRadar: () => void
   onFocusActiveCall?: () => void
+  onOpenZap?: (target: ZapTarget) => void
 }
 
 export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
@@ -52,6 +56,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   onToggleSearch,
   onExpandRadar,
   onFocusActiveCall,
+  onOpenZap,
 }) => {
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
   const isServer =
@@ -63,9 +68,22 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   const activeChannel = engine.servers.activeChannel
 
   const activeCall = engine.calls.activeCall
+  const dmPeerPubkey = isDm && dmThread ? dmThread.peerPubkey : null
   const dmPeerTrusted = Boolean(
     isDm && dmThread && engine.isExplicitlyTrusted(dmThread.peerPubkey)
   )
+  const dmPeerLud16 = dmPeerPubkey ? engine.zaps.getPeerLightningAddress(dmPeerPubkey) : null
+  const translatorEnabled = engine.translator.settings.enabled
+  const translatorLang = engine.translator.settings.myLanguage
+
+  useEffect(() => {
+    if (!dmPeerPubkey) return
+    void engine.zaps.lookupPeerLightningAddress(dmPeerPubkey)
+  }, [dmPeerPubkey, engine.zaps])
+
+  const handleToggleTranslator = () => {
+    engine.translator.updateSettings({ enabled: !translatorEnabled })
+  }
   const inThisDmCall = Boolean(
     isDm &&
       dmThread &&
@@ -302,10 +320,29 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
           )}
         </div>
 
-        {/* Right Header Toolbar — Strictly 3 Clean Circular Buttons */}
+        {/* Right Header Toolbar */}
         <div className="ag-header-actions">
           {isDm && dmThread ? (
             <>
+              {dmPeerLud16 && onOpenZap && (
+                <button
+                  type="button"
+                  className="ag-circle-btn ag-zap-btn"
+                  onClick={() =>
+                    onOpenZap({
+                      pubkey: dmThread.peerPubkey,
+                      nickname: dmThread.peerNickname,
+                      lud16: dmPeerLud16,
+                      channelLabel: dmThread.peerDisplayHandle,
+                    })
+                  }
+                  title={`Zap ${dmThread.peerNickname} (${dmPeerLud16})`}
+                  aria-label={`Zap ${dmThread.peerNickname}`}
+                >
+                  <Zap size={17} />
+                </button>
+              )}
+
               <button
                 type="button"
                 className={`ag-circle-btn ${inThisDmCall ? 'active-ok' : ''}`}
@@ -336,6 +373,21 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 aria-label={inThisDmCall ? 'Focus active video call' : 'Start video call'}
               >
                 <Video size={18} />
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ${translatorEnabled ? 'active' : ''}`}
+                onClick={handleToggleTranslator}
+                title={
+                  translatorEnabled
+                    ? `Exit Translator Mode (${translatorLang})`
+                    : `Translate chat (${translatorLang} · LFM3-1.7B)`
+                }
+                aria-label={translatorEnabled ? 'Exit Translator Mode' : 'Open Translator Mode'}
+                aria-pressed={translatorEnabled}
+              >
+                <Languages size={17} />
               </button>
 
               <button
@@ -374,6 +426,21 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                     {serverCallCount}/{engine.calls.maxParticipants}
                   </span>
                 )}
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ${translatorEnabled ? 'active' : ''}`}
+                onClick={handleToggleTranslator}
+                title={
+                  translatorEnabled
+                    ? `Exit Translator Mode (${translatorLang})`
+                    : `Translate chat (${translatorLang} · LFM3-1.7B)`
+                }
+                aria-label={translatorEnabled ? 'Exit Translator Mode' : 'Open Translator Mode'}
+                aria-pressed={translatorEnabled}
+              >
+                <Languages size={17} />
               </button>
 
               <button
@@ -449,6 +516,21 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 }
               >
                 <Video size={18} />
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ${translatorEnabled ? 'active' : ''}`}
+                onClick={handleToggleTranslator}
+                title={
+                  translatorEnabled
+                    ? `Exit Translator Mode (${translatorLang})`
+                    : `Translate chat (${translatorLang} · LFM3-1.7B)`
+                }
+                aria-label={translatorEnabled ? 'Exit Translator Mode' : 'Open Translator Mode'}
+                aria-pressed={translatorEnabled}
+              >
+                <Languages size={17} />
               </button>
 
               {!isTopicRadio && (

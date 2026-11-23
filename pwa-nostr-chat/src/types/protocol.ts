@@ -1,7 +1,10 @@
 import type { CallEngine } from './calls.ts'
+import type { ContentFilterEngine } from './contentFilter.ts'
 import type { NotificationEngine } from './notifications.ts'
 import type { ServersEngine } from './servers.ts'
 import type { TranscriptionEngine } from './transcription.ts'
+import type { TranslatorEngine } from './translator.ts'
+import type { WalletEngine, ZapEngine } from './wallet.ts'
 
 export type ThemeId = 'phosphor' | 'amber' | 'obsidian' | 'daylight'
 
@@ -420,7 +423,14 @@ export interface AgnostrEngine {
   tuneRadioChannel: (channelKeyOrInput: string) => boolean
   tuneTopicChannel: (slug: string) => boolean
   locateMe: () => Promise<string | null>
-  sendInput: (rawText: string) => Promise<boolean>
+  sendInput: (
+    rawText: string,
+    options?: {
+      onPublishedId?: (id: string) => void
+      originalText?: string
+      translatedToLang?: string
+    }
+  ) => Promise<boolean>
   sendReaction: (message: GeoMessage, emoji: string) => Promise<void>
   postLocationNote: (content: string) => Promise<boolean>
   refreshLocationNotes: () => void
@@ -494,6 +504,18 @@ export interface AgnostrEngine {
 
   // On-device local voice transcription (Voice Memos + Live Call Captions)
   transcription: TranscriptionEngine
+
+  // On-device AI Content Filtering (LiquidAI/d1-2B-ONNX via WebGPU/WASM)
+  contentFilter: ContentFilterEngine
+
+  // On-device AI Translation (onnx-community/LFM3-1.7B-ONNX via WebGPU/WASM)
+  translator: TranslatorEngine
+
+  // Built-in Multi-Mint Cashu Ecash Wallet + Boltz v2 On-Chain Swaps
+  wallet: WalletEngine
+
+  // Nymchat & NIP-57 Lightning Address Discovery + Zaps
+  zaps: ZapEngine
 
   // Push notifications, live incoming DM call ringing & Web Push bridge
   notifications: NotificationEngine

@@ -137,6 +137,8 @@ import {
 import { buildNip42AuthTemplate } from '../lib/nip29.ts'
 import { revokeVoicePreviewUrl } from '../lib/voiceRecorder.ts'
 import { useCallEngine } from './useCallEngine.ts'
+import { useCashuWallet } from './useCashuWallet.ts'
+import { useContentFilter } from './useContentFilter.ts'
 import { useDirectMessages } from './useDirectMessages.ts'
 import { useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
@@ -148,6 +150,8 @@ import {
 import { useServers } from './useServers.ts'
 import { useToasts } from './useToasts.ts'
 import { useTranscription } from './useTranscription.ts'
+import { useTranslator } from './useTranslator.ts'
+import { useZaps } from './useZaps.ts'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#090c0a',
@@ -250,18 +254,21 @@ export function useAgnostrEngine(): AgnostrEngine {
   }
   const presenceTracker = presenceTrackerRef.current
 
-  const [pool, setPool] = useState<RelayPool | null>(null)
+  const poolRef = useRef<RelayPool | null>(null)
+  if (!poolRef.current) {
+    poolRef.current = new RelayPool()
+  }
+  const pool = poolRef.current
   const [relays, setRelays] = useState<RelayTelemetry[]>([])
 
   useEffect(() => {
-    const nextPool = new RelayPool()
-    setPool(nextPool)
-    const unsub = nextPool.onTelemetryChange((snap) => setRelays(snap))
+    pool.revive()
+    const unsub = pool.onTelemetryChange((snap) => setRelays(snap))
     return () => {
       unsub()
-      nextPool.dispose()
+      pool.dispose()
     }
-  }, [])
+  }, [pool])
 
   // Active navigation state
   const [activeGeohash, setActiveGeohash] = useState<string>(() => readInitialGeohash())
@@ -498,9 +505,16 @@ export function useAgnostrEngine(): AgnostrEngine {
   const seedMemoTranscriptRef = useRef<
     (memoKey: string, text: string, modelLabel?: string) => void
   >(() => {})
+  const relaySelectionRef = useRef(relaySelection)
+  const activeServerRelaysRef = useRef<string[]>([])
+  const zapsIngestEventTagsRef = useRef<(pubkey: string, tags: string[][]) => void>(() => {})
 
   // Sync security-critical refs in useLayoutEffect so they are always up to date
   // BEFORE any child component's mount/update useEffect (e.g. TrustedImageView) runs!
+  useLayoutEffect(() => {
+    relaySelectionRef.current = relaySelection
+  }, [relaySelection])
+
   useLayoutEffect(() => {
     activeGeohashRef.current = activeGeohash
   }, [activeGeohash])
@@ -920,6 +934,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               return
             }
 
+            zapsIngestEventTagsRef.current(pk, ev.tags)
             const knownAgnostr = Boolean(
               parsed.isAgnostrClient ||
                 (!parsed.isOwn && presenceTracker.isKnownAgnostrPeer(pk))
@@ -1096,6 +1111,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
           const parsed = parseLocationNoteEvent(ev, gh, ownPubkeysRef.current)
           if (!parsed || parsed.geohash !== gh) return
+          zapsIngestEventTagsRef.current(notePk, ev.tags)
           setLocationNotesState((prev) => {
             if (activeGeohashRef.current !== gh) return prev
             const base = prev.channelKey === gh ? prev.items : []
@@ -1374,6 +1390,36 @@ export function useAgnostrEngine(): AgnostrEngine {
     []
   )
 
+  // Client-side Cashu Ecash Wallet + Boltz Swaps + NIP-57 Lightning Zaps
+  const walletEngine = useCashuWallet({
+    pushToast,
+  })
+
+  const getZapPublishRelayUrls = useCallback(
+    () =>
+      Array.from(
+        new Set([
+          ...relaySelectionRef.current.dmRelays,
+          ...relaySelectionRef.current.channelRelays,
+          ...activeServerRelaysRef.current,
+        ])
+      ),
+    []
+  )
+
+  const zapsEngine = useZaps({
+    relayPool: pool,
+    identityManager,
+    getPublishRelayUrls: getZapPublishRelayUrls,
+    ownPubkeys,
+    activeNickname: identity.nickname,
+    pushToast,
+  })
+
+  useLayoutEffect(() => {
+    zapsIngestEventTagsRef.current = zapsEngine.ingestEventTags
+  }, [zapsEngine.ingestEventTags])
+
   // Discord-like Servers (Instant Virtual Public/E2EE + NIP-29 Relay Communities)
   const {
     engine: serversEngine,
@@ -1391,6 +1437,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     trustedSet,
     settings,
     blossomServers,
+    lightningAddress: zapsEngine.lightningAddress,
+    onIngestEventTags: zapsEngine.ingestEventTags,
     setVoiceSendPhase,
     onSeedMemoTranscript: handleSeedMemoTranscript,
     sendDirectMessage,
@@ -1420,6 +1468,30 @@ export function useAgnostrEngine(): AgnostrEngine {
     [pinnedChannels]
   )
 
+  // On-device AI Content Filtering (LiquidAI/d1-2B-ONNX via WebGPU/WASM)
+  const contentFilterEngine = useContentFilter({
+    ownPubkeys,
+    trustedSet,
+    blockedSet,
+    pushToast,
+  })
+
+  // On-device AI Translation (onnx-community/LFM3-1.7B-ONNX via WebGPU/WASM)
+  const translatorEngine = useTranslator({
+    pushToast,
+  })
+
+  // Allow untrusted group-call WebRTC connections ONLY when user explicitly opted into AI video screening
+  const allowScreenedUntrustedGroupCalls = Boolean(
+    contentFilterEngine.settings.enabled &&
+      (contentFilterEngine.settings.filterNsfw ||
+        contentFilterEngine.settings.filterIllegal ||
+        (contentFilterEngine.settings.customRulesEnabled &&
+          contentFilterEngine.settings.customInstructions.trim().length > 0)) &&
+      (contentFilterEngine.settings.callVideoMode === 'screen-untrusted' ||
+        contentFilterEngine.settings.callVideoMode === 'screen-all')
+  )
+
   const {
     calls: callsEngine,
     callSignalingRelays,
@@ -1434,14 +1506,14 @@ export function useAgnostrEngine(): AgnostrEngine {
     blockedSet,
     trustedSet,
     isExplicitlyTrusted: checkExplicitlyTrusted,
+    allowScreenedUntrustedGroupCalls,
     strictWhitelistMode: settings.strictWhitelistMode,
     getPeerNickname: getCallPeerNickname,
     pushToast,
   })
 
   // Keep active geohash + DM + pulse + active server/NIP-29 + call signaling relays synced in RelayPool
-  const activeServerRelaysRef = useRef<string[]>(activeServerRelays)
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeServerRelaysRef.current = activeServerRelays
   }, [activeServerRelays])
 
@@ -1629,7 +1701,11 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   // Publish public radio message (kind 20000 geohash or kind 23333 topic + optional NIP-13 PoW)
   const sendPublicContent = useCallback(
-    async (rawText: string, replyOverride?: GeoMessage | null): Promise<boolean> => {
+    async (
+      rawText: string,
+      replyOverride?: GeoMessage | null,
+      onPublishedId?: (id: string) => void
+    ): Promise<boolean> => {
       const content = rawText.trim()
       if (!content || !pool) return false
 
@@ -1649,6 +1725,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               nickname: nick,
               replyTo: replyTarget,
               broadcastClientTag: settings.broadcastClientTag,
+              lightningAddress: zapsEngine.lightningAddress,
             })
           : buildGeohashChatTemplate({
               content,
@@ -1657,6 +1734,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               isTeleported: location.isTeleported,
               replyTo: replyTarget,
               broadcastClientTag: settings.broadcastClientTag,
+              lightningAddress: zapsEngine.lightningAddress,
             })
 
         // Mine 8-bit NIP-13 PoW non-blocking when enabled and pubkey is known
@@ -1668,6 +1746,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         }
 
         const signed = await identityManager.signEvent(template, gh)
+        onPublishedId?.(signed.id)
         const findParent = (id: string) =>
           messagesChannelRef.current === gh
             ? messagesRef.current.find((m) => m.id === id)
@@ -1732,6 +1811,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.powEnabled,
       settings.powTargetBits,
       settings.broadcastClientTag,
+      zapsEngine.lightningAddress,
       relaySelection.channelRelays,
       updateChannelMessages,
       pushToast,
@@ -1890,6 +1970,7 @@ export function useAgnostrEngine(): AgnostrEngine {
             trustedSetRef.current = nextTrusted
           }
           voiceCacheRef.current?.revokeForSender(pk)
+          contentFilterEngine.revokeForSender(pk)
           setTrustedPubkeys((trustedPrev) => {
             if (!trustedPrev.some((t) => t.pubkey === pk)) return trustedPrev
             const trimmed = trustedPrev.filter((t) => t.pubkey !== pk)
@@ -1907,7 +1988,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         return next
       })
     },
-    [pushToast, recomputeGeoUnreads, refreshPeers]
+    [pushToast, recomputeGeoUnreads, refreshPeers, contentFilterEngine]
   )
 
   const getPeerByPubkey = useCallback(
@@ -2255,6 +2336,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               replyTo: replyTarget,
               voiceMemo: attachment,
               broadcastClientTag: settings.broadcastClientTag,
+              lightningAddress: zapsEngine.lightningAddress,
             })
           : buildGeohashChatTemplate({
               content,
@@ -2264,6 +2346,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               replyTo: replyTarget,
               voiceMemo: attachment,
               broadcastClientTag: settings.broadcastClientTag,
+              lightningAddress: zapsEngine.lightningAddress,
             })
 
         if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
@@ -2346,6 +2429,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.powEnabled,
       settings.powTargetBits,
       settings.broadcastClientTag,
+      zapsEngine.lightningAddress,
       relaySelection.channelRelays,
       updateChannelMessages,
       pushToast,
@@ -2563,6 +2647,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               replyTo: replyTarget,
               imageAttachment: attachment,
               broadcastClientTag: settings.broadcastClientTag,
+              lightningAddress: zapsEngine.lightningAddress,
             })
           : buildGeohashChatTemplate({
               content,
@@ -2572,6 +2657,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               replyTo: replyTarget,
               imageAttachment: attachment,
               broadcastClientTag: settings.broadcastClientTag,
+              lightningAddress: zapsEngine.lightningAddress,
             })
 
         if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
@@ -2654,6 +2740,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.powEnabled,
       settings.powTargetBits,
       settings.broadcastClientTag,
+      zapsEngine.lightningAddress,
       relaySelection.channelRelays,
       updateChannelMessages,
       pushToast,
@@ -2809,8 +2896,12 @@ export function useAgnostrEngine(): AgnostrEngine {
     blockedSetRef.current = new Set()
     resetAllNotifications()
     resetAllTranscription()
+    contentFilterEngine.resetAll()
+    translatorEngine.resetAll()
+    walletEngine.resetAll()
+    zapsEngine.resetAll()
     resetAllCalls()
-    pool?.closeAll()
+    pool.closeAll()
     voiceCacheRef.current?.revokeAll()
     clearProtocolCaches()
     presenceTracker.clear()
@@ -2853,8 +2944,29 @@ export function useAgnostrEngine(): AgnostrEngine {
     setIdentityVersion((v) => v + 1)
 
     clearToasts()
-    pushToast('warning', 'Panic Wipe Complete', 'All local keys, caches, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.')
-  }, [pool, presenceTracker, clearPulse, clearAllDms, resetAllServers, resetAllCalls, resetAllTranscription, resetAllNotifications, resetLocation, identityManager, clearToasts, pushToast])
+    pushToast(
+      'warning',
+      'Panic Wipe Complete',
+      'All local keys, caches, wallet proofs, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.'
+    )
+  }, [
+    pool,
+    presenceTracker,
+    clearPulse,
+    clearAllDms,
+    resetAllServers,
+    resetAllCalls,
+    resetAllTranscription,
+    resetAllNotifications,
+    contentFilterEngine,
+    translatorEngine,
+    walletEngine,
+    zapsEngine,
+    resetLocation,
+    identityManager,
+    clearToasts,
+    pushToast,
+  ])
 
   // Unified composer submit (commands, DMs, public messages)
   const addSystemMessage = useCallback(
@@ -2867,7 +2979,14 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const sendInput = useCallback(
-    async (rawText: string): Promise<boolean> => {
+    async (
+      rawText: string,
+      options?: {
+        onPublishedId?: (id: string) => void
+        originalText?: string
+        translatedToLang?: string
+      }
+    ): Promise<boolean> => {
       const trimmed = rawText.trim()
       if (!trimmed) return false
 
@@ -2898,15 +3017,27 @@ export function useAgnostrEngine(): AgnostrEngine {
         })
       }
 
+      const handlePublishedId = (id: string) => {
+        options?.onPublishedId?.(id)
+        if (options?.originalText && options.translatedToLang) {
+          translatorEngine.recordOutgoingOriginal(
+            id,
+            options.originalText,
+            trimmed,
+            options.translatedToLang
+          )
+        }
+      }
+
       if (activeView.type === 'dm') {
-        return await sendDirectMessage(activeView.peerPubkey, trimmed)
+        return await sendDirectMessage(activeView.peerPubkey, trimmed, undefined, handlePublishedId)
       }
 
       if (activeView.type === 'server') {
-        return await serversEngine.sendMessage(trimmed)
+        return await serversEngine.sendMessage(trimmed, { onPublishedId: handlePublishedId })
       }
 
-      return await sendPublicContent(trimmed)
+      return await sendPublicContent(trimmed, undefined, handlePublishedId)
     },
     [
       identityManager,
@@ -2933,6 +3064,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       addSystemMessage,
       activeView,
       serversEngine,
+      translatorEngine,
     ]
   )
 
@@ -2946,6 +3078,28 @@ export function useAgnostrEngine(): AgnostrEngine {
         trustedSet.has(m.pubkey.toLowerCase())
     )
   }, [messages, settings.strictWhitelistMode, ownPubkeys, trustedSet])
+
+  // Watch visible public Radio & Server message event IDs for live NIP-57 (kind: 9735) zap receipts
+  const watchZapEventIds = zapsEngine.watchEventIds
+  useEffect(() => {
+    const source =
+      activeView.type === 'channel'
+        ? visibleMessages
+        : activeView.type === 'server'
+          ? serversEngine.messages
+          : []
+    if (source.length === 0) return
+    const ids: string[] = []
+    for (let i = Math.max(0, source.length - 80); i < source.length; i += 1) {
+      const msg = source[i]
+      if (!msg.isSystem && msg.id) {
+        ids.push(msg.id)
+      }
+    }
+    if (ids.length > 0) {
+      watchZapEventIds(ids)
+    }
+  }, [activeView.type, visibleMessages, serversEngine.messages, watchZapEventIds])
 
   const hiddenByWhitelistCount = settings.strictWhitelistMode
     ? Math.max(0, messages.length - visibleMessages.length)
@@ -3075,6 +3229,10 @@ export function useAgnostrEngine(): AgnostrEngine {
     servers: serversEngine,
     calls: callsEngine,
     transcription: transcriptionEngine,
+    contentFilter: contentFilterEngine,
+    translator: translatorEngine,
+    wallet: walletEngine,
+    zaps: zapsEngine,
     notifications: notificationsEngine,
 
     commands: SLASH_COMMANDS,

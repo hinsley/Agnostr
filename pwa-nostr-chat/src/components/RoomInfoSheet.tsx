@@ -25,9 +25,11 @@ import {
   Users,
   Video,
   X,
+  Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { Nip29Member } from '../types/servers.ts'
+import type { ZapTarget } from '../types/wallet.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import type { ServerSettingsTab } from './ServerSettingsModal.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
@@ -53,6 +55,7 @@ export interface RoomInfoSheetProps {
   onExportTranscript: (format: 'md' | 'json') => void
   onLeftServer: () => void
   onCloseDmThread?: (pubkey: string) => void
+  onOpenZap?: (target: ZapTarget) => void
   onPlaySound?: (cue: SoundCue) => void
   onShowQr?: (target: QrShareTarget) => void
   onOpenScanner?: () => void
@@ -83,6 +86,7 @@ export function RoomInfoSheet({
   onExportTranscript,
   onLeftServer,
   onCloseDmThread,
+  onOpenZap,
   onPlaySound,
   onShowQr,
   swipeProgress,
@@ -105,6 +109,14 @@ export function RoomInfoSheet({
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [open, onClose])
+
+  const dmPeerPubkey =
+    open && engine.activeView.type === 'dm' ? (engine.activeDmThread?.peerPubkey ?? null) : null
+
+  useEffect(() => {
+    if (!dmPeerPubkey) return
+    void engine.zaps.lookupPeerLightningAddress(dmPeerPubkey)
+  }, [dmPeerPubkey, engine.zaps])
 
   const sortedGeoPeers = useMemo(() => {
     return [...engine.peers].sort((a, b) => {
@@ -308,12 +320,31 @@ export function RoomInfoSheet({
     })
 
     if (!target.isSelf) {
+      const targetLud16 = engine.zaps.getPeerLightningAddress(target.pubkey)
+      if (targetLud16 && onOpenZap) {
+        items.push({
+          id: 'zap-peer',
+          label: `Zap ${target.displayHandle}`,
+          icon: <Zap size={14} />,
+          dividerBefore: true,
+          onSelect: () => {
+            onPlaySound?.('click')
+            onClose()
+            onOpenZap({
+              pubkey: target.pubkey,
+              nickname: target.nickname,
+              lud16: targetLud16,
+            })
+          },
+        })
+      }
+
       items.push(
         {
           id: 'trust',
           label: trusted ? 'Remove Trust' : 'Trust Peer',
           icon: <ShieldCheck size={14} />,
-          dividerBefore: true,
+          dividerBefore: !(targetLud16 && onOpenZap),
           onSelect: () => {
             onPlaySound?.('click')
             if (trusted) {
@@ -558,6 +589,9 @@ export function RoomInfoSheet({
             <div className="ag-sheet-list" role="list">
               {sortedGeoPeers.map((peer) => {
                 const trusted = !peer.isSelf && engine.isExplicitlyTrusted(peer.pubkey)
+                const peerLud16 = !peer.isSelf
+                  ? engine.zaps.getPeerLightningAddress(peer.pubkey)
+                  : null
                 return (
                   <div
                     key={peer.pubkey}
@@ -621,12 +655,41 @@ export function RoomInfoSheet({
                               Trusted
                             </span>
                           )}
+                          {peerLud16 && (
+                            <span
+                              className="ag-sheet-zap-inline mono truncate"
+                              title={`Lightning Address: ${peerLud16}`}
+                            >
+                              <Zap size={10} />
+                              {peerLud16}
+                            </span>
+                          )}
                         </span>
                       </span>
                     </button>
 
                     {!peer.isSelf && (
                       <div className="ag-sheet-person-actions">
+                        {peerLud16 && onOpenZap && (
+                          <button
+                            type="button"
+                            className="ag-sheet-mini-btn zap"
+                            onClick={() => {
+                              onPlaySound?.('click')
+                              onClose()
+                              onOpenZap({
+                                pubkey: peer.pubkey,
+                                nickname: peer.nickname,
+                                lud16: peerLud16,
+                                channelLabel,
+                              })
+                            }}
+                            title={`Zap ${peer.displayHandle} (${peerLud16})`}
+                            aria-label={`Zap ${peer.displayHandle}`}
+                          >
+                            <Zap size={14} />
+                          </button>
+                        )}
                         <button
                           type="button"
                           className={`ag-sheet-mini-btn ${trusted ? 'active' : ''}`}
@@ -717,6 +780,7 @@ export function RoomInfoSheet({
 
     const trusted = engine.isExplicitlyTrusted(thread.peerPubkey)
     const blocked = engine.isPeerBlocked(thread.peerPubkey)
+    const peerLud16 = engine.zaps.getPeerLightningAddress(thread.peerPubkey)
 
     const handleStartCall = async (media: 'audio' | 'video') => {
       onPlaySound?.('click')
@@ -768,6 +832,31 @@ export function RoomInfoSheet({
             <span>{shortPubkey(thread.peerNpub, 11, 6)}</span>
             {copiedId === 'npub' ? <Check size={13} className="ag-tone-ok" /> : <Copy size={13} />}
           </button>
+
+          {peerLud16 && (
+            <button
+              type="button"
+              className="ag-sheet-zap-pill mono"
+              onClick={() => {
+                onPlaySound?.('click')
+                if (onOpenZap) {
+                  onClose()
+                  onOpenZap({
+                    pubkey: thread.peerPubkey,
+                    nickname: thread.peerNickname,
+                    lud16: peerLud16,
+                    channelLabel: thread.peerDisplayHandle,
+                  })
+                } else {
+                  void copyText('room-link', peerLud16, 'Copied Lightning Address')
+                }
+              }}
+              title={onOpenZap ? `Zap ${peerLud16}` : `Copy ${peerLud16}`}
+            >
+              <Zap size={12} />
+              <span className="truncate">{peerLud16}</span>
+            </button>
+          )}
         </div>
 
         {/* Voice & Video Call Buttons */}
@@ -788,6 +877,25 @@ export function RoomInfoSheet({
             <Video size={17} />
             <span>Video Call</span>
           </button>
+          {peerLud16 && onOpenZap && (
+            <button
+              type="button"
+              className="ag-sheet-action-btn zap"
+              onClick={() => {
+                onPlaySound?.('click')
+                onClose()
+                onOpenZap({
+                  pubkey: thread.peerPubkey,
+                  nickname: thread.peerNickname,
+                  lud16: peerLud16,
+                  channelLabel: thread.peerDisplayHandle,
+                })
+              }}
+            >
+              <Zap size={16} />
+              <span>Zap</span>
+            </button>
+          )}
           <button
             type="button"
             className="ag-sheet-action-btn"

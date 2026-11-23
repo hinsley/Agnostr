@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import {
   AlertCircle,
   AtSign,
@@ -9,30 +9,56 @@ import {
   Copy,
   CornerUpLeft,
   ExternalLink,
+  Eye,
+  EyeOff,
   Hash,
+  Languages,
   Link2,
   Loader2,
   Maximize2,
   MessageCircle,
   Phone,
   Radio,
+  RefreshCw,
+  ShieldAlert,
   ShieldCheck,
   ShieldOff,
   Smile,
   Trash2,
   User,
   Video,
+  Zap,
 } from 'lucide-react'
 import type { GeoMessage, ImageAttachment, VoiceMemoAttachment } from '../types/protocol'
+import type { ContentFilterEngine, ContentFilterVerdict } from '../types/contentFilter'
 import type {
   MemoTranscriptState,
   TranscriptionModelStatus,
 } from '../types/transcription'
+import type { CashuTokenPreview, ZapTarget } from '../types/wallet'
+import { decodeCashuTokenPreview, extractCashuTokensFromText } from '../lib/cashuWallet'
 import { identiconDataUrl, pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
 import { useContextMenu, type ContextMenuItem, type ContextMenuReaction } from './ContextMenu'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
 import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
+
+function formatMintHost(url: string): string {
+  try {
+    return new URL(url).host.replace(/^www\./i, '')
+  } catch {
+    return url.slice(0, 28)
+  }
+}
+
+function stripCashuTokens(text: string, tokens: readonly string[]): string {
+  if (tokens.length === 0) return text
+  let out = text
+  for (const tok of tokens) {
+    out = out.split(`cashu:${tok}`).join('').split(tok).join('')
+  }
+  return out.replace(/\n{3,}/g, '\n\n').trim()
+}
 
 function extractMediaCaption(
   content: string,
@@ -112,6 +138,23 @@ export interface MessageItemProps {
   onJumpToMessage?: (messageId: string) => void
   onCopyText?: (text: string) => void
   onNotify?: (title: string) => void
+  // On-device Content Filter (Liquid d1-2B)
+  contentFilter?: ContentFilterEngine
+  shouldScreenText?: boolean
+  textFilterVerdict?: ContentFilterVerdict | null
+  onRequestScreenText?: (msgId: string, text: string) => void
+  // Cashu Ecash & NIP-57 Lightning Zaps
+  senderLightningAddress?: string | null
+  zapTotalSats?: number
+  onOpenZap?: (target: ZapTarget) => void
+  onClaimCashuToken?: (token: string) => void
+  // Double-Column Translator Mode overrides (LFM3-1.7B)
+  displayContentOverride?: string
+  translationStatus?: 'idle' | 'loading' | 'done' | 'error'
+  translationError?: string
+  translationBadge?: string
+  onRetryTranslation?: () => void
+  compactTranslatorRow?: boolean
 }
 
 export const MessageItem: React.FC<MessageItemProps> = React.memo(
@@ -154,10 +197,66 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onJumpToMessage,
     onCopyText,
     onNotify,
+    contentFilter,
+    shouldScreenText = false,
+    textFilterVerdict = null,
+    onRequestScreenText,
+    senderLightningAddress = null,
+    zapTotalSats = 0,
+    onOpenZap,
+    onClaimCashuToken,
+    displayContentOverride,
+    translationStatus,
+    translationError,
+    translationBadge,
+    onRetryTranslation,
+    compactTranslatorRow = false,
   }) => {
     const [pickerOpen, setPickerOpen] = useState(false)
     const [copied, setCopied] = useState(false)
+    const [revealedFlaggedText, setRevealedFlaggedText] = useState(false)
     const { openContextMenu } = useContextMenu()
+
+    const rawVisibleContent = useMemo(() => {
+      if (message.isSystem) return message.content
+      return message.voiceMemo || message.imageAttachment
+        ? extractMediaCaption(
+            message.content,
+            message.voiceMemo?.url,
+            message.imageAttachment?.url
+          )
+        : message.content
+    }, [message.isSystem, message.voiceMemo, message.imageAttachment, message.content])
+
+    // Trigger text screening strictly when textScope !== 'off' (DEFAULT OFF -> zero work!)
+    useEffect(() => {
+      if (message.isSystem || !shouldScreenText || !onRequestScreenText) return
+      if (!rawVisibleContent.trim()) return
+      if (textFilterVerdict && textFilterVerdict.status !== 'idle') return
+      onRequestScreenText(message.id, rawVisibleContent)
+    }, [
+      message.isSystem,
+      message.id,
+      shouldScreenText,
+      rawVisibleContent,
+      textFilterVerdict,
+      onRequestScreenText,
+    ])
+
+    // Extract Cashu Ecash tokens (fast check -> empty array for 99.9% of messages)
+    const cashuTokens: CashuTokenPreview[] = useMemo(() => {
+      if (message.isSystem || !rawVisibleContent) return []
+      if (!rawVisibleContent.includes('cashuA') && !rawVisibleContent.includes('cashuB')) {
+        return []
+      }
+      const found = extractCashuTokensFromText(rawVisibleContent)
+      const previews: CashuTokenPreview[] = []
+      for (const tok of found) {
+        const preview = decodeCashuTokenPreview(tok)
+        if (preview) previews.push(preview)
+      }
+      return previews
+    }, [message.isSystem, rawVisibleContent])
 
     // System notice row (left-aligned with subtle accent rail)
     if (message.isSystem) {
@@ -197,14 +296,43 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
     const handle = formatHandle(message.nickname, message.pubkey)
     const authorColor = message.isOwn ? undefined : pubkeyToColor(message.pubkey)
+    const baseTextContent =
+      displayContentOverride !== undefined ? displayContentOverride : rawVisibleContent
     const visibleContent =
-      message.voiceMemo || message.imageAttachment
-        ? extractMediaCaption(
-            message.content,
-            message.voiceMemo?.url,
-            message.imageAttachment?.url
+      cashuTokens.length > 0
+        ? stripCashuTokens(
+            baseTextContent,
+            cashuTokens.map((t) => t.raw)
           )
-        : message.content
+        : baseTextContent
+
+    const isTextScreeningActive = shouldScreenText && rawVisibleContent.trim().length > 0
+    const isTextPendingScreen =
+      isTextScreeningActive &&
+      (!textFilterVerdict ||
+        textFilterVerdict.status === 'idle' ||
+        textFilterVerdict.status === 'downloading' ||
+        textFilterVerdict.status === 'scanning')
+    const isTextFlagged = isTextScreeningActive && textFilterVerdict?.status === 'flagged'
+    const isTextIllegal = Boolean(isTextFlagged && textFilterVerdict?.categories.includes('illegal'))
+    const hideTextBehindFilter = isTextFlagged && (isTextIllegal || !revealedFlaggedText)
+    const textFlagReason =
+      textFilterVerdict?.reason ||
+      (textFilterVerdict?.categories?.length
+        ? textFilterVerdict.categories.map((c) => c.toUpperCase()).join(', ')
+        : 'Flagged')
+
+    const canZapSender = Boolean(!message.isOwn && senderLightningAddress && onOpenZap)
+
+    const handleTriggerZap = () => {
+      if (!canZapSender || !onOpenZap) return
+      onOpenZap({
+        pubkey: message.pubkey,
+        nickname: handle.base,
+        lud16: senderLightningAddress,
+        eventId: message.id,
+      })
+    }
 
     const handleCopy = () => {
       const toCopy = visibleContent || message.content
@@ -264,6 +392,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       isMentioned ? 'is-mentioned' : '',
       isSearchActive ? 'is-search-active' : '',
       actionsRevealed || pickerOpen ? 'actions-open' : '',
+      compactTranslatorRow ? 'is-translator-row' : '',
     ]
       .filter(Boolean)
       .join(' ')
@@ -276,7 +405,10 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       const anchorEl = targetEl?.closest('a[href]') as HTMLAnchorElement | null
       const rawHref = anchorEl?.getAttribute('href')?.trim() || ''
       const lowerHref = rawHref.toLowerCase()
-      const isInternalHref = lowerHref.startsWith('#dm=') || lowerHref.startsWith('#invite=')
+      const isInternalHref =
+        lowerHref.startsWith('#dm=') ||
+        lowerHref.startsWith('#invite=') ||
+        lowerHref.startsWith('#topic=')
       const isSafeExternalHref =
         lowerHref.startsWith('https://') ||
         lowerHref.startsWith('http://') ||
@@ -429,6 +561,16 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
           if (addedPeerDivider) return false
           addedPeerDivider = true
           return items.length > 0
+        }
+
+        if (canZapSender) {
+          items.push({
+            id: 'msg-zap-peer',
+            label: `Zap @${handle.base}`,
+            icon: <Zap size={15} />,
+            dividerBefore: markPeerDivider(),
+            onSelect: handleTriggerZap,
+          })
         }
 
         if (!isDmMode && onStartDm) {
@@ -659,15 +801,149 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             </button>
           )}
 
-          {/* Full-Width Message Text Body */}
-          {visibleContent.length > 0 && (
-            <RichMessageContent
-              content={visibleContent}
-              onTuneGeohash={onTuneGeohash}
-              onClickMention={onClickMention}
-              highlightQuery={highlightQuery}
-              knownHandles={knownHandles}
-            />
+          {/* Full-Width Message Text Body (with optional Content Filter & Translator Mode) */}
+          {(visibleContent.length > 0 || translationStatus === 'loading' || translationStatus === 'error') && (
+            <>
+              {isTextPendingScreen ? (
+                <div className="ag-text-filter-shield scanning" role="status">
+                  <Loader2 size={12} className="ag-spin" />
+                  <span>Screening message with Liquid d1-2B…</span>
+                </div>
+              ) : hideTextBehindFilter ? (
+                <div className={`ag-text-filter-shield flagged ${isTextIllegal ? 'illegal' : ''}`}>
+                  <ShieldAlert size={13} className="ag-text-filter-icon" />
+                  <span className="truncate">
+                    Hidden by Content Filter ({textFlagReason})
+                  </span>
+                  {!isTextIllegal && (
+                    <button
+                      type="button"
+                      className="ag-text-filter-toggle"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setRevealedFlaggedText(true)
+                      }}
+                    >
+                      <Eye size={12} />
+                      <span>Show</span>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {isTextFlagged && revealedFlaggedText && !isTextIllegal && (
+                    <div className="ag-text-filter-revealed-bar">
+                      <span>Flagged ({textFlagReason})</span>
+                      <button
+                        type="button"
+                        className="ag-text-filter-toggle"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setRevealedFlaggedText(false)
+                        }}
+                      >
+                        <EyeOff size={11} />
+                        <span>Hide</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {translationStatus === 'loading' && displayContentOverride === undefined ? (
+                    <div className="ag-translator-inline-status">
+                      <Loader2 size={12} className="ag-spin" />
+                      <span>Translating…</span>
+                    </div>
+                  ) : visibleContent.length > 0 ? (
+                    <RichMessageContent
+                      content={visibleContent}
+                      onTuneGeohash={onTuneGeohash}
+                      onClickMention={onClickMention}
+                      highlightQuery={highlightQuery}
+                      knownHandles={knownHandles}
+                    />
+                  ) : null}
+
+                  {translationBadge && (
+                    <div className="ag-translator-msg-meta">
+                      <Languages size={11} />
+                      <span>{translationBadge}</span>
+                    </div>
+                  )}
+
+                  {translationStatus === 'error' && (
+                    <div className="ag-translator-inline-status error">
+                      <AlertCircle size={12} />
+                      <span className="truncate">{translationError || 'Translation failed'}</span>
+                      {onRetryTranslation && (
+                        <button
+                          type="button"
+                          className="ag-text-filter-toggle"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onRetryTranslation()
+                          }}
+                        >
+                          <RefreshCw size={11} />
+                          <span>Retry</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+
+          {/* Inline Cashu Ecash Token Claim Cards */}
+          {cashuTokens.length > 0 && !hideTextBehindFilter && !isTextPendingScreen && (
+            <div className="ag-cashu-token-list">
+              {cashuTokens.map((tok, idx) => (
+                <div key={`${tok.raw.slice(0, 18)}-${idx}`} className="ag-cashu-token-card">
+                  <div className="ag-cashu-token-left">
+                    <span className="ag-cashu-token-icon" aria-hidden="true">
+                      <Zap size={14} />
+                    </span>
+                    <div className="ag-cashu-token-copy">
+                      <div className="ag-cashu-token-title tabular">
+                        <span>{tok.amountSats.toLocaleString()} sats</span>
+                        <span className="ag-cashu-token-tag">Cashu Ecash</span>
+                      </div>
+                      <div className="ag-cashu-token-sub truncate">
+                        <span>{formatMintHost(tok.mintUrl)}</span>
+                        {tok.memo ? <span> · {tok.memo}</span> : null}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="ag-cashu-token-actions">
+                    <button
+                      type="button"
+                      className="ag-cashu-token-copy-btn"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        navigator.clipboard?.writeText(tok.raw).catch(() => {})
+                        onNotify?.('Cashu token copied')
+                      }}
+                      title="Copy raw Cashu token"
+                      aria-label="Copy Cashu token"
+                    >
+                      <Copy size={13} />
+                    </button>
+                    {onClaimCashuToken && (
+                      <button
+                        type="button"
+                        className="ag-cashu-claim-btn"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onClaimCashuToken(tok.raw)
+                        }}
+                      >
+                        Claim to Wallet
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
 
           {/* Left-Aligned Voice Memo Player / Untrusted Shielded Card */}
@@ -704,8 +980,10 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 senderNickname={handle.base}
                 senderDisplayHandle={handle.full}
                 isTrusted={isSenderTrusted}
+                isOwn={message.isOwn}
                 isDmMode={isEncryptedContext}
                 caption={visibleContent || undefined}
+                contentFilter={contentFilter}
                 fetchImageAttachmentBlob={fetchImageAttachmentBlob}
                 onTrustSender={onTrustSender}
                 onInspectSender={(pk, nick) => onInspectAuthor?.(pk, nick)}
@@ -715,21 +993,38 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             </div>
           )}
 
-          {/* Aggregated Emoji Reactions */}
-          {!isDmMode && message.reactions.length > 0 && (
-            <div className="ag-reactions" role="group" aria-label="Message reactions">
-              {message.reactions.map((rx) => (
+          {/* Aggregated Emoji Reactions & Live NIP-57 Zap Receipt Total */}
+          {((!isDmMode && message.reactions.length > 0) || zapTotalSats > 0) && (
+            <div className="ag-reactions" role="group" aria-label="Message reactions and zaps">
+              {zapTotalSats > 0 && (
                 <button
-                  key={rx.emoji}
                   type="button"
-                  className={`ag-reaction-pill ${rx.reactedByMe ? 'mine' : ''}`}
-                  onClick={() => onReact?.(message, rx.emoji)}
-                  title={`React with ${rx.emoji}`}
+                  className="ag-zap-receipt-pill tabular"
+                  onClick={canZapSender ? handleTriggerZap : undefined}
+                  disabled={!canZapSender}
+                  title={
+                    canZapSender
+                      ? `${zapTotalSats.toLocaleString()} sats zapped · Click to zap @${handle.base}`
+                      : `${zapTotalSats.toLocaleString()} sats zapped`
+                  }
                 >
-                  <span>{rx.emoji}</span>
-                  <span className="ag-reaction-count tabular">{rx.count}</span>
+                  <Zap size={12} fill="currentColor" />
+                  <span>{zapTotalSats.toLocaleString()}</span>
                 </button>
-              ))}
+              )}
+              {!isDmMode &&
+                message.reactions.map((rx) => (
+                  <button
+                    key={rx.emoji}
+                    type="button"
+                    className={`ag-reaction-pill ${rx.reactedByMe ? 'mine' : ''}`}
+                    onClick={() => onReact?.(message, rx.emoji)}
+                    title={`React with ${rx.emoji}`}
+                  >
+                    <span>{rx.emoji}</span>
+                    <span className="ag-reaction-count tabular">{rx.count}</span>
+                  </button>
+                ))}
             </div>
           )}
         </div>
@@ -770,6 +1065,21 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 </div>
               )}
             </div>
+          )}
+
+          {canZapSender && (
+            <button
+              type="button"
+              className="ag-msg-act-btn zap"
+              onClick={() => {
+                handleTriggerZap()
+                onToggleActions(null)
+              }}
+              title={`Zap @${handle.base} (${senderLightningAddress})`}
+              aria-label={`Zap ${handle.base}`}
+            >
+              <Zap size={14} />
+            </button>
           )}
 
           {!isDmMode && onReply && (

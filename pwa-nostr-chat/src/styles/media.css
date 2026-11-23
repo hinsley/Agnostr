@@ -133,6 +133,122 @@
   border-color: rgba(244, 63, 94, 0.45);
 }
 
+/* AI Content Filter Intercept, Progress & Flagged Shields */
+.ag-img-shield-card.ai-intercept {
+  border-style: solid;
+  border-color: var(--border-accent);
+}
+
+.ag-img-shield-card.flagged {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--status-danger) 48%, var(--border-default));
+  background-color: color-mix(in srgb, var(--status-danger-soft) 35%, var(--bg-surface));
+}
+
+.ag-img-shield-emblem.ai {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ag-img-shield-emblem.flagged {
+  background-color: var(--status-danger-soft);
+  color: var(--status-danger);
+}
+
+.ag-img-progress-track {
+  width: 100%;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-subtle);
+  overflow: hidden;
+}
+
+.ag-img-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  transition: width 180ms ease;
+}
+
+.ag-img-screened-badge {
+  position: absolute;
+  left: 0.45rem;
+  top: 0.45rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+  padding: 0.14rem 0.46rem;
+  border-radius: var(--radius-full);
+  background-color: rgba(11, 13, 18, 0.8);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid color-mix(in srgb, var(--accent) 52%, transparent);
+  color: #e0f2fe;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  pointer-events: none;
+}
+
+.ag-img-screened-badge svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-img-flagged-pill {
+  position: absolute;
+  left: 0.45rem;
+  top: 0.45rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+  padding: 0.14rem 0.46rem;
+  border-radius: var(--radius-full);
+  background-color: rgba(11, 13, 18, 0.86);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid color-mix(in srgb, var(--status-warn) 58%, transparent);
+  color: #fef3c7;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  pointer-events: none;
+}
+
+.ag-img-flagged-pill svg {
+  color: var(--status-warn);
+  flex-shrink: 0;
+}
+
+.ag-img-hide-btn {
+  position: absolute;
+  right: 0.45rem;
+  top: 0.45rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+  height: 24px;
+  padding: 0 0.5rem;
+  border-radius: var(--radius-full);
+  background-color: rgba(11, 13, 18, 0.86);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #f8fafc;
+  font-size: 10.5px;
+  font-weight: 600;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-img-hide-btn:hover {
+  background-color: var(--status-danger);
+  border-color: var(--status-danger);
+}
+
 /* --------------------------------------------------------------------------
    2. Trusted Inline Image Attachment Viewer & Skeleton Shimmer
    -------------------------------------------------------------------------- */

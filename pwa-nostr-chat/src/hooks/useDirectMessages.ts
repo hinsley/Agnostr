@@ -425,7 +425,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   )
 
   const sendDirectMessage = useCallback(
-    async (peerPubkey: string, rawContent: string, protocolOverride?: DmProtocol): Promise<boolean> => {
+    async (
+      peerPubkey: string,
+      rawContent: string,
+      protocolOverride?: DmProtocol,
+      onPublishedId?: (id: string) => void
+    ): Promise<boolean> => {
       const content = rawContent.trim()
       if (!content || !pool) return false
       const pk = peerPubkey.toLowerCase()
@@ -438,6 +443,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         (signer.mode === 'extension' ? 'nip17' : 'bitchat')
 
       const localMsgId = bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
+      onPublishedId?.(localMsgId)
       const nowMs = Date.now()
       const nowSec = Math.floor(nowMs / 1000)
 

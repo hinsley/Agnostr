@@ -235,6 +235,7 @@ export function buildNip29ChatTemplate(opts: {
   replyTo?: ServerMessage | null
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  lightningAddress?: string | null
 }): EventTemplate {
   const tags: string[][] = [['h', opts.groupId]]
 
@@ -251,6 +252,10 @@ export function buildNip29ChatTemplate(opts: {
   const cleanNick = opts.nickname?.trim()
   if (cleanNick) {
     tags.push(['n', cleanNick])
+  }
+  const cleanLud16 = opts.lightningAddress?.trim()
+  if (cleanLud16) {
+    tags.push(['lud16', cleanLud16])
   }
 
   if (opts.replyTo && !opts.replyTo.isSystem) {

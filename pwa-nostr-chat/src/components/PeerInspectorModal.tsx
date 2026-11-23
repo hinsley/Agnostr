@@ -10,8 +10,10 @@ import {
   ShieldCheck,
   ShieldOff,
   X,
+  Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
+import type { ZapTarget } from '../types/wallet.ts'
 import { formatHandle, identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
 
 export interface PeerInspectorModalProps {
@@ -20,6 +22,7 @@ export interface PeerInspectorModalProps {
   onClose: () => void
   onStartDm: (pubkey: string, nickname?: string) => void
   onMentionPeer: (handle: string) => void
+  onOpenZap?: (target: ZapTarget) => void
 }
 
 function formatLastSeen(unixSec: number): string {
@@ -39,8 +42,15 @@ export function PeerInspectorModal({
   onClose,
   onStartDm,
   onMentionPeer,
+  onOpenZap,
 }: PeerInspectorModalProps) {
-  const [copiedKey, setCopiedKey] = useState<'npub' | 'hex' | null>(null)
+  const [copiedKey, setCopiedKey] = useState<'npub' | 'hex' | 'lud16' | null>(null)
+  const peerPubkey = peer?.pubkey ?? null
+
+  useEffect(() => {
+    if (!peerPubkey) return
+    void engine.zaps.lookupPeerLightningAddress(peerPubkey)
+  }, [peerPubkey, engine.zaps])
 
   useEffect(() => {
     if (!peer) return
@@ -59,14 +69,22 @@ export function PeerInspectorModal({
   const livePeer = engine.getPeerByPubkey(peer.pubkey) ?? peer
   const isBlocked = engine.isPeerBlocked(livePeer.pubkey)
   const isTrustedPeer = !livePeer.isSelf && engine.isExplicitlyTrusted(livePeer.pubkey)
+  const peerLud16 = engine.zaps.getPeerLightningAddress(livePeer.pubkey)
   const handle = formatHandle(livePeer.nickname, livePeer.pubkey)
   const handleColor = pubkeyToColor(livePeer.pubkey)
 
-  const handleCopy = async (kind: 'npub' | 'hex', value: string) => {
+  const handleCopy = async (kind: 'npub' | 'hex' | 'lud16', value: string) => {
     try {
       await navigator.clipboard.writeText(value)
       setCopiedKey(kind)
-      engine.pushToast('success', kind === 'npub' ? 'Copied peer npub' : 'Copied hex pubkey')
+      engine.pushToast(
+        'success',
+        kind === 'npub'
+          ? 'Copied peer npub'
+          : kind === 'lud16'
+            ? 'Copied Lightning Address'
+            : 'Copied hex pubkey',
+      )
       window.setTimeout(() => {
         setCopiedKey((prev) => (prev === kind ? null : prev))
       }, 1800)
@@ -247,6 +265,31 @@ export function PeerInspectorModal({
                 {copiedKey === 'hex' ? <Check size={13} className="ag-tone-ok" /> : <Copy size={13} />}
               </button>
             </div>
+
+            {peerLud16 && (
+              <div className="ag-key-row ag-key-row-zap">
+                <div className="ag-key-meta">
+                  <span className="ag-key-label ag-key-label-zap">
+                    <Zap size={10} />
+                    <span>LIGHTNING ADDRESS</span>
+                  </span>
+                  <span className="ag-key-value mono truncate">{peerLud16}</span>
+                </div>
+                <button
+                  type="button"
+                  className="ag-icon-btn-xs"
+                  onClick={() => void handleCopy('lud16', peerLud16)}
+                  title={`Copy ${peerLud16}`}
+                  aria-label="Copy Lightning Address"
+                >
+                  {copiedKey === 'lud16' ? (
+                    <Check size={13} className="ag-tone-accent" />
+                  ) : (
+                    <Copy size={13} />
+                  )}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -257,13 +300,31 @@ export function PeerInspectorModal({
             <span>
               {isTrustedPeer
                 ? 'Trusted peer — voice memos & media unlock automatically and their text stays visible in Trusted-Only mode.'
-                : 'Untrusted — voice memos & media stay shielded (zero bytes fetched) until you trust this peer, which also keeps their text visible in Trusted-Only mode.'}
+                : 'Untrusted — voice memos & media stay protected until cleared by Liquid d1-2B or until you trust this peer.'}
             </span>
           </div>
         )}
 
         {/* Actions */}
         <div className={`ag-peer-modal-actions ${!livePeer.isSelf ? 'ag-peer-modal-actions-grid' : ''}`}>
+          {!livePeer.isSelf && peerLud16 && onOpenZap && (
+            <button
+              type="button"
+              className="ag-btn ag-btn-zap"
+              onClick={() => {
+                onClose()
+                onOpenZap({
+                  pubkey: livePeer.pubkey,
+                  nickname: livePeer.nickname,
+                  lud16: peerLud16,
+                })
+              }}
+              title={`Zap ${livePeer.displayHandle} (${peerLud16})`}
+            >
+              <Zap size={14} />
+              <span>Zap</span>
+            </button>
+          )}
           {!livePeer.isSelf && (
             <button
               type="button"

@@ -188,6 +188,8 @@ export interface UseServersOptions {
   blossomServers: string[]
   setVoiceSendPhase: (phase: VoiceSendPhase) => void
   onSeedMemoTranscript?: (memoKey: string, text: string, modelLabel?: string) => void
+  lightningAddress?: string | null
+  onIngestEventTags?: (pubkey: string, tags: string[][]) => void
   sendDirectMessage: (peerPubkey: string, content: string) => Promise<boolean>
   pushToast: (level: ToastLevel, title: string, detail?: string) => void
 }
@@ -213,6 +215,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     blossomServers,
     setVoiceSendPhase,
     onSeedMemoTranscript,
+    lightningAddress,
+    onIngestEventTags,
     sendDirectMessage,
     pushToast,
   } = opts
@@ -281,6 +285,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const trustedSetRef = useRef<Set<string>>(trustedSet)
   const strictWhitelistRef = useRef<boolean>(settings.strictWhitelistMode)
   const activeViewRef = useRef<ActiveView>(activeView)
+  const lightningAddressRef = useRef<string | null>(lightningAddress ?? null)
+  const onIngestEventTagsRef = useRef(onIngestEventTags)
   const bgSeenIdsRef = useRef<Set<string>>(new Set())
   const serverUnreadItemsRef = useRef<Map<string, ServerUnreadItem[]>>(new Map())
 
@@ -314,6 +320,14 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   useLayoutEffect(() => {
     activeViewRef.current = activeView
   }, [activeView])
+
+  useLayoutEffect(() => {
+    lightningAddressRef.current = lightningAddress ?? null
+  }, [lightningAddress])
+
+  useLayoutEffect(() => {
+    onIngestEventTagsRef.current = onIngestEventTags
+  }, [onIngestEventTags])
 
   /**
    * Channel-safe state + storage mutator for servers:
@@ -846,6 +860,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             if (identityManager.getWipeGeneration() !== wipeGen) return
             if (parsed.serverId !== serverSnapshot.id || parsed.channelId !== chanId) return
             if (blockedSetRef.current.has(pk) || bannedSet.has(pk)) return
+            onIngestEventTagsRef.current?.(pk, ev.tags)
 
             updateServerChannelMessages(serverSnapshot.id, chanId, (prev) => {
               if (prev.some((m) => m.id === parsed.id)) return null
@@ -1816,7 +1831,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       rawText: string,
       voiceAttachment?: VoiceMemoAttachment,
       imageAttachment?: ImageAttachment,
-      targetOverride?: { server: ServerSummary; channel: ServerChannel; replyTarget?: ServerMessage | null }
+      targetOverride?: { server: ServerSummary; channel: ServerChannel; replyTarget?: ServerMessage | null },
+      onPublishedId?: (id: string) => void
     ): Promise<boolean> => {
       const text = rawText.trim()
       const server = targetOverride?.server ?? activeServer
@@ -1857,6 +1873,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               replyTo: replyTarget,
               voiceMemo: voiceAttachment,
               imageAttachment,
+              lightningAddress: lightningAddressRef.current,
             })
           : buildNip29ChatTemplate({
               groupId: server.groupId || chanId,
@@ -1866,6 +1883,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               replyTo: replyTarget,
               voiceMemo: voiceAttachment,
               imageAttachment,
+              lightningAddress: lightningAddressRef.current,
             })
 
         if (isVirtual && settings.powEnabled && settings.powTargetBits > 0 && masterPk) {
@@ -1874,6 +1892,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         }
 
         const signed = await identityManager.signEvent(tmpl)
+        onPublishedId?.(signed.id)
 
         const optimistic: ServerMessage = {
           id: signed.id,
@@ -1965,7 +1984,11 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   )
 
   const sendMessage = useCallback(
-    async (rawText: string): Promise<boolean> => sendMessageInternal(rawText),
+    async (
+      rawText: string,
+      options?: { onPublishedId?: (id: string) => void }
+    ): Promise<boolean> =>
+      sendMessageInternal(rawText, undefined, undefined, undefined, options?.onPublishedId),
     [sendMessageInternal]
   )
 

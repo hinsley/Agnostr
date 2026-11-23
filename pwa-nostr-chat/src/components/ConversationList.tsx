@@ -39,9 +39,11 @@ import {
   Users,
   Video,
   X,
+  Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, DmThread, PeerInfo } from '../types/protocol'
 import type { ServerChannel, ServerSummary } from '../types/servers'
+import type { WalletInitialIntent, ZapTarget } from '../types/wallet'
 import type { PwaState } from '../hooks/usePwa'
 import type { SoundCue } from '../utils/sound'
 import type { QrShareTarget } from './QrShareModal'
@@ -111,6 +113,8 @@ export interface ConversationListProps {
   onOpenCommandPalette: () => void
   onExpandRadar: () => void
   onOpenSettings: (tab?: SettingsTab) => void
+  onOpenWallet?: (intent?: WalletInitialIntent) => void
+  onOpenZap?: (target: ZapTarget) => void
   onLocateMe: () => void
   onFocusActiveCall?: () => void
   onInspectPeer?: (peer: PeerInfo) => void
@@ -136,6 +140,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onOpenCommandPalette,
   onExpandRadar,
   onOpenSettings,
+  onOpenWallet,
+  onOpenZap,
   onLocateMe,
   onFocusActiveCall,
   onInspectPeer,
@@ -369,6 +375,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   ) => {
     const trusted = engine.isExplicitlyTrusted(peer.peerPubkey)
     const blocked = engine.isPeerBlocked(peer.peerPubkey)
+    const peerLud16 = engine.zaps.getPeerLightningAddress(peer.peerPubkey)
     const npub = encodeNpubSafe(peer.peerPubkey)
     const dmUrl = buildDmShareUrl(peer.peerPubkey, peer.peerNickname)
     const items: ContextMenuItem[] = [
@@ -379,6 +386,21 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         onSelect: () => onOpenDm(peer.peerPubkey, peer.peerNickname),
       },
     ]
+
+    if (peerLud16 && onOpenZap) {
+      items.push({
+        id: `dm-zap-${peer.peerPubkey}`,
+        label: `Zap @${peer.peerNickname}`,
+        icon: <Zap size={15} />,
+        onSelect: () =>
+          onOpenZap({
+            pubkey: peer.peerPubkey,
+            nickname: peer.peerNickname,
+            lud16: peerLud16,
+            channelLabel: peer.peerDisplayHandle,
+          }),
+      })
+    }
 
     if (trusted) {
       items.push(
@@ -709,6 +731,27 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
 
         <div className="ag-conv-header-actions">
+          {/* Compact 1-Tap Cashu Ecash Wallet Button (Desktop & Mobile) */}
+          {onOpenWallet && (
+            <button
+              type="button"
+              className="ag-wallet-header-btn"
+              onClick={() => {
+                onPlaySound?.('click')
+                onOpenWallet({ tab: 'overview' })
+              }}
+              title={`Open Cashu Ecash Wallet (${engine.wallet.totalBalanceSats.toLocaleString()} sats)`}
+              aria-label={`Open Cashu Wallet (${engine.wallet.totalBalanceSats} sats)`}
+            >
+              <Zap size={13} className="ag-wallet-header-icon" aria-hidden="true" />
+              <span className="ag-wallet-header-balance tabular truncate">
+                {engine.wallet.totalBalanceSats > 0
+                  ? `${engine.wallet.totalBalanceSats.toLocaleString()} sats`
+                  : 'Wallet'}
+              </span>
+            </button>
+          )}
+
           {/* Desktop quick Map & Settings buttons */}
           <button
             type="button"

@@ -488,6 +488,7 @@ export function buildGeohashChatTemplate(opts: {
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
   broadcastClientTag?: boolean
+  lightningAddress?: string | null
 }): EventTemplate {
   const gh = normalizeGeohash(opts.geohash)
   const tags: string[][] = [['g', gh]]
@@ -500,6 +501,10 @@ export function buildGeohashChatTemplate(opts: {
   }
   if (opts.broadcastClientTag) {
     tags.push(['client', AGNOSTR_CLIENT_TAG])
+  }
+  const cleanLud16 = opts.lightningAddress?.trim()
+  if (cleanLud16) {
+    tags.push(['lud16', cleanLud16])
   }
   if (opts.replyTo && !opts.replyTo.isSystem) {
     tags.push(['e', opts.replyTo.id, '', 'reply'])
@@ -529,6 +534,7 @@ export function buildNamedRadioChatTemplate(opts: {
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
   broadcastClientTag?: boolean
+  lightningAddress?: string | null
 }): EventTemplate {
   const slug = getTopicSlug(opts.topic) ?? normalizeTopicSlug(opts.topic) ?? ''
   const tags: string[][] = [['d', slug]]
@@ -538,6 +544,10 @@ export function buildNamedRadioChatTemplate(opts: {
   }
   if (opts.broadcastClientTag) {
     tags.push(['client', AGNOSTR_CLIENT_TAG])
+  }
+  const cleanLud16 = opts.lightningAddress?.trim()
+  if (cleanLud16) {
+    tags.push(['lud16', cleanLud16])
   }
   if (opts.replyTo && !opts.replyTo.isSystem) {
     tags.push(['e', opts.replyTo.id, '', 'reply'])

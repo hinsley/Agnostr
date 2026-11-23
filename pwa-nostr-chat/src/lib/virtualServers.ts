@@ -324,6 +324,7 @@ export async function buildVirtualChatTemplate(opts: {
   replyTo?: ServerMessage | null
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  lightningAddress?: string | null
 }): Promise<EventTemplate> {
   const chanTag = getVirtualChannelTag(opts.server, opts.channelId)
   const tags: string[][] = [['t', chanTag]]
@@ -348,6 +349,8 @@ export async function buildVirtualChatTemplate(opts: {
 
   const cleanNick = opts.nickname.trim()
   if (cleanNick) tags.push(['n', cleanNick])
+  const cleanLud16 = opts.lightningAddress?.trim()
+  if (cleanLud16) tags.push(['lud16', cleanLud16])
   if (opts.replyTo && !opts.replyTo.isSystem) {
     tags.push(['e', opts.replyTo.id, '', 'reply'])
     if (/^[0-9a-f]{64}$/i.test(opts.replyTo.pubkey)) {

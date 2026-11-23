@@ -222,7 +222,10 @@ export interface ServersEngine {
   leaveServer: (serverId: string) => Promise<void>
 
   // Messaging, voice, images & reactions (all media strictly honors Trusted Peers gate)
-  sendMessage: (rawText: string) => Promise<boolean>
+  sendMessage: (
+    rawText: string,
+    options?: { onPublishedId?: (id: string) => void }
+  ) => Promise<boolean>
   sendVoiceMemo: (recorded: RecordedVoiceMemo, caption?: string) => Promise<boolean>
   sendImageAttachment: (image: PreparedImage, caption?: string) => Promise<boolean>
   sendReaction: (message: ServerMessage, emoji: string) => Promise<void>

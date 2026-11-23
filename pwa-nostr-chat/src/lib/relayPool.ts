@@ -405,6 +405,17 @@ export class RelayPool {
     this.scheduleTelemetryEmit()
   }
 
+  revive(): void {
+    if (!this.disposed) return
+    this.disposed = false
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange)
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', this.handleOnline)
+    }
+  }
+
   dispose(): void {
     this.disposed = true
     if (typeof document !== 'undefined') {

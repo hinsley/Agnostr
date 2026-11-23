@@ -1,6 +1,8 @@
 import { nip19 } from 'nostr-tools'
+import { extractCashuTokenString } from './cashuWallet.ts'
 import { decodePubkeyInput, encodeNpubSafe } from './identity.ts'
 import { parseServerInvite } from './virtualServers.ts'
+import { parseLightningPayload } from './zaps.ts'
 
 export interface ParsedDmShareTarget {
   kind: 'dm'
@@ -14,7 +16,22 @@ export interface ParsedServerInviteShareTarget {
   inviteCode: string
 }
 
-export type ParsedShareTarget = ParsedDmShareTarget | ParsedServerInviteShareTarget
+export interface ParsedCashuShareTarget {
+  kind: 'cashu'
+  token: string
+}
+
+export interface ParsedLightningShareTarget {
+  kind: 'lightning'
+  payload: string
+  lightningKind: 'bolt11' | 'lud16' | 'lnurl'
+}
+
+export type ParsedShareTarget =
+  | ParsedDmShareTarget
+  | ParsedServerInviteShareTarget
+  | ParsedCashuShareTarget
+  | ParsedLightningShareTarget
 
 const FALLBACK_BASE_HREF = 'https://agnostr.com/'
 
@@ -165,19 +182,40 @@ export function parseShareTarget(rawInput: string): ParsedShareTarget | null {
     if (inv) return inv
   }
 
-  // 3. Community invite code (ag1..., naddr1..., or NIP-29 relay'groupId)
+  // 3. Cashu Ecash token (`cashuA...`, `cashuB...`, `cashu:...`)
+  const cashuToken = extractCashuTokenString(trimmed)
+  if (cashuToken) {
+    return { kind: 'cashu', token: cashuToken }
+  }
+
+  // 4. Community invite code (ag1..., naddr1..., or NIP-29 relay'groupId)
   const serverInvite = parseServerInvite(trimmed)
   if (serverInvite) {
     return { kind: 'server-invite', inviteCode: serverInvite.rawCode }
   }
 
-  // 4. Bare Nostr DM identifier (`npub1...`, `nostr:npub1...`, `nprofile1...`, `nostr:nprofile1...`, hex)
+  // 5. Bare Nostr DM identifier (`npub1...`, `nostr:npub1...`, `nprofile1...`, `nostr:nprofile1...`, hex)
   const pubkey = decodeDmIdentifier(trimmed)
   if (pubkey) {
     return {
       kind: 'dm',
       pubkey,
       npub: encodeNpubSafe(pubkey),
+    }
+  }
+
+  // 6. Lightning invoice / address / LNURL (`lightning:...`, `lnbc...`, `user@domain`, `lnurl1...`)
+  const lightning = parseLightningPayload(trimmed)
+  if (lightning) {
+    return {
+      kind: 'lightning',
+      payload:
+        lightning.kind === 'bolt11'
+          ? lightning.invoice
+          : lightning.kind === 'lud16'
+            ? lightning.address
+            : lightning.lnurl,
+      lightningKind: lightning.kind,
     }
   }
 

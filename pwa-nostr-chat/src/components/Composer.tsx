@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowUp,
   Camera,
   CornerUpLeft,
   Image as ImageIcon,
   ImagePlus,
+  Languages,
   Loader2,
   Lock,
   Mic,
@@ -84,12 +85,21 @@ export const Composer: React.FC<ComposerProps> = ({
   const [cameraModalOpen, setCameraModalOpen] = useState(false)
   const [pendingImage, setPendingImage] = useState<PreparedImage | null>(null)
   const [preparingImage, setPreparingImage] = useState(false)
+  const [translatingOutgoing, setTranslatingOutgoing] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const cameraInputRef = useRef<HTMLInputElement | null>(null)
   const attachWrapRef = useRef<HTMLDivElement | null>(null)
   const pendingImageRef = useRef<PreparedImage | null>(null)
+  const pendingOutgoingOriginalRef = useRef<{
+    targetKey: string
+    originalText: string
+    translatedText: string
+    targetLang: string
+    existingIds: Set<string>
+    createdAt: number
+  } | null>(null)
   const contextEpochRef = useRef(0)
   const dragDepthRef = useRef(0)
 
@@ -124,13 +134,49 @@ export const Composer: React.FC<ComposerProps> = ({
   const activeChannel = engine.servers.activeChannel
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
   const isViolet = isDm || isServerE2ee
-  const isSending = isServer ? engine.servers.sending : engine.sending
+  const isSending = (isServer ? engine.servers.sending : engine.sending) || translatingOutgoing
   const activeReply = isServer ? engine.servers.replyingTo : !isDm ? engine.replyingTo : null
   const activeTargetKey = isDm
     ? `dm:${dmThread?.peerPubkey ?? ''}`
     : isServer
       ? `srv:${activeServer?.id ?? ''}:${activeChannel?.id ?? ''}`
       : `ch:${engine.activeGeohash}`
+
+  const outgoingTranslateActive =
+    engine.translator.settings.enabled && engine.translator.settings.outgoingEnabled
+  const outgoingTargetLang = engine.translator.settings.outgoingLanguage
+
+  // Synchronously record original outgoing text for Double-Column Translator Mode left column
+  const activeStreamMessages = useMemo(
+    () =>
+      isDm
+        ? (dmThread?.messages ?? [])
+        : isServer
+          ? engine.servers.messages
+          : engine.messages,
+    [isDm, dmThread?.messages, isServer, engine.servers.messages, engine.messages]
+  )
+
+  useLayoutEffect(() => {
+    const pending = pendingOutgoingOriginalRef.current
+    if (!pending || !pending.translatedText) return
+    if (pending.targetKey !== activeTargetKey || Date.now() - pending.createdAt > 20_000) {
+      pendingOutgoingOriginalRef.current = null
+      return
+    }
+    for (let i = activeStreamMessages.length - 1; i >= 0; i -= 1) {
+      const msg = activeStreamMessages[i]
+      if (!msg.isOwn || pending.existingIds.has(msg.id)) continue
+      engine.translator.recordOutgoingOriginal(
+        msg.id,
+        pending.originalText,
+        pending.translatedText,
+        pending.targetLang
+      )
+      pendingOutgoingOriginalRef.current = null
+      break
+    }
+  }, [activeStreamMessages, activeTargetKey, engine.translator])
 
   // Tear down voice recorder & staged images on Panic Wipe, key rotation, or context switch
   const prevMasterPkRef = useRef(engine.identity.masterPubkey)
@@ -489,28 +535,91 @@ export const Composer: React.FC<ComposerProps> = ({
     setCursorPos(0)
     restoreFocusSynchronously()
 
+    let outgoingBody = trimmed
+    let translatedMeta:
+      | { originalText: string; translatedToLang: string; onPublishedId: () => void }
+      | undefined
+    const shouldTranslate = outgoingTranslateActive && !trimmed.startsWith('/')
+    if (shouldTranslate) {
+      const existingIds = new Set(activeStreamMessages.map((m) => m.id))
+      setTranslatingOutgoing(true)
+      try {
+        const translated = (
+          await engine.translator.translateOutgoingText(trimmed, outgoingTargetLang)
+        ).trim()
+        if (!translated) {
+          throw new Error('Translator returned an empty message.')
+        }
+        outgoingBody = translated
+        translatedMeta = {
+          originalText: trimmed,
+          translatedToLang: outgoingTargetLang,
+          onPublishedId: () => {
+            pendingOutgoingOriginalRef.current = null
+          },
+        }
+        pendingOutgoingOriginalRef.current = {
+          targetKey: activeTargetKey,
+          originalText: trimmed,
+          translatedText: translated,
+          targetLang: outgoingTargetLang,
+          existingIds,
+          createdAt: Date.now(),
+        }
+      } catch (err) {
+        pendingOutgoingOriginalRef.current = null
+        pushToast(
+          'warning',
+          'Outgoing translation failed',
+          err instanceof Error ? err.message : 'Unable to translate message before sending.'
+        )
+        setDraft((curr) => (curr ? curr : trimmed))
+        return
+      } finally {
+        setTranslatingOutgoing(false)
+      }
+    }
+
     let ok = false
     if (isServer) {
-      if (trimmed.toLowerCase() === '/clear') {
+      if (outgoingBody.toLowerCase() === '/clear') {
         engine.servers.clearChannelCache()
         ok = true
-      } else if (/^\/me\s+/i.test(trimmed)) {
-        const action = trimmed.replace(/^\/me\s+/i, '').trim()
+      } else if (/^\/me\s+/i.test(outgoingBody)) {
+        const action = outgoingBody.replace(/^\/me\s+/i, '').trim()
         ok = action
           ? await engine.servers.sendMessage(`* ${engine.identity.nickname} ${action} *`)
           : false
       } else {
-        ok = await engine.servers.sendMessage(trimmed)
+        ok = await engine.servers.sendMessage(
+          outgoingBody,
+          translatedMeta
+            ? {
+                onPublishedId: (id) => {
+                  pendingOutgoingOriginalRef.current = null
+                  engine.translator.recordOutgoingOriginal(
+                    id,
+                    translatedMeta.originalText,
+                    outgoingBody,
+                    translatedMeta.translatedToLang
+                  )
+                },
+              }
+            : undefined
+        )
       }
-    } else if (isDm && dmThread && !trimmed.startsWith('/')) {
-      ok = await engine.sendDirectMessage(dmThread.peerPubkey, trimmed, dmThread.protocol)
+    } else if (isDm && dmThread && !outgoingBody.startsWith('/')) {
+      ok = translatedMeta
+        ? await engine.sendInput(outgoingBody, translatedMeta)
+        : await engine.sendDirectMessage(dmThread.peerPubkey, outgoingBody, dmThread.protocol)
     } else {
-      ok = await engine.sendInput(trimmed)
+      ok = await engine.sendInput(outgoingBody, translatedMeta)
     }
 
     if (ok) {
       onSent?.(isViolet)
     } else {
+      pendingOutgoingOriginalRef.current = null
       setDraft((curr) => (curr ? curr : trimmed))
     }
   }
@@ -625,19 +734,81 @@ export const Composer: React.FC<ComposerProps> = ({
     const trimmed = text.trim()
     if (!trimmed || isSending || !canSign) return false
 
+    let outgoingBody = trimmed
+    let translatedMeta:
+      | { originalText: string; translatedToLang: string; onPublishedId: () => void }
+      | undefined
+    if (outgoingTranslateActive && !trimmed.startsWith('/')) {
+      const existingIds = new Set(activeStreamMessages.map((m) => m.id))
+      setTranslatingOutgoing(true)
+      try {
+        const translated = (
+          await engine.translator.translateOutgoingText(trimmed, outgoingTargetLang)
+        ).trim()
+        if (translated) {
+          outgoingBody = translated
+          translatedMeta = {
+            originalText: trimmed,
+            translatedToLang: outgoingTargetLang,
+            onPublishedId: () => {
+              pendingOutgoingOriginalRef.current = null
+            },
+          }
+          pendingOutgoingOriginalRef.current = {
+            targetKey: activeTargetKey,
+            originalText: trimmed,
+            translatedText: translated,
+            targetLang: outgoingTargetLang,
+            existingIds,
+            createdAt: Date.now(),
+          }
+        }
+      } catch (err) {
+        pendingOutgoingOriginalRef.current = null
+        pushToast(
+          'warning',
+          'Outgoing translation failed',
+          err instanceof Error ? err.message : 'Unable to translate message before sending.'
+        )
+        return false
+      } finally {
+        setTranslatingOutgoing(false)
+      }
+    }
+
     let ok = false
     if (isServer) {
-      ok = await engine.servers.sendMessage(trimmed)
+      ok = await engine.servers.sendMessage(
+        outgoingBody,
+        translatedMeta
+          ? {
+              onPublishedId: (id) => {
+                pendingOutgoingOriginalRef.current = null
+                engine.translator.recordOutgoingOriginal(
+                  id,
+                  translatedMeta.originalText,
+                  outgoingBody,
+                  translatedMeta.translatedToLang
+                )
+              },
+            }
+          : undefined
+      )
     } else if (isDm && dmThread) {
-      ok = await engine.sendDirectMessage(dmThread.peerPubkey, trimmed, dmThread.protocol)
+      ok =
+        translatedMeta && !outgoingBody.startsWith('/')
+          ? await engine.sendInput(outgoingBody, translatedMeta)
+          : await engine.sendDirectMessage(dmThread.peerPubkey, outgoingBody, dmThread.protocol)
     } else {
-      ok = await engine.sendInput(trimmed)
+      ok = await engine.sendInput(outgoingBody, translatedMeta)
     }
 
     if (ok) {
       setHistory((prev) => [trimmed, ...prev.filter((x) => x !== trimmed)].slice(0, 30))
       setHistoryIdx(-1)
       onSent?.(isViolet)
+    } else {
+      pendingOutgoingOriginalRef.current = null
     }
     return ok
   }
@@ -786,6 +957,37 @@ export const Composer: React.FC<ComposerProps> = ({
           </div>
         )}
 
+        {/* Outgoing Translation Indicator Strip (Double-Column Translator Mode) */}
+        {outgoingTranslateActive && !voiceMode && (
+          <div
+            className={`ag-composer-translate-strip ${isViolet ? 'dm' : ''} ${activeReply || pendingImage ? 'has-next' : ''}`}
+            role="status"
+          >
+            <div className="ag-composer-translate-left truncate">
+              {translatingOutgoing ? (
+                <Loader2 size={13} className="ag-spin" />
+              ) : (
+                <Languages size={13} />
+              )}
+              <span className="truncate">
+                {translatingOutgoing
+                  ? `Translating to ${outgoingTargetLang}…`
+                  : `Auto-translating outgoing → ${outgoingTargetLang}`}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="ag-composer-translate-off"
+              onPointerDown={keepTextareaFocused}
+              onMouseDown={keepTextareaFocused}
+              onClick={() => engine.translator.updateSettings({ outgoingEnabled: false })}
+              title="Turn off outgoing translation"
+            >
+              Off
+            </button>
+          </div>
+        )}
+
         {/* Contextual Reply Strip */}
         {activeReply && (
           <div
@@ -886,7 +1088,7 @@ export const Composer: React.FC<ComposerProps> = ({
           />
         ) : (
           <form
-            className={`ag-composer-bar ${isViolet ? 'dm' : ''} ${activeReply || pendingImage ? 'with-strip' : ''}`}
+            className={`ag-composer-bar ${isViolet ? 'dm' : ''} ${activeReply || pendingImage || outgoingTranslateActive ? 'with-strip' : ''}`}
             onSubmit={(e) => {
               e.preventDefault()
               void handleSubmit(true)

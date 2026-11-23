@@ -18,6 +18,8 @@ import {
   Fingerprint,
   Flame,
   Globe,
+  Image as ImageIcon,
+  Languages,
   Link2,
   Loader2,
   Lock,
@@ -29,16 +31,32 @@ import {
   RefreshCw,
   RotateCcw,
   Server,
+  ShieldAlert,
   ShieldCheck,
   Smartphone,
+  Sparkles,
   Trash2,
   User,
   Volume2,
   VolumeX,
+  Wallet,
   X,
+  Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, SignMode, ThemeId } from '../types/protocol.ts'
+import type {
+  ContentFilterCallVideoMode,
+  ContentFilterMediaScope,
+  ContentFilterTextScope,
+  ContentFilterVerdict,
+} from '../types/contentFilter.ts'
 import type { NotificationFilterMode } from '../types/notifications.ts'
+import {
+  SUPPORTED_TRANSLATION_LANGUAGES,
+  TRANSLATION_LANGUAGE_OPTIONS,
+  TRANSLATOR_MODEL_LABEL,
+  TRANSLATOR_MODEL_SIZE_HINT,
+} from '../types/translator.ts'
 import type { PwaState } from '../hooks/usePwa.ts'
 import {
   RECORDING_QUALITY_PRESETS,
@@ -54,6 +72,8 @@ export type SettingsTab =
   | 'profile'
   | 'notifications'
   | 'privacy'
+  | 'content-filter'
+  | 'translator'
   | 'appearance'
   | 'calls'
   | 'network'
@@ -65,6 +85,7 @@ export interface SettingsModalProps {
   initialTab?: SettingsTab
   onClose: () => void
   onOpenInstall: () => void
+  onOpenWallet?: () => void
   onPlaySound?: (cue: SoundCue) => void
   onShowQr?: (target: QrShareTarget) => void
   onOpenScanner?: () => void
@@ -133,14 +154,34 @@ const NOTIF_FILTER_MODES: readonly { id: NotificationFilterMode; label: string }
   { id: 'off', label: 'Off' },
 ]
 
+const MEDIA_SCOPE_OPTIONS: readonly { id: ContentFilterMediaScope; label: string }[] = [
+  { id: 'untrusted', label: 'Untrusted' },
+  { id: 'all', label: 'Everyone' },
+  { id: 'off', label: 'Off' },
+]
+
+const TEXT_SCOPE_OPTIONS: readonly { id: ContentFilterTextScope; label: string }[] = [
+  { id: 'off', label: 'Off' },
+  { id: 'untrusted', label: 'Untrusted' },
+  { id: 'all', label: 'Everyone' },
+]
+
+const CALL_VIDEO_MODE_OPTIONS: readonly { id: ContentFilterCallVideoMode; label: string }[] = [
+  { id: 'trusted-only', label: 'Trusted Only' },
+  { id: 'screen-untrusted', label: 'Screen Untrusted' },
+  { id: 'screen-all', label: 'Screen All' },
+]
+
 const NAV_ITEMS: readonly {
   id: SettingsTab
   label: string
   subtitle: string
 }[] = [
-  { id: 'profile', label: 'Profile', subtitle: 'Name, keys & signer' },
+  { id: 'profile', label: 'Profile', subtitle: 'Name, keys & Lightning' },
   { id: 'notifications', label: 'Notifications', subtitle: 'Push alerts & call ringing' },
   { id: 'privacy', label: 'Privacy & Trust', subtitle: 'Trusted peers & blocks' },
+  { id: 'content-filter', label: 'Content Filter', subtitle: 'Liquid AI d1-2B safety' },
+  { id: 'translator', label: 'Translator', subtitle: 'On-device LFM3-1.7B' },
   { id: 'appearance', label: 'Appearance', subtitle: 'Theme & sound effects' },
   { id: 'calls', label: 'Calls & Recording', subtitle: 'Quality, captions & TURN' },
   { id: 'network', label: 'Network & App', subtitle: 'Relays, Blossom & PWA' },
@@ -168,6 +209,7 @@ export function SettingsModal({
   initialTab,
   onClose,
   onOpenInstall,
+  onOpenWallet,
   onPlaySound,
   onShowQr,
   inShell = false,
@@ -193,10 +235,32 @@ export function SettingsModal({
 
   // Profile drafts
   const [nickDraft, setNickDraft] = useState(identity.nickname)
+  const [lud16Draft, setLud16Draft] = useState(() => engine.zaps.lightningAddress ?? '')
+  const [lud16Saving, setLud16Saving] = useState(false)
+  const [lud16Feedback, setLud16Feedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [secretDraft, setSecretDraft] = useState('')
   const [secretFeedback, setSecretFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [revealNsec, setRevealNsec] = useState(false)
   const [copiedField, setCopiedField] = useState<'npub' | 'nsec' | 'dm-link' | null>(null)
+
+  // Content Filter (Liquid AI d1-2B) drafts & quick test state
+  const [cfTestText, setCfTestText] = useState('')
+  const [cfTesting, setCfTesting] = useState(false)
+  const [cfTestLabel, setCfTestLabel] = useState<string | null>(null)
+  const [cfTestResult, setCfTestResult] = useState<ContentFilterVerdict | null>(null)
+  const [cfClearingCache, setCfClearingCache] = useState(false)
+  const [cfFeedback, setCfFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
+  const cfFileInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Translator (Liquid LFM3-1.7B) drafts
+  const [trClearingCache, setTrClearingCache] = useState(false)
+  const [trFeedback, setTrFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [customMyLangMode, setCustomMyLangMode] = useState(
+    () => !SUPPORTED_TRANSLATION_LANGUAGES.includes(engine.translator.settings.myLanguage),
+  )
+  const [customOutLangMode, setCustomOutLangMode] = useState(
+    () => !SUPPORTED_TRANSLATION_LANGUAGES.includes(engine.translator.settings.outgoingLanguage),
+  )
 
   // Privacy drafts
   const [trustKeyDraft, setTrustKeyDraft] = useState('')
@@ -266,6 +330,10 @@ export function SettingsModal({
   useEffect(() => {
     setNickDraft(identity.nickname)
   }, [identity.nickname])
+
+  useEffect(() => {
+    setLud16Draft(engine.zaps.lightningAddress ?? '')
+  }, [engine.zaps.lightningAddress])
 
   useEffect(() => {
     setTurnUrlDraft(engine.calls.turnConfig?.url ?? '')
@@ -563,6 +631,115 @@ export function SettingsModal({
     setBridgeFeedback({ ok: true, msg: 'Disconnected background push device' })
   }
 
+  const handleSaveLightningAddress = async (e: FormEvent) => {
+    e.preventDefault()
+    if (lud16Saving) return
+    setLud16Saving(true)
+    setLud16Feedback(null)
+    try {
+      const cleaned = lud16Draft.trim()
+      const res = await engine.zaps.setLightningAddress(cleaned || null)
+      if (res.ok) {
+        onPlaySound?.('click')
+        setLud16Draft(res.normalized ?? '')
+        setLud16Feedback({
+          ok: true,
+          msg: res.normalized
+            ? res.publishedRelays > 0
+              ? `Saved & published to ${res.publishedRelays} ${res.publishedRelays === 1 ? 'relay' : 'relays'}`
+              : 'Saved Lightning Address locally'
+            : 'Lightning Address cleared',
+        })
+      } else {
+        setLud16Feedback({
+          ok: false,
+          msg: res.error || 'Enter a valid Lightning Address (e.g. you@domain.com)',
+        })
+      }
+    } finally {
+      setLud16Saving(false)
+    }
+  }
+
+  const handleCfTestText = async (e: FormEvent) => {
+    e.preventDefault()
+    const sample = cfTestText.trim()
+    if (!sample || cfTesting) return
+    setCfTesting(true)
+    setCfTestLabel('Text test')
+    setCfTestResult(null)
+    onPlaySound?.('click')
+    try {
+      const verdict = await engine.contentFilter.screenText(
+        `settings-test-text:${Date.now()}`,
+        sample,
+        { skipCache: true },
+      )
+      setCfTestResult(verdict)
+    } finally {
+      setCfTesting(false)
+    }
+  }
+
+  const handleCfTestImageFile = async (file: File | null) => {
+    if (!file || cfTesting) return
+    setCfTesting(true)
+    setCfTestLabel(file.name)
+    setCfTestResult(null)
+    onPlaySound?.('click')
+    try {
+      const verdict = await engine.contentFilter.screenImageBlob(
+        `settings-test-img:${Date.now()}`,
+        file,
+        { skipCache: true },
+      )
+      setCfTestResult(verdict)
+    } finally {
+      setCfTesting(false)
+      if (cfFileInputRef.current) {
+        cfFileInputRef.current.value = ''
+      }
+    }
+  }
+
+  const handleClearContentFilterCache = async () => {
+    if (cfClearingCache) return
+    setCfClearingCache(true)
+    setCfFeedback(null)
+    onPlaySound?.('click')
+    try {
+      await engine.contentFilter.clearModelCache()
+      engine.contentFilter.clearVerdictCache()
+      setCfTestResult(null)
+      setCfFeedback({ ok: true, msg: 'Cleared Liquid d1-2B model & verdict cache' })
+    } catch (err) {
+      setCfFeedback({
+        ok: false,
+        msg: err instanceof Error ? err.message : 'Unable to clear filter cache',
+      })
+    } finally {
+      setCfClearingCache(false)
+    }
+  }
+
+  const handleClearTranslatorModelCache = async () => {
+    if (trClearingCache) return
+    setTrClearingCache(true)
+    setTrFeedback(null)
+    onPlaySound?.('click')
+    try {
+      await engine.translator.clearModelCache()
+      setTrFeedback({ ok: true, msg: `Cleared ${TRANSLATOR_MODEL_LABEL} model cache` })
+    } catch (err) {
+      setTrFeedback({
+        ok: false,
+        msg: err instanceof Error ? err.message : 'Unable to clear model cache',
+      })
+    } finally {
+      setTrClearingCache(false)
+    }
+  }
+
   const renderTabIcon = (id: SettingsTab) => {
     switch (id) {
       case 'profile':
@@ -571,6 +748,10 @@ export function SettingsModal({
         return <Bell size={17} />
       case 'privacy':
         return <ShieldCheck size={17} />
+      case 'content-filter':
+        return <ShieldAlert size={17} />
+      case 'translator':
+        return <Languages size={17} />
       case 'appearance':
         return <Palette size={17} />
       case 'calls':
@@ -661,6 +842,38 @@ export function SettingsModal({
         )}
       </div>
 
+      {/* Cashu Ecash Wallet Shortcut */}
+      {onOpenWallet && (
+        <button
+          type="button"
+          className="ag-set-wallet-shortcut"
+          onClick={() => {
+            onPlaySound?.('click')
+            onClose()
+            onOpenWallet()
+          }}
+        >
+          <span className="ag-set-wallet-shortcut-left">
+            <span className="ag-set-wallet-shortcut-icon" aria-hidden="true">
+              <Wallet size={15} />
+            </span>
+            <span className="ag-set-wallet-shortcut-copy">
+              <span className="ag-set-wallet-shortcut-title">Open Cashu Wallet</span>
+              <span className="ag-set-wallet-shortcut-sub">
+                Ecash tokens, Lightning &amp; on-chain swaps
+              </span>
+            </span>
+          </span>
+          <span className="ag-set-wallet-shortcut-right">
+            <span className="ag-set-wallet-bal mono">
+              <Zap size={11} />
+              <span>{engine.wallet.totalBalanceSats.toLocaleString()} sats</span>
+            </span>
+            <ChevronRight size={15} />
+          </span>
+        </button>
+      )}
+
       {/* Nickname */}
       <form className="ag-set-group" onSubmit={handleNickSubmit}>
         <label className="ag-set-label" htmlFor="ag-set-nick">
@@ -684,6 +897,61 @@ export function SettingsModal({
             Save
           </button>
         </div>
+      </form>
+
+      {/* Lightning Address (for NIP-57 Zaps) */}
+      <form className="ag-set-group" onSubmit={(e) => void handleSaveLightningAddress(e)}>
+        <div className="ag-set-label-row">
+          <label className="ag-set-label" htmlFor="ag-set-lud16">
+            Lightning Address (for Zaps)
+          </label>
+          {engine.zaps.lightningAddress && (
+            <span className="ag-badge ag-badge-zap mono">
+              <Zap size={10} />
+              <span>Active</span>
+            </span>
+          )}
+        </div>
+        <div className="ag-set-inline-row">
+          <input
+            id="ag-set-lud16"
+            type="text"
+            inputMode="email"
+            autoComplete="off"
+            spellCheck={false}
+            maxLength={120}
+            className="ag-input mono"
+            value={lud16Draft}
+            onChange={(e) => {
+              setLud16Draft(e.target.value)
+              if (lud16Feedback) setLud16Feedback(null)
+            }}
+            placeholder="you@domain.com"
+          />
+          <button
+            type="submit"
+            className="ag-btn ag-btn-primary"
+            disabled={
+              lud16Saving ||
+              lud16Draft.trim() === (engine.zaps.lightningAddress ?? '')
+            }
+          >
+            {lud16Saving ? <Loader2 size={14} className="ag-spin" /> : 'Save'}
+          </button>
+        </div>
+        <p className="ag-set-helper">
+          Published on your Nostr profile &amp; messages so peers can zap you with Lightning.
+        </p>
+        {lud16Feedback && (
+          <p
+            className={`ag-field-hint ${
+              lud16Feedback.ok ? 'ag-field-hint-accent' : 'ag-field-hint-danger'
+            }`}
+            role="status"
+          >
+            {lud16Feedback.msg}
+          </p>
+        )}
       </form>
 
       {/* Public & Secret Keys */}
@@ -1597,6 +1865,697 @@ export function SettingsModal({
     </div>
   )
 
+  const renderContentFilterTab = () => {
+    const cf = engine.contentFilter
+    const cfs = cf.settings
+    const isDownloading = cf.modelStatus === 'downloading'
+    const pct = Math.max(0, Math.min(100, Math.round(cf.downloadProgress)))
+
+    const statusBadge =
+      cf.modelStatus === 'ready'
+        ? {
+            cls: 'ag-badge-accent',
+            text:
+              cf.runtimeDevice === 'webgpu'
+                ? 'Ready · WebGPU'
+                : cf.runtimeDevice === 'wasm'
+                  ? 'Ready · WASM'
+                  : 'Ready',
+          }
+        : isDownloading
+          ? { cls: 'ag-badge-warn', text: `Loading ${pct}%` }
+          : cf.modelStatus === 'error'
+            ? { cls: 'ag-badge-danger', text: 'Error' }
+            : { cls: 'ag-badge-muted', text: 'Not downloaded' }
+
+    const callVideoHint =
+      cfs.callVideoMode === 'trusted-only'
+        ? 'Untrusted peers stay strictly blocked (zero WebRTC media) until you trust them.'
+        : cfs.callVideoMode === 'screen-untrusted'
+          ? 'Untrusted call video stays veiled behind a safety shield until cleared by Liquid d1-2B.'
+          : 'All remote call video stays veiled until cleared by Liquid d1-2B, re-veiling if flagged.'
+
+    return (
+      <div className="ag-set-pane-stack">
+        {/* Liquid AI d1-2B Model Card */}
+        <div className="ag-set-ai-card">
+          <div className="ag-set-ai-head">
+            <div className="ag-set-ai-title-wrap">
+              <span className="ag-set-ai-emblem" aria-hidden="true">
+                <Sparkles size={15} />
+              </span>
+              <div className="ag-set-ai-title-copy">
+                <span className="ag-set-ai-title">{cf.modelLabel}</span>
+                <span className="ag-set-ai-sub mono truncate">{cf.modelId}</span>
+              </div>
+            </div>
+            <span className={`ag-badge ${statusBadge.cls}`}>{statusBadge.text}</span>
+          </div>
+
+          {isDownloading && (
+            <div className="ag-set-progress-wrap">
+              <div className="ag-set-progress-track" aria-hidden="true">
+                <span className="ag-set-progress-fill" style={{ width: `${pct}%` }} />
+              </div>
+              {cf.downloadFile && (
+                <span className="ag-set-progress-file mono truncate">
+                  {cf.downloadFile} · {pct}%
+                </span>
+              )}
+            </div>
+          )}
+
+          {cf.modelError && (
+            <p className="ag-field-hint ag-field-hint-danger" role="alert">
+              {cf.modelError}
+            </p>
+          )}
+
+          <p className="ag-set-helper">
+            Runs 100% locally on your device via {cf.webGpuSupported ? 'WebGPU / WASM' : 'WASM'} —
+            media and messages never leave your browser.
+          </p>
+
+          <div className="ag-set-ai-actions">
+            <button
+              type="button"
+              className="ag-btn ag-btn-primary ag-btn-sm"
+              disabled={isDownloading}
+              onClick={() => {
+                setCfFeedback(null)
+                onPlaySound?.('click')
+                void cf.preloadModel().then((ok) => {
+                  if (ok) {
+                    setCfFeedback({ ok: true, msg: `${cf.modelLabel} is ready locally` })
+                  }
+                })
+              }}
+            >
+              {isDownloading ? (
+                <Loader2 size={13} className="ag-spin" />
+              ) : cf.modelStatus === 'ready' ? (
+                <Check size={13} />
+              ) : (
+                <Download size={13} />
+              )}
+              <span>
+                {isDownloading
+                  ? `Downloading ${pct}%`
+                  : cf.modelStatus === 'ready'
+                    ? 'Model Ready'
+                    : 'Download / Preload Model'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className="ag-btn ag-btn-secondary ag-btn-sm"
+              disabled={isDownloading || cfClearingCache}
+              onClick={() => void handleClearContentFilterCache()}
+            >
+              <Trash2 size={13} />
+              <span>
+                {cfClearingCache
+                  ? 'Clearing…'
+                  : cf.cachedVerdictCount > 0
+                    ? `Clear Model & Verdict Cache (${cf.cachedVerdictCount})`
+                    : 'Clear Model & Verdict Cache'}
+              </span>
+            </button>
+          </div>
+
+          {cfFeedback && (
+            <p
+              className={`ag-field-hint ${
+                cfFeedback.ok ? 'ag-field-hint-accent' : 'ag-field-hint-danger'
+              }`}
+              role="status"
+            >
+              {cfFeedback.msg}
+            </p>
+          )}
+        </div>
+
+        {/* Master Toggle */}
+        <label className="ag-set-toggle-card">
+          <div className="ag-set-toggle-copy">
+            <span className="ag-set-toggle-title">
+              <ShieldAlert size={16} />
+              <span>Enable AI Content Filtering</span>
+            </span>
+            <span className="ag-set-toggle-desc">
+              Screen incoming media (and optional text or call video) locally with Liquid AI d1-2B
+              before it is displayed.
+            </span>
+          </div>
+          <input
+            type="checkbox"
+            className="ag-switch"
+            checked={cfs.enabled}
+            onChange={() => {
+              cf.updateSettings({ enabled: !cfs.enabled })
+              onPlaySound?.('click')
+            }}
+          />
+        </label>
+
+        {/* What to Filter */}
+        <div className={`ag-set-group ${!cfs.enabled ? 'ag-set-dimmed' : ''}`}>
+          <span className="ag-set-label">What to Filter</span>
+
+          <div className="ag-set-stack-sm">
+            <label className="ag-set-toggle-card">
+              <div className="ag-set-toggle-copy">
+                <span className="ag-set-toggle-title">
+                  <span>NSFW / Explicit content</span>
+                </span>
+                <span className="ag-set-toggle-desc">
+                  Block sexually explicit images, nudity, and graphic adult media.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                disabled={!cfs.enabled}
+                checked={cfs.filterNsfw}
+                onChange={() => {
+                  cf.updateSettings({ filterNsfw: !cfs.filterNsfw })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-toggle-card">
+              <div className="ag-set-toggle-copy">
+                <span className="ag-set-toggle-title">
+                  <span>Illegal &amp; extreme harm</span>
+                </span>
+                <span className="ag-set-toggle-desc">
+                  Permanently block illegal content, CSAM, and severe violence (no reveal override).
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                disabled={!cfs.enabled}
+                checked={cfs.filterIllegal}
+                onChange={() => {
+                  cf.updateSettings({ filterIllegal: !cfs.filterIllegal })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <div className="ag-set-custom-rule-card">
+              <label className="ag-set-custom-rule-head">
+                <div className="ag-set-toggle-copy">
+                  <span className="ag-set-toggle-title">
+                    <span>Custom filter instructions</span>
+                  </span>
+                  <span className="ag-set-toggle-desc">
+                    Add your own natural-language moderation rule evaluated on every scan.
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  className="ag-switch"
+                  disabled={!cfs.enabled}
+                  checked={cfs.customRulesEnabled}
+                  onChange={() => {
+                    cf.updateSettings({ customRulesEnabled: !cfs.customRulesEnabled })
+                    onPlaySound?.('click')
+                  }}
+                />
+              </label>
+
+              {cfs.customRulesEnabled && (
+                <textarea
+                  className="ag-textarea ag-set-rule-textarea"
+                  rows={3}
+                  maxLength={400}
+                  disabled={!cfs.enabled}
+                  value={cfs.customInstructions}
+                  onChange={(e) => cf.updateSettings({ customInstructions: e.target.value })}
+                  placeholder="e.g., Flag heavy profanity, slurs, or crypto scam spam"
+                  aria-label="Custom content filter instructions"
+                />
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Where to Apply */}
+        <div className={`ag-set-group ${!cfs.enabled ? 'ag-set-dimmed' : ''}`}>
+          <span className="ag-set-label">Where to Apply</span>
+
+          <div className="ag-set-scope-list">
+            <div className="ag-set-scope-item">
+              <div className="ag-set-label-row">
+                <span className="ag-set-scope-title">Incoming Images &amp; Media</span>
+                <span className="ag-set-scope-default">Default: Untrusted</span>
+              </div>
+              <div
+                className="ag-segmented"
+                role="radiogroup"
+                aria-label="Incoming images and media filter scope"
+              >
+                {MEDIA_SCOPE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="radio"
+                    disabled={!cfs.enabled}
+                    aria-checked={cfs.mediaScope === opt.id}
+                    className={cfs.mediaScope === opt.id ? 'active' : ''}
+                    onClick={() => {
+                      cf.updateSettings({ mediaScope: opt.id })
+                      onPlaySound?.('click')
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="ag-set-scope-item">
+              <div className="ag-set-label-row">
+                <span className="ag-set-scope-title">Text Messages</span>
+                <span className="ag-set-scope-default">Default: Off</span>
+              </div>
+              <div
+                className="ag-segmented"
+                role="radiogroup"
+                aria-label="Text message filter scope"
+              >
+                {TEXT_SCOPE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="radio"
+                    disabled={!cfs.enabled}
+                    aria-checked={cfs.textScope === opt.id}
+                    className={cfs.textScope === opt.id ? 'active' : ''}
+                    onClick={() => {
+                      cf.updateSettings({ textScope: opt.id })
+                      onPlaySound?.('click')
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="ag-set-scope-item">
+              <div className="ag-set-label-row">
+                <span className="ag-set-scope-title">Call Video Feeds</span>
+                <span className="ag-set-scope-default">Default: Trusted Only</span>
+              </div>
+              <div
+                className="ag-segmented"
+                role="radiogroup"
+                aria-label="Call video feed screening mode"
+              >
+                {CALL_VIDEO_MODE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="radio"
+                    disabled={!cfs.enabled}
+                    aria-checked={cfs.callVideoMode === opt.id}
+                    className={cfs.callVideoMode === opt.id ? 'active' : ''}
+                    onClick={() => {
+                      cf.updateSettings({ callVideoMode: opt.id })
+                      onPlaySound?.('click')
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <p className="ag-set-helper">{callVideoHint}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Quick Test Box */}
+        <div className="ag-set-group">
+          <span className="ag-set-label">Quick Test</span>
+          <div className="ag-set-test-box">
+            <form className="ag-set-inline-row" onSubmit={(e) => void handleCfTestText(e)}>
+              <input
+                type="text"
+                className="ag-input"
+                value={cfTestText}
+                onChange={(e) => setCfTestText(e.target.value)}
+                placeholder="Type sample text to test d1-2B…"
+                aria-label="Sample text to test content filter"
+              />
+              <button
+                type="submit"
+                className="ag-btn ag-btn-primary ag-btn-sm"
+                disabled={cfTesting || !cfTestText.trim()}
+              >
+                {cfTesting ? <Loader2 size={13} className="ag-spin" /> : 'Test Text'}
+              </button>
+            </form>
+
+            <div className="ag-set-test-img-row">
+              <input
+                ref={cfFileInputRef}
+                type="file"
+                accept="image/*"
+                className="sr-only"
+                onChange={(e) => void handleCfTestImageFile(e.target.files?.[0] ?? null)}
+              />
+              <button
+                type="button"
+                className="ag-btn ag-btn-secondary ag-btn-sm"
+                disabled={cfTesting}
+                onClick={() => cfFileInputRef.current?.click()}
+              >
+                <ImageIcon size={13} />
+                <span>Test Image File…</span>
+              </button>
+              <span className="ag-set-helper">Evaluated locally using your active rules above.</span>
+            </div>
+
+            {cfTestResult && (
+              <div
+                className={`ag-set-verdict-box ${
+                  cfTestResult.status === 'flagged'
+                    ? 'flagged'
+                    : cfTestResult.status === 'error'
+                      ? 'error'
+                      : 'safe'
+                }`}
+                role="status"
+              >
+                <span className="ag-set-verdict-head">
+                  {cfTestResult.status === 'flagged' ? (
+                    <ShieldAlert size={14} />
+                  ) : cfTestResult.status === 'error' ? (
+                    <AlertTriangle size={14} />
+                  ) : (
+                    <ShieldCheck size={14} />
+                  )}
+                  <strong>
+                    {cfTestResult.status === 'flagged'
+                      ? `Flagged (${cfTestResult.categories.join(', ') || 'policy'})`
+                      : cfTestResult.status === 'error'
+                        ? 'Error'
+                        : 'Safe'}
+                  </strong>
+                  {cfTestLabel && <span className="ag-set-verdict-label truncate">· {cfTestLabel}</span>}
+                </span>
+                {(cfTestResult.reason || cfTestResult.error) && (
+                  <span className="ag-set-verdict-detail">
+                    {cfTestResult.error || cfTestResult.reason}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderTranslatorTab = () => {
+    const tr = engine.translator
+    const trs = tr.settings
+    const isDownloading = tr.modelStatus === 'downloading'
+    const pct = Math.max(0, Math.min(100, Math.round(tr.downloadProgress)))
+
+    const statusBadge =
+      tr.modelStatus === 'ready'
+        ? {
+            cls: 'ag-badge-accent',
+            text:
+              tr.runtimeDevice === 'webgpu'
+                ? 'Ready · WebGPU'
+                : tr.runtimeDevice === 'wasm'
+                  ? 'Ready · WASM'
+                  : 'Ready',
+          }
+        : isDownloading
+          ? { cls: 'ag-badge-warn', text: `Loading ${pct}%` }
+          : tr.modelStatus === 'error'
+            ? { cls: 'ag-badge-danger', text: 'Error' }
+            : { cls: 'ag-badge-muted', text: 'On-demand' }
+
+    const mySelectVal =
+      customMyLangMode || !SUPPORTED_TRANSLATION_LANGUAGES.includes(trs.myLanguage)
+        ? '__custom__'
+        : trs.myLanguage
+    const outSelectVal =
+      customOutLangMode || !SUPPORTED_TRANSLATION_LANGUAGES.includes(trs.outgoingLanguage)
+        ? '__custom__'
+        : trs.outgoingLanguage
+
+    return (
+      <div className="ag-set-pane-stack">
+        {/* Liquid LFM3-1.7B Model Card */}
+        <div className="ag-set-ai-card">
+          <div className="ag-set-ai-head">
+            <div className="ag-set-ai-title-wrap">
+              <span className="ag-set-ai-emblem" aria-hidden="true">
+                <Languages size={15} />
+              </span>
+              <div className="ag-set-ai-title-copy">
+                <span className="ag-set-ai-title">Liquid {TRANSLATOR_MODEL_LABEL}</span>
+                <span className="ag-set-ai-sub mono truncate">{tr.modelId}</span>
+              </div>
+            </div>
+            <span className={`ag-badge ${statusBadge.cls}`}>{statusBadge.text}</span>
+          </div>
+
+          {isDownloading && (
+            <div className="ag-set-progress-wrap">
+              <div className="ag-set-progress-track" aria-hidden="true">
+                <span className="ag-set-progress-fill" style={{ width: `${pct}%` }} />
+              </div>
+              {tr.downloadFile && (
+                <span className="ag-set-progress-file mono truncate">
+                  {tr.downloadFile} · {pct}%
+                </span>
+              )}
+            </div>
+          )}
+
+          {tr.modelError && (
+            <p className="ag-field-hint ag-field-hint-danger" role="alert">
+              {tr.modelError}
+            </p>
+          )}
+
+          <p className="ag-set-helper">
+            100% local neural translation ({TRANSLATOR_MODEL_SIZE_HINT}) — messages never leave your
+            device.
+          </p>
+
+          <div className="ag-set-ai-actions">
+            <button
+              type="button"
+              className="ag-btn ag-btn-primary ag-btn-sm"
+              disabled={isDownloading}
+              onClick={() => {
+                setTrFeedback(null)
+                onPlaySound?.('click')
+                void tr.preloadModel().then((ok) => {
+                  if (ok) {
+                    setTrFeedback({ ok: true, msg: `${TRANSLATOR_MODEL_LABEL} is ready locally` })
+                  }
+                })
+              }}
+            >
+              {isDownloading ? (
+                <Loader2 size={13} className="ag-spin" />
+              ) : tr.modelStatus === 'ready' ? (
+                <Check size={13} />
+              ) : (
+                <Download size={13} />
+              )}
+              <span>
+                {isDownloading
+                  ? `Loading ${pct}%`
+                  : tr.modelStatus === 'ready'
+                    ? 'Model Ready'
+                    : 'Preload Model'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className="ag-btn ag-btn-secondary ag-btn-sm"
+              disabled={isDownloading || trClearingCache}
+              onClick={() => void handleClearTranslatorModelCache()}
+            >
+              <Trash2 size={13} />
+              <span>{trClearingCache ? 'Clearing…' : 'Clear Model Cache'}</span>
+            </button>
+
+            <button
+              type="button"
+              className="ag-btn ag-btn-secondary ag-btn-sm"
+              disabled={tr.cachedTranslationCount === 0}
+              onClick={() => {
+                tr.clearTranslationCache()
+                onPlaySound?.('click')
+                setTrFeedback({ ok: true, msg: 'Cleared cached message translations' })
+              }}
+            >
+              <Trash2 size={13} />
+              <span>Clear Translations ({tr.cachedTranslationCount})</span>
+            </button>
+          </div>
+
+          {trFeedback && (
+            <p
+              className={`ag-field-hint ${
+                trFeedback.ok ? 'ag-field-hint-accent' : 'ag-field-hint-danger'
+              }`}
+              role="status"
+            >
+              {trFeedback.msg}
+            </p>
+          )}
+        </div>
+
+        {/* Double-Column Translator Mode Toggle */}
+        <label className="ag-set-toggle-card">
+          <div className="ag-set-toggle-copy">
+            <span className="ag-set-toggle-title">
+              <Languages size={16} />
+              <span>Double-Column Translator Mode</span>
+            </span>
+            <span className="ag-set-toggle-desc">
+              Shows messages translated into your language on the left alongside a collapsible
+              Underlying Chat column on the right.
+            </span>
+          </div>
+          <input
+            type="checkbox"
+            className="ag-switch"
+            checked={trs.enabled}
+            onChange={() => {
+              tr.updateSettings({ enabled: !trs.enabled })
+              onPlaySound?.('click')
+            }}
+          />
+        </label>
+
+        {/* Reading Language */}
+        <div className="ag-set-group">
+          <label className="ag-set-label" htmlFor="ag-set-my-lang">
+            My Language (Incoming)
+          </label>
+          <select
+            id="ag-set-my-lang"
+            className="ag-input ag-select"
+            value={mySelectVal}
+            onChange={(e) => {
+              const v = e.target.value
+              onPlaySound?.('click')
+              if (v === '__custom__') {
+                setCustomMyLangMode(true)
+              } else {
+                setCustomMyLangMode(false)
+                tr.updateSettings({ myLanguage: v })
+              }
+            }}
+          >
+            {TRANSLATION_LANGUAGE_OPTIONS.map((opt) => (
+              <option key={opt.code} value={opt.name}>
+                {opt.name} ({opt.nativeName})
+              </option>
+            ))}
+            <option value="__custom__">Custom language…</option>
+          </select>
+
+          {mySelectVal === '__custom__' && (
+            <input
+              type="text"
+              maxLength={40}
+              className="ag-input"
+              value={trs.myLanguage}
+              onChange={(e) => tr.updateSettings({ myLanguage: e.target.value })}
+              placeholder="Enter any language (e.g. Swedish, Swahili, Latin)"
+              aria-label="Custom reading language"
+            />
+          )}
+        </div>
+
+        {/* Outgoing Translation */}
+        <div className="ag-set-group">
+          <label className="ag-set-toggle-card">
+            <div className="ag-set-toggle-copy">
+              <span className="ag-set-toggle-title">
+                <span>Translate Outgoing Messages</span>
+              </span>
+              <span className="ag-set-toggle-desc">
+                Automatically translates what you type before publishing to chat while keeping your
+                original text in your reading column.
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              className="ag-switch"
+              checked={trs.outgoingEnabled}
+              onChange={() => {
+                tr.updateSettings({ outgoingEnabled: !trs.outgoingEnabled })
+                onPlaySound?.('click')
+              }}
+            />
+          </label>
+
+          {trs.outgoingEnabled && (
+            <div className="ag-set-sub-field">
+              <label className="ag-set-label" htmlFor="ag-set-out-lang">
+                Outgoing Chat Language
+              </label>
+              <select
+                id="ag-set-out-lang"
+                className="ag-input ag-select"
+                value={outSelectVal}
+                onChange={(e) => {
+                  const v = e.target.value
+                  onPlaySound?.('click')
+                  if (v === '__custom__') {
+                    setCustomOutLangMode(true)
+                  } else {
+                    setCustomOutLangMode(false)
+                    tr.updateSettings({ outgoingLanguage: v })
+                  }
+                }}
+              >
+                {TRANSLATION_LANGUAGE_OPTIONS.map((opt) => (
+                  <option key={opt.code} value={opt.name}>
+                    {opt.name} ({opt.nativeName})
+                  </option>
+                ))}
+                <option value="__custom__">Custom language…</option>
+              </select>
+
+              {outSelectVal === '__custom__' && (
+                <input
+                  type="text"
+                  maxLength={40}
+                  className="ag-input"
+                  value={trs.outgoingLanguage}
+                  onChange={(e) => tr.updateSettings({ outgoingLanguage: e.target.value })}
+                  placeholder="Enter target outgoing language"
+                  aria-label="Custom outgoing language"
+                />
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   const renderAppearanceTab = () => (
     <div className="ag-set-pane-stack">
       <div className="ag-set-group">
@@ -2458,6 +3417,8 @@ export function SettingsModal({
               {activeTab === 'profile' && renderProfileTab()}
               {activeTab === 'notifications' && renderNotificationsTab()}
               {activeTab === 'privacy' && renderPrivacyTab()}
+              {activeTab === 'content-filter' && renderContentFilterTab()}
+              {activeTab === 'translator' && renderTranslatorTab()}
               {activeTab === 'appearance' && renderAppearanceTab()}
               {activeTab === 'calls' && renderCallsTab()}
               {activeTab === 'network' && renderNetworkTab()}

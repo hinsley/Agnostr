@@ -49,6 +49,7 @@ import {
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { CallEngine, CallParticipant, PeerIceConnectionState } from '../types/calls.ts'
+import type { ContentFilterEngine } from '../types/contentFilter.ts'
 import type { LiveCaptionEntry } from '../types/transcription.ts'
 import {
   RECORDING_QUALITY_PRESETS,
@@ -326,6 +327,8 @@ function ParticipantTile({
   participant,
   compact,
   shielded,
+  screenVideo = false,
+  contentFilter,
   isPinned = false,
   stripMode = false,
   onTogglePin,
@@ -335,6 +338,8 @@ function ParticipantTile({
   participant: CallParticipant
   compact: boolean
   shielded: boolean
+  screenVideo?: boolean
+  contentFilter?: ContentFilterEngine
   isPinned?: boolean
   stripMode?: boolean
   onTogglePin?: () => void
@@ -344,6 +349,12 @@ function ParticipantTile({
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const lastTapRef = useRef<{ time: number; x: number; y: number } | null>(null)
   const lastTouchToggleAtRef = useRef<number>(0)
+  const screenInFlightRef = useRef(false)
+  const screenSeqRef = useRef(0)
+  const [videoScreenStatus, setVideoScreenStatus] = useState<'screening' | 'safe' | 'flagged'>(
+    'screening',
+  )
+  const [videoFlagDetail, setVideoFlagDetail] = useState('')
 
   const liveVideoTrack =
     !shielded && participant.stream && (participant.videoEnabled || participant.screenSharing)
@@ -439,6 +450,91 @@ function ParticipantTile({
     }
   }, [shielded, hasLiveVideo, participant.stream, liveVideoTrackId, liveVideoTrack])
 
+  // Periodic offscreen frame screening via Liquid d1-2B when user opted into video screening
+  useEffect(() => {
+    if (!screenVideo || !hasLiveVideo || !contentFilter || shielded) {
+      setVideoScreenStatus('screening')
+      setVideoFlagDetail('')
+      return
+    }
+
+    let cancelled = false
+    setVideoScreenStatus('screening')
+    setVideoFlagDetail('')
+
+    const sampleAndScreen = async () => {
+      if (cancelled || screenInFlightRef.current) return
+      const el = videoRef.current
+      if (!el || el.readyState < 2 || el.videoWidth <= 0 || el.videoHeight <= 0) return
+
+      const maxDim = 384
+      const scale = Math.min(1, maxDim / Math.max(el.videoWidth, el.videoHeight))
+      const w = Math.max(32, Math.round(el.videoWidth * scale))
+      const h = Math.max(32, Math.round(el.videoHeight * scale))
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.drawImage(el, 0, 0, w, h)
+
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.78)
+      })
+      if (!blob || cancelled) return
+
+      screenInFlightRef.current = true
+      try {
+        const seq = ++screenSeqRef.current
+        const verdict = await contentFilter.screenImageBlob(
+          `call-frame:${participant.pubkey}:${seq}`,
+          blob,
+          { skipCache: true },
+        )
+        if (cancelled) return
+        if (verdict.flagged) {
+          const cats =
+            verdict.categories.length > 0
+              ? verdict.categories
+                  .map((c) => (c === 'nsfw' ? 'NSFW' : c === 'illegal' ? 'Illegal' : 'Custom'))
+                  .join(', ')
+              : verdict.reason || 'Policy'
+          setVideoFlagDetail(cats)
+          setVideoScreenStatus('flagged')
+        } else if (verdict.safe) {
+          setVideoFlagDetail('')
+          setVideoScreenStatus('safe')
+        }
+      } catch {
+        // Keep veiled until a frame passes screening
+      } finally {
+        screenInFlightRef.current = false
+      }
+    }
+
+    const el = videoRef.current
+    const onFrameReady = () => {
+      void sampleAndScreen()
+    }
+    el?.addEventListener('loadeddata', onFrameReady)
+    el?.addEventListener('playing', onFrameReady)
+
+    const initialTimer = window.setTimeout(() => {
+      void sampleAndScreen()
+    }, 600)
+    const intervalId = window.setInterval(() => {
+      void sampleAndScreen()
+    }, 4500)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(initialTimer)
+      window.clearInterval(intervalId)
+      el?.removeEventListener('loadeddata', onFrameReady)
+      el?.removeEventListener('playing', onFrameReady)
+    }
+  }, [screenVideo, hasLiveVideo, liveVideoTrackId, contentFilter, shielded, participant.pubkey])
+
   const handleColor = pubkeyToColor(participant.pubkey)
 
   if (shielded) {
@@ -488,7 +584,8 @@ function ParticipantTile({
 
   const avatarSize = stripMode ? 34 : compact ? 44 : 60
   const levelScale = 1 + Math.min(0.32, participant.audioLevel * 0.45)
-  const canPinVideo = hasLiveVideo && Boolean(onTogglePin)
+  const isVideoVeiled = screenVideo && hasLiveVideo && videoScreenStatus !== 'safe'
+  const canPinVideo = hasLiveVideo && !isVideoVeiled && Boolean(onTogglePin)
 
   const handleTileDoubleClick = (e: ReactMouseEvent<HTMLDivElement>) => {
     if (!canPinVideo || !onTogglePin) return
@@ -543,15 +640,51 @@ function ParticipantTile({
       }
     >
       {hasLiveVideo ? (
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className={`ag-call-video ${
-            participant.isSelf && !participant.screenSharing ? 'mirrored' : ''
-          } ${participant.screenSharing || isPinned ? 'contain' : ''}`}
-        />
+        <>
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`ag-call-video ${
+              participant.isSelf && !participant.screenSharing ? 'mirrored' : ''
+            } ${participant.screenSharing || isPinned ? 'contain' : ''} ${
+              isVideoVeiled ? 'is-veiled' : ''
+            }`}
+          />
+          {isVideoVeiled && (
+            <div
+              className={`ag-call-video-veil ${videoScreenStatus === 'flagged' ? 'flagged' : ''}`}
+              role="status"
+              aria-live="polite"
+            >
+              {videoScreenStatus === 'flagged' ? (
+                <>
+                  <span className="ag-call-veil-icon flagged" aria-hidden="true">
+                    <ShieldAlert size={20} />
+                  </span>
+                  <span className="ag-call-veil-title">
+                    Video blocked by Liquid d1-2B · Flagged
+                  </span>
+                  {videoFlagDetail && (
+                    <span className="ag-call-veil-sub">{videoFlagDetail}</span>
+                  )}
+                </>
+              ) : (
+                <>
+                  <span className="ag-call-veil-icon" aria-hidden="true">
+                    <Loader2 size={18} className="ag-spin" />
+                  </span>
+                  <span className="ag-call-veil-title">
+                    {contentFilter?.modelStatus === 'downloading'
+                      ? `Downloading Liquid d1-2B · ${Math.round(contentFilter.downloadProgress)}%`
+                      : 'Screening video with Liquid d1-2B…'}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </>
       ) : (
         <div className="ag-call-avatar-stage">
           <div className="ag-call-avatar-wrap">
@@ -574,12 +707,21 @@ function ParticipantTile({
       )}
 
       {/* Top-left telemetry / Pinned Stage banner */}
-      {(isPinned || participant.screenSharing || !participant.isSelf) && (
+      {(isPinned || (screenVideo && hasLiveVideo && videoScreenStatus === 'safe') || participant.screenSharing || !participant.isSelf) && (
         <div className="ag-call-tile-top ag-call-tile-net">
           {isPinned && (
             <span className="ag-call-pinned-pill">
               <Pin size={10} />
               <span>Pinned · Double-tap to unpin</span>
+            </span>
+          )}
+          {screenVideo && hasLiveVideo && videoScreenStatus === 'safe' && (
+            <span
+              className="ag-call-micro-pill ag-call-pill-screened mono"
+              title="Video screened safe on-device by Liquid d1-2B"
+            >
+              <ShieldCheck size={10} />
+              <span>d1-2B</span>
             </span>
           )}
           {participant.screenSharing && (
@@ -653,7 +795,7 @@ export function CallStage({
   onReturnToCall,
 }: CallStageProps) {
   const { activeCall } = calls
-  const { transcription } = engine
+  const { transcription, contentFilter } = engine
   const { openContextMenu } = useContextMenu()
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [togglingRec, setTogglingRec] = useState(false)
@@ -718,11 +860,14 @@ export function CallStage({
       setPinnedVideoPubkey(null)
       return
     }
-    const shielded = !target.isSelf && (Boolean(target.isUntrusted) || !engine.isTrusted(target.pubkey))
+    const shielded =
+      !target.isSelf &&
+      !contentFilter.shouldAllowScreenedCallVideo(target.pubkey, false) &&
+      (Boolean(target.isUntrusted) || !engine.isTrusted(target.pubkey))
     if (!hasParticipantLiveVideo(target, shielded)) {
       setPinnedVideoPubkey(null)
     }
-  }, [pinnedVideoPubkey, activeCall, engine])
+  }, [pinnedVideoPubkey, activeCall, engine, contentFilter])
 
   useEffect(() => {
     if (!transcriptOpen) return
@@ -900,8 +1045,11 @@ export function CallStage({
     )
   }
 
-  const isParticipantShielded = (p: CallParticipant) =>
-    !p.isSelf && (Boolean(p.isUntrusted) || !engine.isTrusted(p.pubkey))
+  const isParticipantShielded = (p: CallParticipant) => {
+    if (p.isSelf) return false
+    if (contentFilter.shouldAllowScreenedCallVideo(p.pubkey, false)) return false
+    return Boolean(p.isUntrusted) || !engine.isTrusted(p.pubkey)
+  }
 
   const remoteParticipants = activeCall.participants.filter((p) => !p.isSelf)
   const trustedRemoteParticipants = remoteParticipants.filter((p) => !isParticipantShielded(p))
@@ -1433,28 +1581,36 @@ export function CallStage({
   const renderParticipantTile = (
     item: (typeof stageParticipants)[number],
     opts?: { compact?: boolean; isPinned?: boolean; stripMode?: boolean },
-  ) => (
-    <ParticipantTile
-      key={item.participant.pubkey}
-      participant={item.participant}
-      compact={opts?.compact ?? (!expanded && count > 2)}
-      shielded={item.shielded}
-      isPinned={opts?.isPinned ?? false}
-      stripMode={opts?.stripMode ?? false}
-      onTogglePin={
-        item.liveVideo ? () => togglePinVideo(item.participant.pubkey) : undefined
-      }
-      onTrustPeer={
-        item.shielded
-          ? () => {
-              onPlaySound?.('click')
-              engine.trustPubkey(item.participant.pubkey, item.participant.nickname)
-            }
-          : undefined
-      }
-      onContextMenu={(e) => openParticipantContextMenu(e, item.participant)}
-    />
-  )
+  ) => {
+    const screenVideo =
+      !item.participant.isSelf &&
+      !item.shielded &&
+      contentFilter.shouldScreenCallVideo(item.participant.pubkey, false)
+    return (
+      <ParticipantTile
+        key={item.participant.pubkey}
+        participant={item.participant}
+        compact={opts?.compact ?? (!expanded && count > 2)}
+        shielded={item.shielded}
+        screenVideo={screenVideo}
+        contentFilter={screenVideo ? contentFilter : undefined}
+        isPinned={opts?.isPinned ?? false}
+        stripMode={opts?.stripMode ?? false}
+        onTogglePin={
+          item.liveVideo ? () => togglePinVideo(item.participant.pubkey) : undefined
+        }
+        onTrustPeer={
+          item.shielded
+            ? () => {
+                onPlaySound?.('click')
+                engine.trustPubkey(item.participant.pubkey, item.participant.nickname)
+              }
+            : undefined
+        }
+        onContextMenu={(e) => openParticipantContextMenu(e, item.participant)}
+      />
+    )
+  }
 
   const stageContent = (
     <section

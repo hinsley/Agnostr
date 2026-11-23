@@ -1,24 +1,62 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
+  AlertCircle,
   ArrowDown,
+  Columns2,
   Crosshair,
   Hash,
+  Languages,
+  Loader2,
   Lock,
   Map as MapIcon,
+  PanelRightClose,
+  PanelRightOpen,
   Radio,
   Server,
+  ShieldAlert,
   ShieldCheck,
   UserPlus,
+  X,
 } from 'lucide-react'
 import type { AgnostrEngine, GeoMessage, PeerInfo } from '../types/protocol'
 import type { ServerMessage } from '../types/servers'
+import {
+  TRANSLATION_LANGUAGE_OPTIONS,
+  translationCacheKey,
+  TRANSLATOR_MODEL_LABEL,
+} from '../types/translator'
+import type { ZapTarget } from '../types/wallet'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { LightboxImagePayload } from './ImageLightboxModal'
 import { MessageItem } from './MessageItem'
 import { doesContentMentionUser } from '../lib/bitchatProtocol'
 import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel'
-import { identiconDataUrl, formatHandle } from '../utils/identicon'
+import { identiconDataUrl, formatHandle, pubkeyToColor } from '../utils/identicon'
+import { RichMessageContent } from '../utils/markdown'
+
+function formatClockShort(unixSec: number): string {
+  try {
+    return new Date(unixSec * 1000).toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+    })
+  } catch {
+    return ''
+  }
+}
+
+function extractCleanMessageText(msg: GeoMessage): string {
+  let text = msg.content.trim()
+  if (!text) return ''
+  for (const rawUrl of [msg.voiceMemo?.url, msg.imageAttachment?.url]) {
+    const target = rawUrl?.trim()
+    if (!target) continue
+    if (text === target) return ''
+    text = text.split(target).join('')
+  }
+  return text.replace(/\n{3,}/g, '\n\n').trim()
+}
 
 function getServerMonogram(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean)
@@ -87,6 +125,8 @@ export interface MessageStreamProps {
   onExpandRadar: () => void
   onOpenServerSettings?: (serverId: string, initialTab?: ServerSettingsTab) => void
   onOpenLightbox: (payload: LightboxImagePayload) => void
+  onOpenZap?: (target: ZapTarget) => void
+  onClaimCashuToken?: (token: string) => void
 }
 
 export const MessageStream: React.FC<MessageStreamProps> = ({
@@ -106,6 +146,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   onExpandRadar,
   onOpenServerSettings,
   onOpenLightbox,
+  onOpenZap,
+  onClaimCashuToken,
 }) => {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
@@ -544,6 +586,67 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       ? engine.hiddenByWhitelistCount
       : 0
 
+  const handleRequestScreenText = useCallback(
+    (msgId: string, text: string) => {
+      void engine.contentFilter.screenText(`text:${msgId}`, text)
+    },
+    [engine.contentFilter]
+  )
+
+  // Watch recent visible non-DM event IDs for live NIP-57 kind: 9735 Zap Receipts
+  const watchedZapIdsKey = useMemo(() => {
+    if (isDm) return ''
+    const ids: string[] = []
+    for (let i = Math.max(0, displayMessages.length - 40); i < displayMessages.length; i += 1) {
+      const m = displayMessages[i]
+      if (!m.isSystem && m.id) ids.push(m.id)
+    }
+    return ids.join(',')
+  }, [isDm, displayMessages])
+
+  useEffect(() => {
+    if (!watchedZapIdsKey) return
+    engine.zaps.watchEventIds(watchedZapIdsKey.split(','))
+  }, [watchedZapIdsKey, engine.zaps])
+
+  // Double-Column Translator Mode (`LFM3-1.7B`) — auto-translate recent visible messages when ON
+  const translator = engine.translator
+  const translatorEnabled = translator.settings.enabled
+  const myLanguage = translator.settings.myLanguage
+  const outgoingEnabled = translator.settings.outgoingEnabled
+  const outgoingLanguage = translator.settings.outgoingLanguage
+  const underlyingCollapsed = translator.settings.underlyingCollapsed
+
+  useEffect(() => {
+    if (!translatorEnabled) return
+    const startIdx = Math.max(0, displayMessages.length - 30)
+    for (let i = startIdx; i < displayMessages.length; i += 1) {
+      const msg = displayMessages[i]
+      if (msg.isSystem) continue
+      if (translator.originalOutgoingById[msg.id]) continue
+      const key = translationCacheKey(msg.id, myLanguage)
+      if (translator.translations[key]) continue
+      const clean = extractCleanMessageText(msg)
+      if (!clean) continue
+      void translator.translateMessage(msg.id, clean, myLanguage)
+    }
+  }, [
+    translatorEnabled,
+    displayMessages,
+    myLanguage,
+    translator,
+  ])
+
+  const myLanguageOptions = useMemo(() => {
+    const names = TRANSLATION_LANGUAGE_OPTIONS.map((o) => o.name)
+    return names.includes(myLanguage) ? names : [myLanguage, ...names]
+  }, [myLanguage])
+
+  const outgoingLanguageOptions = useMemo(() => {
+    const names = TRANSLATION_LANGUAGE_OPTIONS.map((o) => o.name)
+    return names.includes(outgoingLanguage) ? names : [outgoingLanguage, ...names]
+  }, [outgoingLanguage])
+
   const showTrustedFilterBar = !isDm && engine.strictWhitelistMode && hiddenCount > 0
 
   return (
@@ -565,6 +668,127 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
           >
             Show all
           </button>
+        </div>
+      )}
+
+      {/* Compact Double-Column Translator Controls Strip (LFM3-1.7B) */}
+      {translatorEnabled && (
+        <div className="ag-translator-bar" role="region" aria-label="Translator controls">
+          <div className="ag-translator-bar-row">
+            <div className="ag-translator-bar-group">
+              <span className="ag-translator-bar-icon" aria-hidden="true">
+                <Languages size={14} />
+              </span>
+              <label className="ag-translator-select-wrap" title="Your reading language">
+                <span className="ag-translator-field-label">Read</span>
+                <select
+                  className="ag-translator-select"
+                  value={myLanguage}
+                  onChange={(e) => translator.updateSettings({ myLanguage: e.target.value })}
+                  aria-label="My reading language"
+                >
+                  {myLanguageOptions.map((lang) => (
+                    <option key={lang} value={lang}>
+                      {lang}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                type="button"
+                className={`ag-translator-pill-btn ${outgoingEnabled ? 'active' : ''}`}
+                onClick={() => translator.updateSettings({ outgoingEnabled: !outgoingEnabled })}
+                aria-pressed={outgoingEnabled}
+                title="Translate your outgoing messages before sending"
+              >
+                <span>Send →</span>
+              </button>
+
+              {outgoingEnabled && (
+                <select
+                  className="ag-translator-select compact"
+                  value={outgoingLanguage}
+                  onChange={(e) => translator.updateSettings({ outgoingLanguage: e.target.value })}
+                  aria-label="Outgoing message language"
+                >
+                  {outgoingLanguageOptions.map((lang) => (
+                    <option key={lang} value={lang}>
+                      {lang}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            <div className="ag-translator-bar-right">
+              {translator.modelStatus === 'downloading' ? (
+                <span className="ag-translator-model-status downloading tabular">
+                  <Loader2 size={12} className="ag-spin" />
+                  <span>
+                    {TRANSLATOR_MODEL_LABEL} · {Math.round(translator.downloadProgress)}%
+                  </span>
+                </span>
+              ) : translator.modelStatus === 'error' ? (
+                <button
+                  type="button"
+                  className="ag-translator-model-status error"
+                  onClick={() => void translator.preloadModel()}
+                  title={translator.modelError || 'Retry loading translator model'}
+                >
+                  <AlertCircle size={12} />
+                  <span>Retry model</span>
+                </button>
+              ) : (
+                <span className="ag-translator-model-status ready ag-desktop-only">
+                  <Columns2 size={11} />
+                  <span>{TRANSLATOR_MODEL_LABEL}</span>
+                </span>
+              )}
+
+              <button
+                type="button"
+                className={`ag-translator-pill-btn ${!underlyingCollapsed ? 'active' : ''}`}
+                onClick={() =>
+                  translator.updateSettings({ underlyingCollapsed: !underlyingCollapsed })
+                }
+                title={
+                  underlyingCollapsed
+                    ? 'Show Underlying Chat column'
+                    : 'Hide Underlying Chat column'
+                }
+                aria-label={
+                  underlyingCollapsed
+                    ? 'Show Underlying Chat column'
+                    : 'Hide Underlying Chat column'
+                }
+              >
+                {underlyingCollapsed ? <PanelRightOpen size={13} /> : <PanelRightClose size={13} />}
+                <span className="ag-hide-xs">
+                  {underlyingCollapsed ? 'Show Original' : 'Hide Original'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                className="ag-translator-close-btn"
+                onClick={() => translator.updateSettings({ enabled: false })}
+                title="Exit Translator Mode"
+                aria-label="Exit Translator Mode"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+
+          {translator.modelStatus === 'downloading' && (
+            <div className="ag-translator-progress-track" aria-hidden="true">
+              <div
+                className="ag-translator-progress-fill"
+                style={{ width: `${Math.max(4, Math.min(100, Math.round(translator.downloadProgress)))}%` }}
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -732,53 +956,103 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
               })()
             )
           ) : (
-            displayMessages.map((msg, idx) => {
-              const prev = idx > 0 ? displayMessages[idx - 1] : null
-              const showDateDivider = !prev || dateDayKey(prev.createdAt) !== dateDayKey(msg.createdAt)
-              const showUnreadDivider =
-                !isDm && !isServer && engine.unreadDividerId !== null && msg.id === engine.unreadDividerId
-
-              const grouped =
-                !showDateDivider &&
-                !showUnreadDivider &&
-                !msg.isSystem &&
-                !msg.isEmote &&
-                !msg.replyTo &&
-                prev !== null &&
-                !prev.isSystem &&
-                !prev.isEmote &&
-                prev.pubkey === msg.pubkey &&
-                msg.createdAt - prev.createdAt <= 180
-
-              const isLive =
-                initialIdsRef.current.key === streamKey && !initialIdsRef.current.ids.has(msg.id)
-
-              const isMentioned =
-                !msg.isOwn &&
-                !msg.isSystem &&
-                doesContentMentionUser(msg.content, msg.mentions, ownNick, ownPubkey)
-
-              const voiceMemoKey = msg.voiceMemo
-                ? msg.voiceMemo.sha256 || msg.voiceMemo.url || msg.id
-                : ''
-              const memoTranscript = voiceMemoKey
-                ? engine.transcription.memoTranscripts[voiceMemoKey]
-                : undefined
-
-              return (
-                <React.Fragment key={msg.id}>
-                  {showDateDivider && (
-                    <div className="ag-date-divider" role="separator">
-                      <span className="ag-date-pill">{formatDateHeading(msg.createdAt)}</span>
+            <div className={translatorEnabled ? 'ag-translator-grid-wrap' : undefined}>
+              {translatorEnabled && (
+                <div
+                  className={`ag-translator-col-heads ${underlyingCollapsed ? 'collapsed' : ''}`}
+                  aria-hidden="true"
+                >
+                  <div className="ag-translator-col-head">
+                    <Languages size={12} />
+                    <span>My Language · {myLanguage}</span>
+                  </div>
+                  {!underlyingCollapsed && (
+                    <div className="ag-translator-col-head underlying">
+                      <span>Underlying Chat</span>
                     </div>
                   )}
+                </div>
+              )}
 
-                  {showUnreadDivider && (
-                    <div className="ag-unread-divider" role="separator">
-                      <span className="ag-unread-label">New messages</span>
-                    </div>
-                  )}
+              {displayMessages.map((msg, idx) => {
+                const prev = idx > 0 ? displayMessages[idx - 1] : null
+                const showDateDivider = !prev || dateDayKey(prev.createdAt) !== dateDayKey(msg.createdAt)
+                const showUnreadDivider =
+                  !isDm && !isServer && engine.unreadDividerId !== null && msg.id === engine.unreadDividerId
 
+                const grouped =
+                  !showDateDivider &&
+                  !showUnreadDivider &&
+                  !msg.isSystem &&
+                  !msg.isEmote &&
+                  !msg.replyTo &&
+                  prev !== null &&
+                  !prev.isSystem &&
+                  !prev.isEmote &&
+                  prev.pubkey === msg.pubkey &&
+                  msg.createdAt - prev.createdAt <= 180
+
+                const isLive =
+                  initialIdsRef.current.key === streamKey && !initialIdsRef.current.ids.has(msg.id)
+
+                const isMentioned =
+                  !msg.isOwn &&
+                  !msg.isSystem &&
+                  doesContentMentionUser(msg.content, msg.mentions, ownNick, ownPubkey)
+
+                const voiceMemoKey = msg.voiceMemo
+                  ? msg.voiceMemo.sha256 || msg.voiceMemo.url || msg.id
+                  : ''
+                const memoTranscript = voiceMemoKey
+                  ? engine.transcription.memoTranscripts[voiceMemoKey]
+                  : undefined
+
+                const shouldScreenText =
+                  !msg.isSystem && engine.contentFilter.shouldScreenText(msg.pubkey, msg.isOwn)
+                const textFilterVerdict = shouldScreenText
+                  ? engine.contentFilter.getVerdict(`text:${msg.id}`)
+                  : null
+                const senderLud16 =
+                  !msg.isOwn && !msg.isSystem
+                    ? engine.zaps.getPeerLightningAddress(msg.pubkey)
+                    : null
+                const zapTotalSats = !msg.isSystem ? (engine.zaps.zapTotalsByEventId[msg.id] ?? 0) : 0
+
+                // Compute Left-column translation state when Translator Mode is active
+                let displayContentOverride: string | undefined
+                let translationStatus: 'idle' | 'loading' | 'done' | 'error' | undefined
+                let translationError: string | undefined
+                let translationBadge: string | undefined
+                let onRetryTranslation: (() => void) | undefined
+
+                if (translatorEnabled && !msg.isSystem) {
+                  const outgoingOrig = translator.originalOutgoingById[msg.id]
+                  if (outgoingOrig) {
+                    displayContentOverride = outgoingOrig.originalText
+                    translationStatus = 'done'
+                    translationBadge = `Original · ${outgoingOrig.sourceLang} → ${outgoingOrig.targetLang}`
+                  } else {
+                    const cleanOriginal = extractCleanMessageText(msg)
+                    if (cleanOriginal) {
+                      const tKey = translationCacheKey(msg.id, myLanguage)
+                      const tEntry = translator.translations[tKey]
+                      if (tEntry?.status === 'done' && tEntry.text) {
+                        displayContentOverride = tEntry.text
+                        translationStatus = 'done'
+                      } else if (tEntry?.status === 'loading') {
+                        translationStatus = 'loading'
+                      } else if (tEntry?.status === 'error') {
+                        translationStatus = 'error'
+                        translationError = tEntry.error
+                        onRetryTranslation = () => {
+                          void translator.translateMessage(msg.id, cleanOriginal, myLanguage)
+                        }
+                      }
+                    }
+                  }
+                }
+
+                const messageNode = (
                   <MessageItem
                     message={msg}
                     grouped={grouped}
@@ -822,10 +1096,103 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     onJumpToMessage={handleJumpToMessage}
                     onCopyText={() => engine.pushToast('info', 'Copied to clipboard')}
                     onNotify={(title) => engine.pushToast('info', title)}
+                    contentFilter={engine.contentFilter}
+                    shouldScreenText={shouldScreenText}
+                    textFilterVerdict={textFilterVerdict}
+                    onRequestScreenText={handleRequestScreenText}
+                    senderLightningAddress={senderLud16}
+                    zapTotalSats={zapTotalSats}
+                    onOpenZap={onOpenZap}
+                    onClaimCashuToken={onClaimCashuToken}
+                    displayContentOverride={displayContentOverride}
+                    translationStatus={translationStatus}
+                    translationError={translationError}
+                    translationBadge={translationBadge}
+                    onRetryTranslation={onRetryTranslation}
+                    compactTranslatorRow={translatorEnabled}
                   />
-                </React.Fragment>
-              )
-            })
+                )
+
+                const underlyingText = extractCleanMessageText(msg)
+                const underlyingBlockedByFilter =
+                  shouldScreenText &&
+                  underlyingText.length > 0 &&
+                  (!textFilterVerdict ||
+                    textFilterVerdict.status === 'idle' ||
+                    textFilterVerdict.status === 'downloading' ||
+                    textFilterVerdict.status === 'scanning' ||
+                    textFilterVerdict.status === 'flagged')
+                const handle = formatHandle(msg.nickname, msg.pubkey)
+
+                return (
+                  <React.Fragment key={msg.id}>
+                    {showDateDivider && (
+                      <div className="ag-date-divider" role="separator">
+                        <span className="ag-date-pill">{formatDateHeading(msg.createdAt)}</span>
+                      </div>
+                    )}
+
+                    {showUnreadDivider && (
+                      <div className="ag-unread-divider" role="separator">
+                        <span className="ag-unread-label">New messages</span>
+                      </div>
+                    )}
+
+                    {translatorEnabled && !msg.isSystem ? (
+                      <div
+                        className={`ag-translator-pair ${underlyingCollapsed ? 'collapsed' : ''} ${grouped ? 'grouped' : ''}`}
+                      >
+                        <div className="ag-translator-cell translated">{messageNode}</div>
+
+                        {!underlyingCollapsed && (
+                          <div className="ag-translator-cell original" aria-label="Underlying chat message">
+                            {!grouped && (
+                              <div className="ag-translator-orig-head">
+                                <span
+                                  className="ag-translator-orig-author truncate"
+                                  style={!msg.isOwn ? { color: pubkeyToColor(msg.pubkey) } : undefined}
+                                >
+                                  {handle.base}
+                                </span>
+                                <span className="ag-translator-orig-time tabular">
+                                  {formatClockShort(msg.createdAt)}
+                                </span>
+                              </div>
+                            )}
+                            <div className="ag-translator-orig-body">
+                              {underlyingBlockedByFilter ? (
+                                <span className="ag-translator-orig-masked">
+                                  <ShieldAlert size={11} />
+                                  <span>
+                                    {textFilterVerdict?.status === 'flagged'
+                                      ? 'Hidden by Content Filter'
+                                      : 'Screening…'}
+                                  </span>
+                                </span>
+                              ) : underlyingText ? (
+                                <RichMessageContent
+                                  content={underlyingText}
+                                  onTuneGeohash={onTuneChannel}
+                                  onClickMention={onClickMention}
+                                  highlightQuery={searchQuery}
+                                  knownHandles={knownHandles}
+                                />
+                              ) : msg.voiceMemo ? (
+                                <span className="ag-translator-orig-media">Voice memo</span>
+                              ) : msg.imageAttachment ? (
+                                <span className="ag-translator-orig-media">Image attachment</span>
+                              ) : null}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      messageNode
+                    )}
+                  </React.Fragment>
+                )
+              })}
+            </div>
           )}
         </div>
       </div>
