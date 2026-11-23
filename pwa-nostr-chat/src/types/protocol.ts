@@ -257,11 +257,22 @@ export interface PulseRoom {
   messageCount: number
   peerCount: number
   lastActivityAt: number // unix ms
+  lastMessageAt?: number // unix ms of latest visible chat message
+  lastMessageId?: string
   lastPreview: string
   lastSender: string
   lastSenderPubkey?: string
   messagesPerMin: number
   nearestCity: string | null
+}
+
+export interface RadioChannelPreview {
+  id: string
+  preview: string
+  sender: string
+  senderPubkey: string
+  createdAt: number // unix seconds
+  updatedAtMs: number // unix ms
 }
 
 export interface LocationNote {
@@ -404,6 +415,7 @@ export interface AgnostrEngine {
 
   // Discovery, pins & per-geohash unread/direct-ping counters
   pulseRooms: PulseRoom[]
+  channelPreviews: Record<string, RadioChannelPreview>
   pinnedChannels: PinnedChannel[]
   recentChannels: string[]
   unreadCounts: Record<string, number>

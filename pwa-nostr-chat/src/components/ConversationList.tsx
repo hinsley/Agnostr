@@ -44,10 +44,11 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import type { AgnostrEngine, DmThread, PeerInfo } from '../types/protocol'
+import type { AgnostrEngine, DmThread, PeerInfo, PulseRoom } from '../types/protocol'
 import type { ServerChannel, ServerSummary } from '../types/servers'
 import type { WalletInitialIntent, ZapTarget } from '../types/wallet'
 import type { PwaState } from '../hooks/usePwa'
+import { formatRadioPreviewText } from '../hooks/useGlobalPulse'
 import type { SoundCue } from '../utils/sound'
 import type { QrShareTarget } from './QrShareModal'
 import type { ServerHubTab } from './ServerHubModal'
@@ -751,6 +752,84 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const liveSet = new Set(liveRooms.map((r) => r.geohash.toLowerCase()))
   const showActiveRoomCard = !pinnedSet.has(activeGhLower) && !liveSet.has(activeGhLower)
 
+  let activeChannelLatest: { preview: string; createdAt: number; activityMs: number } | null = null
+  for (let i = engine.messages.length - 1; i >= 0; i -= 1) {
+    const m = engine.messages[i]
+    if (!m || m.isSystem) continue
+    if (engine.isPeerBlocked(m.pubkey)) continue
+    if (!m.isOwn && isPulsePreviewHidden(m.pubkey)) continue
+    const preview = formatRadioPreviewText({
+      content: m.content,
+      hasImage: Boolean(m.imageAttachment),
+      hasVoice: Boolean(m.voiceMemo),
+      mediaUrl: m.imageAttachment?.url ?? m.voiceMemo?.url,
+      tags: m.tags,
+    })
+    if (!preview) continue
+    const nowMs = Date.now()
+    const nowSec = Math.floor(nowMs / 1000)
+    const createdAt = Math.min(Math.floor(m.createdAt || nowSec), nowSec)
+    activeChannelLatest = {
+      preview,
+      createdAt,
+      activityMs: Math.min(createdAt * 1000, nowMs),
+    }
+    break
+  }
+
+  const resolveRadioPreview = (
+    ghKey: string,
+    livePulse?: PulseRoom
+  ): { preview: string; activityMs: number | null } => {
+    if (ghKey === activeGhLower && activeChannelLatest) {
+      return {
+        preview: activeChannelLatest.preview,
+        activityMs: Math.max(activeChannelLatest.activityMs, livePulse?.lastActivityAt ?? 0),
+      }
+    }
+
+    const cp = engine.channelPreviews[ghKey]
+    const safeCp = cp && cp.preview && !isPulsePreviewHidden(cp.senderPubkey) ? cp : null
+    const safePulsePreview =
+      livePulse?.lastPreview && !isPulsePreviewHidden(livePulse.lastSenderPubkey)
+        ? livePulse.lastPreview
+        : ''
+
+    if (safeCp && safePulsePreview && livePulse) {
+      const cpMs = safeCp.createdAt * 1000
+      const pulseMsgMs = livePulse.lastMessageAt ?? livePulse.lastActivityAt
+      if (cpMs >= pulseMsgMs) {
+        return {
+          preview: safeCp.preview,
+          activityMs: Math.max(cpMs, livePulse.lastActivityAt),
+        }
+      }
+      return {
+        preview: safePulsePreview,
+        activityMs: Math.max(livePulse.lastActivityAt, cpMs),
+      }
+    }
+
+    if (safeCp) {
+      return {
+        preview: safeCp.preview,
+        activityMs: Math.max(safeCp.createdAt * 1000, livePulse?.lastActivityAt ?? 0),
+      }
+    }
+
+    if (safePulsePreview && livePulse) {
+      return {
+        preview: safePulsePreview,
+        activityMs: livePulse.lastActivityAt,
+      }
+    }
+
+    return {
+      preview: '',
+      activityMs: livePulse?.lastActivityAt ?? null,
+    }
+  }
+
   const activeCall = engine.calls.activeCall
 
   return (
@@ -957,11 +1036,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               const inCall =
                 activeCall?.mode === 'geo' &&
                 (activeCall.geohash ?? '').toLowerCase() === ghKey
-              const currentSubtitle = isTopic
-                ? 'Topic channel'
-                : engine.presence.isUncertainCount
-                  ? 'Geo Radio room'
-                  : `${engine.presence.onlineCount} online`
+              const livePulse = pulseByHash.get(ghKey)
+              const resolved = resolveRadioPreview(ghKey, livePulse)
+              const currentSubtitle = resolved.preview
+                ? resolved.preview
+                : isTopic
+                  ? 'Topic channel'
+                  : engine.presence.isUncertainCount
+                    ? 'Geo Radio room'
+                    : `${engine.presence.onlineCount} online`
               return (
               <section className="ag-conv-group" aria-label="Current room">
                 <div className="ag-conv-group-label">Current Room</div>
@@ -989,7 +1072,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                             <span className="ag-chat-row-city"> · {engine.cell.nearestCity}</span>
                           ) : null}
                         </span>
-                        <span className="ag-chat-row-time">live</span>
+                        <span className={`ag-chat-row-time${resolved.activityMs ? ' tabular' : ''}`}>
+                          {resolved.activityMs ? formatRelativeTime(resolved.activityMs) : 'live'}
+                        </span>
                       </div>
                       <div className="ag-chat-row-bottom">
                         <span className="ag-chat-row-preview truncate">{currentSubtitle}</span>
@@ -1057,12 +1142,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     dropPinTarget.position === 'after' &&
                     dragPinIndex !== null &&
                     dragPinIndex !== idx
-                  const safePulsePreview =
-                    livePulse?.lastPreview && !isPulsePreviewHidden(livePulse.lastSenderPubkey)
-                      ? livePulse.lastPreview
-                      : ''
-                  const subtitle = safePulsePreview
-                    ? safePulsePreview
+                  const resolved = resolveRadioPreview(ghKey, livePulse)
+                  const subtitle = resolved.preview
+                    ? resolved.preview
                     : livePulse && livePulse.peerCount > 0
                       ? `${livePulse.peerCount} ${livePulse.peerCount === 1 ? 'person' : 'people'} active`
                       : livePulse && livePulse.messageCount > 0
@@ -1144,9 +1226,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                                 <span className="ag-chat-row-city"> · {displayCity}</span>
                               ) : null}
                             </span>
-                            {livePulse ? (
+                            {resolved.activityMs ? (
                               <span className="ag-chat-row-time tabular">
-                                {formatRelativeTime(livePulse.lastActivityAt)}
+                                {formatRelativeTime(resolved.activityMs)}
                               </span>
                             ) : active ? (
                               <span className="ag-chat-row-time">live</span>
@@ -1327,12 +1409,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   const inCall =
                     activeCall?.mode === 'geo' &&
                     (activeCall.geohash ?? '').toLowerCase() === ghKey
-                  const safeRoomPreview =
-                    room.lastPreview && !isPulsePreviewHidden(room.lastSenderPubkey)
-                      ? room.lastPreview
-                      : ''
-                  const subtitle = safeRoomPreview
-                    ? safeRoomPreview
+                  const resolved = resolveRadioPreview(ghKey, room)
+                  const subtitle = resolved.preview
+                    ? resolved.preview
                     : room.peerCount > 0
                       ? `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'} active`
                       : `${room.messageCount} recent ${room.messageCount === 1 ? 'message' : 'messages'}`
@@ -1367,7 +1446,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                               ) : null}
                             </span>
                             <span className="ag-chat-row-time tabular">
-                              {formatRelativeTime(room.lastActivityAt)}
+                              {formatRelativeTime(resolved.activityMs ?? room.lastActivityAt)}
                             </span>
                           </div>
                           <div className="ag-chat-row-bottom">

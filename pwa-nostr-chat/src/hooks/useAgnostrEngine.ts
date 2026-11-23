@@ -12,6 +12,7 @@ import type {
   PendingTrustRequest,
   PinnedChannel,
   PreparedImage,
+  RadioChannelPreview,
   RecordedVoiceMemo,
   RelayTelemetry,
   SignMode,
@@ -152,7 +153,7 @@ import { useCashuWallet } from './useCashuWallet.ts'
 import { useContentFilter } from './useContentFilter.ts'
 import { useDeviceSync } from './useDeviceSync.ts'
 import { useDirectMessages } from './useDirectMessages.ts'
-import { useGlobalPulse } from './useGlobalPulse.ts'
+import { formatRadioPreviewText, useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
 import {
   useNotifications,
@@ -170,6 +171,42 @@ const THEME_META_COLORS: Record<ThemeId, string> = {
   amber: '#0d0a07',
   obsidian: '#09090f',
   daylight: '#f4f5f2',
+}
+
+function extractLatestVisiblePreview(
+  items: readonly GeoMessage[],
+  blocked: Set<string>,
+  trusted: Set<string>,
+  own: Set<string>,
+  strict: boolean
+): RadioChannelPreview | null {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const m = items[i]
+    if (!m || m.isSystem) continue
+    const pk = (m.pubkey || '').toLowerCase()
+    if (!pk || blocked.has(pk)) continue
+    if (strict && !m.isOwn && !own.has(pk) && !trusted.has(pk)) continue
+    const preview = formatRadioPreviewText({
+      content: m.content,
+      hasImage: Boolean(m.imageAttachment),
+      hasVoice: Boolean(m.voiceMemo),
+      mediaUrl: m.imageAttachment?.url ?? m.voiceMemo?.url,
+      tags: m.tags,
+    })
+    if (!preview) continue
+    const nowMs = Date.now()
+    const nowSec = Math.floor(nowMs / 1000)
+    const createdAt = Math.min(Math.floor(m.createdAt || nowSec), nowSec)
+    return {
+      id: m.id,
+      preview,
+      sender: (m.nickname || m.displayHandle || `anon${pk.slice(-4)}`).trim(),
+      senderPubkey: pk,
+      createdAt,
+      updatedAtMs: Math.min(createdAt * 1000, nowMs),
+    }
+  }
+  return null
 }
 
 function applyReactionToMessage(
@@ -569,6 +606,187 @@ export function useAgnostrEngine(): AgnostrEngine {
   useLayoutEffect(() => {
     activeViewRef.current = activeView
   }, [activeView])
+
+  // Priority channels (active + pinned) are never evicted from Global Pulse's 48-room cap
+  const priorityChannels = useMemo(
+    () => [activeGeohash, ...pinnedChannels.map((p) => p.geohash)],
+    [activeGeohash, pinnedChannels]
+  )
+
+  // Global Pulse Radar (strictly respects muted/blocked peers & strict whitelist mode)
+  const { pulseRooms, recordRoomMessage, clearRoomMessages, clearPulse } = useGlobalPulse(
+    pool,
+    true,
+    {
+      blockedSet,
+      trustedSet,
+      ownPubkeys,
+      strictWhitelistMode: settings.strictWhitelistMode,
+      priorityChannels,
+    }
+  )
+
+  // Authoritative per-channel latest visible radio message previews (geo + topic)
+  const [channelPreviews, setChannelPreviews] = useState<Record<string, RadioChannelPreview>>(() => {
+    const initial: Record<string, RadioChannelPreview> = {}
+    const keys = Array.from(
+      new Set([
+        activeGeohash.toLowerCase(),
+        ...pinnedChannels.map((p) => p.geohash.toLowerCase()),
+      ])
+    )
+    for (const key of keys) {
+      const latest = extractLatestVisiblePreview(
+        loadChannelMessages(key),
+        blockedSet,
+        trustedSet,
+        ownPubkeys,
+        settings.strictWhitelistMode
+      )
+      if (latest) initial[key] = latest
+    }
+    return initial
+  })
+
+  const upsertChannelPreview = useCallback(
+    (
+      geohash: string,
+      entry: {
+        id: string
+        replaceId?: string
+        preview: string
+        sender: string
+        senderPubkey: string
+        createdAt: number
+      },
+      options?: { force?: boolean; preferExistingOnTie?: boolean }
+    ) => {
+      const ghKey = geohash.trim().toLowerCase()
+      const pk = entry.senderPubkey.trim().toLowerCase()
+      const cleanPreview = entry.preview.trim().slice(0, 96)
+      if (!ghKey || !entry.id || !pk || !cleanPreview) return
+      if (blockedSetRef.current.has(pk)) return
+      if (
+        strictWhitelistRef.current &&
+        !ownPubkeysRef.current.has(pk) &&
+        !trustedSetRef.current.has(pk)
+      ) {
+        return
+      }
+      const nowMs = Date.now()
+      const nowSec = Math.floor(nowMs / 1000)
+      const createdAt = Math.min(Math.floor(entry.createdAt || nowSec), nowSec)
+      const nextItem: RadioChannelPreview = {
+        id: entry.id,
+        preview: cleanPreview,
+        sender: entry.sender.trim() || `anon${pk.slice(-4)}`,
+        senderPubkey: pk,
+        createdAt,
+        updatedAtMs: Math.min(createdAt * 1000, nowMs),
+      }
+      setChannelPreviews((prev) => {
+        const existing = prev[ghKey]
+        const isReplacing = Boolean(entry.replaceId && existing?.id === entry.replaceId)
+        if (existing && !options?.force && !isReplacing) {
+          if (nextItem.createdAt < existing.createdAt) {
+            return prev
+          }
+          if (
+            options?.preferExistingOnTie &&
+            nextItem.createdAt === existing.createdAt &&
+            existing.id !== nextItem.id
+          ) {
+            return prev
+          }
+        }
+        if (
+          existing &&
+          existing.id === nextItem.id &&
+          existing.preview === nextItem.preview &&
+          existing.sender === nextItem.sender &&
+          existing.senderPubkey === nextItem.senderPubkey &&
+          existing.createdAt === nextItem.createdAt
+        ) {
+          return prev
+        }
+        return {
+          ...prev,
+          [ghKey]: nextItem,
+        }
+      })
+    },
+    []
+  )
+
+  const pinnedChannelKeys = useMemo(
+    () =>
+      pinnedChannels
+        .map((p) => p.geohash.toLowerCase())
+        .sort()
+        .join(','),
+    [pinnedChannels]
+  )
+
+  // Seed cached channel previews & immediately scrub blocked/untrusted senders on moderation changes
+  useEffect(() => {
+    const trackedKeys = new Set<string>([activeGeohash.toLowerCase()])
+    if (pinnedChannelKeys) {
+      for (const key of pinnedChannelKeys.split(',')) {
+        if (key) trackedKeys.add(key)
+      }
+    }
+    setChannelPreviews((prev) => {
+      let changed = false
+      const next: Record<string, RadioChannelPreview> = { ...prev }
+
+      for (const [ghKey, entry] of Object.entries(next)) {
+        const pk = entry.senderPubkey.toLowerCase()
+        const hidden =
+          blockedSet.has(pk) ||
+          (settings.strictWhitelistMode && !ownPubkeys.has(pk) && !trustedSet.has(pk))
+        if (hidden) {
+          const fallback = extractLatestVisiblePreview(
+            loadChannelMessages(ghKey),
+            blockedSet,
+            trustedSet,
+            ownPubkeys,
+            settings.strictWhitelistMode
+          )
+          if (fallback) {
+            next[ghKey] = fallback
+          } else {
+            delete next[ghKey]
+          }
+          changed = true
+        }
+      }
+
+      for (const ghKey of trackedKeys) {
+        const cachedLatest = extractLatestVisiblePreview(
+          loadChannelMessages(ghKey),
+          blockedSet,
+          trustedSet,
+          ownPubkeys,
+          settings.strictWhitelistMode
+        )
+        if (!cachedLatest) continue
+        const existing = next[ghKey]
+        if (!existing || cachedLatest.createdAt > existing.createdAt) {
+          next[ghKey] = cachedLatest
+          changed = true
+        }
+      }
+
+      return changed ? next : prev
+    })
+  }, [
+    activeGeohash,
+    pinnedChannelKeys,
+    blockedSet,
+    trustedSet,
+    ownPubkeys,
+    settings.strictWhitelistMode,
+  ])
 
   const recomputeGeoUnreads = useCallback(() => {
     const blocked = blockedSetRef.current
@@ -1064,6 +1282,37 @@ export function useAgnostrEngine(): AgnostrEngine {
               ).slice(-350)
             })
 
+            const parsedPreview = formatRadioPreviewText({
+              content: parsed.content,
+              hasImage: Boolean(parsed.imageAttachment),
+              hasVoice: Boolean(parsed.voiceMemo),
+              mediaUrl: parsed.imageAttachment?.url ?? parsed.voiceMemo?.url,
+              tags: ev.tags,
+            })
+            if (parsedPreview) {
+              const previewSender =
+                parsed.nickname || parsed.displayHandle || `anon${pk.slice(-4)}`
+              upsertChannelPreview(
+                gh,
+                {
+                  id: parsed.id,
+                  preview: parsedPreview,
+                  sender: previewSender,
+                  senderPubkey: pk,
+                  createdAt: parsed.createdAt,
+                },
+                { preferExistingOnTie: isHistoryReplay }
+              )
+              recordRoomMessage({
+                id: parsed.id,
+                geohash: gh,
+                pubkey: pk,
+                sender: previewSender,
+                preview: parsedPreview,
+                createdAtSec: parsed.createdAt,
+              })
+            }
+
             if (!isHistoryReplay && !parsed.isOwn && !isStale() && !blockedSetRef.current.has(pk)) {
               refreshTrustedPeerLabel(pk, parsed.nickname)
               const view = activeViewRef.current
@@ -1129,6 +1378,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     identityManager,
     incrementGeoUnread,
     refreshTrustedPeerLabel,
+    upsertChannelPreview,
+    recordRoomMessage,
   ])
 
   // Location dead-drop notes subscription (kind 1 + NIP-40 expiration — geohash channels only)
@@ -1214,10 +1465,47 @@ export function useAgnostrEngine(): AgnostrEngine {
     [pinnedChannels, activeGeohash]
   )
 
-  useEffect(() => {
-    if (!pool || !watchedPinnedKey) return
+  const watchedPinnedRelaysKey = useMemo(() => {
+    if (!watchedPinnedKey) return ''
     const watchedChannels = watchedPinnedKey.split(',').filter(Boolean)
-    if (watchedChannels.length === 0) return
+    const set = new Set<string>(CORE_DM_RELAYS)
+    for (const raw of customRelays) {
+      const normalized = normalizeRelayUrl(raw)
+      if (normalized) set.add(normalized)
+    }
+    const geoChannels: string[] = []
+    let hasTopic = false
+    for (const ch of watchedChannels) {
+      if (isTopicChannel(ch)) {
+        hasTopic = true
+      } else {
+        geoChannels.push(ch)
+      }
+    }
+    if (hasTopic) {
+      for (const url of PULSE_RELAYS.slice(0, 2)) {
+        set.add(url)
+      }
+    }
+    for (const ch of geoChannels) {
+      const sel = selectRelaysForGeohash(ch, geoDirectory, customRelays, 2)
+      for (const url of sel.channelRelays.slice(0, 2)) {
+        set.add(url)
+      }
+    }
+    if (hasTopic) {
+      for (const url of PULSE_RELAYS.slice(2, 7)) {
+        set.add(url)
+      }
+    }
+    return Array.from(set).slice(0, 10).sort().join(',')
+  }, [watchedPinnedKey, geoDirectory, customRelays])
+
+  useEffect(() => {
+    if (!pool || !watchedPinnedKey || !watchedPinnedRelaysKey) return
+    const watchedChannels = watchedPinnedKey.split(',').filter(Boolean)
+    const watchRelays = watchedPinnedRelaysKey.split(',').filter(Boolean)
+    if (watchedChannels.length === 0 || watchRelays.length === 0) return
 
     const watchedSet = new Set(watchedChannels)
     const watchedGeos: string[] = []
@@ -1232,21 +1520,24 @@ export function useAgnostrEngine(): AgnostrEngine {
     }
     if (watchedGeos.length === 0 && watchedTopicSlugs.length === 0) return
 
-    const since = Math.floor(Date.now() / 1000)
+    const liveSince = Math.floor(Date.now() / 1000)
+    const backfillSince = liveSince - 900
     const filters: Filter[] = []
     if (watchedGeos.length > 0) {
-      filters.push({ kinds: [KIND_GEOHASH_CHAT], '#g': watchedGeos, since })
+      filters.push({ kinds: [KIND_GEOHASH_CHAT], '#g': watchedGeos, since: backfillSince, limit: 40 })
     }
     if (watchedTopicSlugs.length > 0) {
-      filters.push({ kinds: [KIND_NAMED_RADIO_CHAT], '#d': watchedTopicSlugs, since })
+      filters.push({
+        kinds: [KIND_NAMED_RADIO_CHAT],
+        '#d': watchedTopicSlugs,
+        since: backfillSince,
+        limit: 40,
+      })
     }
-    const watchRelays =
-      watchedTopicSlugs.length > 0
-        ? Array.from(new Set([...CORE_DM_RELAYS, ...PULSE_RELAYS.slice(0, 7)]))
-        : CORE_DM_RELAYS
 
     let cancelled = false
     let backfillDone = false
+    const pinnedSeenIds = new Set<string>()
     const eoseFallback = window.setTimeout(() => {
       if (cancelled) return
       backfillDone = true
@@ -1265,15 +1556,18 @@ export function useAgnostrEngine(): AgnostrEngine {
         onEvent: (ev) => {
           if (cancelled) return
           if (ev.kind !== KIND_GEOHASH_CHAT && ev.kind !== KIND_NAMED_RADIO_CHAT) return
-          if (geoSeenIdsRef.current.has(ev.id)) return
-          if (!backfillDone && ev.created_at < since - 2) return
+          if (pinnedSeenIds.has(ev.id)) return
           if (!verifyEventCached(ev)) return
-          geoSeenIdsRef.current.add(ev.id)
-          if (geoSeenIdsRef.current.size > 1200) {
-            const first = geoSeenIdsRef.current.values().next().value
-            if (first) geoSeenIdsRef.current.delete(first)
+          if (cancelled) return
+          pinnedSeenIds.add(ev.id)
+          if (pinnedSeenIds.size > 1200) {
+            const first = pinnedSeenIds.values().next().value
+            if (first) pinnedSeenIds.delete(first)
           }
+
           const pk = ev.pubkey.toLowerCase()
+          if (blockedSetRef.current.has(pk)) return
+
           let gh: string | null = null
           if (ev.kind === KIND_NAMED_RADIO_CHAT) {
             const slug = extractTopicChannelTag(ev.tags)
@@ -1281,26 +1575,64 @@ export function useAgnostrEngine(): AgnostrEngine {
           } else {
             gh = extractGeohashTag(ev.tags)
           }
-          if (!gh || !watchedSet.has(gh) || !(ev.content ?? '').trim()) return
+          if (!gh || !watchedSet.has(gh)) return
+
+          const previewText = formatRadioPreviewText({
+            content: ev.content,
+            tags: ev.tags,
+          })
+          if (!previewText) return
+
+          const geoPubkey = identityManager.getKeyMaterialForGeohash(gh).pubkey.toLowerCase()
+          const masterPubkey = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+          const isOwnSender =
+            pk === geoPubkey ||
+            pk === masterPubkey ||
+            ownPubkeysRef.current.has(pk)
+          if (!isOwnSender && strictWhitelistRef.current && !trustedSetRef.current.has(pk)) {
+            return
+          }
+
+          const rawNick = getTagValue(ev.tags, 'n')
+          const previewSender = rawNick?.trim() || `anon${pk.slice(-4)}`
+
+          // Always keep pinned room activity previews up to date (including media-only
+          // events and own same-key messages sent from another device)
+          upsertChannelPreview(
+            gh,
+            {
+              id: ev.id,
+              preview: previewText,
+              sender: previewSender,
+              senderPubkey: pk,
+              createdAt: ev.created_at,
+            },
+            { preferExistingOnTie: !backfillDone }
+          )
+          recordRoomMessage({
+            id: ev.id,
+            geohash: gh,
+            pubkey: pk,
+            sender: previewSender,
+            preview: previewText,
+            createdAtSec: ev.created_at,
+          })
+
+          // Only count unreads & fire notifications for genuinely live, non-own events
+          if (!backfillDone || ev.created_at < liveSince - 2) return
+          if (geoSeenIdsRef.current.has(ev.id)) return
+          geoSeenIdsRef.current.add(ev.id)
+          if (geoSeenIdsRef.current.size > 1200) {
+            const first = geoSeenIdsRef.current.values().next().value
+            if (first) geoSeenIdsRef.current.delete(first)
+          }
 
           // Never double-count if user just switched onto this geohash
           if (activeViewRef.current.type === 'channel' && activeViewRef.current.geohash === gh) {
             return
           }
+          if (isOwnSender) return
 
-          const geoPubkey = identityManager.getKeyMaterialForGeohash(gh).pubkey.toLowerCase()
-          const masterPubkey = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
-          if (
-            pk === geoPubkey ||
-            pk === masterPubkey ||
-            ownPubkeysRef.current.has(pk) ||
-            blockedSetRef.current.has(pk)
-          ) {
-            return
-          }
-          if (strictWhitelistRef.current && !trustedSetRef.current.has(pk)) return
-
-          const rawNick = getTagValue(ev.tags, 'n')
           refreshTrustedPeerLabel(pk, rawNick)
 
           const mentions = extractMentions(ev.content)
@@ -1352,7 +1684,16 @@ export function useAgnostrEngine(): AgnostrEngine {
       window.clearTimeout(eoseFallback)
       unsub()
     }
-  }, [pool, watchedPinnedKey, identityManager, incrementGeoUnread, refreshTrustedPeerLabel])
+  }, [
+    pool,
+    watchedPinnedKey,
+    watchedPinnedRelaysKey,
+    identityManager,
+    incrementGeoUnread,
+    refreshTrustedPeerLabel,
+    upsertChannelPreview,
+    recordRoomMessage,
+  ])
 
   // Privacy-safe kind 20001 presence heartbeat (strictly precision <= 5 per GeohashPresenceSpec.md)
   useEffect(() => {
@@ -1396,14 +1737,6 @@ export function useAgnostrEngine(): AgnostrEngine {
     identityManager,
     identityVersion,
   ])
-
-  // Global Pulse Radar (strictly respects muted/blocked peers & strict whitelist mode)
-  const { pulseRooms, clearPulse } = useGlobalPulse(pool, true, {
-    blockedSet,
-    trustedSet,
-    ownPubkeys,
-    strictWhitelistMode: settings.strictWhitelistMode,
-  })
 
   // Direct Messages (dual-stack: Bitchat v2 + NIP-17)
   const activeDmPeer = activeView.type === 'dm' ? activeView.peerPubkey : null
@@ -1719,9 +2052,34 @@ export function useAgnostrEngine(): AgnostrEngine {
         },
         { persist: true, allowBackgroundPersist: true }
       )
+      const sortedSynced = sortChannelMessagesWithPending(validIncoming, 'pending-radio-')
+      const latestSynced = extractLatestVisiblePreview(
+        sortedSynced,
+        blockedSetRef.current,
+        trustedSetRef.current,
+        ownPubkeysRef.current,
+        strictWhitelistRef.current
+      )
+      if (latestSynced) {
+        upsertChannelPreview(gh, {
+          id: latestSynced.id,
+          preview: latestSynced.preview,
+          sender: latestSynced.sender,
+          senderPubkey: latestSynced.senderPubkey,
+          createdAt: latestSynced.createdAt,
+        })
+        recordRoomMessage({
+          id: latestSynced.id,
+          geohash: gh,
+          pubkey: latestSynced.senderPubkey,
+          sender: latestSynced.sender,
+          preview: latestSynced.preview,
+          createdAtSec: latestSynced.createdAt,
+        })
+      }
       return addedCount
     },
-    [updateChannelMessages]
+    [updateChannelMessages, upsertChannelPreview, recordRoomMessage]
   )
 
   const setPeerNote = useCallback((pubkeyOrNpub: string, rawNote: string) => {
@@ -2066,6 +2424,29 @@ export function useAgnostrEngine(): AgnostrEngine {
         },
         { allowBackgroundPersist: true }
       )
+      const optimisticPreview = formatRadioPreviewText({ content })
+      if (optimisticPreview) {
+        upsertChannelPreview(
+          gh,
+          {
+            id: tempId,
+            preview: optimisticPreview,
+            sender: nick,
+            senderPubkey: activePk,
+            createdAt: nowSec,
+          },
+          { force: true }
+        )
+        recordRoomMessage({
+          id: tempId,
+          geohash: gh,
+          pubkey: activePk,
+          sender: nick,
+          preview: optimisticPreview,
+          createdAtSec: nowSec,
+          isAuthoritative: activeGeohashRef.current === gh,
+        })
+      }
 
       adjustInFlightSend(1)
       try {
@@ -2132,6 +2513,37 @@ export function useAgnostrEngine(): AgnostrEngine {
                   (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-radio-'),
                   { allowBackgroundPersist: true }
                 )
+                const signedPreview = formatRadioPreviewText({
+                  content: parsed.content,
+                  hasImage: Boolean(parsed.imageAttachment),
+                  hasVoice: Boolean(parsed.voiceMemo),
+                  mediaUrl: parsed.imageAttachment?.url ?? parsed.voiceMemo?.url,
+                  tags: signed.tags,
+                })
+                if (signedPreview) {
+                  upsertChannelPreview(
+                    gh,
+                    {
+                      id: parsed.id,
+                      replaceId: tempId,
+                      preview: signedPreview,
+                      sender: parsed.nickname || nick,
+                      senderPubkey: parsed.pubkey,
+                      createdAt: parsed.createdAt,
+                    },
+                    { force: activeGeohashRef.current === gh }
+                  )
+                  recordRoomMessage({
+                    id: parsed.id,
+                    replaceId: tempId,
+                    geohash: gh,
+                    pubkey: parsed.pubkey,
+                    sender: parsed.nickname || nick,
+                    preview: signedPreview,
+                    createdAtSec: parsed.createdAt,
+                    isAuthoritative: activeGeohashRef.current === gh,
+                  })
+                }
               }
 
               const res = await pool.publish(targetRelays, signed)
@@ -2206,6 +2618,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.broadcastClientTag,
       zapsEngine.lightningAddress,
       updateChannelMessages,
+      upsertChannelPreview,
+      recordRoomMessage,
       adjustInFlightSend,
       pushToast,
     ]
@@ -2328,10 +2742,18 @@ export function useAgnostrEngine(): AgnostrEngine {
       return
     }
     const gh = activeGeohashRef.current
+    const ghKey = gh.toLowerCase()
     setChannelMessagesState({ channelKey: gh, items: [] })
     setUnreadDividerId(null)
     clearChannelMessagesStorage(gh)
-  }, [activeView, clearThread, serversEngine, pushToast])
+    setChannelPreviews((prev) => {
+      if (!(ghKey in prev)) return prev
+      const next = { ...prev }
+      delete next[ghKey]
+      return next
+    })
+    clearRoomMessages(ghKey)
+  }, [activeView, clearThread, serversEngine, clearRoomMessages, pushToast])
 
   // Moderation
   const isPeerBlocked = useCallback((pubkey: string) => blockedSet.has(pubkey.toLowerCase()), [blockedSet])
@@ -2760,6 +3182,30 @@ export function useAgnostrEngine(): AgnostrEngine {
         },
         { allowBackgroundPersist: true }
       )
+      const optimisticVoicePreview = formatRadioPreviewText({
+        content: cleanCaption,
+        hasVoice: true,
+      })
+      upsertChannelPreview(
+        gh,
+        {
+          id: tempId,
+          preview: optimisticVoicePreview,
+          sender: nick,
+          senderPubkey: activePk,
+          createdAt: nowSec,
+        },
+        { force: true }
+      )
+      recordRoomMessage({
+        id: tempId,
+        geohash: gh,
+        pubkey: activePk,
+        sender: nick,
+        preview: optimisticVoicePreview,
+        createdAtSec: nowSec,
+        isAuthoritative: activeGeohashRef.current === gh,
+      })
 
       adjustInFlightSend(1)
       try {
@@ -2853,6 +3299,34 @@ export function useAgnostrEngine(): AgnostrEngine {
                   (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-radio-'),
                   { allowBackgroundPersist: true }
                 )
+                const signedVoicePreview = formatRadioPreviewText({
+                  content: parsed.content,
+                  hasVoice: true,
+                  mediaUrl: parsed.voiceMemo?.url ?? upload.url,
+                  tags: signed.tags,
+                })
+                upsertChannelPreview(
+                  gh,
+                  {
+                    id: parsed.id,
+                    replaceId: tempId,
+                    preview: signedVoicePreview,
+                    sender: parsed.nickname || nick,
+                    senderPubkey: parsed.pubkey,
+                    createdAt: parsed.createdAt,
+                  },
+                  { force: activeGeohashRef.current === gh }
+                )
+                recordRoomMessage({
+                  id: parsed.id,
+                  replaceId: tempId,
+                  geohash: gh,
+                  pubkey: parsed.pubkey,
+                  sender: parsed.nickname || nick,
+                  preview: signedVoicePreview,
+                  createdAtSec: parsed.createdAt,
+                  isAuthoritative: activeGeohashRef.current === gh,
+                })
               }
 
               setVoiceSendPhase('publishing')
@@ -2935,6 +3409,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.broadcastClientTag,
       zapsEngine.lightningAddress,
       updateChannelMessages,
+      upsertChannelPreview,
+      recordRoomMessage,
       adjustInFlightSend,
       pushToast,
     ]
@@ -3192,6 +3668,30 @@ export function useAgnostrEngine(): AgnostrEngine {
         },
         { allowBackgroundPersist: true }
       )
+      const optimisticImagePreview = formatRadioPreviewText({
+        content: cleanCaption,
+        hasImage: true,
+      })
+      upsertChannelPreview(
+        gh,
+        {
+          id: tempId,
+          preview: optimisticImagePreview,
+          sender: nick,
+          senderPubkey: activePk,
+          createdAt: nowSec,
+        },
+        { force: true }
+      )
+      recordRoomMessage({
+        id: tempId,
+        geohash: gh,
+        pubkey: activePk,
+        sender: nick,
+        preview: optimisticImagePreview,
+        createdAtSec: nowSec,
+        isAuthoritative: activeGeohashRef.current === gh,
+      })
 
       adjustInFlightSend(1)
       try {
@@ -3281,6 +3781,34 @@ export function useAgnostrEngine(): AgnostrEngine {
                   (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-radio-'),
                   { allowBackgroundPersist: true }
                 )
+                const signedImagePreview = formatRadioPreviewText({
+                  content: parsed.content,
+                  hasImage: true,
+                  mediaUrl: parsed.imageAttachment?.url ?? upload.url,
+                  tags: signed.tags,
+                })
+                upsertChannelPreview(
+                  gh,
+                  {
+                    id: parsed.id,
+                    replaceId: tempId,
+                    preview: signedImagePreview,
+                    sender: parsed.nickname || nick,
+                    senderPubkey: parsed.pubkey,
+                    createdAt: parsed.createdAt,
+                  },
+                  { force: activeGeohashRef.current === gh }
+                )
+                recordRoomMessage({
+                  id: parsed.id,
+                  replaceId: tempId,
+                  geohash: gh,
+                  pubkey: parsed.pubkey,
+                  sender: parsed.nickname || nick,
+                  preview: signedImagePreview,
+                  createdAtSec: parsed.createdAt,
+                  isAuthoritative: activeGeohashRef.current === gh,
+                })
               }
 
               setVoiceSendPhase('publishing')
@@ -3365,6 +3893,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.broadcastClientTag,
       zapsEngine.lightningAddress,
       updateChannelMessages,
+      upsertChannelPreview,
+      recordRoomMessage,
       adjustInFlightSend,
       pushToast,
     ]
@@ -3535,6 +4065,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     clearProtocolCaches()
     presenceTracker.clear()
     clearPulse()
+    setChannelPreviews({})
     clearAllDms()
     resetAllServers()
     resetLocation()
@@ -3711,6 +4242,49 @@ export function useAgnostrEngine(): AgnostrEngine {
     )
   }, [messages, settings.strictWhitelistMode, ownPubkeys, trustedSet])
 
+  // Authoritatively sync active channel's exact bottom visible message to BOTH
+  // channelPreviews and Global Pulse so the sidebar preview ALWAYS matches MessageStream 1:1.
+  useEffect(() => {
+    const ghKey = activeGeohash.toLowerCase()
+    const latest = extractLatestVisiblePreview(
+      visibleMessages,
+      blockedSet,
+      trustedSet,
+      ownPubkeys,
+      settings.strictWhitelistMode
+    )
+    if (!latest) return
+    upsertChannelPreview(
+      ghKey,
+      {
+        id: latest.id,
+        preview: latest.preview,
+        sender: latest.sender,
+        senderPubkey: latest.senderPubkey,
+        createdAt: latest.createdAt,
+      },
+      { force: true }
+    )
+    recordRoomMessage({
+      id: latest.id,
+      geohash: ghKey,
+      pubkey: latest.senderPubkey,
+      sender: latest.sender,
+      preview: latest.preview,
+      createdAtSec: latest.createdAt,
+      isAuthoritative: true,
+    })
+  }, [
+    activeGeohash,
+    visibleMessages,
+    blockedSet,
+    trustedSet,
+    ownPubkeys,
+    settings.strictWhitelistMode,
+    upsertChannelPreview,
+    recordRoomMessage,
+  ])
+
   // Watch visible public Radio & Server message event IDs for live NIP-57 (kind: 9735) zap receipts
   const watchZapEventIds = zapsEngine.watchEventIds
   useEffect(() => {
@@ -3780,6 +4354,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     setReplyingTo,
 
     pulseRooms,
+    channelPreviews,
     pinnedChannels,
     recentChannels,
     unreadCounts: geoUnreadCounts,
