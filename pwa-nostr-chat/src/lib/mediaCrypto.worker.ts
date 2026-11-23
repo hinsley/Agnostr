@@ -1,7 +1,13 @@
 /// <reference lib="webworker" />
 
 import { sha256 } from '@noble/hashes/sha256'
+import { verifyEvent, type Event as NostrEvent } from 'nostr-tools'
 import type { VoiceMemoEncryption } from '../types/protocol.ts'
+
+export interface VerifiedEventResult {
+  id: string
+  ok: boolean
+}
 
 export type MediaCryptoWorkerRequest =
   | {
@@ -38,6 +44,11 @@ export type MediaCryptoWorkerRequest =
       content: string
       targetBits: number
       timeCapMs: number
+    }
+  | {
+      id: number
+      op: 'verifyEventsBatch'
+      events: NostrEvent[]
     }
 
 export type MediaCryptoWorkerSuccess =
@@ -77,6 +88,12 @@ export type MediaCryptoWorkerSuccess =
       ok: true
       op: 'mineNip13'
       nonceTag: string[] | null
+    }
+  | {
+      id: number
+      ok: true
+      op: 'verifyEventsBatch'
+      results: VerifiedEventResult[]
     }
 
 export interface MediaCryptoWorkerFailure {
@@ -400,6 +417,55 @@ async function handleMineNip13(
   return { id: req.id, ok: true, op: 'mineNip13', nonceTag: null }
 }
 
+const MAX_INBOUND_TAGS = 64
+const MAX_TAG_VALUES = 12
+const MAX_TAG_VALUE_LEN = 1024
+
+function isWithinInboundTagLimits(tags: unknown): tags is string[][] {
+  if (!Array.isArray(tags) || tags.length > MAX_INBOUND_TAGS) return false
+  for (const tag of tags) {
+    if (!Array.isArray(tag) || tag.length > MAX_TAG_VALUES) return false
+    for (const val of tag) {
+      if (typeof val !== 'string' || val.length > MAX_TAG_VALUE_LEN) return false
+    }
+  }
+  return true
+}
+
+function handleVerifyEventsBatch(
+  req: Extract<MediaCryptoWorkerRequest, { op: 'verifyEventsBatch' }>
+): MediaCryptoWorkerSuccess {
+  const results: VerifiedEventResult[] = []
+  const seen = new Map<string, boolean>()
+
+  for (const ev of req.events) {
+    if (!ev || typeof ev.id !== 'string' || typeof ev.pubkey !== 'string') continue
+    const prior = seen.get(ev.id)
+    if (prior !== undefined) {
+      results.push({ id: ev.id, ok: prior })
+      continue
+    }
+
+    let ok = false
+    if (isWithinInboundTagLimits(ev.tags)) {
+      try {
+        ok = verifyEvent(ev)
+      } catch {
+        ok = false
+      }
+    }
+    seen.set(ev.id, ok)
+    results.push({ id: ev.id, ok })
+  }
+
+  return {
+    id: req.id,
+    ok: true,
+    op: 'verifyEventsBatch',
+    results,
+  }
+}
+
 workerScope.onmessage = (event: MessageEvent<MediaCryptoWorkerRequest>) => {
   const req = event.data
   if (!req || typeof req !== 'object' || typeof req.id !== 'number') return
@@ -435,6 +501,11 @@ workerScope.onmessage = (event: MessageEvent<MediaCryptoWorkerRequest>) => {
         }
         case 'mineNip13': {
           const response = await handleMineNip13(req)
+          workerScope.postMessage(response)
+          return
+        }
+        case 'verifyEventsBatch': {
+          const response = handleVerifyEventsBatch(req)
           workerScope.postMessage(response)
           return
         }

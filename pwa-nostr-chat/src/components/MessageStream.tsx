@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
   AlertCircle,
@@ -129,6 +129,9 @@ export interface MessageStreamProps {
   onClaimCashuToken?: (token: string) => void
 }
 
+const INITIAL_RENDER_LIMIT = 80
+const LOAD_EARLIER_STEP = 60
+
 export const MessageStream: React.FC<MessageStreamProps> = ({
   engine,
   searchQuery,
@@ -152,6 +155,13 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
   const lastClientHeightRef = useRef(0)
+  const streamSwitchedAtRef = useRef(0)
+  const lastAutoExpandAtRef = useRef(0)
+  const pendingScrollAnchorRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(
+    null
+  )
+  const pendingJumpIdRef = useRef<string | null>(null)
+  const [renderLimit, setRenderLimit] = useState<number>(INITIAL_RENDER_LIMIT)
   const [showJumpBtn, setShowJumpBtn] = useState(false)
   const [unseenBelow, setUnseenBelow] = useState(0)
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null)
@@ -298,13 +308,48 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     dmThread,
   ])
 
-  // Snapshot existing IDs on channel/DM switch & snap to bottom
+  const hiddenEarlierCount = Math.max(0, displayMessages.length - renderLimit)
+  const visibleMessages = useMemo(
+    () => (hiddenEarlierCount > 0 ? displayMessages.slice(hiddenEarlierCount) : displayMessages),
+    [displayMessages, hiddenEarlierCount]
+  )
+
+  const loadEarlierMessages = useCallback(() => {
+    if (hiddenEarlierCount <= 0) return
+    const el = scrollRef.current
+    if (el) {
+      pendingScrollAnchorRef.current = {
+        prevScrollHeight: el.scrollHeight,
+        prevScrollTop: el.scrollTop,
+      }
+    }
+    setRenderLimit((curr) => curr + LOAD_EARLIER_STEP)
+  }, [hiddenEarlierCount])
+
+  // Preserve visual scroll anchor when prepending older windowed messages
+  useLayoutEffect(() => {
+    const anchor = pendingScrollAnchorRef.current
+    if (!anchor) return
+    pendingScrollAnchorRef.current = null
+    const el = scrollRef.current
+    if (!el) return
+    const heightDelta = el.scrollHeight - anchor.prevScrollHeight
+    if (heightDelta > 0) {
+      el.scrollTop = anchor.prevScrollTop + heightDelta
+    }
+  }, [visibleMessages.length])
+
+  // Snapshot existing IDs on channel/DM switch, reset DOM window to latest 80, & snap to bottom
   useEffect(() => {
     initialIdsRef.current = {
       key: streamKey,
       ids: new Set(displayMessages.map((m) => m.id)),
     }
     stickToBottomRef.current = true
+    streamSwitchedAtRef.current = Date.now()
+    pendingScrollAnchorRef.current = null
+    pendingJumpIdRef.current = null
+    setRenderLimit(INITIAL_RENDER_LIMIT)
     setShowJumpBtn(false)
     setUnseenBelow(0)
     setActiveActionMsgId(null)
@@ -369,14 +414,32 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     }
   }, [scrollContainerToBottom])
 
-  // Scroll to active search hit when navigating search results (container-only, never scrolls window)
+  // Scroll to active search hit when navigating search results (auto-expanding window if hit is older)
   useEffect(() => {
     if (!activeSearchMessageId) return
+    const idx = displayMessages.findIndex((m) => m.id === activeSearchMessageId)
+    if (idx !== -1 && idx < hiddenEarlierCount) {
+      const needed = displayMessages.length - idx + 12
+      setRenderLimit((curr) => Math.max(curr, needed))
+      return
+    }
     const el = document.getElementById(`msg-${activeSearchMessageId}`)
     if (el) {
       scrollMessageIntoContainer(el, true)
     }
-  }, [activeSearchMessageId, scrollMessageIntoContainer])
+  }, [activeSearchMessageId, displayMessages, hiddenEarlierCount, scrollMessageIntoContainer])
+
+  // Fulfill deferred reply-quote jumps after expanding the message window
+  useEffect(() => {
+    const targetId = pendingJumpIdRef.current
+    if (!targetId) return
+    const el = document.getElementById(`msg-${targetId}`)
+    if (!el) return
+    pendingJumpIdRef.current = null
+    scrollMessageIntoContainer(el, true)
+    el.classList.add('is-search-active')
+    window.setTimeout(() => el.classList.remove('is-search-active'), 1600)
+  }, [visibleMessages.length, scrollMessageIntoContainer])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -399,7 +462,21 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       setUnseenBelow(0)
       engine.markChannelRead()
     }
-  }, [unseenBelow, engine])
+
+    // Auto-expand earlier messages smoothly when scrolled near the top
+    const now = Date.now()
+    if (
+      hiddenEarlierCount > 0 &&
+      !atBottom &&
+      el.scrollTop <= 48 &&
+      el.scrollHeight > el.clientHeight + 80 &&
+      now - streamSwitchedAtRef.current > 250 &&
+      now - lastAutoExpandAtRef.current > 250
+    ) {
+      lastAutoExpandAtRef.current = now
+      loadEarlierMessages()
+    }
+  }, [unseenBelow, engine, hiddenEarlierCount, loadEarlierMessages])
 
   const scrollToLatest = useCallback(() => {
     stickToBottomRef.current = true
@@ -412,12 +489,20 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const handleJumpToMessage = useCallback(
     (id: string) => {
       const el = document.getElementById(`msg-${id}`)
-      if (!el) return
-      scrollMessageIntoContainer(el, true)
-      el.classList.add('is-search-active')
-      window.setTimeout(() => el.classList.remove('is-search-active'), 1600)
+      if (el) {
+        scrollMessageIntoContainer(el, true)
+        el.classList.add('is-search-active')
+        window.setTimeout(() => el.classList.remove('is-search-active'), 1600)
+        return
+      }
+      const idx = displayMessages.findIndex((m) => m.id === id)
+      if (idx !== -1 && idx < hiddenEarlierCount) {
+        pendingJumpIdRef.current = id
+        const needed = displayMessages.length - idx + 12
+        setRenderLimit((curr) => Math.max(curr, needed))
+      }
     },
-    [scrollMessageIntoContainer]
+    [displayMessages, hiddenEarlierCount, scrollMessageIntoContainer]
   )
 
   const handleInspectAuthor = useCallback(
@@ -1029,8 +1114,39 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 </div>
               )}
 
-              {displayMessages.map((msg, idx) => {
-                const prev = idx > 0 ? displayMessages[idx - 1] : null
+              {hiddenEarlierCount > 0 && (
+                <div
+                  className="ag-load-earlier-wrap"
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'center',
+                    padding: '8px 0 12px',
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="ag-load-earlier-btn"
+                    onClick={loadEarlierMessages}
+                    style={{
+                      appearance: 'none',
+                      border: '1px solid var(--border-subtle)',
+                      background: 'var(--bg-surface)',
+                      color: 'var(--text-secondary)',
+                      borderRadius: '999px',
+                      padding: '5px 14px',
+                      fontSize: '12px',
+                      fontWeight: 500,
+                      lineHeight: 1.4,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Load earlier messages ({hiddenEarlierCount})
+                  </button>
+                </div>
+              )}
+
+              {visibleMessages.map((msg, idx) => {
+                const prev = idx > 0 ? visibleMessages[idx - 1] : null
                 const showDateDivider = !prev || dateDayKey(prev.createdAt) !== dateDayKey(msg.createdAt)
                 const showUnreadDivider =
                   !isDm && !isServer && engine.unreadDividerId !== null && msg.id === engine.unreadDividerId

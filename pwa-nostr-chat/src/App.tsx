@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react'
 import { createPortal } from 'react-dom'
 import {
   Loader2,
@@ -32,6 +41,7 @@ import type { ServerMessage, ServerSummary } from './types/servers'
 import type { WalletInitialIntent, ZapTarget } from './types/wallet'
 import { radioAudio, type SoundCue } from './utils/sound'
 import { identiconDataUrl, shortPubkey } from './utils/identicon'
+import AppRail, { type ActiveWorkspace } from './components/AppRail'
 import ConversationList, { type ListTab } from './components/ConversationList'
 import UserListPane from './components/UserListPane'
 import MobileTabBar from './components/MobileTabBar'
@@ -39,28 +49,33 @@ import ChannelHeader from './components/ChannelHeader'
 import SearchBar from './components/SearchBar'
 import MessageStream from './components/MessageStream'
 import Composer from './components/Composer'
-import CommandPalette from './components/CommandPalette'
 import ToastStack from './components/ToastStack'
-import RoomInfoSheet from './components/RoomInfoSheet'
-import SettingsModal, { type SettingsTab } from './components/SettingsModal'
-import ServerHubModal, { type ServerHubTab } from './components/ServerHubModal'
-import ServerSettingsModal, { type ServerSettingsTab } from './components/ServerSettingsModal'
-import PeerInspectorModal from './components/PeerInspectorModal'
-import ExpandedRadarModal from './components/ExpandedRadarModal'
-import PwaInstallModal from './components/PwaInstallModal'
-import CallStage from './components/CallStage'
 import IncomingCallBanner from './components/IncomingCallBanner'
-import ImageLightboxModal, { type LightboxImagePayload } from './components/ImageLightboxModal'
-import QrShareModal, { type QrShareTarget } from './components/QrShareModal'
-import QrScannerModal from './components/QrScannerModal'
 import TrustConfirmModal from './components/TrustConfirmModal'
-import WalletModal from './components/WalletModal'
-import ZapModal from './components/ZapModal'
-import AmailView, {
-  type AmailComposeTarget,
-  type AmailInitialSection,
-} from './components/AmailView'
 import { ContextMenuProvider } from './components/ContextMenu'
+import type { SettingsTab } from './components/SettingsModal'
+import type { ServerHubTab } from './components/ServerHubModal'
+import type { ServerSettingsTab } from './components/ServerSettingsModal'
+import type { LightboxImagePayload } from './components/ImageLightboxModal'
+import type { QrShareTarget } from './components/QrShareModal'
+import type { AmailComposeTarget, AmailInitialSection } from './components/AmailView'
+
+// Aggressive React.lazy code-splitting: secondary workspaces & modals load on demand only
+const AmailView = lazy(() => import('./components/AmailView'))
+const WalletModal = lazy(() => import('./components/WalletModal'))
+const SettingsModal = lazy(() => import('./components/SettingsModal'))
+const ExpandedRadarModal = lazy(() => import('./components/ExpandedRadarModal'))
+const CallStage = lazy(() => import('./components/CallStage'))
+const RoomInfoSheet = lazy(() => import('./components/RoomInfoSheet'))
+const ServerHubModal = lazy(() => import('./components/ServerHubModal'))
+const ServerSettingsModal = lazy(() => import('./components/ServerSettingsModal'))
+const CommandPalette = lazy(() => import('./components/CommandPalette'))
+const PeerInspectorModal = lazy(() => import('./components/PeerInspectorModal'))
+const QrShareModal = lazy(() => import('./components/QrShareModal'))
+const QrScannerModal = lazy(() => import('./components/QrScannerModal'))
+const ZapModal = lazy(() => import('./components/ZapModal'))
+const PwaInstallModal = lazy(() => import('./components/PwaInstallModal'))
+const ImageLightboxModal = lazy(() => import('./components/ImageLightboxModal'))
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#0B0C0F',
@@ -85,7 +100,11 @@ export function App() {
   useMobileViewport()
   const engine = useAgnostrEngine()
 
+  const [workspace, setWorkspace] = useState<ActiveWorkspace>('chat')
   const [listTab, setListTab] = useState<ListTab>('radio')
+  const [selectedServerId, setSelectedServerId] = useState<string | null>(
+    () => engine.servers.activeServer?.id ?? engine.servers.joinedServers[0]?.id ?? null
+  )
   const [mobileScreen, setMobileScreen] = useState<'list' | 'chat'>('chat')
   const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth <= 867 : false
@@ -94,6 +113,25 @@ export function App() {
   const [userListCollapsed, setUserListCollapsed] = useState(false)
   const [mobileUserListOpen, setMobileUserListOpen] = useState(false)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
+
+  // Keep selectedServerId synced with active server & joined servers list
+  const activeServerId = engine.servers.activeServer?.id ?? null
+  const firstJoinedServerId = engine.servers.joinedServers[0]?.id ?? null
+  const joinedServerIdsKey = engine.servers.joinedServers.map((s) => s.id).join(',')
+
+  useEffect(() => {
+    if (activeServerId) {
+      setSelectedServerId(activeServerId)
+    }
+  }, [activeServerId])
+
+  useEffect(() => {
+    const validIds = new Set(joinedServerIdsKey ? joinedServerIdsKey.split(',') : [])
+    setSelectedServerId((prev) => {
+      if (prev && validIds.has(prev)) return prev
+      return activeServerId ?? firstJoinedServerId ?? null
+    })
+  }, [joinedServerIdsKey, activeServerId, firstJoinedServerId])
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return
@@ -118,16 +156,12 @@ export function App() {
   const [lightboxImage, setLightboxImage] = useState<LightboxImagePayload | null>(null)
   const [qrShareTarget, setQrShareTarget] = useState<QrShareTarget | null>(null)
   const [qrScannerOpen, setQrScannerOpen] = useState(false)
-  const [walletState, setWalletState] = useState<{
-    open: boolean
-    intent?: WalletInitialIntent
-  }>({ open: false, intent: undefined })
+  const [walletIntent, setWalletIntent] = useState<WalletInitialIntent | undefined>(undefined)
   const [zapTarget, setZapTarget] = useState<ZapTarget | null>(null)
   const [amailState, setAmailState] = useState<{
-    open: boolean
     section: AmailInitialSection
     composeTo: AmailComposeTarget | null
-  }>({ open: false, section: 'inbox', composeTo: null })
+  }>({ section: 'inbox', composeTo: null })
   const [pendingDeleteDm, setPendingDeleteDm] = useState<{
     pubkey: string
     displayName: string
@@ -283,7 +317,9 @@ export function App() {
 
   const handleReturnToActiveCall = useCallback(() => {
     if (!activeCall) return
-    setAmailState({ open: false, section: 'inbox', composeTo: null })
+    setWorkspace('chat')
+    setAmailState({ section: 'inbox', composeTo: null })
+    setWalletIntent(undefined)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -294,6 +330,7 @@ export function App() {
       setMobileScreen('chat')
     } else if (activeCall.mode === 'server' && activeCall.serverId) {
       engine.servers.selectServer(activeCall.serverId)
+      setSelectedServerId(activeCall.serverId)
       setListTab('servers')
       setMobileScreen('chat')
     } else if (activeCall.mode === 'dm' && activeCall.peerPubkey) {
@@ -314,7 +351,9 @@ export function App() {
     // Navigate to target room/DM/server once per pending notification action
     if (navigatedNotifTsRef.current !== receivedAt) {
       navigatedNotifTsRef.current = receivedAt
-      setAmailState({ open: false, section: 'inbox', composeTo: null })
+      setWorkspace('chat')
+      setAmailState({ section: 'inbox', composeTo: null })
+      setWalletIntent(undefined)
       setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       setCmdkOpen(false)
@@ -333,6 +372,7 @@ export function App() {
         } else {
           engine.servers.selectServer(payload.serverId)
         }
+        setSelectedServerId(payload.serverId)
         setListTab('servers')
         setMobileScreen('chat')
       } else if (
@@ -458,11 +498,16 @@ export function App() {
     radioAudio.setEnabled(engine.settings.soundEnabled)
   }, [engine.settings.soundEnabled])
 
-  // Sync dynamic document title with active channel, DM, or Server channel
+  // Sync dynamic document title with active workspace, channel, DM, or Server channel
   useEffect(() => {
     const totalUnread = engine.totalDmUnread + engine.servers.totalServerUnread
     const unreadPrefix = totalUnread > 0 ? `(${totalUnread}) ` : ''
-    if (engine.activeView.type === 'dm' && engine.activeDmThread) {
+    if (workspace === 'mail') {
+      const mailPrefix = engine.amail.unreadInboxCount > 0 ? `(${engine.amail.unreadInboxCount}) ` : unreadPrefix
+      document.title = `${mailPrefix}Agmail · Agnostr`
+    } else if (workspace === 'wallet') {
+      document.title = `${unreadPrefix}Agwallet · Agnostr`
+    } else if (engine.activeView.type === 'dm' && engine.activeDmThread) {
       document.title = `${unreadPrefix}${engine.activeDmThread.peerDisplayHandle} · Agnostr`
     } else if (
       engine.activeView.type === 'server' &&
@@ -474,6 +519,8 @@ export function App() {
       document.title = `${unreadPrefix}${formatRadioChannelLabel(engine.activeGeohash)} · Agnostr`
     }
   }, [
+    workspace,
+    engine.amail.unreadInboxCount,
     engine.activeView,
     engine.activeGeohash,
     engine.activeDmThread,
@@ -561,6 +608,8 @@ export function App() {
       engine.identity.masterPubkey &&
       prevMasterPkRef.current !== engine.identity.masterPubkey
     ) {
+      setWorkspace('chat')
+      setSelectedServerId(null)
       setServerSettingsState({ serverId: null, tab: 'overview' })
       setSettingsState({ open: false, tab: undefined })
       setMobileUserListOpen(false)
@@ -571,9 +620,9 @@ export function App() {
       setLightboxImage(null)
       setQrShareTarget(null)
       setQrScannerOpen(false)
-      setWalletState({ open: false, intent: undefined })
+      setWalletIntent(undefined)
       setZapTarget(null)
-      setAmailState({ open: false, section: 'inbox', composeTo: null })
+      setAmailState({ section: 'inbox', composeTo: null })
       setPendingDeleteDm(null)
       setNoteEditorPeer(null)
       setPanicFlash(true)
@@ -667,7 +716,7 @@ export function App() {
       }
       if (mod && e.key === ',') {
         e.preventDefault()
-        setAmailState({ open: false, section: 'inbox', composeTo: null })
+        setRadarExpanded(false)
         setSettingsState((prev) => ({ open: !prev.open, tab: undefined }))
         return
       }
@@ -687,9 +736,6 @@ export function App() {
         } else if (zapTarget) {
           e.stopImmediatePropagation()
           setZapTarget(null)
-        } else if (walletState.open) {
-          e.stopImmediatePropagation()
-          setWalletState({ open: false, intent: undefined })
         } else if (qrShareTarget) {
           e.stopImmediatePropagation()
           setQrShareTarget(null)
@@ -699,9 +745,6 @@ export function App() {
         } else if (lightboxImage) {
           e.stopImmediatePropagation()
           setLightboxImage(null)
-        } else if (amailState.open) {
-          // Let AmailView's own Escape listener step back (To dropdown -> Compose -> Reader -> Close)
-          return
         } else if (settingsState.open) {
           setSettingsState((prev) => ({ ...prev, open: false }))
         } else if (serverSettingsState.serverId) {
@@ -734,11 +777,9 @@ export function App() {
     noteEditorPeer,
     qrScannerOpen,
     zapTarget,
-    walletState.open,
     qrShareTarget,
     cmdkOpen,
     lightboxImage,
-    amailState.open,
     settingsState.open,
     serverSettingsState.serverId,
     serverHubState.open,
@@ -757,18 +798,78 @@ export function App() {
   }, [])
 
   const closeAmail = useCallback(() => {
-    setAmailState({ open: false, section: 'inbox', composeTo: null })
+    setAmailState({ section: 'inbox', composeTo: null })
+    setWorkspace('chat')
   }, [])
+
+  const closeWallet = useCallback(() => {
+    setWalletIntent(undefined)
+    setWorkspace('chat')
+  }, [])
+
+  const handleSelectWorkspace = useCallback((next: ActiveWorkspace) => {
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
+    setRoomInfoOpen(false)
+    setZapTarget(null)
+    setInspectedPeer(null)
+    if (next === 'mail') {
+      setWalletIntent(undefined)
+      setAmailState((prev) => ({ section: prev.section || 'inbox', composeTo: null }))
+    } else if (next === 'wallet') {
+      setWalletIntent(undefined)
+    }
+    setWorkspace(next)
+  }, [])
+
+  const handleSelectChatTab = useCallback(
+    (tab: ListTab) => {
+      setRadarExpanded(false)
+      setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+      setMobileUserListOpen(false)
+      setRoomInfoOpen(false)
+      setZapTarget(null)
+      setInspectedPeer(null)
+      setWorkspace('chat')
+      setListTab(tab)
+      setSidebarCollapsed(false)
+      if (tab === 'radio' && engine.activeView.type !== 'channel') {
+        engine.tuneGeohash(engine.activeGeohash)
+      }
+    },
+    [engine]
+  )
+
+  const handleSelectServer = useCallback(
+    (serverId: string) => {
+      setRadarExpanded(false)
+      setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+      setMobileUserListOpen(false)
+      setRoomInfoOpen(false)
+      setZapTarget(null)
+      setInspectedPeer(null)
+      setSelectedServerId(serverId)
+      setListTab('servers')
+      setWorkspace('chat')
+      setSidebarCollapsed(false)
+      if (!isMobileViewport) {
+        engine.servers.selectServer(serverId)
+      }
+    },
+    [engine.servers, isMobileViewport]
+  )
 
   const handleOpenAmail = useCallback((section: AmailInitialSection = 'inbox') => {
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
-    setWalletState({ open: false, intent: undefined })
+    setWalletIntent(undefined)
     setZapTarget(null)
     setInspectedPeer(null)
-    setAmailState({ open: true, section, composeTo: null })
+    setAmailState({ section, composeTo: null })
+    setWorkspace('mail')
   }, [])
 
   const handleOpenAmailCompose = useCallback((pubkey: string, nickname?: string) => {
@@ -776,14 +877,14 @@ export function App() {
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
-    setWalletState({ open: false, intent: undefined })
+    setWalletIntent(undefined)
     setZapTarget(null)
     setInspectedPeer(null)
-    setAmailState({ open: true, section: 'compose', composeTo: { pubkey, nickname } })
+    setAmailState({ section: 'compose', composeTo: { pubkey, nickname } })
+    setWorkspace('mail')
   }, [])
 
   const handleOpenSettings = useCallback((tab?: SettingsTab) => {
-    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
@@ -833,11 +934,10 @@ export function App() {
 
   const swipeDisabled =
     !isMobileViewport ||
+    workspace !== 'chat' ||
     Boolean(engine.pendingTrustRequest) ||
     Boolean(pendingDeleteDm) ||
     Boolean(noteEditorPeer) ||
-    amailState.open ||
-    walletState.open ||
     Boolean(zapTarget) ||
     settingsState.open ||
     radarExpanded ||
@@ -876,7 +976,9 @@ export function App() {
   }, [engine.activeView.type])
 
   const handleMobileSelectTab = useCallback((tab: ListTab) => {
-    setAmailState({ open: false, section: 'inbox', composeTo: null })
+    setWorkspace('chat')
+    setAmailState({ section: 'inbox', composeTo: null })
+    setWalletIntent(undefined)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -885,24 +987,22 @@ export function App() {
     setMobileScreen('list')
   }, [])
 
-  const handleMobileTabMap = useCallback(() => {
-    setAmailState({ open: false, section: 'inbox', composeTo: null })
+  const handleMobileSelectMail = useCallback(() => {
+    radioAudio.play('click')
+    handleOpenAmail('inbox')
+  }, [handleOpenAmail])
+
+  const handleMobileSelectWallet = useCallback(() => {
+    radioAudio.play('click')
+    setZapTarget(null)
+    setInspectedPeer(null)
+    setAmailState({ section: 'inbox', composeTo: null })
+    setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
-    setRadarExpanded((open) => !open)
-    radioAudio.play('click')
-  }, [])
-
-  const handleMobileTabSettings = useCallback(() => {
-    setAmailState({ open: false, section: 'inbox', composeTo: null })
-    setRadarExpanded(false)
-    setMobileUserListOpen(false)
-    setRoomInfoOpen(false)
-    setSettingsState((prev) =>
-      prev.open ? { ...prev, open: false } : { open: true, tab: undefined }
-    )
-    radioAudio.play('click')
+    setWalletIntent({ tab: 'overview' })
+    setWorkspace('wallet')
   }, [])
 
   const { pushToast } = engine
@@ -926,10 +1026,6 @@ export function App() {
     }
     if (zapTarget) {
       setZapTarget(null)
-      return true
-    }
-    if (walletState.open) {
-      setWalletState({ open: false, intent: undefined })
       return true
     }
     if (qrShareTarget) {
@@ -964,12 +1060,16 @@ export function App() {
       setRadarExpanded(false)
       return true
     }
-    if (amailState.open) {
-      closeAmail()
-      return true
-    }
     if (settingsState.open) {
       setSettingsState((prev) => ({ ...prev, open: false }))
+      return true
+    }
+    if (workspace === 'wallet') {
+      closeWallet()
+      return true
+    }
+    if (workspace === 'mail') {
+      closeAmail()
       return true
     }
     if (activeCall && callExpanded) {
@@ -1000,7 +1100,6 @@ export function App() {
     noteEditorPeer,
     qrScannerOpen,
     zapTarget,
-    walletState.open,
     qrShareTarget,
     lightboxImage,
     cmdkOpen,
@@ -1010,9 +1109,10 @@ export function App() {
     closeServerHub,
     installModalOpen,
     radarExpanded,
-    amailState.open,
-    closeAmail,
     settingsState.open,
+    workspace,
+    closeWallet,
+    closeAmail,
     activeCall,
     callExpanded,
     mobileUserListOpen,
@@ -1062,7 +1162,7 @@ export function App() {
     Boolean(noteEditorPeer) ||
     qrScannerOpen ||
     Boolean(zapTarget) ||
-    walletState.open ||
+    workspace !== 'chat' ||
     Boolean(qrShareTarget) ||
     Boolean(lightboxImage) ||
     cmdkOpen ||
@@ -1071,7 +1171,6 @@ export function App() {
     serverHubState.open ||
     installModalOpen ||
     radarExpanded ||
-    amailState.open ||
     settingsState.open ||
     Boolean(activeCall && callExpanded) ||
     mobileUserListOpen ||
@@ -1100,7 +1199,9 @@ export function App() {
       const ok = engine.tuneGeohash(resolved?.key ?? channelInput)
       if (ok) {
         radioAudio.play('tune')
-        setAmailState({ open: false, section: 'inbox', composeTo: null })
+        setWorkspace('chat')
+        setAmailState({ section: 'inbox', composeTo: null })
+        setWalletIntent(undefined)
         setListTab('radio')
         setMobileScreen('chat')
         setMobileUserListOpen(false)
@@ -1116,7 +1217,10 @@ export function App() {
     (serverId: string, channelId: string) => {
       engine.servers.selectChannel(serverId, channelId)
       radioAudio.play('tune')
-      setAmailState({ open: false, section: 'inbox', composeTo: null })
+      setWorkspace('chat')
+      setSelectedServerId(serverId)
+      setAmailState({ section: 'inbox', composeTo: null })
+      setWalletIntent(undefined)
       setListTab('servers')
       setMobileScreen('chat')
       setMobileUserListOpen(false)
@@ -1142,6 +1246,8 @@ export function App() {
     (server: ServerSummary) => {
       engine.servers.selectServer(server.id)
       closeServerHub()
+      setWorkspace('chat')
+      setSelectedServerId(server.id)
       setListTab('servers')
       setMobileScreen('chat')
     },
@@ -1155,17 +1261,16 @@ export function App() {
   const handleOpenWallet = useCallback((intent?: WalletInitialIntent) => {
     setZapTarget(null)
     setInspectedPeer(null)
-    setAmailState({ open: false, section: 'inbox', composeTo: null })
+    setAmailState({ section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
-    setWalletState({ open: true, intent })
+    setWalletIntent(intent)
+    setWorkspace('wallet')
   }, [])
 
   const handleOpenZap = useCallback((target: ZapTarget) => {
-    setWalletState({ open: false, intent: undefined })
-    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setZapTarget(target)
   }, [])
 
@@ -1207,7 +1312,8 @@ export function App() {
       }
       if (ok) {
         radioAudio.play(isDm || isServerE2ee ? 'dm' : 'send')
-        setWalletState({ open: false, intent: undefined })
+        setWalletIntent(undefined)
+        setWorkspace('chat')
         setMobileScreen('chat')
       }
       return ok
@@ -1248,10 +1354,9 @@ export function App() {
           )
           return
         }
-        if (amailState.open) {
+        if (workspace === 'mail') {
           void engine.amail.addContact(target.pubkey, target.nickname)
           setAmailState({
-            open: true,
             section: 'compose',
             composeTo: { pubkey: target.pubkey, nickname: target.nickname },
           })
@@ -1262,8 +1367,9 @@ export function App() {
           )
           return
         }
-        setAmailState({ open: false, section: 'inbox', composeTo: null })
-        setWalletState({ open: false, intent: undefined })
+        setWorkspace('chat')
+        setAmailState({ section: 'inbox', composeTo: null })
+        setWalletIntent(undefined)
         setZapTarget(null)
         setRadarExpanded(false)
         setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
@@ -1290,8 +1396,9 @@ export function App() {
         )
         return
       }
-      setAmailState({ open: false, section: 'inbox', composeTo: null })
-      setWalletState({ open: false, intent: undefined })
+      setWorkspace('chat')
+      setAmailState({ section: 'inbox', composeTo: null })
+      setWalletIntent(undefined)
       setZapTarget(null)
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
@@ -1304,7 +1411,7 @@ export function App() {
         }
       })
     },
-    [amailState.open, engine, handleJoinedServer, handleOpenWallet]
+    [workspace, engine, handleJoinedServer, handleOpenWallet]
   )
 
   // Listen on mount + hashchange for `#dm=npub1...(&name=...)` deep links
@@ -1330,7 +1437,9 @@ export function App() {
     const onRadioHash = () => {
       const key = parseRadioChannelHash(window.location.hash)
       if (!key) return
-      setAmailState({ open: false, section: 'inbox', composeTo: null })
+      setWorkspace('chat')
+      setAmailState({ section: 'inbox', composeTo: null })
+      setWalletIntent(undefined)
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setMobileUserListOpen(false)
@@ -1346,6 +1455,7 @@ export function App() {
     setServerSettingsState({ serverId: null, tab: 'overview' })
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
+    setWorkspace('chat')
     engine.tuneGeohash(engine.activeGeohash)
     setListTab('radio')
   }, [engine])
@@ -1354,7 +1464,9 @@ export function App() {
     (pubkey: string, nickname?: string) => {
       engine.openDmThread(pubkey, nickname)
       radioAudio.play('click')
-      setAmailState({ open: false, section: 'inbox', composeTo: null })
+      setWorkspace('chat')
+      setAmailState({ section: 'inbox', composeTo: null })
+      setWalletIntent(undefined)
       setInspectedPeer(null)
       setMobileUserListOpen(false)
       setRoomInfoOpen(false)
@@ -1514,7 +1626,6 @@ export function App() {
   )
 
   const handleExpandRadar = useCallback(() => {
-    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRadarExpanded(true)
     setMobileUserListOpen(false)
@@ -1551,6 +1662,7 @@ export function App() {
     const found = await engine.locateMe()
     if (found) {
       radioAudio.play('tune')
+      setWorkspace('chat')
       setListTab('radio')
       setMobileScreen('chat')
     }
@@ -1634,7 +1746,7 @@ export function App() {
         } else {
           const lines = [
             `# ${activeServer.name} — #${activeChannel.name}`,
-            `Exported ${new Date().toISOString()} (${activeServer.kind === 'nip29' ? 'NIP-29' : activeServer.encrypted ? 'E2EE Virtual Server' : 'Public Virtual Server'})`,
+            `Exported ${new Date().toISOString()} (${activeServer.kind === 'nip29' ? 'Hosted Community' : activeServer.encrypted ? 'Private Encrypted Server' : 'Public Server'})`,
             '',
             ...engine.servers.messages.map((m) => {
               const ts = new Date(m.createdAt * 1000).toISOString()
@@ -1671,10 +1783,17 @@ export function App() {
     [engine, isServer, activeServer, activeChannel]
   )
 
+  const workspaceLoadingFallback = (
+    <div className="ag-workspace-stage ag-workspace-loading" role="status" aria-live="polite">
+      <Loader2 size={20} className="ag-spin" aria-hidden="true" />
+    </div>
+  )
+
   return (
     <ContextMenuProvider>
     <div
       className={`ag-app ag-shell ${panicFlash ? 'ag-panic-active' : ''}`}
+      data-workspace={workspace}
       data-mobile-screen={mobileScreen}
       data-right-drawer={mobileUserListOpen ? 'open' : 'closed'}
     >
@@ -1688,308 +1807,424 @@ export function App() {
           } as CSSProperties
         }
       >
-        {/* Dimmed Interactive Scrim behind Mobile Left Slide-Over Sidebar */}
-        <div
-          className={`ag-drawer-scrim ${mobileScreen === 'list' ? 'active' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
-          onClick={() => setMobileScreen('chat')}
-          aria-hidden="true"
-        />
-
-        {/* Left Pane (Desktop 280px) / Interactive Slide-Over Sidebar Drawer (Mobile <868px) */}
-        <div
-          className={`ag-conv-col ${mobileScreen === 'list' ? 'open' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
-          aria-hidden={
-            isMobileViewport && mobileScreen === 'chat' && !isSwipingLeft ? true : undefined
-          }
-        >
-          <ConversationList
+        {/* Far-Left Desktop Navigation & Discord Server Rail (60px, always visible >= 868px) */}
+        {!isMobileViewport && (
+          <AppRail
             engine={engine}
-            activeTab={listTab}
-            collapsed={sidebarCollapsed}
-            onTabChange={setListTab}
-            onTuneChannel={handleTuneChannel}
-            onOpenDm={handleOpenDm}
-            onCloseDmThread={handleCloseDmThread}
-            onSelectServerChannel={handleSelectServerChannel}
+            workspace={workspace}
+            listTab={listTab}
+            selectedServerId={selectedServerId}
+            mapActive={radarExpanded}
+            settingsActive={settingsState.open}
+            pwa={pwa}
+            onSelectWorkspace={handleSelectWorkspace}
+            onSelectChatTab={handleSelectChatTab}
+            onSelectServer={handleSelectServer}
             onOpenServerHub={handleOpenServerHub}
             onOpenServerSettings={handleOpenServerSettings}
-            onOpenCommandPalette={() => setCmdkOpen(true)}
-            onExpandRadar={handleExpandRadar}
+            onOpenMap={handleExpandRadar}
             onOpenSettings={handleOpenSettings}
-            amailOpen={amailState.open}
-            onOpenAmail={handleOpenAmail}
-            onOpenAmailCompose={handleOpenAmailCompose}
-            onOpenWallet={handleOpenWallet}
-            onOpenZap={handleOpenZap}
-            onLocateMe={() => void handleLocateMe()}
-            onFocusActiveCall={() => {
-              setMobileScreen('chat')
-              setCallExpanded(true)
-            }}
-            onInspectPeer={setInspectedPeer}
-            onEditPeerNote={handleOpenPeerNote}
-            onShowQr={setQrShareTarget}
-            onOpenScanner={handleOpenScanner}
-            onResolvedShareTarget={handleResolvedShareTarget}
-            pwa={pwa}
             onOpenInstall={handleOpenInstall}
             onPlaySound={playSound}
           />
-        </div>
-
-        {/* Main Chat Stage */}
-        <main
-          className={`ag-main ${isDm ? 'dm-mode' : isServerE2ee ? 'server-e2ee-mode' : ''}`}
-        >
-        <ChannelHeader
-          engine={engine}
-          sidebarCollapsed={sidebarCollapsed}
-          userListOpen={isMobileViewport ? mobileUserListOpen : !userListCollapsed}
-          roomInfoOpen={roomInfoOpen}
-          searchOpen={searchOpen}
-          hasOtherUnread={totalUnreadBadge > 0}
-          onMobileBack={handleMobileBack}
-          onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
-          onToggleUserList={handleToggleUserList}
-          onOpenRoomInfo={handleOpenRoomInfo}
-          onOpenTrustedSettings={() => handleOpenSettings('privacy')}
-          onToggleSearch={() => {
-            setSearchOpen((v) => {
-              if (v) setSearchQuery('')
-              return !v
-            })
-          }}
-          onExpandRadar={handleExpandRadar}
-          onFocusActiveCall={() => setCallExpanded(true)}
-          onOpenZap={handleOpenZap}
-        />
-
-        {/* Compact PWA Offline & Update-Ready Status Strips */}
-        {pwa.isOffline && (
-          <div className="ag-pwa-banner offline" role="status" aria-live="polite">
-            <div className="ag-pwa-banner-left">
-              <WifiOff size={14} />
-              <span>Offline · Viewing cached messages</span>
-            </div>
-          </div>
         )}
 
-        {pwa.updateAvailable && (
-          <div className="ag-pwa-banner update" role="status" aria-live="polite">
-            <div className="ag-pwa-banner-left">
-              <RefreshCw size={14} />
-              <span>New version ready</span>
-            </div>
-            <div className="ag-pwa-banner-actions">
-              <button
-                type="button"
-                className="ag-pwa-reload-btn"
-                onClick={() => void pwa.applyUpdate()}
-              >
-                Reload
-              </button>
-              <button
-                type="button"
-                className="ag-pwa-dismiss-btn"
-                onClick={pwa.dismissUpdate}
-                title="Dismiss update notice"
-                aria-label="Dismiss update notice"
-              >
-                <X size={14} />
-              </button>
-            </div>
+        {workspace === 'mail' ? (
+          <div className="ag-workspace-stage">
+            <Suspense fallback={workspaceLoadingFallback}>
+              <AmailView
+                open={true}
+                embedded={true}
+                inShell={isMobileViewport}
+                onClose={closeAmail}
+                engine={engine}
+                initialSection={amailState.section}
+                initialComposeTo={amailState.composeTo}
+                onOpenScanner={handleOpenScanner}
+                onPlaySound={playSound}
+              />
+            </Suspense>
           </div>
-        )}
+        ) : workspace === 'wallet' ? (
+          <div className="ag-workspace-stage">
+            <Suspense fallback={workspaceLoadingFallback}>
+              <WalletModal
+                open={true}
+                embedded={true}
+                onClose={closeWallet}
+                wallet={engine.wallet}
+                zaps={engine.zaps}
+                initialIntent={walletIntent}
+                onOpenScanner={handleOpenScanner}
+                onSendToChat={handleSendCashuToChat}
+                activeChatLabel={activeChatLabel}
+              />
+            </Suspense>
+          </div>
+        ) : (
+          <>
+            {/* Dimmed Interactive Scrim behind Mobile Left Slide-Over Sidebar */}
+            <div
+              className={`ag-drawer-scrim ${mobileScreen === 'list' ? 'active' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+              onClick={() => setMobileScreen('chat')}
+              aria-hidden="true"
+            />
 
-        {/* Active P2P Voice & Video Call Stage (+ Post-Call Transcript Save Prompt) */}
-        <CallStage
-          calls={engine.calls}
-          engine={engine}
-          expanded={callExpanded}
-          compactFloating={callCompactFloating}
-          onToggleExpand={() => setCallExpanded((v) => !v)}
-          onInspectPeer={setInspectedPeer}
-          onOpenDm={handleOpenDm}
-          onReturnToCall={handleReturnToActiveCall}
-          onPlaySound={playSound}
-        />
-
-        {/* Live Geo Radio Group Call Join Banner (shown when peers are in this room's call) */}
-        {showGeoCallJoinBanner && (
-          <div className="ag-geo-call-banner" role="region" aria-label="Active room call">
-            <div className="ag-geo-call-banner-left">
-              <span className="ag-live-dot" aria-hidden="true" />
-              <span className="ag-geo-call-banner-count tabular">
-                {activeGeoCallCount} in call
-              </span>
-              <span className="ag-geo-call-banner-peers truncate">
-                {activeGeoCallPresence
-                  .slice(0, 2)
-                  .map((p) => p.nickname || p.displayHandle)
-                  .join(', ')}
-                {activeGeoCallPresence.length > 2
-                  ? ` +${activeGeoCallPresence.length - 2}`
-                  : ''}
-              </span>
+            {/* Left Pane (Desktop 256px) / Interactive Slide-Over Sidebar Drawer (Mobile <868px) */}
+            <div
+              className={`ag-conv-col ${mobileScreen === 'list' ? 'open' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+              aria-hidden={
+                isMobileViewport && mobileScreen === 'chat' && !isSwipingLeft ? true : undefined
+              }
+            >
+              <ConversationList
+                engine={engine}
+                activeTab={listTab}
+                collapsed={sidebarCollapsed}
+                isMobileViewport={isMobileViewport}
+                selectedServerId={selectedServerId}
+                onSelectServer={handleSelectServer}
+                onTabChange={setListTab}
+                onTuneChannel={handleTuneChannel}
+                onOpenDm={handleOpenDm}
+                onCloseDmThread={handleCloseDmThread}
+                onSelectServerChannel={handleSelectServerChannel}
+                onOpenServerHub={handleOpenServerHub}
+                onOpenServerSettings={handleOpenServerSettings}
+                onOpenCommandPalette={() => setCmdkOpen(true)}
+                onExpandRadar={handleExpandRadar}
+                onOpenSettings={handleOpenSettings}
+                amailOpen={false}
+                onOpenAmail={handleOpenAmail}
+                onOpenAmailCompose={handleOpenAmailCompose}
+                onOpenWallet={handleOpenWallet}
+                onOpenZap={handleOpenZap}
+                onLocateMe={() => void handleLocateMe()}
+                onFocusActiveCall={() => {
+                  setMobileScreen('chat')
+                  setCallExpanded(true)
+                }}
+                onInspectPeer={setInspectedPeer}
+                onEditPeerNote={handleOpenPeerNote}
+                onShowQr={setQrShareTarget}
+                onOpenScanner={handleOpenScanner}
+                onResolvedShareTarget={handleResolvedShareTarget}
+                pwa={pwa}
+                onOpenInstall={handleOpenInstall}
+                onPlaySound={playSound}
+              />
             </div>
-            <div className="ag-geo-call-banner-actions">
-              <button
-                type="button"
-                className="ag-geo-call-join-btn primary"
-                disabled={isActiveGeoCallFull}
-                onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'audio')}
-                title={
-                  isActiveGeoCallFull
-                    ? `Call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
-                    : `Join ${formatRadioChannelLabel(engine.activeGeohash)} voice call`
-                }
-              >
-                <Phone size={13} />
-                <span>{isActiveGeoCallFull ? 'Full 6/6' : 'Join Voice'}</span>
-              </button>
-              {!isActiveGeoCallFull && (
-                <button
-                  type="button"
-                  className="ag-geo-call-join-btn"
-                  onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'video')}
-                  title={`Join ${formatRadioChannelLabel(engine.activeGeohash)} video call`}
-                  aria-label={`Join ${formatRadioChannelLabel(engine.activeGeohash)} video call`}
-                >
-                  <Video size={13} />
-                  <span>Video</span>
-                </button>
+
+            {/* Main Chat Stage */}
+            <main
+              className={`ag-main ${isDm ? 'dm-mode' : isServerE2ee ? 'server-e2ee-mode' : ''}`}
+            >
+              <ChannelHeader
+                engine={engine}
+                sidebarCollapsed={sidebarCollapsed}
+                userListOpen={isMobileViewport ? mobileUserListOpen : !userListCollapsed}
+                roomInfoOpen={roomInfoOpen}
+                searchOpen={searchOpen}
+                hasOtherUnread={totalUnreadBadge > 0}
+                onMobileBack={handleMobileBack}
+                onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+                onToggleUserList={handleToggleUserList}
+                onOpenRoomInfo={handleOpenRoomInfo}
+                onOpenTrustedSettings={() => handleOpenSettings('privacy')}
+                onToggleSearch={() => {
+                  setSearchOpen((v) => {
+                    if (v) setSearchQuery('')
+                    return !v
+                  })
+                }}
+                onExpandRadar={handleExpandRadar}
+                onFocusActiveCall={() => setCallExpanded(true)}
+                onOpenZap={handleOpenZap}
+              />
+
+              {/* Compact PWA Offline & Update-Ready Status Strips */}
+              {pwa.isOffline && (
+                <div className="ag-pwa-banner offline" role="status" aria-live="polite">
+                  <div className="ag-pwa-banner-left">
+                    <WifiOff size={14} />
+                    <span>Offline · Viewing cached messages</span>
+                  </div>
+                </div>
               )}
+
+              {pwa.updateAvailable && (
+                <div className="ag-pwa-banner update" role="status" aria-live="polite">
+                  <div className="ag-pwa-banner-left">
+                    <RefreshCw size={14} />
+                    <span>New version ready</span>
+                  </div>
+                  <div className="ag-pwa-banner-actions">
+                    <button
+                      type="button"
+                      className="ag-pwa-reload-btn"
+                      onClick={() => void pwa.applyUpdate()}
+                    >
+                      Reload
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-pwa-dismiss-btn"
+                      onClick={pwa.dismissUpdate}
+                      title="Dismiss update notice"
+                      aria-label="Dismiss update notice"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Active P2P Voice & Video Call Stage (+ Post-Call Transcript Save Prompt) */}
+              {(activeCall || engine.transcription.endedCallTranscript) && (
+                <Suspense fallback={null}>
+                  <CallStage
+                    calls={engine.calls}
+                    engine={engine}
+                    expanded={callExpanded}
+                    compactFloating={callCompactFloating}
+                    onToggleExpand={() => setCallExpanded((v) => !v)}
+                    onInspectPeer={setInspectedPeer}
+                    onOpenDm={handleOpenDm}
+                    onReturnToCall={handleReturnToActiveCall}
+                    onPlaySound={playSound}
+                  />
+                </Suspense>
+              )}
+
+              {/* Live Geo Radio Group Call Join Banner (shown when peers are in this room's call) */}
+              {showGeoCallJoinBanner && (
+                <div className="ag-geo-call-banner" role="region" aria-label="Active room call">
+                  <div className="ag-geo-call-banner-left">
+                    <span className="ag-live-dot" aria-hidden="true" />
+                    <span className="ag-geo-call-banner-count tabular">
+                      {activeGeoCallCount} in call
+                    </span>
+                    <span className="ag-geo-call-banner-peers truncate">
+                      {activeGeoCallPresence
+                        .slice(0, 2)
+                        .map((p) => p.nickname || p.displayHandle)
+                        .join(', ')}
+                      {activeGeoCallPresence.length > 2
+                        ? ` +${activeGeoCallPresence.length - 2}`
+                        : ''}
+                    </span>
+                  </div>
+                  <div className="ag-geo-call-banner-actions">
+                    <button
+                      type="button"
+                      className="ag-geo-call-join-btn primary"
+                      disabled={isActiveGeoCallFull}
+                      onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'audio')}
+                      title={
+                        isActiveGeoCallFull
+                          ? `Call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                          : `Join ${formatRadioChannelLabel(engine.activeGeohash)} voice call`
+                      }
+                    >
+                      <Phone size={13} />
+                      <span>{isActiveGeoCallFull ? 'Full 6/6' : 'Join Voice'}</span>
+                    </button>
+                    {!isActiveGeoCallFull && (
+                      <button
+                        type="button"
+                        className="ag-geo-call-join-btn"
+                        onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'video')}
+                        title={`Join ${formatRadioChannelLabel(engine.activeGeohash)} video call`}
+                        aria-label={`Join ${formatRadioChannelLabel(engine.activeGeohash)} video call`}
+                      >
+                        <Video size={13} />
+                        <span>Video</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <SearchBar
+                open={searchOpen}
+                query={searchQuery}
+                matchCount={searchMatchIds.length}
+                activeMatchIndex={searchMatchIdx}
+                onQueryChange={setSearchQuery}
+                onPrev={() =>
+                  setSearchMatchIdx((i) =>
+                    searchMatchIds.length
+                      ? (i - 1 + searchMatchIds.length) % searchMatchIds.length
+                      : 0
+                  )
+                }
+                onNext={() =>
+                  setSearchMatchIdx((i) =>
+                    searchMatchIds.length ? (i + 1) % searchMatchIds.length : 0
+                  )
+                }
+                onClose={() => {
+                  setSearchOpen(false)
+                  setSearchQuery('')
+                }}
+              />
+
+              <MessageStream
+                engine={engine}
+                searchQuery={searchOpen ? searchQuery : ''}
+                activeSearchMessageId={activeSearchMessageId}
+                onReply={handleReply}
+                onReact={handleReact}
+                onReplyServer={handleReplyServer}
+                onReactServer={handleReactServer}
+                onInspectPeer={setInspectedPeer}
+                onStartDm={handleOpenDm}
+                onMentionPeer={handleMentionPeer}
+                onTuneChannel={handleTuneChannel}
+                onClickMention={handleClickInlineMention}
+                onLocateMe={() => void handleLocateMe()}
+                onExpandRadar={handleExpandRadar}
+                onOpenServerSettings={handleOpenServerSettings}
+                onOpenLightbox={setLightboxImage}
+                onOpenZap={handleOpenZap}
+                onClaimCashuToken={handleClaimCashuToken}
+              />
+
+              <Composer
+                engine={engine}
+                externalDraftToken={externalDraftToken}
+                onSent={(isEncrypted) => radioAudio.play(isEncrypted ? 'dm' : 'send')}
+              />
+            </main>
+
+            {/* Dimmed Interactive Scrim behind Mobile Right Slide-Out User List Tray */}
+            <div
+              className={`ag-right-drawer-scrim ${mobileUserListOpen ? 'active' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
+              onClick={() => setMobileUserListOpen(false)}
+              aria-hidden="true"
+            />
+
+            {/* Right Pane (Desktop User List) / Interactive Swipe-Left Slide-Out Tray (Mobile <868px) */}
+            <div
+              className={`ag-users-col ${mobileUserListOpen ? 'open' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
+              aria-hidden={
+                isMobileViewport && !mobileUserListOpen && !isSwipingRight ? true : undefined
+              }
+            >
+              <UserListPane
+                engine={engine}
+                collapsed={userListCollapsed}
+                onCloseMobile={() => setMobileUserListOpen(false)}
+                onInspectPeer={setInspectedPeer}
+                onStartDm={handleOpenDm}
+                onMentionPeer={handleMentionPeer}
+                onEditPeerNote={handleOpenPeerNote}
+                onOpenZap={handleOpenZap}
+                onOpenAmailCompose={({ pubkey, nickname }) =>
+                  handleOpenAmailCompose(pubkey, nickname)
+                }
+                onPlaySound={playSound}
+              />
             </div>
-          </div>
+          </>
         )}
 
-        <SearchBar
-          open={searchOpen}
-          query={searchQuery}
-          matchCount={searchMatchIds.length}
-          activeMatchIndex={searchMatchIdx}
-          onQueryChange={setSearchQuery}
-          onPrev={() =>
-            setSearchMatchIdx((i) =>
-              searchMatchIds.length ? (i - 1 + searchMatchIds.length) % searchMatchIds.length : 0
-            )
-          }
-          onNext={() =>
-            setSearchMatchIdx((i) =>
-              searchMatchIds.length ? (i + 1) % searchMatchIds.length : 0
-            )
-          }
-          onClose={() => {
-            setSearchOpen(false)
-            setSearchQuery('')
-          }}
-        />
-
-        <MessageStream
-          engine={engine}
-          searchQuery={searchOpen ? searchQuery : ''}
-          activeSearchMessageId={activeSearchMessageId}
-          onReply={handleReply}
-          onReact={handleReact}
-          onReplyServer={handleReplyServer}
-          onReactServer={handleReactServer}
-          onInspectPeer={setInspectedPeer}
-          onStartDm={handleOpenDm}
-          onMentionPeer={handleMentionPeer}
-          onTuneChannel={handleTuneChannel}
-          onClickMention={handleClickInlineMention}
-          onLocateMe={() => void handleLocateMe()}
-          onExpandRadar={handleExpandRadar}
-          onOpenServerSettings={handleOpenServerSettings}
-          onOpenLightbox={setLightboxImage}
-          onOpenZap={handleOpenZap}
-          onClaimCashuToken={handleClaimCashuToken}
-        />
-
-        <Composer
-          engine={engine}
-          externalDraftToken={externalDraftToken}
-          onSent={(isEncrypted) => radioAudio.play(isEncrypted ? 'dm' : 'send')}
-        />
-        </main>
-
-        {/* Dimmed Interactive Scrim behind Mobile Right Slide-Out User List Tray */}
-        <div
-          className={`ag-right-drawer-scrim ${mobileUserListOpen ? 'active' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
-          onClick={() => setMobileUserListOpen(false)}
-          aria-hidden="true"
-        />
-
-        {/* Right Pane (Desktop User List) / Interactive Swipe-Left Slide-Out Tray (Mobile <868px) */}
-        <div
-          className={`ag-users-col ${mobileUserListOpen ? 'open' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
-          aria-hidden={
-            isMobileViewport && !mobileUserListOpen && !isSwipingRight ? true : undefined
-          }
-        >
-          <UserListPane
-            engine={engine}
-            collapsed={userListCollapsed}
-            onCloseMobile={() => setMobileUserListOpen(false)}
-            onInspectPeer={setInspectedPeer}
-            onStartDm={handleOpenDm}
-            onMentionPeer={handleMentionPeer}
-            onEditPeerNote={handleOpenPeerNote}
-            onOpenZap={handleOpenZap}
-            onOpenAmailCompose={({ pubkey, nickname }) => handleOpenAmailCompose(pubkey, nickname)}
-            onPlaySound={playSound}
-          />
-        </div>
-
-        {/* Clean Chat / Room / Server Info Slide-Over Sheet (In-Shell Drawer on Mobile) */}
-        <RoomInfoSheet
-          open={roomInfoOpen}
-          swipeProgress={undefined}
-          isSwiping={false}
-          inShell={isMobileViewport}
-          engine={engine}
-          onClose={() => setRoomInfoOpen(false)}
-          onInspectPeer={setInspectedPeer}
-          onStartDm={handleOpenDm}
-          onCloseDmThread={handleCloseDmThread}
-          onTuneChannel={handleTuneChannel}
-          onExpandRadar={handleExpandRadar}
-          onOpenServerSettings={handleOpenServerSettings}
-          onExportTranscript={handleExport}
-          onLeftServer={handleLeftServer}
-          onShowQr={setQrShareTarget}
-          onOpenScanner={handleOpenScanner}
-          onOpenZap={handleOpenZap}
-          onPlaySound={playSound}
-        />
-
-        {/* Mobile In-Shell Map, Amail & Settings Overlays (Sit above Always-Present Bottom Tab Bar) */}
-        {isMobileViewport && (
-          <ExpandedRadarModal
-            open={radarExpanded}
-            inShell={true}
-            engine={engine}
-            onClose={() => setRadarExpanded(false)}
-            onTuneChannel={handleTuneChannel}
-            onPlaySound={playSound}
-          />
+        {/* Keep floating active call pill accessible when viewing Agmail or Agwallet */}
+        {workspace !== 'chat' && (activeCall || engine.transcription.endedCallTranscript) && (
+          <Suspense fallback={null}>
+            <CallStage
+              calls={engine.calls}
+              engine={engine}
+              expanded={callExpanded}
+              compactFloating={!callExpanded}
+              onToggleExpand={() => setCallExpanded((v) => !v)}
+              onInspectPeer={setInspectedPeer}
+              onOpenDm={handleOpenDm}
+              onReturnToCall={handleReturnToActiveCall}
+              onPlaySound={playSound}
+            />
+          </Suspense>
         )}
-        {isMobileViewport && (
-          <AmailView
-            open={amailState.open}
-            inShell={true}
-            onClose={closeAmail}
-            engine={engine}
-            initialSection={amailState.section}
-            initialComposeTo={amailState.composeTo}
-            onOpenScanner={handleOpenScanner}
-            onPlaySound={playSound}
-          />
+
+        {/* Clean Chat / Room / Server Info Slide-Over Sheet (Lazy loaded on open) */}
+        {roomInfoOpen && (
+          <Suspense fallback={null}>
+            <RoomInfoSheet
+              open={roomInfoOpen}
+              swipeProgress={undefined}
+              isSwiping={false}
+              inShell={isMobileViewport}
+              engine={engine}
+              onClose={() => setRoomInfoOpen(false)}
+              onInspectPeer={setInspectedPeer}
+              onStartDm={handleOpenDm}
+              onCloseDmThread={handleCloseDmThread}
+              onTuneChannel={handleTuneChannel}
+              onExpandRadar={handleExpandRadar}
+              onOpenServerSettings={handleOpenServerSettings}
+              onExportTranscript={handleExport}
+              onLeftServer={handleLeftServer}
+              onShowQr={setQrShareTarget}
+              onOpenScanner={handleOpenScanner}
+              onOpenZap={handleOpenZap}
+              onPlaySound={playSound}
+            />
+          </Suspense>
         )}
-        {isMobileViewport && (
+
+        {/* Mobile In-Shell Map & Settings Overlays (Sit above Always-Present 5-Tab Bottom Bar) */}
+        {isMobileViewport && radarExpanded && (
+          <Suspense fallback={null}>
+            <ExpandedRadarModal
+              open={radarExpanded}
+              inShell={true}
+              engine={engine}
+              onClose={() => setRadarExpanded(false)}
+              onTuneChannel={handleTuneChannel}
+              onPlaySound={playSound}
+            />
+          </Suspense>
+        )}
+        {isMobileViewport && settingsState.open && (
+          <Suspense fallback={null}>
+            <SettingsModal
+              open={settingsState.open}
+              inShell={true}
+              engine={engine}
+              pwa={pwa}
+              initialTab={settingsState.tab}
+              onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
+              onOpenInstall={handleOpenInstall}
+              onOpenWallet={() => handleOpenWallet({ tab: 'overview' })}
+              onShowQr={setQrShareTarget}
+              onOpenScanner={handleOpenScanner}
+              onPlaySound={playSound}
+            />
+          </Suspense>
+        )}
+      </div>
+
+      {/* Always-Present 5-Tab Native Mobile Bottom Tab Bar (< 868px, Flex Flow) */}
+      <MobileTabBar
+        workspace={workspace}
+        activeTab={mobileNavActiveTab}
+        radioUnread={engine.totalGeoUnread}
+        radioMentions={engine.totalGeoMentions}
+        dmUnread={engine.totalDmUnread}
+        serverUnread={engine.servers.totalServerUnread}
+        serverMentions={engine.servers.totalServerMentions}
+        mailUnread={engine.amail.unreadInboxCount}
+        onSelectTab={handleMobileSelectTab}
+        onSelectMail={handleMobileSelectMail}
+        onSelectWallet={handleMobileSelectWallet}
+      />
+
+      {/* Desktop Unified Calm Settings Modal (Lazy loaded on open) */}
+      {!isMobileViewport && settingsState.open && (
+        <Suspense fallback={null}>
           <SettingsModal
             open={settingsState.open}
-            inShell={true}
+            inShell={false}
             engine={engine}
             pwa={pwa}
             initialTab={settingsState.tab}
@@ -2000,150 +2235,138 @@ export function App() {
             onOpenScanner={handleOpenScanner}
             onPlaySound={playSound}
           />
-        )}
-      </div>
-
-      {/* Always-Present Native Mobile Bottom Tab Bar (< 868px, Flex Flow) */}
-      <MobileTabBar
-        activeTab={mobileNavActiveTab}
-        mapActive={radarExpanded}
-        settingsActive={settingsState.open}
-        radioUnread={engine.totalGeoUnread}
-        radioMentions={engine.totalGeoMentions}
-        dmUnread={engine.totalDmUnread}
-        serverUnread={engine.servers.totalServerUnread}
-        serverMentions={engine.servers.totalServerMentions}
-        onSelectTab={handleMobileSelectTab}
-        onOpenMap={handleMobileTabMap}
-        onOpenSettings={handleMobileTabSettings}
-      />
-
-      {/* Desktop Full-Pane Gmail-Style Amail Client */}
-      {!isMobileViewport && (
-        <AmailView
-          open={amailState.open}
-          inShell={false}
-          onClose={closeAmail}
-          engine={engine}
-          initialSection={amailState.section}
-          initialComposeTo={amailState.composeTo}
-          onOpenScanner={handleOpenScanner}
-          onPlaySound={playSound}
-        />
-      )}
-
-      {/* Desktop Unified Calm Settings Modal (Profile · Privacy & Trust · Appearance · Calls · Network) */}
-      {!isMobileViewport && (
-        <SettingsModal
-          open={settingsState.open}
-          inShell={false}
-          engine={engine}
-          pwa={pwa}
-          initialTab={settingsState.tab}
-          onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
-          onOpenInstall={handleOpenInstall}
-          onOpenWallet={() => handleOpenWallet({ tab: 'overview' })}
-          onShowQr={setQrShareTarget}
-          onOpenScanner={handleOpenScanner}
-          onPlaySound={playSound}
-        />
+        </Suspense>
       )}
 
       {/* Peer Profile & Moderation Modal */}
-      <PeerInspectorModal
-        peer={inspectedPeer}
-        engine={engine}
-        onClose={() => setInspectedPeer(null)}
-        onStartDm={handleOpenDm}
-        onMentionPeer={handleMentionPeer}
-        onOpenZap={handleOpenZap}
-      />
+      {inspectedPeer && (
+        <Suspense fallback={null}>
+          <PeerInspectorModal
+            peer={inspectedPeer}
+            engine={engine}
+            onClose={() => setInspectedPeer(null)}
+            onStartDm={handleOpenDm}
+            onMentionPeer={handleMentionPeer}
+            onOpenZap={handleOpenZap}
+          />
+        </Suspense>
+      )}
 
       {/* Desktop Full-Screen Expandable Geohash Map Modal */}
-      {!isMobileViewport && (
-        <ExpandedRadarModal
-          open={radarExpanded}
-          inShell={false}
-          engine={engine}
-          onClose={() => setRadarExpanded(false)}
-          onTuneChannel={handleTuneChannel}
-          onPlaySound={playSound}
-        />
+      {!isMobileViewport && radarExpanded && (
+        <Suspense fallback={null}>
+          <ExpandedRadarModal
+            open={radarExpanded}
+            inShell={false}
+            engine={engine}
+            onClose={() => setRadarExpanded(false)}
+            onTuneChannel={handleTuneChannel}
+            onPlaySound={playSound}
+          />
+        </Suspense>
       )}
 
       {/* PWA Install Guide / Native Install Modal */}
-      <PwaInstallModal
-        open={installModalOpen}
-        pwa={pwa}
-        onClose={() => setInstallModalOpen(false)}
-        onPlaySound={playSound}
-      />
+      {installModalOpen && (
+        <Suspense fallback={null}>
+          <PwaInstallModal
+            open={installModalOpen}
+            pwa={pwa}
+            onClose={() => setInstallModalOpen(false)}
+            onPlaySound={playSound}
+          />
+        </Suspense>
+      )}
 
       {/* Create / Join / Explore Servers Hub Modal */}
-      <ServerHubModal
-        open={serverHubState.open}
-        initialTab={serverHubState.tab}
-        servers={engine.servers}
-        onClose={closeServerHub}
-        onJoinedServer={handleJoinedServer}
-        onShowQr={setQrShareTarget}
-        onOpenScanner={handleOpenScanner}
-        onPlaySound={playSound}
-      />
+      {serverHubState.open && (
+        <Suspense fallback={null}>
+          <ServerHubModal
+            open={serverHubState.open}
+            initialTab={serverHubState.tab}
+            servers={engine.servers}
+            onClose={closeServerHub}
+            onJoinedServer={handleJoinedServer}
+            onShowQr={setQrShareTarget}
+            onOpenScanner={handleOpenScanner}
+            onPlaySound={playSound}
+          />
+        </Suspense>
+      )}
 
       {/* Server Settings, Invite & Moderation Modal */}
-      <ServerSettingsModal
-        server={settingsServer}
-        initialTab={serverSettingsState.tab}
-        engine={engine}
-        servers={engine.servers}
-        onClose={() => setServerSettingsState({ serverId: null, tab: 'overview' })}
-        onLeftServer={handleLeftServer}
-        onShowQr={setQrShareTarget}
-        onOpenScanner={handleOpenScanner}
-        onPlaySound={playSound}
-      />
+      {settingsServer && (
+        <Suspense fallback={null}>
+          <ServerSettingsModal
+            server={settingsServer}
+            initialTab={serverSettingsState.tab}
+            engine={engine}
+            servers={engine.servers}
+            onClose={() => setServerSettingsState({ serverId: null, tab: 'overview' })}
+            onLeftServer={handleLeftServer}
+            onShowQr={setQrShareTarget}
+            onOpenScanner={handleOpenScanner}
+            onPlaySound={playSound}
+          />
+        </Suspense>
+      )}
 
       {/* Quick Switcher & Command Palette (Cmd+K) */}
-      <CommandPalette
-        open={cmdkOpen}
-        engine={engine}
-        onClose={() => setCmdkOpen(false)}
-        onTuneChannel={handleTuneChannel}
-        onOpenDm={handleOpenDm}
-        onSelectServerChannel={handleSelectServerChannel}
-        onOpenServerHub={handleOpenServerHub}
-        onExpandRadar={handleExpandRadar}
-        onLocateMe={() => void handleLocateMe()}
-        onOpenRoomInfo={handleOpenRoomInfo}
-        onOpenSettings={handleOpenSettings}
-        onOpenAmail={handleOpenAmail}
-        onOpenWallet={handleOpenWallet}
-        onToggleSound={handleToggleSound}
-        onRunCommand={handleRunCommand}
-        onExport={handleExport}
-        onShowQr={setQrShareTarget}
-        onOpenScanner={handleOpenScanner}
-        onResolvedShareTarget={handleResolvedShareTarget}
-        pwa={pwa}
-        onOpenInstall={handleOpenInstall}
-      />
+      {cmdkOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette
+            open={cmdkOpen}
+            engine={engine}
+            onClose={() => setCmdkOpen(false)}
+            onTuneChannel={handleTuneChannel}
+            onOpenDm={handleOpenDm}
+            onSelectServerChannel={handleSelectServerChannel}
+            onOpenServerHub={handleOpenServerHub}
+            onExpandRadar={handleExpandRadar}
+            onLocateMe={() => void handleLocateMe()}
+            onOpenRoomInfo={handleOpenRoomInfo}
+            onOpenSettings={handleOpenSettings}
+            onOpenAmail={handleOpenAmail}
+            onOpenWallet={handleOpenWallet}
+            onToggleSound={handleToggleSound}
+            onRunCommand={handleRunCommand}
+            onExport={handleExport}
+            onShowQr={setQrShareTarget}
+            onOpenScanner={handleOpenScanner}
+            onResolvedShareTarget={handleResolvedShareTarget}
+            pwa={pwa}
+            onOpenInstall={handleOpenInstall}
+          />
+        </Suspense>
+      )}
 
       {/* Fullscreen Image Lightbox Viewer */}
-      <ImageLightboxModal
-        payload={lightboxImage}
-        onClose={() => setLightboxImage(null)}
-      />
+      {lightboxImage && (
+        <Suspense fallback={null}>
+          <ImageLightboxModal
+            payload={lightboxImage}
+            onClose={() => setLightboxImage(null)}
+          />
+        </Suspense>
+      )}
 
       {/* Shareable QR Code Modal (DMs & Community Invites) */}
-      <QrShareModal target={qrShareTarget} onClose={() => setQrShareTarget(null)} />
+      {qrShareTarget && (
+        <Suspense fallback={null}>
+          <QrShareModal target={qrShareTarget} onClose={() => setQrShareTarget(null)} />
+        </Suspense>
+      )}
 
       {/* Camera / Image QR Code Scanner Modal (DMs & Community Invites) */}
-      <QrScannerModal
-        open={qrScannerOpen}
-        onClose={() => setQrScannerOpen(false)}
-        onResolved={handleResolvedShareTarget}
-      />
+      {qrScannerOpen && (
+        <Suspense fallback={null}>
+          <QrScannerModal
+            open={qrScannerOpen}
+            onClose={() => setQrScannerOpen(false)}
+            onResolved={handleResolvedShareTarget}
+          />
+        </Suspense>
+      )}
 
       {/* Incoming Encrypted P2P Call Offer Takeover / Card */}
       {engine.calls.incomingCall && (
@@ -2157,6 +2380,7 @@ export function App() {
           onAcceptAudio={() => {
             const offer = engine.calls.incomingCall
             if (offer) {
+              setWorkspace('chat')
               engine.openDmThread(offer.callerPubkey, offer.callerNickname)
               setListTab('dms')
               setMobileScreen('chat')
@@ -2166,6 +2390,7 @@ export function App() {
           onAcceptVideo={() => {
             const offer = engine.calls.incomingCall
             if (offer) {
+              setWorkspace('chat')
               engine.openDmThread(offer.callerPubkey, offer.callerNickname)
               setListTab('dms')
               setMobileScreen('chat')
@@ -2179,26 +2404,18 @@ export function App() {
         />
       )}
 
-      {/* Built-In Multi-Mint Cashu Ecash Wallet & Boltz On-Chain Swap Modal */}
-      <WalletModal
-        open={walletState.open}
-        onClose={() => setWalletState({ open: false, intent: undefined })}
-        wallet={engine.wallet}
-        zaps={engine.zaps}
-        initialIntent={walletState.intent}
-        onOpenScanner={handleOpenScanner}
-        onSendToChat={handleSendCashuToChat}
-        activeChatLabel={activeChatLabel}
-      />
-
-      {/* NIP-57 / Nymchat Lightning Zap Modal */}
-      <ZapModal
-        target={zapTarget}
-        onClose={() => setZapTarget(null)}
-        wallet={engine.wallet}
-        zaps={engine.zaps}
-        onOpenWallet={handleOpenWallet}
-      />
+      {/* Lightning Zap Modal */}
+      {zapTarget && (
+        <Suspense fallback={null}>
+          <ZapModal
+            target={zapTarget}
+            onClose={() => setZapTarget(null)}
+            wallet={engine.wallet}
+            zaps={engine.zaps}
+            onOpenWallet={handleOpenWallet}
+          />
+        </Suspense>
+      )}
 
       {/* Global Trust Peer Security Warning Confirmation Dialog */}
       <TrustConfirmModal

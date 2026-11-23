@@ -1,25 +1,20 @@
 /* ==========================================================================
-   Agnostr Discord-like Servers UI:
-   Far-Left Server Rail, Server Sidebar, Hub & Settings Modals, Info Panel
+   Agnostr Unified App Rail, Discord-Native Server Sidebar & Server Modals
    Theme-adaptive via tokens.css across phosphor | amber | obsidian | daylight
    ========================================================================== */
 
-:root {
-  --rail-w: 58px;
-}
-
 /* --------------------------------------------------------------------------
-   Far-Left Server Rail (58px Desktop/Tablet Dock; Horizontal Strip on Mobile)
+   Far-Left Unified App & Discord Server Rail (Desktop >= 868px)
    -------------------------------------------------------------------------- */
-.ag-server-rail {
-  width: var(--rail-w);
-  flex: 0 0 var(--rail-w);
+.ag-app-rail {
+  width: var(--rail-w, 60px);
+  flex: 0 0 var(--rail-w, 60px);
   height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.45rem;
-  padding: calc(0.6rem + env(safe-area-inset-top, 0px)) 0 calc(0.65rem + env(safe-area-inset-bottom, 0px));
+  gap: 8px;
+  padding: calc(10px + env(safe-area-inset-top, 0px)) 0 max(10px, env(safe-area-inset-bottom, 0px));
   background-color: var(--bg-canvas);
   border-right: 1px solid var(--border-subtle);
   z-index: 22;
@@ -30,16 +25,17 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.42rem;
+  gap: 8px;
+  width: 100%;
   flex-shrink: 0;
 }
 
 .ag-rail-divider {
-  width: 26px;
+  width: 24px;
   height: 1px;
-  background-color: var(--border-default);
+  background-color: var(--border-subtle);
   flex-shrink: 0;
-  margin: 0.1rem 0;
+  margin: 2px 0;
 }
 
 .ag-rail-servers {
@@ -49,12 +45,12 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.44rem;
+  gap: 8px;
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-width: none;
   -ms-overflow-style: none;
-  padding: 0.1rem 0 0.4rem;
+  padding: 2px 0 6px;
 }
 
 .ag-rail-servers::-webkit-scrollbar {
@@ -70,7 +66,7 @@
   flex-shrink: 0;
 }
 
-.ag-rail-item {
+.ag-rail-tile {
   position: relative;
   width: 40px;
   height: 40px;
@@ -79,31 +75,46 @@
   align-items: center;
   justify-content: center;
   color: var(--text-secondary);
-  background-color: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
   transition:
     border-radius var(--dur-med) var(--ease-spring),
     background-color var(--dur-fast) ease,
-    border-color var(--dur-fast) ease,
     color var(--dur-fast) ease,
     box-shadow var(--dur-fast) ease,
     transform 80ms ease;
 }
 
-.ag-rail-item:hover {
+.ag-rail-tile.compact {
+  width: 38px;
+  height: 38px;
+  border-radius: 13px;
+}
+
+.ag-rail-tile:hover {
   border-radius: 11px;
   color: var(--text-primary);
-  border-color: var(--border-strong);
-  background-color: var(--bg-subtle);
+  background-color: var(--bg-elevated);
 }
 
-.ag-rail-item:active {
-  transform: translateY(1px);
+.ag-rail-tile.compact:hover,
+.ag-rail-tile.compact.active {
+  border-radius: 10px;
 }
 
-.ag-rail-pill {
+.ag-rail-tile:active {
+  transform: scale(0.96);
+}
+
+.ag-rail-tile:focus-visible,
+.ag-rail-util:focus-visible {
+  outline: none;
+  box-shadow: var(--accent-glow);
+}
+
+/* Crisp 3px Left Edge Active / Unread / Hover Indicator Pill */
+.ag-rail-indicator {
   position: absolute;
-  left: -10px;
+  left: calc((var(--rail-w, 60px) - 40px) / -2);
   top: 50%;
   width: 3px;
   height: 0;
@@ -111,73 +122,80 @@
   background-color: var(--accent);
   transform: translateY(-50%);
   opacity: 0;
+  pointer-events: none;
   transition:
     height var(--dur-med) var(--ease-spring),
     opacity var(--dur-fast) ease,
     background-color var(--dur-fast) ease;
 }
 
-.ag-rail-item:hover .ag-rail-pill {
+.ag-rail-tile.compact .ag-rail-indicator {
+  left: -9px;
+}
+
+.ag-rail-tile.has-unread .ag-rail-indicator {
+  height: 8px;
+  opacity: 0.9;
+  background-color: var(--text-primary);
+}
+
+.ag-rail-tile:hover .ag-rail-indicator {
   height: 14px;
-  opacity: 0.7;
+  opacity: 0.85;
 }
 
-.ag-rail-item.active .ag-rail-pill {
-  height: 24px;
+.ag-rail-tile.active .ag-rail-indicator {
+  height: 22px;
   opacity: 1;
+  background-color: var(--accent);
 }
 
-/* Geo Radio button */
-.ag-rail-geo.active {
+/* Workspace Active States */
+.ag-rail-radio.active,
+.ag-rail-mail.active,
+.ag-rail-wallet.active {
   border-radius: 11px;
   color: var(--accent);
   background-color: var(--accent-soft);
-  border-color: var(--border-accent);
-  box-shadow: var(--accent-glow);
 }
 
-/* Encrypted DMs button */
-.ag-rail-dm:hover {
+.ag-rail-people:hover {
   color: var(--dm-accent);
-  border-color: color-mix(in srgb, var(--dm-accent) 45%, transparent);
 }
 
-.ag-rail-dm.active {
+.ag-rail-people.active {
   border-radius: 11px;
   color: var(--dm-accent);
   background-color: var(--dm-soft);
-  border-color: color-mix(in srgb, var(--dm-accent) 55%, transparent);
 }
 
-.ag-rail-dm.active .ag-rail-pill,
-.ag-rail-dm:hover .ag-rail-pill {
+.ag-rail-people.active .ag-rail-indicator,
+.ag-rail-people:hover .ag-rail-indicator {
   background-color: var(--dm-accent);
 }
 
-/* Joined Server squircle */
-.ag-rail-server {
-  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 14%, var(--bg-elevated));
-  border-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 32%, var(--border-subtle));
+/* Discord-Style Joined Server Squircle */
+.ag-rail-srv {
+  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 14%, var(--bg-surface));
   color: var(--text-primary);
 }
 
-.ag-rail-server:hover {
+.ag-rail-srv:hover {
   background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 22%, var(--bg-elevated));
-  border-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 56%, transparent);
 }
 
-.ag-rail-server.active {
+.ag-rail-srv.active {
   border-radius: 11px;
-  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 26%, var(--bg-elevated));
-  border-color: var(--srv-accent, var(--accent));
-  box-shadow: 0 0 16px color-mix(in srgb, var(--srv-accent, var(--accent)) 24%, transparent);
+  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 24%, var(--bg-elevated));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--srv-accent, var(--accent)) 55%, transparent);
 }
 
-.ag-rail-server .ag-rail-pill {
+.ag-rail-srv.active .ag-rail-indicator,
+.ag-rail-srv:hover .ag-rail-indicator {
   background-color: var(--srv-accent, var(--accent));
 }
 
-.ag-rail-server-img {
+.ag-rail-srv-img {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -185,42 +203,29 @@
   display: block;
 }
 
-.ag-rail-server-emoji {
+.ag-rail-srv-emoji {
   font-size: 18px;
   line-height: 1;
 }
 
-.ag-rail-server-mono {
+.ag-rail-srv-mono {
   font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
 }
 
-/* Corner micro-indicator (E2EE lock or NIP-29 relay dot) */
-.ag-rail-kind-dot {
-  position: absolute;
-  bottom: -3px;
-  right: -3px;
-  width: 15px;
-  height: 15px;
-  border-radius: var(--radius-full);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 2px solid var(--bg-canvas);
+/* Add / Join Server '+' Squircle */
+.ag-rail-add {
+  background-color: var(--bg-surface);
+  color: var(--text-muted);
 }
 
-.ag-rail-kind-dot.e2ee {
-  background-color: var(--dm-accent);
-  color: #ffffff;
+.ag-rail-add:hover {
+  color: var(--accent);
+  background-color: var(--accent-soft);
 }
 
-.ag-rail-kind-dot.nip29 {
-  background-color: var(--mesh-accent);
-  color: #06131c;
-}
-
-/* Top-right unread / mention pills on Rail */
+/* Top-Right Unread / Mention Badges on Rail */
 .ag-rail-badge {
   position: absolute;
   top: -4px;
@@ -230,223 +235,464 @@
   padding: 0 4px;
   border-radius: var(--radius-full);
   border: 2px solid var(--bg-canvas);
-  font-size: 9px;
+  font-size: 9.5px;
   font-weight: 700;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   line-height: 1;
+  pointer-events: none;
 }
 
-.ag-rail-badge-dm {
-  background-color: var(--dm-accent);
-  color: #ffffff;
-}
-
-.ag-rail-badge-unread {
-  background-color: var(--accent);
-  color: var(--text-inverse);
-}
-
-.ag-rail-badge-mention {
+.ag-rail-badge.ping {
   background-color: var(--status-danger);
   color: #ffffff;
 }
 
-/* Add / Explore Server '+' button */
-.ag-rail-add {
-  background-color: transparent;
-  border: 1px dashed var(--border-strong);
-  color: var(--text-muted);
+.ag-rail-badge.unread {
+  background-color: var(--bg-active);
+  color: var(--text-primary);
 }
 
-.ag-rail-add:hover {
-  color: var(--accent);
-  border-style: solid;
-  border-color: var(--border-accent);
-  background-color: var(--accent-soft);
+/* Subtle Bottom-Right Voice Active Presence Dot */
+.ag-rail-voice-dot {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  background-color: var(--status-ok);
+  border: 2px solid var(--bg-canvas);
+  pointer-events: none;
 }
 
-/* --------------------------------------------------------------------------
-   Server Sidebar (Swaps into .ag-sidebar slot when a Server is active)
-   -------------------------------------------------------------------------- */
-.ag-srv-side-header {
-  flex: 0 0 auto;
-  padding: 0.68rem 0.72rem 0.6rem;
-  border-bottom: 1px solid var(--border-subtle);
+.ag-rail-voice-dot.in-call {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-ok) 30%, transparent);
+}
+
+/* Bottom Utility Stack (Map, Settings, Install) */
+.ag-rail-bottom {
+  flex-shrink: 0;
+  width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--srv-accent, var(--accent)) 8%, var(--bg-surface)) 0%,
-    var(--bg-surface) 100%
-  );
-}
-
-.ag-srv-side-title-row {
-  display: flex;
   align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
+  gap: 6px;
 }
 
-.ag-srv-side-icon {
-  width: 34px;
-  height: 34px;
+.ag-rail-util {
+  width: 36px;
+  height: 36px;
   border-radius: 10px;
-  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
-  font-weight: 700;
-  background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 18%, var(--bg-elevated));
-  border: 1px solid color-mix(in srgb, var(--srv-accent, var(--accent)) 45%, transparent);
+  color: var(--text-muted);
+  background-color: transparent;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-rail-util:hover {
+  background-color: var(--bg-hover);
   color: var(--text-primary);
-  overflow: hidden;
 }
 
-.ag-srv-side-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
+.ag-rail-util.active {
+  background-color: var(--accent-soft);
+  color: var(--accent);
 }
 
-.ag-srv-side-heading {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
+/* Unclipped Portal Hover Tooltip (Rendered on document.body) */
+.ag-rail-tooltip {
+  position: fixed;
+  transform: translateY(-50%);
+  z-index: calc(var(--z-toast, 100) + 10);
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-md);
+  white-space: nowrap;
+  animation: ag-fade-in 90ms ease;
 }
 
-.ag-srv-side-name {
-  font-size: var(--text-sm);
-  font-weight: 700;
+.ag-rail-tooltip-title {
+  font-size: 12.5px;
+  font-weight: 600;
   color: var(--text-primary);
   line-height: 1.2;
 }
 
-.ag-srv-side-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.22rem;
+.ag-rail-tooltip-sub {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  line-height: 1.2;
 }
 
-.ag-srv-side-actions {
+/* --------------------------------------------------------------------------
+   Discord-Native Server Sidebar (Desktop & Mobile Right Split Column)
+   -------------------------------------------------------------------------- */
+.ag-srv-discord-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: var(--bg-surface);
+}
+
+.ag-srv-discord-header {
+  flex: 0 0 auto;
+  width: 100%;
+  height: var(--header-h);
+  min-height: var(--header-h);
+  padding: 0 12px 0 14px;
   display: flex;
   align-items: center;
-  gap: 0.14rem;
+  justify-content: space-between;
+  gap: 8px;
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-srv-discord-header:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-srv-discord-head-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-srv-discord-kind {
+  color: var(--text-muted);
   flex-shrink: 0;
 }
 
-.ag-srv-side-meta {
+.ag-srv-discord-kind.dm {
+  color: var(--dm-accent);
+}
+
+.ag-srv-discord-name {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.ag-srv-discord-caret {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-srv-discord-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  padding: 12px 8px 14px;
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 14px;
 }
 
-.ag-srv-side-desc {
-  margin: 0;
-  font-size: 11.5px;
-  line-height: 1.38;
-  color: var(--text-secondary);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+.ag-srv-discord-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.ag-srv-relay-pill {
+.ag-srv-discord-cat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 0 4px 3px;
+}
+
+.ag-srv-discord-cat-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 0.28rem;
-  max-width: 100%;
-  padding: 0.14rem 0.42rem;
-  border-radius: var(--radius-xs);
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-subtle);
-  font-size: 10px;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   color: var(--text-muted);
+  padding: 2px 2px;
+  border-radius: var(--radius-xs);
+  transition: color var(--dur-fast) ease;
 }
 
-.ag-srv-add-ch-trigger {
-  width: 20px;
-  height: 20px;
+.ag-srv-discord-cat-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.ag-srv-discord-cat-add {
+  width: 22px;
+  height: 22px;
   border-radius: var(--radius-xs);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
-  border: 1px solid transparent;
   transition:
-    color var(--dur-fast) ease,
     background-color var(--dur-fast) ease,
-    border-color var(--dur-fast) ease;
+    color var(--dur-fast) ease;
 }
 
-.ag-srv-add-ch-trigger:hover {
-  color: var(--accent);
-  background-color: var(--accent-soft);
-  border-color: var(--border-accent);
+.ag-srv-discord-cat-add:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
 }
 
-.ag-srv-inline-add {
+/* Discord-Style Voice Lounge Row & Nested Live Participants */
+.ag-srv-discord-voice-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-srv-discord-voice-row {
   display: flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.25rem 0.25rem 0.45rem;
+  gap: 2px;
+  border-radius: var(--radius-sm);
+  transition: background-color var(--dur-fast) ease;
 }
 
-.ag-srv-inline-add .ag-input {
-  height: 30px;
+.ag-srv-discord-voice-row:hover {
+  background-color: var(--bg-hover);
 }
 
-.ag-srv-mini-icon {
+.ag-srv-discord-voice-row.in-call {
+  background-color: var(--accent-soft);
+}
+
+.ag-srv-discord-voice-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  font-weight: 500;
+  transition: color var(--dur-fast) ease;
+}
+
+.ag-srv-discord-voice-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.ag-srv-discord-voice-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ag-srv-discord-voice-row.in-call .ag-srv-discord-voice-btn {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.ag-srv-discord-voice-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-srv-discord-voice-row.in-call .ag-srv-discord-voice-icon {
+  color: var(--accent);
+}
+
+.ag-srv-discord-voice-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ag-srv-discord-voice-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-srv-discord-voice-leave {
+  width: 26px;
+  height: 26px;
+  margin-right: 4px;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--status-danger);
+  flex-shrink: 0;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-srv-discord-voice-leave:hover {
+  background-color: var(--status-danger-soft);
+}
+
+.ag-srv-discord-voice-users {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 4px 4px 24px;
+}
+
+.ag-srv-discord-voice-user {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 6px;
+  border-radius: var(--radius-xs);
+  min-width: 0;
+}
+
+.ag-srv-discord-voice-avatar {
   width: 22px;
   height: 22px;
   border-radius: 6px;
+  object-fit: cover;
   flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
-  background-color: var(--bg-subtle);
-  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-canvas);
 }
 
-.ag-srv-quick-nav {
+.ag-srv-discord-voice-uname {
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.25;
+  min-width: 0;
+}
+
+/* Minimal Calm Empty State for Servers */
+.ag-srv-discord-empty {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 0.28rem;
-  padding: 0.2rem 0.15rem;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 28px 18px;
+  text-align: center;
 }
 
-.ag-srv-nav-btn {
+.ag-srv-discord-empty h3 {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ag-srv-empty-actions {
   display: flex;
   align-items: center;
-  gap: 0.42rem;
-  width: 100%;
-  padding: 0.44rem 0.55rem;
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-subtle);
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  transition:
-    color var(--dur-fast) ease,
-    border-color var(--dur-fast) ease,
-    background-color var(--dur-fast) ease;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
-.ag-srv-nav-btn:hover {
+.ag-srv-empty-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 13px;
+  border-radius: var(--radius-sm);
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-srv-empty-primary:hover {
+  background-color: var(--accent-hover);
+}
+
+.ag-srv-empty-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-srv-empty-ghost:hover {
+  background-color: var(--bg-subtle);
   color: var(--text-primary);
-  background-color: var(--bg-hover);
-  border-color: var(--border-default);
+}
+
+/* --------------------------------------------------------------------------
+   Mobile Discord 2-Column Split Server Drawer (< 868px)
+   [56px Vertical Server Strip | Selected Server Channels & Voice]
+   -------------------------------------------------------------------------- */
+.ag-srv-mobile-split {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+.ag-srv-mobile-rail {
+  width: 56px;
+  flex: 0 0 56px;
+  height: 100%;
+  background-color: var(--bg-canvas);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  overscroll-behavior-y: contain;
+}
+
+.ag-srv-mobile-rail::-webkit-scrollbar {
+  display: none;
+}
+
+.ag-srv-mobile-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: var(--bg-surface);
 }
 
 /* --------------------------------------------------------------------------
@@ -1098,9 +1344,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   Mobile Responsive Rail Transformation (< 768px)
-   Transforms the Server Rail into a sleek horizontal top strip inside
-   the slide-over left navigation drawer so mobile chat keeps full 390px width.
+   Mobile Responsive Server Modal & Discord Drawer Adjustments (< 868px)
    -------------------------------------------------------------------------- */
 @media (max-width: 867px) {
   .ag-srv-modal {
@@ -1110,76 +1354,16 @@
   .ag-srv-modal .ag-input,
   .ag-srv-modal .ag-textarea,
   .ag-srv-modal select,
-  .ag-server-sidebar .ag-input {
+  .ag-srv-discord-pane .ag-srv-inline-input {
     font-size: 16px;
+  }
+
+  .ag-srv-discord-voice-btn {
+    min-height: 40px;
   }
 }
 
 @media (max-width: 768px) {
-  .ag-server-rail {
-    width: 100%;
-    flex: 0 0 auto;
-    height: auto;
-    flex-direction: row;
-    align-items: center;
-    gap: 0.42rem;
-    padding: calc(0.42rem + env(safe-area-inset-top, 0px)) 0.65rem 0.35rem;
-    border-right: none;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .ag-rail-group {
-    flex-direction: row;
-    gap: 0.38rem;
-    padding: 6px 0 11px;
-  }
-
-  .ag-rail-divider {
-    width: 1px;
-    height: 24px;
-    margin: 0 0.08rem 4px;
-  }
-
-  .ag-rail-servers {
-    flex-direction: row;
-    width: auto;
-    height: auto;
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding: 6px 4px 11px;
-    gap: 0.42rem;
-  }
-
-  .ag-rail-slot {
-    width: auto;
-  }
-
-  .ag-rail-item {
-    width: 36px;
-    height: 36px;
-    border-radius: 11px;
-  }
-
-  .ag-rail-pill {
-    left: 50%;
-    top: auto;
-    bottom: -8px;
-    width: 0;
-    height: 3px;
-    border-radius: 3px 3px 0 0;
-    transform: translateX(-50%);
-  }
-
-  .ag-rail-item:hover .ag-rail-pill {
-    width: 12px;
-    height: 3px;
-  }
-
-  .ag-rail-item.active .ag-rail-pill {
-    width: 20px;
-    height: 3px;
-  }
-
   .ag-srv-mode-grid {
     grid-template-columns: 1fr;
     gap: 0.36rem;
@@ -1210,8 +1394,7 @@
   /* iOS Safari 16px input zoom guard */
   .ag-srv-modal .ag-input,
   .ag-srv-modal .ag-textarea,
-  .ag-srv-modal select,
-  .ag-server-sidebar .ag-input {
+  .ag-srv-modal select {
     font-size: 16px;
   }
 }

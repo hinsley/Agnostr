@@ -26,6 +26,7 @@ const LEGACY_TRANSFORMERS_CACHE_KEY = 'transformers-cache'
 
 const MAX_CACHED_TRANSLATIONS = 600
 const MAX_OUTGOING_ORIGINALS = 200
+const IDLE_WORKER_TEARDOWN_MS = 5 * 60 * 1000 // Reclaim WASM/ONNX RAM after 5m idle when Translator Mode is off
 
 export interface UseTranslatorParams {
   pushToast?: (level: ToastLevel, title: string, detail?: string) => void
@@ -420,6 +421,14 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
   const loadPromiseRef = useRef<{ modelId: string; promise: Promise<boolean> } | null>(null)
   const loadedModelIdRef = useRef<string | null>(null)
   const reqSeqRef = useRef<number>(0)
+  const idleTeardownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearIdleTeardownTimer = useCallback(() => {
+    if (idleTeardownTimerRef.current !== null) {
+      clearTimeout(idleTeardownTimerRef.current)
+      idleTeardownTimerRef.current = null
+    }
+  }, [])
 
   // Verify actual WebGPU adapter availability + silently evict legacy LFM3 cache on mount
   useEffect(() => {
@@ -452,6 +461,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
   }, [])
 
   const terminateWorker = useCallback(() => {
+    clearIdleTeardownTimer()
     const w = workerRef.current
     workerRef.current = null
     loadedModelIdRef.current = null
@@ -497,7 +507,41 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       }
       w.terminate()
     }
-  }, [])
+  }, [clearIdleTeardownTimer])
+
+  const scheduleIdleWorkerTeardown = useCallback(() => {
+    clearIdleTeardownTimer()
+    if (!workerRef.current) return
+    if (settingsRef.current.enabled) return
+    if (pendingRef.current.size > 0 || loadPromiseRef.current !== null) return
+
+    idleTeardownTimerRef.current = setTimeout(() => {
+      idleTeardownTimerRef.current = null
+      if (
+        !workerRef.current ||
+        settingsRef.current.enabled ||
+        pendingRef.current.size > 0 ||
+        loadPromiseRef.current !== null
+      ) {
+        return
+      }
+      terminateWorker()
+      setModelStatus('idle')
+      modelStatusRef.current = 'idle'
+      setDownloadProgress(0)
+      setDownloadFile(null)
+      setRuntimeDevice(null)
+      setModelError(null)
+    }, IDLE_WORKER_TEARDOWN_MS)
+  }, [clearIdleTeardownTimer, terminateWorker])
+
+  useEffect(() => {
+    if (settings.enabled) {
+      clearIdleTeardownTimer()
+    } else {
+      scheduleIdleWorkerTeardown()
+    }
+  }, [settings.enabled, clearIdleTeardownTimer, scheduleIdleWorkerTeardown])
 
   useEffect(() => {
     return () => {
@@ -540,7 +584,10 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       if (msg.type === 'dropped') {
         const dropped = pendingRef.current.get(msg.requestId)
         pendingRef.current.delete(msg.requestId)
-        if (!dropped) return
+        if (!dropped) {
+          scheduleIdleWorkerTeardown()
+          return
+        }
         if (dropped.kind === 'load') {
           dropped.resolve(false)
         } else if (dropped.kind === 'outgoing') {
@@ -556,6 +603,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
           })
           dropped.resolve(null)
         }
+        scheduleIdleWorkerTeardown()
         return
       }
 
@@ -578,12 +626,14 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
 
         if (pending.kind === 'load') {
           pending.resolve(true)
+          scheduleIdleWorkerTeardown()
           return
         }
 
         if (pending.kind === 'outgoing') {
           const translated = msg.text.trim()
           pending.resolve(translated || pending.originalText)
+          scheduleIdleWorkerTeardown()
           return
         }
 
@@ -592,6 +642,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
           // Drop stale result if user switched models while this job was queued
           if (pending.modelKey !== settingsRef.current.model) {
             pending.resolve(null)
+            scheduleIdleWorkerTeardown()
             return
           }
           const translated = msg.text.trim()
@@ -605,6 +656,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
               return next
             })
             pending.resolve(null)
+            scheduleIdleWorkerTeardown()
             return
           }
 
@@ -632,6 +684,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
             return next
           })
           pending.resolve(translated)
+          scheduleIdleWorkerTeardown()
           return
         }
       }
@@ -639,16 +692,19 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       if (msg.type === 'error') {
         if (pending.kind === 'load') {
           pending.resolve(false)
+          scheduleIdleWorkerTeardown()
           return
         }
         if (pending.kind === 'outgoing') {
           pending.reject(new Error(msg.error || 'Unable to translate message.'))
+          scheduleIdleWorkerTeardown()
           return
         }
         if (pending.kind === 'message') {
           inFlightByKeyRef.current.delete(pending.cacheKey)
           if (pending.modelKey !== settingsRef.current.model) {
             pending.resolve(null)
+            scheduleIdleWorkerTeardown()
             return
           }
           setTranslations((prev) => {
@@ -665,13 +721,15 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
             return next
           })
           pending.resolve(null)
+          scheduleIdleWorkerTeardown()
         }
       }
     },
-    []
+    [scheduleIdleWorkerTeardown]
   )
 
   const ensureWorker = useCallback((): Worker => {
+    clearIdleTeardownTimer()
     if (workerRef.current) return workerRef.current
     if (typeof Worker === 'undefined') {
       throw new Error('Web Workers are unavailable in this browser.')
@@ -717,7 +775,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
     }
     workerRef.current = worker
     return worker
-  }, [handleWorkerMessage])
+  }, [clearIdleTeardownTimer, handleWorkerMessage])
 
   const preloadModel = useCallback(async (): Promise<boolean> => {
     const model = activeModelRef.current
@@ -766,12 +824,13 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         if (loadPromiseRef.current?.modelId === model.id) {
           loadPromiseRef.current = null
         }
+        scheduleIdleWorkerTeardown()
       }
     })()
 
     loadPromiseRef.current = { modelId: model.id, promise }
     return await promise
-  }, [ensureWorker, nextRequestId])
+  }, [ensureWorker, nextRequestId, scheduleIdleWorkerTeardown])
 
   const updateSettings = useCallback(
     (patch: Partial<TranslatorSettings>) => {

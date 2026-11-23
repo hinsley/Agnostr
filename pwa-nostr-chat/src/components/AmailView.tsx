@@ -80,6 +80,7 @@ export interface AmailComposeTarget {
 
 export interface AmailViewProps {
   open: boolean
+  embedded?: boolean
   inShell?: boolean
   onClose: () => void
   engine: AgnostrEngine
@@ -349,6 +350,7 @@ function getSortModeShortLabel(mode: AmailFolderSortMode): string {
 
 export function AmailView({
   open,
+  embedded = false,
   inShell = false,
   onClose,
   engine,
@@ -745,8 +747,8 @@ export function AmailView({
     }
   }, [open, initialSection, initialComposePubkey, initialComposeNickname])
 
-  // Android / PWA Back button LIFO: Popover -> Composer -> Reader -> Non-Inbox Section -> Close
-  useBackHandler(open, onClose)
+  // Android / PWA Back button LIFO: Popover -> Composer -> Reader -> Non-Inbox Section -> Close (modal only)
+  useBackHandler(open && !embedded, onClose)
   useBackHandler(open && section !== 'inbox' && !selectedMessageId && !composing, () =>
     setSection('inbox'),
   )
@@ -761,21 +763,27 @@ export function AmailView({
     if (!open) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      e.preventDefault()
       if (folderPicker) {
+        e.preventDefault()
         setFolderPicker(null)
       } else if (renamingFolderId) {
+        e.preventDefault()
         setRenamingFolderId(null)
       } else if (creatingFolder) {
+        e.preventDefault()
         setCreatingFolder(false)
         setNewFolderName('')
       } else if (activeRecipientField) {
+        e.preventDefault()
         setActiveRecipientField(null)
       } else if (composing) {
+        e.preventDefault()
         setComposing(false)
       } else if (selectedMessageId) {
+        e.preventDefault()
         setSelectedMessageId(null)
-      } else {
+      } else if (!embedded) {
+        e.preventDefault()
         onClose()
       }
     }
@@ -783,6 +791,7 @@ export function AmailView({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [
     open,
+    embedded,
     folderPicker,
     renamingFolderId,
     creatingFolder,
@@ -1568,7 +1577,7 @@ export function AmailView({
     const { to, cc, bcc, invalidInputs } = collectFinalRecipients()
     if (invalidInputs.length > 0) {
       setComposeError(
-        `Unrecognized recipient "${invalidInputs[0]}". Pick a contact or paste a valid npub / hex key.`,
+        `Unrecognized recipient "${invalidInputs[0]}". Pick a contact or paste an npub.`,
       )
       return
     }
@@ -1663,7 +1672,7 @@ export function AmailView({
     } else {
       setContactFeedback({
         ok: false,
-        msg: 'Enter a valid npub1… or hex pubkey.',
+        msg: 'Enter a valid npub or public key.',
       })
     }
   }
@@ -1685,8 +1694,8 @@ export function AmailView({
     const removed = await amail.pruneExpired()
     setMeshFeedback(
       removed > 0
-        ? `Pruned ${removed} expired ${removed === 1 ? 'capsule' : 'capsules'}.`
-        : 'No expired capsules.',
+        ? `Cleared ${removed} expired ${removed === 1 ? 'item' : 'items'}.`
+        : 'No expired items.',
     )
   }
 
@@ -2557,8 +2566,8 @@ export function AmailView({
           </label>
 
           <div className="ag-amail-ttl-group">
-            <span className="ag-amail-ttl-label">TTL</span>
-            <div className="ag-amail-seg" role="radiogroup" aria-label="Mesh TTL">
+            <span className="ag-amail-ttl-label">Expires</span>
+            <div className="ag-amail-seg" role="radiogroup" aria-label="Message lifetime">
               {TTL_OPTIONS.map((opt) => (
                 <button
                   key={opt.sec}
@@ -2611,8 +2620,8 @@ export function AmailView({
               setContactKeyDraft(e.target.value)
               if (contactFeedback) setContactFeedback(null)
             }}
-            placeholder="npub1… or hex pubkey"
-            aria-label="Contact public key or DM link"
+            placeholder="npub1… or public key"
+            aria-label="Contact public key or invite link"
           />
           {onOpenScanner && (
             <button
@@ -2798,7 +2807,7 @@ export function AmailView({
               <span className="ag-amail-metric-val mono">{formatBytes(stats.mailBytes)}</span>
             </div>
             <div className="ag-amail-metric">
-              <span className="ag-amail-metric-label">ACKs</span>
+              <span className="ag-amail-metric-label">Receipts</span>
               <span className="ag-amail-metric-val mono">{stats.tombstoneCount}</span>
             </div>
           </div>
@@ -2808,8 +2817,8 @@ export function AmailView({
         <div className="ag-amail-settings-list">
           <label className="ag-amail-setting-row">
             <div className="ag-amail-setting-copy">
-              <span className="ag-amail-setting-title">Mesh relay</span>
-              <span className="ag-amail-setting-desc">Relay encrypted mail for offline peers</span>
+              <span className="ag-amail-setting-title">Peer relay</span>
+              <span className="ag-amail-setting-desc">Deliver encrypted mail for offline peers</span>
             </div>
             <input
               type="checkbox"
@@ -2922,15 +2931,15 @@ export function AmailView({
           </h4>
 
           {amail.relayCapsules.length === 0 ? (
-            <p className="ag-amail-empty-inline">No buffered capsules</p>
+            <p className="ag-amail-empty-inline">No queued items</p>
           ) : (
-            <div className="ag-amail-capsule-table" role="table" aria-label="Carried relay capsules">
+            <div className="ag-amail-capsule-table" role="table" aria-label="Queued relay items">
               <div className="ag-amail-capsule-row head mono" role="row">
-                <span role="columnheader">Capsule</span>
+                <span role="columnheader">ID</span>
                 <span role="columnheader">Size</span>
                 <span role="columnheader">Hops</span>
-                <span role="columnheader">TTL</span>
-                <span role="columnheader">Hint</span>
+                <span role="columnheader">Expires</span>
+                <span role="columnheader">Route</span>
               </div>
               {amail.relayCapsules.map((cap) => (
                 <div key={cap.capsuleId} className="ag-amail-capsule-row mono" role="row">
@@ -2954,27 +2963,16 @@ export function AmailView({
     )
   }
 
-  return (
-    <div
-      className={`ag-amail-backdrop ${inShell ? 'in-shell' : ''}`}
-      onClick={inShell ? undefined : onClose}
-      role="presentation"
-      data-no-swipe="true"
-    >
-      <div
-        className="ag-amail-shell"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Agmail"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Top Bar */}
-        <header className="ag-amail-topbar">
-          <div className="ag-amail-brand">
-            <Mail size={16} className="ag-amail-brand-glyph" aria-hidden="true" />
-            <span className="ag-amail-brand-name">Agmail</span>
-          </div>
+  const content = (
+    <>
+      {/* Top Bar */}
+      <header className="ag-amail-topbar">
+        <div className="ag-amail-brand">
+          <Mail size={16} className="ag-amail-brand-glyph" aria-hidden="true" />
+          <span className="ag-amail-brand-name">Agmail</span>
+        </div>
 
+        <div className="ag-amail-topbar-main">
           <div className="ag-amail-search-wrap">
             <Search size={14} className="ag-amail-search-icon" aria-hidden="true" />
             <input
@@ -3051,20 +3049,23 @@ export function AmailView({
               <Plus size={16} />
             </button>
 
-            <button
-              type="button"
-              className="ag-amail-icon-btn"
-              onClick={() => {
-                hideTooltip()
-                onClose()
-              }}
-              aria-label="Close Agmail"
-              {...tipProps('Close Agmail')}
-            >
-              <X size={16} />
-            </button>
+            {!embedded && (
+              <button
+                type="button"
+                className="ag-amail-icon-btn"
+                onClick={() => {
+                  hideTooltip()
+                  onClose()
+                }}
+                aria-label="Close Agmail"
+                {...tipProps('Close Agmail')}
+              >
+                <X size={16} />
+              </button>
+            )}
           </div>
-        </header>
+        </div>
+      </header>
 
         {/* Mobile Scrollable Folder Pills */}
         {!composing && !selectedMessage && (
@@ -3588,8 +3589,11 @@ export function AmailView({
                     : renderMailList()}
           </main>
         </div>
-      </div>
+    </>
+  )
 
+  const portals = (
+    <>
       {/* Portal: Move-to-Folder Popover */}
       {folderPicker &&
         typeof document !== 'undefined' &&
@@ -3688,6 +3692,39 @@ export function AmailView({
           </div>,
           document.body,
         )}
+    </>
+  )
+
+  if (embedded) {
+    return (
+      <div
+        className="ag-amail-workspace"
+        aria-label="Agmail"
+        data-no-swipe="true"
+      >
+        {content}
+        {portals}
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className={`ag-amail-backdrop ${inShell ? 'in-shell' : ''}`}
+      onClick={inShell ? undefined : onClose}
+      role="presentation"
+      data-no-swipe="true"
+    >
+      <div
+        className="ag-amail-shell"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Agmail"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {content}
+      </div>
+      {portals}
     </div>
   )
 }

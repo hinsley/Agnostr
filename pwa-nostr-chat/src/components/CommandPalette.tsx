@@ -316,7 +316,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         id: `person-friend-${pk}`,
         group: 'People',
         title: handle.full,
-        subtitle: peerNote || 'Trusted friend · Tap to message',
+        subtitle: peerNote || 'Trusted',
         keywords: `people dm friend trusted ${handle.base} ${handle.full} ${entry.npub} ${peerNote}`,
         badge: 'FRIEND',
         icon: <ShieldCheck size={15} style={{ color: 'var(--accent)' }} />,
@@ -338,12 +338,12 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           subtitle:
             chan.topic ||
             (srv.kind === 'nip29'
-              ? `NIP-29 · ${srv.relayUrl?.replace(/^wss?:\/\//i, '') ?? 'relay'}`
+              ? srv.relayUrl?.replace(/^wss?:\/\//i, '') ?? 'Hosted community'
               : srv.encrypted
                 ? 'Private encrypted server'
                 : 'Public server'),
           keywords: `server channel ${srv.name} ${chan.name} #${chan.name} ${srv.kind} ${srv.encrypted ? 'e2ee encrypted private' : 'public'}`,
-          badge: srv.kind === 'nip29' ? 'NIP-29' : srv.encrypted ? 'E2EE' : undefined,
+          badge: srv.kind === 'nip29' ? 'HOSTED' : srv.encrypted ? 'PRIVATE' : undefined,
           icon: srv.encrypted ? (
             <Lock size={15} style={{ color: 'var(--dm-accent)' }} />
           ) : (
@@ -710,7 +710,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         id: 'act-browse-nip29',
         group: 'Actions',
         title: 'Browse Communities',
-        subtitle: 'Explore public NIP-29 relay communities',
+        subtitle: 'Explore public relay communities',
         keywords: 'browse explore nip29 communities groups relays servers',
         icon: <Server size={15} />,
         run: () => {
@@ -797,16 +797,16 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             {
               id: 'act-amail-inbox',
               group: 'Agmail',
-              title: 'Open Agmail (Inbox)',
+              title: 'Open Agmail',
               subtitle:
                 engine.amail.unreadInboxCount > 0
-                  ? `${engine.amail.unreadInboxCount} unread · ${engine.amail.meshPeers.filter((p) => p.state === 'connected').length} mesh ${engine.amail.meshPeers.filter((p) => p.state === 'connected').length === 1 ? 'peer' : 'peers'} connected`
-                  : `E2EE Briar-style store-and-forward mesh mail · ${engine.amail.contacts.length} ${engine.amail.contacts.length === 1 ? 'contact' : 'contacts'}`,
-              keywords: 'open agmail amail inbox email snailmail mail encrypted mesh briar messages',
+                  ? `${engine.amail.unreadInboxCount} unread · ${engine.amail.meshPeers.filter((p) => p.state === 'connected').length} mesh connected`
+                  : `Encrypted mesh mail · ${engine.amail.contacts.length} ${engine.amail.contacts.length === 1 ? 'contact' : 'contacts'}`,
+              keywords: 'open agmail amail inbox email snailmail mail encrypted mesh messages',
               badge:
                 engine.amail.unreadInboxCount > 0
                   ? `${engine.amail.unreadInboxCount} UNREAD`
-                  : 'MESH',
+                  : 'MAIL',
               icon: <Mail size={15} style={{ color: 'var(--accent)' }} />,
               run: () => {
                 onClose()
@@ -817,9 +817,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
               id: 'act-amail-compose',
               group: 'Agmail',
               title: 'Compose Agmail',
-              subtitle: 'Write an E2EE Markdown + MathJax email relayed across the Agnostr mesh',
+              subtitle: 'Write an encrypted message',
               keywords: 'compose write new send agmail amail email mail markdown mathjax mesh',
-              badge: 'E2EE',
+              badge: 'MAIL',
               icon: <PenLine size={15} style={{ color: 'var(--accent)' }} />,
               run: () => {
                 onClose()
@@ -829,9 +829,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             {
               id: 'act-amail-mesh',
               group: 'Agmail',
-              title: 'Agmail Mesh Relay & Storage',
-              subtitle: `Relay vault ${Math.max(0, Math.round(engine.amail.storageStats.vaultBytes / 1024)).toLocaleString()} KB · ${engine.amail.storageStats.vaultCapsuleCount} sealed ${engine.amail.storageStats.vaultCapsuleCount === 1 ? 'capsule' : 'capsules'} carried`,
-              keywords: 'agmail amail mesh relay storage vault capsules quota inspector telemetry briar',
+              title: 'Agmail Mesh & Storage',
+              subtitle: `Vault ${Math.max(0, Math.round(engine.amail.storageStats.vaultBytes / 1024)).toLocaleString()} KB · ${engine.amail.storageStats.vaultCapsuleCount} ${engine.amail.storageStats.vaultCapsuleCount === 1 ? 'parcel' : 'parcels'}`,
+              keywords: 'agmail amail mesh relay storage vault capsules quota inspector telemetry',
               badge: engine.amail.settings.relayEnabled ? 'RELAY ON' : 'RELAY OFF',
               icon: <Database size={15} style={{ color: 'var(--accent)' }} />,
               run: () => {
@@ -847,10 +847,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         title: 'Sync Linked Devices Now',
         subtitle:
           engine.deviceSync.onlineSiblingCount > 0
-            ? `${engine.deviceSync.onlineSiblingCount} sibling ${engine.deviceSync.onlineSiblingCount === 1 ? 'device' : 'devices'} online on this key · NIP-44 self-encrypted sync`
+            ? `${engine.deviceSync.onlineSiblingCount} ${engine.deviceSync.onlineSiblingCount === 1 ? 'device' : 'devices'} online · Encrypted sync`
             : engine.deviceSync.enabled
-              ? `Silent multi-device background sync active (${engine.deviceSync.deviceLabel})`
-              : 'Multi-device sync is paused — enable & run an encrypted sync checkpoint now',
+              ? `Background sync active (${engine.deviceSync.deviceLabel})`
+              : 'Sync paused — enable and sync now',
         keywords: 'sync linked devices multi device multi-device background crdt servers messages nip44',
         badge:
           engine.deviceSync.onlineSiblingCount > 0
@@ -1282,9 +1282,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                               ? 'danger'
                               : entry.badge === 'OFF'
                                 ? 'muted'
-                                : entry.badge === 'E2EE'
+                                : entry.badge === 'PRIVATE'
                                   ? 'dm'
-                                  : entry.badge === 'NIP-29'
+                                  : entry.badge === 'HOSTED'
                                     ? 'mesh'
                                     : 'accent'
                         }`}

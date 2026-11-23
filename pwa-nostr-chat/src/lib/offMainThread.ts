@@ -1,9 +1,10 @@
-import type { EventTemplate } from 'nostr-tools'
+import type { Event as NostrEvent, EventTemplate } from 'nostr-tools'
 import type { VoiceMemoEncryption } from '../types/protocol.ts'
 import type {
   MediaCryptoWorkerRequest,
   MediaCryptoWorkerResponse,
   MediaCryptoWorkerSuccess,
+  VerifiedEventResult,
 } from './mediaCrypto.worker.ts'
 
 export class OffMainThreadUnavailableError extends Error {
@@ -292,4 +293,27 @@ export async function mineNip13OffMainThread(
     throw new OffMainThreadUnavailableError('Unexpected worker response for mineNip13.')
   }
   return res.nonceTag
+}
+
+export async function verifyEventsBatchOffMainThread(
+  events: readonly NostrEvent[]
+): Promise<VerifiedEventResult[]> {
+  if (events.length === 0) return []
+  if (!isOffMainThreadWorkerSupported()) {
+    throw new OffMainThreadUnavailableError('Web Workers are unavailable.')
+  }
+  const id = nextRequestId++
+  const res = await callWorker(
+    {
+      id,
+      op: 'verifyEventsBatch',
+      events: [...events],
+    },
+    [],
+    15_000
+  )
+  if (res.op !== 'verifyEventsBatch') {
+    throw new OffMainThreadUnavailableError('Unexpected worker response for verifyEventsBatch.')
+  }
+  return res.results
 }

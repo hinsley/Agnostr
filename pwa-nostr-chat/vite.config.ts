@@ -33,6 +33,22 @@ export default defineConfig({
           if (id.includes('/node_modules/qrcode/')) {
             return 'qrcode'
           }
+          if (id.includes('/node_modules/leaflet/')) {
+            return 'leaflet'
+          }
+          if (
+            id.includes('/node_modules/@cashu/cashu-ts/') ||
+            id.includes('/node_modules/@scure/bip39/') ||
+            id.includes('/node_modules/@scure/bip32/')
+          ) {
+            return 'cashu'
+          }
+          if (
+            id.includes('/node_modules/nostr-tools/') ||
+            id.includes('/node_modules/@noble/')
+          ) {
+            return 'nostr-core'
+          }
           return undefined
         },
       },

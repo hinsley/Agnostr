@@ -20,8 +20,9 @@
   --text-xl: 1.25rem;     /* 20px — display headings */
 
   /* Compact High-Density Layout Dimensions */
-  --sidebar-w: 280px;
-  --users-w: 248px;
+  --rail-w: 60px;
+  --sidebar-w: 256px;
+  --users-w: 244px;
   --inspector-w: 380px;
   --sheet-w: 380px;
   --header-h: 52px;
@@ -288,9 +289,10 @@
   --ambient-glow: none;
 }
 
-@media (min-width: 868px) and (max-width: 1079px) {
+@media (min-width: 868px) and (max-width: 1140px) {
   :root {
-    --sidebar-w: 256px;
-    --users-w: 224px;
+    --rail-w: 56px;
+    --sidebar-w: 228px;
+    --users-w: 212px;
   }
 }

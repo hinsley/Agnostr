@@ -1035,7 +1035,7 @@ export function RoomInfoSheet({
                 <span>Trust Peer</span>
               </span>
               <span className="ag-sheet-switch-desc">
-                Trusted peers can send voice memos, images, and start P2P calls with you.
+                Allow voice memos, images, and calls.
               </span>
             </div>
             <input
@@ -1129,9 +1129,9 @@ export function RoomInfoSheet({
 
     const modeLabel =
       activeServer.kind === 'nip29'
-        ? 'NIP-29 Community'
+        ? 'Relay community'
         : activeServer.encrypted
-          ? 'End-to-end encrypted'
+          ? 'Encrypted server'
           : 'Public server'
 
     const handleCopyInvite = async () => {
@@ -1200,7 +1200,7 @@ export function RoomInfoSheet({
           <h2 className="ag-sheet-hero-title truncate">{activeServer.name}</h2>
           <p className={`ag-sheet-hero-sub ${activeServer.encrypted ? 'dm' : ''}`}>
             {activeServer.encrypted ? <Lock size={12} /> : <Server size={12} />}
-            <span>{modeLabel} · Saved on relays</span>
+            <span>{modeLabel}</span>
           </p>
           {activeServer.description && (
             <p className="ag-sheet-hero-desc">{activeServer.description}</p>

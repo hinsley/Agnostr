@@ -4,6 +4,19 @@
    Zero green accents; visual-viewport safe on mobile; 0px horizontal overflow.
    ========================================================================== */
 
+/* Native First-Class Embedded Workspace (fills .ag-shell-body seamlessly) */
+.ag-amail-workspace {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-canvas);
+  overflow: hidden;
+}
+
 .ag-amail-backdrop {
   position: fixed;
   top: var(--ag-vvt, 0px);
@@ -229,10 +242,59 @@
   display: flex;
   align-items: center;
   gap: 0.7rem;
-  height: 52px;
+  height: var(--header-h, 52px);
+  min-height: var(--header-h, 52px);
   padding: 0 0.9rem;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 55%, transparent);
+  border-bottom: 1px solid var(--border-subtle);
   background-color: var(--bg-surface);
+}
+
+.ag-amail-topbar-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.ag-amail-workspace .ag-amail-topbar {
+  gap: 0;
+  padding: 0;
+  background-color: var(--bg-canvas);
+}
+
+.ag-amail-workspace .ag-amail-brand {
+  flex: 0 0 var(--sidebar-w, 256px);
+  width: var(--sidebar-w, 256px);
+  height: 100%;
+  padding: 0 1rem;
+  background-color: var(--bg-surface);
+  border-right: 1px solid var(--border-subtle);
+}
+
+.ag-amail-workspace .ag-amail-topbar-main {
+  height: 100%;
+  padding: 0 1rem;
+  background-color: var(--bg-canvas);
+}
+
+.ag-amail-workspace .ag-amail-rail {
+  flex: 0 0 var(--sidebar-w, 256px);
+  width: var(--sidebar-w, 256px);
+  background-color: var(--bg-surface);
+  border-right: 1px solid var(--border-subtle);
+}
+
+.ag-amail-workspace .ag-amail-main {
+  background-color: var(--bg-canvas);
+}
+
+.ag-amail-workspace .ag-amail-soft-input {
+  background-color: var(--bg-canvas);
+}
+
+.ag-amail-workspace .ag-amail-seg button.active {
+  background-color: var(--bg-canvas);
 }
 
 .ag-amail-brand {
@@ -1953,9 +2015,39 @@
     animation: none;
   }
 
+  .ag-amail-workspace {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .ag-amail-workspace .ag-amail-topbar {
+    gap: 0.45rem;
+    padding: 0 0.65rem;
+    background-color: var(--bg-surface);
+  }
+
+  .ag-amail-workspace .ag-amail-brand {
+    flex: 0 0 auto;
+    width: auto;
+    height: auto;
+    padding: 0;
+    background-color: transparent;
+    border-right: none;
+  }
+
+  .ag-amail-workspace .ag-amail-topbar-main {
+    height: auto;
+    padding: 0;
+    gap: 0.45rem;
+    background-color: transparent;
+  }
+
   .ag-amail-topbar {
     gap: 0.45rem;
     padding: 0 0.65rem;
+  }
+
+  .ag-amail-topbar-main {
+    gap: 0.45rem;
   }
 
   .ag-amail-brand-name {

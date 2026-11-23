@@ -1,6 +1,14 @@
 import type { Event as NostrEvent, Filter } from 'nostr-tools'
 import type { RelayRole, RelayStatus, RelayTelemetry } from '../types/protocol.ts'
+import {
+  getEventVerificationCacheResult,
+  markEventVerifiedCached,
+} from './bitchatProtocol.ts'
 import type { SelectedRelayMeta } from './geoRelays.ts'
+import {
+  isOffMainThreadWorkerSupported,
+  verifyEventsBatchOffMainThread,
+} from './offMainThread.ts'
 
 export type Nip42AuthSigner = (relayUrl: string, challenge: string) => Promise<NostrEvent | null>
 
@@ -71,6 +79,27 @@ const MAX_RECONNECT_MS = 60_000
 const HANDSHAKE_BASE_BACKOFF_MS = 10_000
 const HANDSHAKE_MAX_BACKOFF_MS = 300_000
 const MAX_HANDSHAKE_FAILURES = 3
+const FRAME_BUDGET_MS = 8
+const VERIFY_BATCH_MAX = 32
+
+interface QueuedRawFrame {
+  conn: RelayConnection
+  ws: WebSocket
+  raw: string
+}
+
+type PendingDispatchItem =
+  | {
+      kind: 'event'
+      conn: RelayConnection
+      wireSubId: string
+      event: NostrEvent
+    }
+  | {
+      kind: 'eose'
+      conn: RelayConnection
+      wireSubId: string
+    }
 
 export class RelayPool {
   private connections = new Map<string, RelayConnection>()
@@ -84,6 +113,19 @@ export class RelayPool {
   private emitTimer: number | null = null
   private lastHiddenAt: number | null = null
   private disposed = false
+
+  // Frame-budgeted inbound message & off-main-thread batch verification pipeline
+  private inboundRawQueue: QueuedRawFrame[] = []
+  private inboundRawHead = 0
+  private pendingDispatchQueue: PendingDispatchItem[] = []
+  private pendingDispatchHead = 0
+  private inFlightVerifyIds = new Set<string>()
+  private verifyEpoch = 0
+  private yieldChannel: MessageChannel | null = null
+  private yieldPending = false
+  private yieldFallbackTimer: ReturnType<typeof setTimeout> | null = null
+  private inboundScheduled = false
+  private dispatchScheduled = false
 
   private readonly handleVisibilityChange = (): void => {
     if (this.disposed || typeof document === 'undefined') return
@@ -394,6 +436,7 @@ export class RelayPool {
   }
 
   closeAll(): void {
+    this.resetInboundPipeline()
     for (const wireId of Array.from(this.subscriptions.keys())) {
       this.unsubscribeByWireId(wireId)
     }
@@ -418,6 +461,17 @@ export class RelayPool {
 
   dispose(): void {
     this.disposed = true
+    this.resetInboundPipeline()
+    if (this.yieldChannel) {
+      try {
+        this.yieldChannel.port1.onmessage = null
+        this.yieldChannel.port1.close()
+        this.yieldChannel.port2.close()
+      } catch {
+        // Ignore MessageChannel close error
+      }
+      this.yieldChannel = null
+    }
     if (typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', this.handleVisibilityChange)
     }
@@ -548,7 +602,18 @@ export class RelayPool {
       conn.rxCount += 1
       conn.lastActivityAt = Date.now()
       if (typeof msgEvent.data !== 'string') return
-      this.handleRelayMessage(conn, msgEvent.data)
+      const raw = msgEvent.data
+      // Keep OK / AUTH / NOTICE control frames immediately responsive even during EVENT bursts
+      if (
+        raw.startsWith('["OK"') ||
+        raw.startsWith('["AUTH"') ||
+        raw.startsWith('["NOTICE"')
+      ) {
+        this.handleImmediateControlFrame(conn, raw)
+        return
+      }
+      this.inboundRawQueue.push({ conn, ws, raw })
+      this.scheduleInboundDrain()
     })
 
     ws.addEventListener('error', () => {
@@ -600,7 +665,242 @@ export class RelayPool {
     }
   }
 
-  private handleRelayMessage(conn: RelayConnection, raw: string): void {
+  private resetInboundPipeline(): void {
+    this.verifyEpoch += 1
+    this.inboundRawQueue = []
+    this.inboundRawHead = 0
+    this.pendingDispatchQueue = []
+    this.pendingDispatchHead = 0
+    this.inFlightVerifyIds.clear()
+    this.inboundScheduled = false
+    this.dispatchScheduled = false
+    this.yieldPending = false
+    if (this.yieldFallbackTimer !== null) {
+      clearTimeout(this.yieldFallbackTimer)
+      this.yieldFallbackTimer = null
+    }
+  }
+
+  private triggerYield(): void {
+    if (this.yieldPending || this.disposed) return
+    this.yieldPending = true
+
+    if (typeof MessageChannel !== 'undefined') {
+      if (!this.yieldChannel) {
+        const ch = new MessageChannel()
+        ch.port1.onmessage = () => {
+          this.yieldPending = false
+          this.runScheduledWork()
+        }
+        this.yieldChannel = ch
+      }
+      this.yieldChannel.port2.postMessage(null)
+      return
+    }
+
+    this.yieldFallbackTimer = setTimeout(() => {
+      this.yieldFallbackTimer = null
+      this.yieldPending = false
+      this.runScheduledWork()
+    }, 0)
+  }
+
+  private scheduleInboundDrain(): void {
+    if (this.disposed) return
+    this.inboundScheduled = true
+    this.triggerYield()
+  }
+
+  private scheduleDispatchDrain(): void {
+    if (this.disposed) return
+    this.dispatchScheduled = true
+    this.triggerYield()
+  }
+
+  private runScheduledWork(): void {
+    if (this.disposed) return
+    const sliceStart = performance.now()
+    if (this.inboundScheduled) {
+      this.inboundScheduled = false
+      this.drainInboundRawSlice(sliceStart)
+    }
+    if (this.dispatchScheduled) {
+      if (performance.now() - sliceStart >= FRAME_BUDGET_MS) {
+        this.triggerYield()
+        return
+      }
+      this.dispatchScheduled = false
+      this.drainDispatchSlice(sliceStart)
+    }
+  }
+
+  private drainInboundRawSlice(sliceStart: number): void {
+    const unverifiedBatch: NostrEvent[] = []
+    let processed = 0
+
+    while (this.inboundRawHead < this.inboundRawQueue.length) {
+      if (
+        processed > 0 &&
+        (performance.now() - sliceStart >= FRAME_BUDGET_MS ||
+          unverifiedBatch.length >= VERIFY_BATCH_MAX)
+      ) {
+        break
+      }
+
+      const frame = this.inboundRawQueue[this.inboundRawHead++]
+      processed += 1
+
+      if (this.disposed || frame.conn.ws !== frame.ws) continue
+
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(frame.raw)
+      } catch {
+        continue
+      }
+      if (!Array.isArray(parsed) || parsed.length < 2) continue
+
+      const frameType = parsed[0]
+      if (frameType === 'EVENT' && parsed.length >= 3) {
+        const wireSubId = typeof parsed[1] === 'string' ? parsed[1] : null
+        const ev = parsed[2] as NostrEvent | null
+        if (!wireSubId || !ev || typeof ev !== 'object') continue
+        const sub = this.subscriptions.get(wireSubId)
+        if (!sub || sub.closed) continue
+
+        this.pendingDispatchQueue.push({
+          kind: 'event',
+          conn: frame.conn,
+          wireSubId,
+          event: ev,
+        })
+
+        if (
+          typeof ev.id === 'string' &&
+          ev.id.length > 0 &&
+          getEventVerificationCacheResult(ev.id) === null &&
+          !this.inFlightVerifyIds.has(ev.id)
+        ) {
+          this.inFlightVerifyIds.add(ev.id)
+          unverifiedBatch.push(ev)
+        }
+        continue
+      }
+
+      if (frameType === 'EOSE' && typeof parsed[1] === 'string') {
+        const wireSubId = parsed[1]
+        const sub = this.subscriptions.get(wireSubId)
+        if (!sub || sub.closed) continue
+        this.pendingDispatchQueue.push({
+          kind: 'eose',
+          conn: frame.conn,
+          wireSubId,
+        })
+        continue
+      }
+
+      this.handleParsedControlFrame(frame.conn, parsed)
+    }
+
+    if (this.inboundRawHead >= this.inboundRawQueue.length) {
+      this.inboundRawQueue = []
+      this.inboundRawHead = 0
+    } else if (this.inboundRawHead >= 64) {
+      this.inboundRawQueue = this.inboundRawQueue.slice(this.inboundRawHead)
+      this.inboundRawHead = 0
+    }
+
+    if (unverifiedBatch.length > 0) {
+      if (isOffMainThreadWorkerSupported()) {
+        const epoch = this.verifyEpoch
+        const batchIds = unverifiedBatch.map((ev) => ev.id)
+        void verifyEventsBatchOffMainThread(unverifiedBatch)
+          .then((results) => {
+            if (this.disposed || this.verifyEpoch !== epoch) return
+            for (const r of results) {
+              markEventVerifiedCached(r.id, r.ok)
+            }
+          })
+          .catch(() => {
+            // Worker unavailable or crashed: subscribers' verifyEventCached(ev) falls back cleanly
+          })
+          .finally(() => {
+            for (const id of batchIds) {
+              this.inFlightVerifyIds.delete(id)
+            }
+            if (!this.disposed && this.verifyEpoch === epoch) {
+              this.scheduleDispatchDrain()
+            }
+          })
+      } else {
+        for (const ev of unverifiedBatch) {
+          this.inFlightVerifyIds.delete(ev.id)
+        }
+        this.scheduleDispatchDrain()
+      }
+    }
+
+    if (this.pendingDispatchHead < this.pendingDispatchQueue.length) {
+      this.dispatchScheduled = true
+    }
+
+    if (this.inboundRawHead < this.inboundRawQueue.length) {
+      this.scheduleInboundDrain()
+    }
+  }
+
+  private drainDispatchSlice(sliceStart: number): void {
+    let dispatched = 0
+    let blockedOnVerify = false
+
+    while (this.pendingDispatchHead < this.pendingDispatchQueue.length) {
+      if (dispatched > 0 && performance.now() - sliceStart >= FRAME_BUDGET_MS) {
+        break
+      }
+
+      const item = this.pendingDispatchQueue[this.pendingDispatchHead]
+      if (
+        item.kind === 'event' &&
+        typeof item.event.id === 'string' &&
+        this.inFlightVerifyIds.has(item.event.id)
+      ) {
+        // Preserve strict per-stream EVENT -> EOSE order until off-main-thread batch resolves
+        blockedOnVerify = true
+        break
+      }
+
+      this.pendingDispatchHead += 1
+
+      const sub = this.subscriptions.get(item.wireSubId)
+      if (!sub || sub.closed || this.disposed) continue
+
+      if (item.kind === 'event') {
+        sub.handlers.onEvent(item.event, item.conn.url)
+        dispatched += 1
+      } else if (!sub.eoseReceived.has(item.conn.url)) {
+        sub.eoseReceived.add(item.conn.url)
+        sub.handlers.onEose?.(item.conn.url)
+      }
+    }
+
+    if (this.pendingDispatchHead >= this.pendingDispatchQueue.length) {
+      this.pendingDispatchQueue = []
+      this.pendingDispatchHead = 0
+    } else if (this.pendingDispatchHead >= 64) {
+      this.pendingDispatchQueue = this.pendingDispatchQueue.slice(this.pendingDispatchHead)
+      this.pendingDispatchHead = 0
+    }
+
+    if (dispatched > 0) {
+      this.scheduleTelemetryEmit()
+    }
+
+    if (!blockedOnVerify && this.pendingDispatchHead < this.pendingDispatchQueue.length) {
+      this.scheduleDispatchDrain()
+    }
+  }
+
+  private handleImmediateControlFrame(conn: RelayConnection, raw: string): void {
     let parsed: unknown
     try {
       parsed = JSON.parse(raw)
@@ -608,27 +908,11 @@ export class RelayPool {
       return
     }
     if (!Array.isArray(parsed) || parsed.length < 2) return
+    this.handleParsedControlFrame(conn, parsed)
+  }
 
+  private handleParsedControlFrame(conn: RelayConnection, parsed: unknown[]): void {
     const frameType = parsed[0]
-    if (frameType === 'EVENT' && parsed.length >= 3) {
-      const wireSubId = typeof parsed[1] === 'string' ? parsed[1] : null
-      const ev = parsed[2] as NostrEvent | null
-      if (!wireSubId || !ev || typeof ev !== 'object') return
-      const sub = this.subscriptions.get(wireSubId)
-      if (!sub || sub.closed) return
-      sub.handlers.onEvent(ev, conn.url)
-      this.scheduleTelemetryEmit()
-      return
-    }
-
-    if (frameType === 'EOSE' && typeof parsed[1] === 'string') {
-      const sub = this.subscriptions.get(parsed[1])
-      if (sub && !sub.closed && !sub.eoseReceived.has(conn.url)) {
-        sub.eoseReceived.add(conn.url)
-        sub.handlers.onEose?.(conn.url)
-      }
-      return
-    }
 
     if (frameType === 'AUTH' && typeof parsed[1] === 'string') {
       const challenge = parsed[1]

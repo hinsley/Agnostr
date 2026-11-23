@@ -291,12 +291,12 @@ export function ServerSettingsModal({
               {liveServer.kind === 'nip29' ? (
                 <span className="ag-badge ag-badge-mesh">
                   <Server size={9} />
-                  <span>NIP-29</span>
+                  <span>HOSTED</span>
                 </span>
               ) : liveServer.encrypted ? (
                 <span className="ag-badge ag-badge-dm">
                   <Lock size={9} />
-                  <span>E2EE AES-256-GCM</span>
+                  <span>ENCRYPTED</span>
                 </span>
               ) : (
                 <span className="ag-badge ag-badge-accent">PUBLIC</span>
@@ -380,8 +380,8 @@ export function ServerSettingsModal({
                     <div className="ag-privacy-callout">
                       <AlertTriangle size={13} />
                       <span>
-                        This invite embeds the <strong>AES-256-GCM decryption key</strong>. Share
-                        only with trusted people.
+                        This invite includes the <strong>server decryption key</strong>. Share only
+                        with invited people.
                       </span>
                     </div>
                   )}
@@ -870,7 +870,7 @@ export function ServerSettingsModal({
                   <ShieldOff size={20} className="ag-empty-icon" />
                   <p className="ag-empty-title">No banned pubkeys</p>
                   <p className="ag-empty-sub">
-                    Banned peers are hidden from this server (or removed via NIP-29 relay moderation).
+                    Banned people are hidden from this server.
                   </p>
                 </div>
               ) : (

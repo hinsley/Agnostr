@@ -1001,7 +1001,7 @@ export function SettingsModal({
           </button>
         </div>
         <p className="ag-set-helper">
-          Published on your Nostr profile &amp; messages so peers can zap you with Lightning.
+          Lets others send you Lightning zaps.
         </p>
         {lud16Feedback && (
           <p
@@ -1038,8 +1038,7 @@ export function SettingsModal({
                 <span>Silent Background Sync</span>
               </span>
               <span className="ag-set-toggle-desc">
-                NIP-44 self-encrypted sync of servers, trusted/blocked peers, notes, pins, Agmail
-                &amp; missing messages across devices using this key.
+                Encrypted sync for servers, friends, notes, pins, Agmail, and messages.
               </span>
             </div>
             <input
@@ -1178,7 +1177,7 @@ export function SettingsModal({
       <div className="ag-set-group">
         <div className="ag-set-label-row">
           <span className="ag-set-label">Signer</span>
-          {identity.hasNip07 && <span className="ag-badge ag-badge-ok">NIP-07 detected</span>}
+          {identity.hasNip07 && <span className="ag-badge ag-badge-ok">Extension detected</span>}
         </div>
         <div className="ag-segmented" role="tablist" aria-label="Nostr signing mode">
           {SIGN_MODES.map((m) => (
@@ -1463,7 +1462,7 @@ export function SettingsModal({
               <div className="ag-set-notif-row-copy">
                 <span className="ag-set-notif-row-title">Direct Messages</span>
                 <span className="ag-set-notif-row-desc">
-                  Encrypted 1-on-1 messages (NIP-17 &amp; Bitchat)
+                  Encrypted 1-on-1 messages
                 </span>
               </div>
               <input
@@ -1501,7 +1500,7 @@ export function SettingsModal({
               <div className="ag-set-notif-row-copy">
                 <span className="ag-set-notif-row-title">Incoming DM Call Ringing</span>
                 <span className="ag-set-notif-row-desc">
-                  Accept / Decline notification buttons, full-screen ringer, ringtone &amp; vibration
+                  Full-screen ringer, chime, and vibration
                 </span>
               </div>
               <input
@@ -1725,9 +1724,7 @@ export function SettingsModal({
           {bridgeOpen && (
             <div className="ag-set-bridge-body">
               <p className="ag-set-helper">
-                Notifications and call ringing work automatically while Agnostr is open or
-                backgrounded. Connect a self-hosted NIP-98/VAPID push bridge to wake a completely
-                closed or locked phone.
+                Connect a self-hosted push bridge to wake a closed or locked phone.
               </p>
 
               <form className="ag-set-subform" onSubmit={(e) => void handleConnectPushBridge(e)}>
@@ -1743,19 +1740,19 @@ export function SettingsModal({
                     setBridgeUrlDraft(e.target.value)
                     if (bridgeFeedback) setBridgeFeedback(null)
                   }}
-                  aria-label="Web Push bridge URL"
+                  aria-label="Push bridge URL"
                 />
                 <input
                   type="text"
                   autoComplete="off"
                   className="ag-input mono"
-                  placeholder="VAPID public key (optional)"
+                  placeholder="Server public key (optional)"
                   value={vapidKeyDraft}
                   onChange={(e) => {
                     setVapidKeyDraft(e.target.value)
                     if (bridgeFeedback) setBridgeFeedback(null)
                   }}
-                  aria-label="VAPID public key"
+                  aria-label="Push server public key"
                 />
                 <div className="ag-set-bridge-actions">
                   <button
@@ -1832,8 +1829,7 @@ export function SettingsModal({
             <span>Trusted Peers Only (Text)</span>
           </span>
           <span className="ag-set-toggle-desc">
-            Hide text messages from untrusted senders. Images, voice memos, and DM calls always
-            require trusting the sender.
+            Hide text from untrusted senders. Media and calls always require trust.
           </span>
         </div>
         <input
@@ -1854,9 +1850,7 @@ export function SettingsModal({
             <span>Broadcast Agnostr client</span>
           </span>
           <span className="ag-set-toggle-desc">
-            Includes a standard NIP-89 client tag on Geo Radio messages and presence so other
-            Agnostr users see a blue border on your profile picture and Agnostr listed in your
-            profile. Turn off for a wider Bitchat anonymity set.
+            Show a blue avatar border and Agnostr in your profile. Turn off for a wider anonymity set.
           </span>
         </div>
         <input
@@ -2605,8 +2599,7 @@ export function SettingsModal({
               <span>Double-Column Translator Mode</span>
             </span>
             <span className="ag-set-toggle-desc">
-              Shows messages translated into your language on the left alongside a collapsible
-              Underlying Chat column on the right.
+              Read translated messages beside the original chat column.
             </span>
           </div>
           <input
@@ -2669,8 +2662,7 @@ export function SettingsModal({
                 <span>Translate Outgoing Messages</span>
               </span>
               <span className="ag-set-toggle-desc">
-                Automatically translates what you type before publishing to chat while keeping your
-                original text in your reading column.
+                Translate your messages automatically before sending.
               </span>
             </div>
             <input
@@ -3115,8 +3107,8 @@ export function SettingsModal({
             </span>
           </div>
           <p className="ag-set-helper">
-            Calls connect peer-to-peer (WebRTC) and share your IP with call peers. Add a TURN
-            server only if you are behind a strict firewall.
+            Calls connect directly and share your IP with call participants. Add a relay server only
+            behind strict firewalls.
           </p>
 
           <form className="ag-turn-form" onSubmit={handleSaveTurn}>
@@ -3307,7 +3299,7 @@ export function SettingsModal({
 
         <p className="ag-set-helper">
           <Lock size={12} style={{ verticalAlign: '-2px', marginRight: 4 }} />
-          DM &amp; private server media are AES-256-GCM encrypted before upload.
+          DM and private server media are encrypted before upload.
         </p>
 
         {blossomServers.length > 0 && (
@@ -3457,8 +3449,7 @@ export function SettingsModal({
           <span>Emergency Panic Wipe</span>
         </div>
         <p className="ag-set-helper">
-          Hold for 1.5s to erase all local keys, messages, DMs, trusted peers, and caches, and
-          rotate to a fresh identity.
+          Hold 1.5s to erase all local data and generate a fresh identity.
         </p>
         <button
           type="button"

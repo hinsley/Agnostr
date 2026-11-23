@@ -38,6 +38,7 @@ import {
 const MAX_CALL_CAPTION_ENTRIES = 500
 const TRANSFORMERS_CACHE_KEY = 'transformers-cache'
 const PARAKEET_IDB_NAME = 'parakeet-cache-db'
+const IDLE_WORKER_TEARDOWN_MS = 5 * 60 * 1000 // Reclaim WASM/ONNX RAM after 5m idle with no active call or job
 
 export interface UseTranscriptionParams {
   activeCall: ActiveCallSession | null
@@ -253,6 +254,7 @@ export function useTranscription(
     useState<EndedCallTranscript | null>(null)
 
   const workerRef = useRef<Worker | null>(null)
+  const idleTeardownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const capturerRef = useRef<LiveStreamSpeechCapturer | null>(null)
   const pendingRef = useRef<Map<string, PendingWorkerRequest>>(new Map())
   const memoQueueRef = useRef<QueuedMemoItem[]>([])
@@ -329,7 +331,15 @@ export function useTranscription(
     }
   }, [])
 
+  const clearIdleTeardownTimer = useCallback(() => {
+    if (idleTeardownTimerRef.current !== null) {
+      clearTimeout(idleTeardownTimerRef.current)
+      idleTeardownTimerRef.current = null
+    }
+  }, [])
+
   const terminateWorker = useCallback(() => {
+    clearIdleTeardownTimer()
     const w = workerRef.current
     workerRef.current = null
     loadedModelKeyRef.current = null
@@ -353,7 +363,39 @@ export function useTranscription(
       }
       w.terminate()
     }
-  }, [])
+  }, [clearIdleTeardownTimer])
+
+  const scheduleIdleWorkerTeardown = useCallback(() => {
+    clearIdleTeardownTimer()
+    if (!workerRef.current) return
+    if (
+      activeCallRef.current ||
+      pendingRef.current.size > 0 ||
+      memoQueueRef.current.length > 0 ||
+      memoQueueRunningRef.current
+    ) {
+      return
+    }
+
+    idleTeardownTimerRef.current = setTimeout(() => {
+      idleTeardownTimerRef.current = null
+      if (
+        !workerRef.current ||
+        activeCallRef.current ||
+        pendingRef.current.size > 0 ||
+        memoQueueRef.current.length > 0 ||
+        memoQueueRunningRef.current
+      ) {
+        return
+      }
+      terminateWorker()
+      setModelStatus('idle')
+      setDownloadProgress(0)
+      setDownloadFile(null)
+      setRuntimeDevice(null)
+      setModelError(null)
+    }, IDLE_WORKER_TEARDOWN_MS)
+  }, [clearIdleTeardownTimer, terminateWorker])
 
   const handleWorkerMessage = useCallback(
     (event: MessageEvent<WorkerOutMessage>) => {
@@ -392,6 +434,7 @@ export function useTranscription(
         if (dropped?.kind === 'blob') {
           dropped.reject(new Error('Transcription request was dropped.'))
         }
+        scheduleIdleWorkerTeardown()
         return
       }
 
@@ -407,6 +450,7 @@ export function useTranscription(
 
         if (pending.kind === 'load') {
           pending.resolve(true)
+          scheduleIdleWorkerTeardown()
           return
         }
 
@@ -442,11 +486,13 @@ export function useTranscription(
             return updated
           })
           pending.resolve()
+          scheduleIdleWorkerTeardown()
           return
         }
 
         if (pending.kind === 'blob') {
           pending.resolve(msg.text.trim())
+          scheduleIdleWorkerTeardown()
           return
         }
 
@@ -457,6 +503,7 @@ export function useTranscription(
             !liveCaptionsEnabledRef.current ||
             activeCallRef.current?.callId !== pending.callId
           ) {
+            scheduleIdleWorkerTeardown()
             return
           }
           const entry: LiveCaptionEntry = {
@@ -477,6 +524,7 @@ export function useTranscription(
             liveCaptionsRef.current = capped
             return capped
           })
+          scheduleIdleWorkerTeardown()
           return
         }
       }
@@ -484,10 +532,12 @@ export function useTranscription(
       if (msg.type === 'error') {
         if (pending.kind === 'load') {
           pending.resolve(false)
+          scheduleIdleWorkerTeardown()
           return
         }
         if (pending.kind === 'blob') {
           pending.reject(new Error(msg.error || 'Unable to transcribe audio.'))
+          scheduleIdleWorkerTeardown()
           return
         }
         if (pending.kind === 'memo') {
@@ -501,13 +551,15 @@ export function useTranscription(
             },
           }))
           pending.resolve()
+          scheduleIdleWorkerTeardown()
         }
       }
     },
-    []
+    [scheduleIdleWorkerTeardown]
   )
 
   const ensureWorker = useCallback((): Worker => {
+    clearIdleTeardownTimer()
     if (workerRef.current) return workerRef.current
     if (typeof Worker === 'undefined') {
       throw new Error('Web Workers are unavailable in this browser.')
@@ -548,7 +600,7 @@ export function useTranscription(
     }
     workerRef.current = worker
     return worker
-  }, [handleWorkerMessage])
+  }, [clearIdleTeardownTimer, handleWorkerMessage])
 
   const preloadModel = useCallback(async (): Promise<boolean> => {
     const model = activeModelRef.current
@@ -830,8 +882,9 @@ export function useTranscription(
       }
     } finally {
       memoQueueRunningRef.current = false
+      scheduleIdleWorkerTeardown()
     }
-  }, [ensureWorker, nextRequestId])
+  }, [ensureWorker, nextRequestId, scheduleIdleWorkerTeardown])
 
   const clearTranscriptCache = useCallback(() => {
     clearMemoQueue()
@@ -1115,8 +1168,11 @@ export function useTranscription(
         liveCaptionsRef.current = []
         setLiveCaptions([])
       }
+      scheduleIdleWorkerTeardown()
       return
     }
+
+    clearIdleTeardownTimer()
 
     activeCallMetaRef.current = {
       callId: activeCall.callId,
@@ -1190,6 +1246,8 @@ export function useTranscription(
     handleCapturedSpeechSegment,
     preloadModel,
     stopCapturer,
+    clearIdleTeardownTimer,
+    scheduleIdleWorkerTeardown,
   ])
 
   // Clean up capturer & worker on unmount

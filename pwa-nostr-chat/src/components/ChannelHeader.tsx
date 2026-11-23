@@ -129,7 +129,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
       engine.pushToast(
         'warning',
         `Trust ${dmThread.peerDisplayHandle} first`,
-        'P2P calls connect directly. Open Chat Info and trust this person to unlock calls.'
+        'Open Chat Info and trust this person to unlock calls.'
       )
       return
     }
@@ -146,7 +146,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
       engine.pushToast(
         'warning',
         `Voice Lounge full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`,
-        'Group calls support up to 6 participants at once.'
+        'Up to 6 participants per call.'
       )
       return
     }
@@ -161,8 +161,8 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     if (isGeoCallFull) {
       engine.pushToast(
         'warning',
-        `${isTopicRadio ? 'Topic Radio' : 'Geo Radio'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`,
-        'Group calls support up to 6 participants at once.'
+        `Call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`,
+        'Up to 6 participants per call.'
       )
       return
     }
@@ -170,9 +170,9 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   }
 
   const onlineSubtitle = isTopicRadio
-    ? 'Named Radio'
+    ? 'Topic'
     : engine.presence.isUncertainCount
-      ? 'Private precision'
+      ? 'Local area'
       : `${engine.presence.onlineCount} online`
 
   return (
@@ -276,7 +276,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                     <span>
                       {isDisconnected
                         ? `Offline · ${activeServer.name}`
-                        : `${activeServer.name} · Saved`}
+                        : activeServer.name}
                     </span>
                   </div>
                 </div>
@@ -564,17 +564,15 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 <Languages size={17} />
               </button>
 
-              {!isTopicRadio && (
-                <button
-                  type="button"
-                  className="ag-circle-btn ag-desktop-only"
-                  onClick={onExpandRadar}
-                  title="Open Full Map"
-                  aria-label="Open Geohash Map"
-                >
-                  <MapIcon size={18} />
-                </button>
-              )}
+              <button
+                type="button"
+                className="ag-circle-btn"
+                onClick={onExpandRadar}
+                title="Open Map"
+                aria-label="Open Map"
+              >
+                <MapIcon size={18} />
+              </button>
 
               <button
                 type="button"

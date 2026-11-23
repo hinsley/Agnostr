@@ -3,6 +3,8 @@
    Shared across main message stream, sidebar, peers panel, and modals.
    ========================================================================== */
 
+export const MAX_IDENTICON_CACHE = 256
+
 const dataUrlCache = new Map<string, string>()
 
 /**
@@ -101,7 +103,12 @@ export function getIdenticonData(pubkey: string): IdenticonData {
 export function identiconDataUrl(pubkey: string): string {
   const key = (pubkey || 'anon').toLowerCase()
   const cached = dataUrlCache.get(key)
-  if (cached) return cached
+  if (cached) {
+    // Refresh LRU recency on hit
+    dataUrlCache.delete(key)
+    dataUrlCache.set(key, cached)
+    return cached
+  }
 
   const { grid, hue, secondaryHue } = getIdenticonData(key)
 
@@ -132,9 +139,10 @@ export function identiconDataUrl(pubkey: string): string {
   ].join('')
 
   const url = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
-  if (dataUrlCache.size > 400) {
-    const first = dataUrlCache.keys().next().value
-    if (first) dataUrlCache.delete(first)
+  while (dataUrlCache.size >= MAX_IDENTICON_CACHE) {
+    const oldest = dataUrlCache.keys().next().value
+    if (oldest === undefined) break
+    dataUrlCache.delete(oldest)
   }
   dataUrlCache.set(key, url)
   return url

@@ -3,7 +3,6 @@ import type { CSSProperties, FormEvent } from 'react'
 import {
   Check,
   Compass,
-  Database,
   Globe,
   Hash,
   Link2,
@@ -217,7 +216,7 @@ export function ServerHubModal({
     if (createMode === 'nip29') {
       const relay = nip29CreateRelay.trim()
       if (!relay || !/^wss?:\/\//i.test(relay)) {
-        setCreateError('Select or enter a valid wss:// NIP-29 relay URL')
+        setCreateError('Enter a valid wss:// relay URL')
         return
       }
       const created = await servers.createNip29Group({
@@ -236,7 +235,7 @@ export function ServerHubModal({
         onJoinedServer?.(created)
         onClose()
       } else {
-        setCreateError('Relay did not accept group creation. Try another open NIP-29 relay.')
+        setCreateError('Relay did not accept group creation. Try another relay.')
       }
       return
     }
@@ -332,10 +331,10 @@ export function ServerHubModal({
         <div className="ag-srv-modal-head">
           <div className="ag-srv-modal-title-group">
             <h2 id="ag-srv-hub-title" className="ag-srv-modal-title">
-              Servers &amp; Communities
+              Servers
             </h2>
             <p className="ag-srv-modal-sub">
-              Create or join a Nostr server.
+              Create, join, or browse communities.
             </p>
           </div>
           <button
@@ -387,7 +386,7 @@ export function ServerHubModal({
             }}
           >
             <Compass size={12} />
-            <span>Explore NIP-29</span>
+            <span>Explore</span>
           </button>
         </div>
 
@@ -403,7 +402,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'virtual-e2ee'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-e2ee' ? 'active e2ee' : ''}`}
-                  title="Persistent — encrypted messages are stored on relays, not ephemeral"
+                  title="Encrypted invite-only server"
                   onClick={() => {
                     setCreateMode('virtual-e2ee')
                     setIconDraft('🔐')
@@ -412,11 +411,10 @@ export function ServerHubModal({
                 >
                   <div className="ag-srv-mode-top">
                     <Lock size={14} />
-                    <span>E2EE Private</span>
+                    <span>Private</span>
                   </div>
                   <div className="ag-srv-mode-sub">
-                    <span className="ag-srv-mode-desc">Invite-only</span>
-                    <span className="ag-srv-saved-pill mono">SAVED</span>
+                    <span className="ag-srv-mode-desc">Encrypted</span>
                   </div>
                 </button>
 
@@ -425,7 +423,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'virtual-public'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-public' ? 'active' : ''}`}
-                  title="Persistent — public messages are stored on relays, not ephemeral"
+                  title="Open public server"
                   onClick={() => {
                     setCreateMode('virtual-public')
                     setIconDraft('📡')
@@ -434,11 +432,10 @@ export function ServerHubModal({
                 >
                   <div className="ag-srv-mode-top">
                     <Globe size={14} />
-                    <span>Instant Public</span>
+                    <span>Public</span>
                   </div>
                   <div className="ag-srv-mode-sub">
                     <span className="ag-srv-mode-desc">Open chat</span>
-                    <span className="ag-srv-saved-pill mono">SAVED</span>
                   </div>
                 </button>
 
@@ -447,7 +444,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'nip29'}
                   className={`ag-srv-mode-card ${createMode === 'nip29' ? 'active nip29' : ''}`}
-                  title="Persistent — messages are stored on the host NIP-29 relay, not ephemeral"
+                  title="Relay-hosted moderated community"
                   onClick={() => {
                     setCreateMode('nip29')
                     setIconDraft('🛰️')
@@ -456,21 +453,12 @@ export function ServerHubModal({
                 >
                   <div className="ag-srv-mode-top">
                     <Server size={14} />
-                    <span>NIP-29 Relay</span>
+                    <span>Hosted</span>
                   </div>
                   <div className="ag-srv-mode-sub">
                     <span className="ag-srv-mode-desc">Moderated</span>
-                    <span className="ag-srv-saved-pill mono">SAVED</span>
                   </div>
                 </button>
-              </div>
-
-              <div className="ag-srv-persistence-bar">
-                <Database size={12} />
-                <span>
-                  <strong>History:</strong> Saved on relays (not ephemeral — use Geo Radio for
-                  ephemeral chat).
-                </span>
               </div>
 
               {/* Name & Description */}
@@ -607,7 +595,7 @@ export function ServerHubModal({
               ) : (
                 <div className="ag-srv-nip29-create-box">
                   <label className="ag-field-label" htmlFor="ag-nip29-create-relay">
-                    Host NIP-29 Relay
+                    Host Relay
                   </label>
                   <div className="ag-srv-preset-pills">
                     {servers.nip29Presets.map((preset) => (
@@ -676,9 +664,9 @@ export function ServerHubModal({
                       <Sparkles size={14} />
                       <span>
                         {createMode === 'virtual-e2ee'
-                          ? 'Create E2EE Server'
+                          ? 'Create Private Server'
                           : createMode === 'nip29'
-                            ? 'Create NIP-29 Group'
+                            ? 'Create Hosted Community'
                             : 'Create Public Server'}
                       </span>
                     </>
@@ -694,7 +682,7 @@ export function ServerHubModal({
               <div>
                 <div className="ag-srv-join-head">
                   <label className="ag-field-label" htmlFor="ag-srv-invite-input">
-                    Invite Link, Code, or NIP-29 Address
+                    Invite Link or Code
                   </label>
                   {onOpenScanner && (
                     <button
@@ -747,23 +735,16 @@ export function ServerHubModal({
                         {parsedInvite.kind === 'nip29' ? (
                           <span className="ag-badge ag-badge-mesh">
                             <Server size={9} />
-                            <span>NIP-29</span>
+                            <span>HOSTED</span>
                           </span>
                         ) : parsedInvite.encrypted ? (
                           <span className="ag-badge ag-badge-dm">
                             <Lock size={9} />
-                            <span>E2EE AES-256-GCM</span>
+                            <span>ENCRYPTED</span>
                           </span>
                         ) : (
-                          <span className="ag-badge ag-badge-accent">PUBLIC SERVER</span>
+                          <span className="ag-badge ag-badge-accent">PUBLIC</span>
                         )}
-                        <span
-                          className="ag-badge ag-srv-saved-badge"
-                          title="Persistent history stored on relays"
-                        >
-                          <Database size={9} />
-                          <span>SAVED</span>
-                        </span>
                         {parsedInvite.channels && parsedInvite.channels.length > 0 && (
                           <span className="ag-badge ag-badge-muted">
                             {parsedInvite.channels.length}{' '}
@@ -805,20 +786,18 @@ export function ServerHubModal({
                   <div className="ag-safety-notice">
                     <ShieldAlert size={13} />
                     <span>
-                      Joining connects to the server&apos;s relays. Voice memos &amp; media still
-                      require <strong>trusting the sender</strong> (zero bytes fetched until trusted).
+                      Media from untrusted senders stays hidden until trusted.
                     </span>
                   </div>
                 </div>
               ) : inviteDraft.trim().length > 0 ? (
                 <p className="ag-field-hint ag-field-hint-warn">
-                  Unrecognized invite format — paste a full Agnostr <code className="mono">#invite=ag1…</code>{' '}
-                  link or NIP-29 <code className="mono">relay&apos;groupId</code>.
+                  Unrecognized invite — paste an <code className="mono">#invite=ag1…</code> link
+                  or <code className="mono">relay&apos;groupId</code>.
                 </p>
               ) : (
                 <p className="ag-field-hint">
-                  You&apos;ll see a full preview of the server, encryption mode, and relay before
-                  joining.
+                  Paste an invite link or code to preview before joining.
                 </p>
               )}
 
@@ -880,10 +859,10 @@ export function ServerHubModal({
                 <input
                   type="text"
                   className="ag-input mono"
-                  placeholder="Custom wss:// NIP-29 relay…"
+                  placeholder="Custom wss:// relay URL…"
                   value={customExploreRelay}
                   onChange={(e) => setCustomExploreRelay(e.target.value)}
-                  aria-label="Custom NIP-29 relay URL"
+                  aria-label="Custom relay URL"
                 />
                 <button
                   type="submit"
@@ -918,7 +897,7 @@ export function ServerHubModal({
                   placeholder={`Filter groups on ${stripWs(servers.exploredRelayUrl || 'relay')}…`}
                   value={exploreQuery}
                   onChange={(e) => setExploreQuery(e.target.value)}
-                  aria-label="Filter discovered NIP-29 groups"
+                  aria-label="Filter discovered groups"
                 />
                 {exploreQuery && (
                   <button
@@ -941,7 +920,7 @@ export function ServerHubModal({
                 {servers.exploringRelay ? (
                   <div className="ag-empty-panel">
                     <Loader2 size={20} className="ag-empty-icon ag-spin" />
-                    <p className="ag-empty-title">Scanning NIP-29 relay…</p>
+                    <p className="ag-empty-title">Scanning relay…</p>
                     <p className="ag-empty-sub mono">{stripWs(servers.exploredRelayUrl)}</p>
                   </div>
                 ) : filteredExploredGroups.length === 0 ? (
@@ -949,7 +928,7 @@ export function ServerHubModal({
                     <Users size={20} className="ag-empty-icon" />
                     <p className="ag-empty-title">No communities found</p>
                     <p className="ag-empty-sub">
-                      Try another NIP-29 relay above or clear your search filter.
+                      Try another relay above or clear your search.
                     </p>
                   </div>
                 ) : (

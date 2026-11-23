@@ -31,7 +31,8 @@ export const DEFAULT_POW_TARGET_BITS = 8
 const MAX_INBOUND_TAGS = 64
 const MAX_TAG_VALUES = 12
 const MAX_TAG_VALUE_LEN = 1024
-const MAX_VERIFIED_CACHE = 4000
+const MAX_VERIFIED_CACHE = 1500
+const MAX_INVALID_CACHE = 500
 
 const verifiedEventIds = new Set<string>()
 const invalidEventIds = new Set<string>()
@@ -40,6 +41,37 @@ const utf8Encoder = new TextEncoder()
 export function clearProtocolCaches(): void {
   verifiedEventIds.clear()
   invalidEventIds.clear()
+}
+
+/**
+ * Returns cached verification verdict (`true` / `false`) or `null` if unknown.
+ */
+export function getEventVerificationCacheResult(id: string): boolean | null {
+  if (!id) return null
+  if (verifiedEventIds.has(id)) return true
+  if (invalidEventIds.has(id)) return false
+  return null
+}
+
+/**
+ * Populates the O(1) verification cache from off-main-thread batch verification
+ * so subsequent `verifyEventCached(ev)` calls hit the cache in ~0.001ms.
+ */
+export function markEventVerifiedCached(id: string, ok: boolean): void {
+  if (!id || typeof id !== 'string') return
+  if (ok) {
+    invalidEventIds.delete(id)
+    if (verifiedEventIds.has(id)) {
+      verifiedEventIds.delete(id)
+    } else if (verifiedEventIds.size >= MAX_VERIFIED_CACHE) {
+      const first = verifiedEventIds.values().next().value
+      if (first) verifiedEventIds.delete(first)
+    }
+    verifiedEventIds.add(id)
+  } else {
+    verifiedEventIds.delete(id)
+    rememberInvalid(id)
+  }
 }
 
 export function isWithinTagLimits(tags: unknown): tags is string[][] {
@@ -56,7 +88,12 @@ export function isWithinTagLimits(tags: unknown): tags is string[][] {
 export function verifyEventCached(event: NostrEvent): boolean {
   if (!event || typeof event.id !== 'string' || typeof event.pubkey !== 'string') return false
   const eventId = event.id
-  if (verifiedEventIds.has(eventId)) return true
+  if (verifiedEventIds.has(eventId)) {
+    // Refresh LRU recency
+    verifiedEventIds.delete(eventId)
+    verifiedEventIds.add(eventId)
+    return true
+  }
   if (invalidEventIds.has(eventId)) return false
   if (!isWithinTagLimits(event.tags)) {
     rememberInvalid(eventId)
@@ -65,11 +102,7 @@ export function verifyEventCached(event: NostrEvent): boolean {
   try {
     const ok = verifyEvent(event)
     if (ok) {
-      if (verifiedEventIds.size >= MAX_VERIFIED_CACHE) {
-        const first = verifiedEventIds.values().next().value
-        if (first) verifiedEventIds.delete(first)
-      }
-      verifiedEventIds.add(eventId)
+      markEventVerifiedCached(eventId, true)
     } else {
       rememberInvalid(eventId)
     }
@@ -81,7 +114,9 @@ export function verifyEventCached(event: NostrEvent): boolean {
 }
 
 function rememberInvalid(id: string): void {
-  if (invalidEventIds.size >= MAX_VERIFIED_CACHE) {
+  if (invalidEventIds.has(id)) {
+    invalidEventIds.delete(id)
+  } else if (invalidEventIds.size >= MAX_INVALID_CACHE) {
     const first = invalidEventIds.values().next().value
     if (first) invalidEventIds.delete(first)
   }

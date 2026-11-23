@@ -405,18 +405,6 @@ export function PeerInspectorModal({
           </div>
         )}
 
-        {/* Trust Info */}
-        {!livePeer.isSelf && (
-          <div className={`ag-trust-callout ${isTrustedPeer ? 'trusted' : ''}`}>
-            {isTrustedPeer ? <ShieldCheck size={14} /> : <Shield size={14} />}
-            <span>
-              {isTrustedPeer
-                ? 'Trusted peer — voice memos & media unlock automatically and their text stays visible in Trusted-Only mode.'
-                : 'Untrusted — voice memos & media stay protected until cleared by the Safety Filter or until you trust this peer.'}
-            </span>
-          </div>
-        )}
-
         {/* Actions */}
         <div className={`ag-peer-modal-actions ${!livePeer.isSelf ? 'ag-peer-modal-actions-grid' : ''}`}>
           {!livePeer.isSelf && peerLud16 && onOpenZap && (

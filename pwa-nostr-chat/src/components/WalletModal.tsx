@@ -25,6 +25,7 @@ import {
   Send,
   Trash2,
   Upload,
+  Wallet,
   X,
   Zap,
 } from 'lucide-react'
@@ -65,6 +66,7 @@ import '../styles/wallet.css'
 
 export interface WalletModalProps {
   open: boolean
+  embedded?: boolean
   onClose: () => void
   wallet: WalletEngine
   zaps: ZapEngine
@@ -135,13 +137,13 @@ function formatTxLabel(type: WalletTransaction['type']): string {
     case 'send_ln':
       return 'Lightning Payment'
     case 'receive_btc':
-      return 'BTC Deposit'
+      return 'Bitcoin Deposit'
     case 'send_btc':
-      return 'BTC Send'
+      return 'Bitcoin Send'
     case 'zap_out':
       return 'Zap'
     case 'reclaim':
-      return 'Reclaimed Token'
+      return 'Reclaimed Ecash'
   }
 }
 
@@ -220,6 +222,7 @@ function resolveInitialNav(intent?: WalletInitialIntent | null): {
 }
 
 function WalletModalInner({
+  embedded = false,
   onClose,
   wallet,
   zaps,
@@ -242,9 +245,12 @@ function WalletModalInner({
   const [importingSetup, setImportingSetup] = useState(false)
   const setupImportFileRef = useRef<HTMLInputElement | null>(null)
 
-  const [tab, setTab] = useState<WalletModalTab>(initNav.tab)
+  const [tab, setTab] = useState<WalletModalTab>(
+    initNav.tab === 'history' ? 'mints' : initNav.tab
+  )
   const [receiveMode, setReceiveMode] = useState<WalletReceiveMode>(initNav.receiveMode)
   const [sendMode, setSendMode] = useState<WalletSendMode>(initNav.sendMode)
+  const [showAllActivity, setShowAllActivity] = useState(false)
 
   const [feedback, setFeedback] = useState<{
     kind: 'accent' | 'warn' | 'danger'
@@ -317,6 +323,9 @@ function WalletModalInner({
   const [importingBackup, setImportingBackup] = useState(false)
   const backupFileInputRef = useRef<HTMLInputElement | null>(null)
 
+  const canStepBackInSetup =
+    setupMode === 'create' || setupMode === 'import' || (setupMode === 'choose' && wallet.initialized)
+
   const handleBack = useCallback(() => {
     if (setupMode === 'create' || setupMode === 'import') {
       setSetupMode('choose')
@@ -328,21 +337,35 @@ function WalletModalInner({
       setFeedback(null)
       return
     }
-    onClose()
-  }, [onClose, setupMode, wallet.initialized])
+    if (!embedded) {
+      onClose()
+    }
+  }, [embedded, onClose, setupMode, wallet.initialized])
 
-  useBackHandler(true, handleBack)
+  useBackHandler(!embedded || canStepBackInSetup, handleBack)
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key !== 'Escape') return
+      if (canStepBackInSetup) {
+        e.preventDefault()
+        handleBack()
+      } else if (!embedded) {
         e.preventDefault()
         onClose()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
+  }, [canStepBackInSetup, embedded, handleBack, onClose])
+
+  const handleTriggerScanner = useCallback(() => {
+    if (!onOpenScanner) return
+    if (!embedded) {
+      onClose()
+    }
+    onOpenScanner()
+  }, [embedded, onClose, onOpenScanner])
 
   const markCopied = useCallback(async (key: string, value: string) => {
     const ok = await copyTextSafe(value)
@@ -550,13 +573,13 @@ function WalletModalInner({
         kind: res.restoredSats > 0 ? 'accent' : 'warn',
         text:
           res.restoredSats > 0
-            ? `Restored ${res.restoredSats.toLocaleString()} sats (${res.restoredProofs} proofs)`
-            : `No unspent proofs found on ${formatMintHost(wallet.activeMintUrl)}`,
+            ? `Restored ${res.restoredSats.toLocaleString()} sats`
+            : `No balance found on ${formatMintHost(wallet.activeMintUrl)}`,
       })
     } catch (err) {
       setFeedback({
         kind: 'danger',
-        text: err instanceof Error ? err.message : 'Seed restore failed.',
+        text: err instanceof Error ? err.message : 'Restore failed.',
       })
     } finally {
       setRestoringSeed(false)
@@ -882,12 +905,12 @@ function WalletModalInner({
       setActiveRevSwapId(swap.id)
       setFeedback({
         kind: 'accent',
-        text: `Swap ${swap.id} started — export the Rescue JSON for safekeeping.`,
+        text: `Swap ${swap.id} started — save the recovery file just in case.`,
       })
     } catch (err) {
       setFeedback({
         kind: 'danger',
-        text: err instanceof Error ? err.message : 'On-chain swap failed.',
+        text: err instanceof Error ? err.message : 'Bitcoin send failed.',
       })
     } finally {
       setCreatingRevSwap(false)
@@ -948,13 +971,13 @@ function WalletModalInner({
         setFeedback({
           kind: info.online ? 'accent' : 'danger',
           text: info.online
-            ? `${info.name} · ${info.feePpk ?? 0} ppk · ${info.nuts.length} NUTs`
+            ? `${info.name} · ${info.feePpk === 0 ? 'No fee' : `${info.feePpk ?? 0} ppk`} · Online`
             : info.error || 'Mint offline',
         })
       } catch (err) {
         setFeedback({
           kind: 'danger',
-          text: err instanceof Error ? err.message : 'Inspection failed.',
+          text: err instanceof Error ? err.message : 'Could not reach mint.',
         })
       } finally {
         setInspectingMintUrl(null)
@@ -1003,7 +1026,7 @@ function WalletModalInner({
         setShowImportPaste(false)
         setFeedback({
           kind: 'accent',
-          text: `Restored ${res.importedProofs} proofs · ${res.totalSats.toLocaleString()} sats`,
+          text: `Restored ${res.totalSats.toLocaleString()} sats`,
         })
       } catch (err) {
         setFeedback({
@@ -1033,7 +1056,7 @@ function WalletModalInner({
     setRevPair(null)
     setSubPairError(null)
     setRevPairError(null)
-    setFeedback({ kind: 'accent', text: 'Updated Boltz endpoint.' })
+    setFeedback({ kind: 'accent', text: 'Updated swap server.' })
   }, [boltzUrlDraft, wallet])
 
   const subEstimate = useMemo(() => {
@@ -1081,7 +1104,7 @@ function WalletModalInner({
       <div key={swap.id} className="ag-wallet-tonal">
         <div className="ag-wallet-section-head">
           <span className="ag-wallet-section-title">
-            {swap.direction === 'submarine' ? 'BTC Deposit' : 'BTC Send'} · {swap.id}
+            {swap.direction === 'submarine' ? 'Bitcoin Deposit' : 'Bitcoin Send'} · {swap.id}
           </span>
           <span className={`ag-wallet-pill ${failed ? 'danger' : active ? 'warn' : 'accent'}`}>
             {formatBoltzStatusLabel(swap.status)}
@@ -1113,7 +1136,7 @@ function WalletModalInner({
                   onClick={() => void markCopied(`bip21-${swap.id}`, swap.bip21!)}
                 >
                   {copiedKey === `bip21-${swap.id}` ? <Check size={13} /> : <Copy size={13} />}
-                  <span>{copiedKey === `bip21-${swap.id}` ? 'Copied' : 'Copy BIP-21'}</span>
+                  <span>{copiedKey === `bip21-${swap.id}` ? 'Copied' : 'Copy Payment URI'}</span>
                 </button>
               )}
             </div>
@@ -1123,7 +1146,7 @@ function WalletModalInner({
         <div className="ag-wallet-kv-list">
           <div className="ag-wallet-kv">
             <span className="ag-wallet-kv-label">
-              {swap.direction === 'submarine' ? 'Send exact BTC' : 'Sent'}
+              {swap.direction === 'submarine' ? 'Send exact Bitcoin' : 'Sent'}
             </span>
             <span className="ag-wallet-kv-val tabular">
               {(swap.direction === 'submarine'
@@ -1135,7 +1158,7 @@ function WalletModalInner({
           </div>
           <div className="ag-wallet-kv">
             <span className="ag-wallet-kv-label">
-              {swap.direction === 'submarine' ? 'Mint receives' : 'On-chain output'}
+              {swap.direction === 'submarine' ? 'Wallet receives' : 'Bitcoin output'}
             </span>
             <span className="ag-wallet-kv-val tabular">
               {(swap.direction === 'submarine'
@@ -1157,7 +1180,7 @@ function WalletModalInner({
           )}
           {swap.direction === 'reverse' && (
             <div className="ag-wallet-kv">
-              <span className="ag-wallet-kv-label">HTLC</span>
+              <span className="ag-wallet-kv-label">Lockup</span>
               <a
                 href={getMempoolAddressUrl(swap.address)}
                 target="_blank"
@@ -1197,7 +1220,7 @@ function WalletModalInner({
             onClick={() => handleDownloadSwapRescue(swap.id)}
           >
             <Download size={13} />
-            <span>{swap.direction === 'submarine' ? 'Refund JSON' : 'Rescue JSON'}</span>
+            <span>{swap.direction === 'submarine' ? 'Refund file' : 'Recovery file'}</span>
           </button>
 
           {swap.txid && (
@@ -1218,623 +1241,590 @@ function WalletModalInner({
   }
 
   const inSetupFlow = setupMode !== 'none'
-  const showSetupBackBtn =
-    setupMode === 'create' || setupMode === 'import' || (setupMode === 'choose' && wallet.initialized)
+  const showSetupBackBtn = canStepBackInSetup
+  const activeTab: 'overview' | 'receive' | 'send' | 'mints' = tab === 'history' ? 'mints' : tab
 
-  return (
-    <div
-      className="ag-wallet-backdrop"
-      onClick={onClose}
-      role="presentation"
-      data-no-swipe="true"
-    >
-      <div
-        className="ag-wallet-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="ag-wallet-modal-title"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Minimal Header */}
-        <header className="ag-wallet-header">
-          <div className="ag-wallet-title-group">
-            {showSetupBackBtn && (
+  const stageHeaderTitle = inSetupFlow
+    ? setupMode === 'create'
+      ? 'New Agwallet'
+      : setupMode === 'import'
+        ? 'Import Agwallet'
+        : 'Agwallet'
+    : activeTab === 'overview'
+      ? 'Overview'
+      : activeTab === 'receive'
+        ? 'Receive'
+        : activeTab === 'send'
+          ? 'Send'
+          : 'Mints & Backup'
+
+  const visibleHistory = showAllActivity ? wallet.history : wallet.history.slice(0, 8)
+
+  const setupBody = (
+    <>
+      {feedback && (
+        <div className={`ag-wallet-banner ${feedback.kind}`} role="status">
+          {feedback.kind === 'danger' ? <AlertCircle size={15} /> : <Check size={15} />}
+          <span>{feedback.text}</span>
+        </div>
+      )}
+
+      {/* Mode 0: Choose Create or Import */}
+      {setupMode === 'choose' && (
+        <div className="ag-wallet-setup-choose">
+          <h3 className="ag-wallet-setup-heading">Set up Agwallet</h3>
+          <p className="ag-wallet-setup-sub">
+            Create a new wallet or import an existing recovery phrase.
+          </p>
+          <div className="ag-wallet-setup-actions">
+            <button
+              type="button"
+              className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
+              onClick={enterCreateMode}
+            >
+              Create New Agwallet
+            </button>
+            <button
+              type="button"
+              className="ag-wbtn ag-wbtn-secondary ag-wbtn-full"
+              onClick={enterImportMode}
+            >
+              Import Agwallet
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Mode 1: Create New Wallet (12-word Recovery Phrase + Derived Private Key) */}
+      {setupMode === 'create' && draftKeys && (
+        <section className="ag-wallet-section">
+          <div className="ag-wallet-label-row">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+              <span className="ag-wallet-label">Recovery phrase</span>
+              <span className="ag-wallet-pill accent">Save this</span>
+            </div>
+            <button
+              type="button"
+              className="ag-wbtn ag-wbtn-link"
+              onClick={handleRegenerateDraft}
+            >
+              Regenerate
+            </button>
+          </div>
+
+          {renderSeedGrid(draftKeys.mnemonic)}
+
+          <div className="ag-wallet-field">
+            <div className="ag-wallet-label-row">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                <span className="ag-wallet-label">Private key</span>
+                <span className="ag-wallet-pill">Derived</span>
+              </div>
               <button
                 type="button"
-                className="ag-wallet-back-btn"
-                onClick={handleBack}
-                aria-label="Back"
+                className="ag-wbtn ag-wbtn-link"
+                onClick={() => setShowDraftPrivKey((v) => !v)}
               >
-                <ArrowLeft size={17} />
+                {showDraftPrivKey ? 'Hide' : 'Show'}
               </button>
+            </div>
+            {showDraftPrivKey ? (
+              <div className="ag-wallet-code-box" title={draftKeys.privateKeyHex}>
+                {draftKeys.privateKeyHex}
+              </div>
+            ) : (
+              <div className="ag-wallet-masked-key">••••••••••••••••••••••••••••••••</div>
             )}
-            <h2 id="ag-wallet-modal-title" className="ag-wallet-title">
-              {setupMode === 'create'
-                ? 'New Agwallet'
-                : setupMode === 'import'
-                  ? 'Import Agwallet'
-                  : 'Agwallet'}
-            </h2>
+          </div>
+
+          <div className="ag-wallet-btn-row">
+            <button
+              type="button"
+              className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+              onClick={() => void markCopied('draft-phrase', draftKeys.mnemonic)}
+            >
+              {copiedKey === 'draft-phrase' ? <Check size={13} /> : <Copy size={13} />}
+              <span>{copiedKey === 'draft-phrase' ? 'Copied' : 'Copy Phrase'}</span>
+            </button>
+            <button
+              type="button"
+              className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+              onClick={() => void markCopied('draft-key', draftKeys.privateKeyHex)}
+            >
+              {copiedKey === 'draft-key' ? <Check size={13} /> : <KeyRound size={13} />}
+              <span>{copiedKey === 'draft-key' ? 'Copied' : 'Copy Key'}</span>
+            </button>
+            <button
+              type="button"
+              className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+              onClick={handleExportDraftKey}
+            >
+              <Download size={13} />
+              <span>Export Key</span>
+            </button>
+          </div>
+
+          <div className="ag-wallet-field">
+            <label className="ag-wallet-label" htmlFor="ag-setup-create-mint">
+              Starting mint
+            </label>
+            <select
+              id="ag-setup-create-mint"
+              className="ag-wallet-select-full"
+              value={setupMintUrl}
+              onChange={(e) => setSetupMintUrl(e.target.value)}
+            >
+              {wallet.mints.map((m) => (
+                <option key={m.url} value={m.url}>
+                  {m.label}
+                  {m.info?.feePpk === 0 ? ' · No fee' : ''}
+                </option>
+              ))}
+            </select>
           </div>
 
           <button
             type="button"
-            className="ag-wallet-close-btn"
-            onClick={onClose}
-            aria-label="Close Agwallet"
-            title="Close (Esc)"
+            className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
+            onClick={handleFinalizeCreateWallet}
           >
-            <X size={18} />
+            Create Agwallet
           </button>
-        </header>
+        </section>
+      )}
 
-        {/* ===================== FIRST-TIME / SWITCHER SETUP FLOW ===================== */}
-        {inSetupFlow ? (
-          <div className="ag-wallet-body">
-            {feedback && (
-              <div className={`ag-wallet-banner ${feedback.kind}`} role="status">
-                {feedback.kind === 'danger' ? <AlertCircle size={15} /> : <Check size={15} />}
-                <span>{feedback.text}</span>
+      {/* Mode 2: Import Existing Recovery Phrase / Private Key / Backup File */}
+      {setupMode === 'import' && (
+        <section className="ag-wallet-section">
+          <div className="ag-wallet-field">
+            <div className="ag-wallet-label-row">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                <label className="ag-wallet-label" htmlFor="ag-setup-import-input">
+                  Recovery phrase or backup
+                </label>
+                {detectedSetupImport && (
+                  <span className="ag-wallet-pill accent">{detectedSetupImport.label}</span>
+                )}
               </div>
-            )}
-
-            {/* Mode 0: Choose Create or Import */}
-            {setupMode === 'choose' && (
-              <div className="ag-wallet-setup-choose">
-                <h3 className="ag-wallet-setup-heading">Set up Agwallet</h3>
-                <p className="ag-wallet-setup-sub">
-                  Create a self-custodial Cashu wallet or import an existing key.
-                </p>
-                <div className="ag-wallet-setup-actions">
-                  <button
-                    type="button"
-                    className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
-                    onClick={enterCreateMode}
-                  >
-                    Create New Agwallet
-                  </button>
-                  <button
-                    type="button"
-                    className="ag-wbtn ag-wbtn-secondary ag-wbtn-full"
-                    onClick={enterImportMode}
-                  >
-                    Import Agwallet
-                  </button>
-                </div>
+              <div style={{ display: 'flex', gap: '0.35rem' }}>
+                <button
+                  type="button"
+                  className="ag-wbtn ag-wbtn-link"
+                  onClick={() => void handlePasteInto(setSetupImportInput)}
+                >
+                  Paste
+                </button>
+                <button
+                  type="button"
+                  className="ag-wbtn ag-wbtn-link"
+                  onClick={() => setupImportFileRef.current?.click()}
+                >
+                  Import File
+                </button>
+                <input
+                  ref={setupImportFileRef}
+                  type="file"
+                  accept="application/json,.json,.txt"
+                  style={{ display: 'none' }}
+                  onChange={handleSetupImportFile}
+                />
               </div>
-            )}
+            </div>
+            <textarea
+              id="ag-setup-import-input"
+              className="ag-wallet-textarea mono"
+              value={setupImportInput}
+              onChange={(e) => {
+                setSetupImportInput(e.target.value)
+                setFeedback(null)
+              }}
+              placeholder="12-word recovery phrase, private key, or backup file"
+            />
+          </div>
 
-            {/* Mode 1: Create New Wallet (12-word BIP-39 Seed + Hex Private Key) */}
-            {setupMode === 'create' && draftKeys && (
-              <section className="ag-wallet-section">
-                <div className="ag-wallet-label-row">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
-                    <span className="ag-wallet-label">Recovery phrase</span>
-                    <span className="ag-wallet-pill accent">Save this</span>
-                  </div>
+          <div className="ag-wallet-field">
+            <label className="ag-wallet-label" htmlFor="ag-setup-import-mint">
+              Starting mint
+            </label>
+            <select
+              id="ag-setup-import-mint"
+              className="ag-wallet-select-full"
+              value={setupMintUrl}
+              onChange={(e) => setSetupMintUrl(e.target.value)}
+            >
+              {wallet.mints.map((m) => (
+                <option key={m.url} value={m.url}>
+                  {m.label}
+                  {m.info?.feePpk === 0 ? ' · No fee' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            type="button"
+            className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
+            disabled={importingSetup || !detectedSetupImport}
+            onClick={() => void handleFinalizeImportWallet()}
+          >
+            {importingSetup ? <Loader2 size={15} className="ag-wallet-spin" /> : null}
+            <span>{importingSetup ? 'Importing & Scanning…' : 'Import & Restore'}</span>
+          </button>
+        </section>
+      )}
+    </>
+  )
+
+  const mainBody = (
+    <>
+      {/* Balance Hero (Full calm hero on Overview; compact bar only in modal fallback) */}
+      {(activeTab === 'overview' || !embedded) && (
+        <section
+          className={`ag-wallet-hero ${activeTab !== 'overview' ? 'compact' : ''} ${embedded ? 'workspace-hero' : ''}`}
+          aria-label="Agwallet balance"
+        >
+          <div className="ag-wallet-balance-block">
+            <div className="ag-wallet-balance-amount">
+              <span>{wallet.activeMintBalanceSats.toLocaleString()}</span>
+              <span className="ag-wallet-balance-unit">sats</span>
+            </div>
+            {wallet.totalBalanceSats !== wallet.activeMintBalanceSats && (
+              <span className="ag-wallet-balance-total tabular">
+                Total: {wallet.totalBalanceSats.toLocaleString()} sats
+              </span>
+            )}
+          </div>
+
+          {!embedded && (
+            <div className="ag-wallet-mint-pill-row">
+              <select
+                className="ag-wallet-select"
+                value={wallet.activeMintUrl}
+                onChange={(e) => wallet.selectMint(e.target.value)}
+                aria-label="Active Mint"
+              >
+                {wallet.mints.map((m) => (
+                  <option key={m.url} value={m.url}>
+                    {m.label} ({(wallet.balancesByMint[m.url] ?? 0).toLocaleString()} sats)
+                  </option>
+                ))}
+              </select>
+
+              {onOpenScanner && (
+                <button
+                  type="button"
+                  className="ag-wallet-scan-icon-btn"
+                  onClick={handleTriggerScanner}
+                  aria-label="Scan QR"
+                >
+                  <ScanLine size={15} />
+                </button>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'overview' && (
+            <div className="ag-wallet-hero-actions">
+              <button
+                type="button"
+                className="ag-wbtn ag-wbtn-primary"
+                onClick={() => switchTab('receive')}
+              >
+                <ArrowDownLeft size={15} />
+                <span>Receive</span>
+              </button>
+              <button
+                type="button"
+                className="ag-wbtn ag-wbtn-secondary"
+                onClick={() => switchTab('send')}
+              >
+                <ArrowUpRight size={15} />
+                <span>Send</span>
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Global Feedback Strip */}
+      {feedback && (
+        <div className={`ag-wallet-banner ${feedback.kind}`} role="status">
+          {feedback.kind === 'danger' ? <AlertCircle size={15} /> : <Check size={15} />}
+          <span>{feedback.text}</span>
+        </div>
+      )}
+
+      {/* ===================== TAB 1: OVERVIEW ===================== */}
+      {activeTab === 'overview' && (
+        <>
+          {/* Empty Balance 1-Tap Quick-Start */}
+          {wallet.totalBalanceSats === 0 && (
+            <section className="ag-wallet-section" aria-label="Fund your Agwallet">
+              <h3 className="ag-wallet-section-title">Add funds</h3>
+              <div className="ag-wallet-fund-grid">
+                <button
+                  type="button"
+                  className="ag-wallet-fund-btn"
+                  onClick={() => jumpToReceive('lightning')}
+                >
+                  <Zap size={16} />
+                  <span>Lightning</span>
+                </button>
+                <button
+                  type="button"
+                  className="ag-wallet-fund-btn"
+                  onClick={() => jumpToReceive('onchain')}
+                >
+                  <Bitcoin size={16} />
+                  <span>Bitcoin</span>
+                </button>
+                <button
+                  type="button"
+                  className="ag-wallet-fund-btn"
+                  onClick={() => jumpToReceive('cashu')}
+                >
+                  <Coins size={16} />
+                  <span>Ecash</span>
+                </button>
+              </div>
+            </section>
+          )}
+
+          {/* Lightning Address */}
+          <section className="ag-wallet-field">
+            <label className="ag-wallet-label" htmlFor="ag-wallet-lud16">
+              Lightning Address
+            </label>
+            <div className="ag-wallet-input-row">
+              <input
+                id="ag-wallet-lud16"
+                type="text"
+                className="ag-wallet-input mono"
+                value={lud16Draft}
+                onChange={(e) => setLud16Draft(e.target.value)}
+                placeholder="you@domain.com"
+              />
+              <button
+                type="button"
+                className="ag-wbtn ag-wbtn-secondary"
+                disabled={savingLud16 || zaps.publishingProfile}
+                onClick={() => void handleSaveLud16()}
+              >
+                {savingLud16 || zaps.publishingProfile ? (
+                  <Loader2 size={14} className="ag-wallet-spin" />
+                ) : (
+                  'Save'
+                )}
+              </button>
+            </div>
+          </section>
+
+          {/* Active Bitcoin Swaps */}
+          {activeBoltzSwaps.length > 0 && (
+            <section className="ag-wallet-section">
+              {activeBoltzSwaps.map((sw) => renderSwapBlock(sw))}
+            </section>
+          )}
+
+          {/* Funded Multi-Mint Breakdown */}
+          {fundedMints.length > 1 && (
+            <section className="ag-wallet-section">
+              <div className="ag-wallet-section-head">
+                <h3 className="ag-wallet-section-title">Mints</h3>
+                <button
+                  type="button"
+                  className="ag-wbtn ag-wbtn-link"
+                  onClick={() => switchTab('mints')}
+                >
+                  Manage
+                </button>
+              </div>
+              <div className="ag-wallet-flat-list">
+                {fundedMints.map((m) => {
+                  const bal = wallet.balancesByMint[m.url] ?? 0
+                  const isActive = m.url === wallet.activeMintUrl
+                  return (
+                    <div key={m.url} className="ag-wallet-mint-row">
+                      <button
+                        type="button"
+                        className="ag-wallet-mint-main"
+                        onClick={() => wallet.selectMint(m.url)}
+                      >
+                        <div className="ag-wallet-mint-info">
+                          <span className="ag-wallet-mint-name">
+                            {isActive && <span className="ag-wallet-active-dot" />}
+                            <span className="truncate">{m.label}</span>
+                          </span>
+                          <span className="ag-wallet-mint-sub">
+                            <span className="ag-wallet-mint-host">
+                              {formatMintHost(m.url)}
+                            </span>
+                          </span>
+                        </div>
+                        <span className="ag-wallet-mint-bal">
+                          {bal.toLocaleString()} sats
+                        </span>
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+          )}
+
+          {/* Activity */}
+          <section className="ag-wallet-section">
+            <div className="ag-wallet-section-head">
+              <h3 className="ag-wallet-section-title">Activity</h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                {wallet.history.length > 8 && (
                   <button
                     type="button"
                     className="ag-wbtn ag-wbtn-link"
-                    onClick={handleRegenerateDraft}
+                    onClick={() => setShowAllActivity((v) => !v)}
                   >
-                    Regenerate
+                    {showAllActivity ? 'Show less' : `View all (${wallet.history.length})`}
                   </button>
-                </div>
+                )}
+                {wallet.history.length > 0 && (
+                  <button
+                    type="button"
+                    className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
+                    onClick={() => wallet.clearHistory()}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
 
-                {renderSeedGrid(draftKeys.mnemonic)}
-
-                <div className="ag-wallet-field">
-                  <div className="ag-wallet-label-row">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
-                      <span className="ag-wallet-label">Private key (hex)</span>
-                      <span className="ag-wallet-pill">Derived</span>
+            {wallet.history.length === 0 ? (
+              <div className="ag-wallet-empty">No activity yet</div>
+            ) : (
+              <div className="ag-wallet-flat-list">
+                {visibleHistory.map((tx) => {
+                  const incoming = isIncomingTx(tx.type)
+                  return (
+                    <div key={tx.id} className="ag-wallet-tx-item">
+                      <div className="ag-wallet-tx-left">
+                        <span className={`ag-wallet-tx-icon ${incoming ? 'in' : ''}`}>
+                          {incoming ? (
+                            <ArrowDownLeft size={14} />
+                          ) : (
+                            <ArrowUpRight size={14} />
+                          )}
+                        </span>
+                        <div className="ag-wallet-tx-copy">
+                          <span className="ag-wallet-tx-title truncate">
+                            {formatTxLabel(tx.type)}
+                          </span>
+                          <span className="ag-wallet-tx-sub truncate">
+                            {tx.memo || tx.counterparty || formatMintHost(tx.mintUrl)}
+                            {tx.feeSats ? ` · ${tx.feeSats} sat fee` : ''}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="ag-wallet-tx-right">
+                        <span className={`ag-wallet-tx-amt ${incoming ? 'in' : ''}`}>
+                          {incoming ? '+' : '-'}
+                          {tx.amountSats.toLocaleString()} sats
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          {tx.txid && (
+                            <a
+                              href={getMempoolTxUrl(tx.txid)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="ag-wallet-tx-time"
+                            >
+                              tx ↗
+                            </a>
+                          )}
+                          <span className="ag-wallet-tx-time">
+                            {formatRelativeTime(tx.createdAt)}
+                          </span>
+                        </div>
+                      </div>
                     </div>
+                  )
+                })}
+              </div>
+            )}
+          </section>
+        </>
+      )}
+
+      {/* ===================== TAB 2: RECEIVE ===================== */}
+      {activeTab === 'receive' && (
+        <>
+          <div className="ag-wallet-subtabs" role="tablist" aria-label="Receive method">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={receiveMode === 'cashu'}
+              className={`ag-wallet-subtab ${receiveMode === 'cashu' ? 'active' : ''}`}
+              onClick={() => switchReceiveMode('cashu')}
+            >
+              <Coins size={13} />
+              <span>Ecash</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={receiveMode === 'lightning'}
+              className={`ag-wallet-subtab ${receiveMode === 'lightning' ? 'active' : ''}`}
+              onClick={() => switchReceiveMode('lightning')}
+            >
+              <Zap size={13} />
+              <span>Lightning</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={receiveMode === 'onchain'}
+              className={`ag-wallet-subtab ${receiveMode === 'onchain' ? 'active' : ''}`}
+              onClick={() => switchReceiveMode('onchain')}
+            >
+              <Bitcoin size={13} />
+              <span>Bitcoin</span>
+            </button>
+          </div>
+
+          {/* Receive: Ecash */}
+          {receiveMode === 'cashu' && (
+            <section className="ag-wallet-section">
+              <div className="ag-wallet-field">
+                <div className="ag-wallet-label-row">
+                  <label className="ag-wallet-label" htmlFor="ag-cashu-receive-token">
+                    Ecash token
+                  </label>
+                  <div style={{ display: 'flex', gap: '0.35rem' }}>
                     <button
                       type="button"
                       className="ag-wbtn ag-wbtn-link"
-                      onClick={() => setShowDraftPrivKey((v) => !v)}
+                      onClick={() => void handlePasteInto(setCashuReceiveInput)}
                     >
-                      {showDraftPrivKey ? 'Hide' : 'Show'}
+                      Paste
                     </button>
-                  </div>
-                  {showDraftPrivKey ? (
-                    <div className="ag-wallet-code-box" title={draftKeys.privateKeyHex}>
-                      {draftKeys.privateKeyHex}
-                    </div>
-                  ) : (
-                    <div className="ag-wallet-masked-key">••••••••••••••••••••••••••••••••</div>
-                  )}
-                </div>
-
-                <div className="ag-wallet-btn-row">
-                  <button
-                    type="button"
-                    className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
-                    onClick={() => void markCopied('draft-phrase', draftKeys.mnemonic)}
-                  >
-                    {copiedKey === 'draft-phrase' ? <Check size={13} /> : <Copy size={13} />}
-                    <span>{copiedKey === 'draft-phrase' ? 'Copied' : 'Copy Phrase'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
-                    onClick={() => void markCopied('draft-key', draftKeys.privateKeyHex)}
-                  >
-                    {copiedKey === 'draft-key' ? <Check size={13} /> : <KeyRound size={13} />}
-                    <span>{copiedKey === 'draft-key' ? 'Copied' : 'Copy Key'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
-                    onClick={handleExportDraftKey}
-                  >
-                    <Download size={13} />
-                    <span>Export Key</span>
-                  </button>
-                </div>
-
-                <div className="ag-wallet-field">
-                  <label className="ag-wallet-label" htmlFor="ag-setup-create-mint">
-                    Starting mint
-                  </label>
-                  <select
-                    id="ag-setup-create-mint"
-                    className="ag-wallet-select-full"
-                    value={setupMintUrl}
-                    onChange={(e) => setSetupMintUrl(e.target.value)}
-                  >
-                    {wallet.mints.map((m) => (
-                      <option key={m.url} value={m.url}>
-                        {m.label}
-                        {m.info?.feePpk === 0 ? ' · 0 fee' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <button
-                  type="button"
-                  className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
-                  onClick={handleFinalizeCreateWallet}
-                >
-                  Create Agwallet
-                </button>
-              </section>
-            )}
-
-            {/* Mode 2: Import Existing Seed / Private Key / Backup JSON */}
-            {setupMode === 'import' && (
-              <section className="ag-wallet-section">
-                <div className="ag-wallet-field">
-                  <div className="ag-wallet-label-row">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
-                      <label className="ag-wallet-label" htmlFor="ag-setup-import-input">
-                        Key or backup
-                      </label>
-                      {detectedSetupImport && (
-                        <span className="ag-wallet-pill accent">{detectedSetupImport.label}</span>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', gap: '0.35rem' }}>
+                    {onOpenScanner && (
                       <button
                         type="button"
                         className="ag-wbtn ag-wbtn-link"
-                        onClick={() => void handlePasteInto(setSetupImportInput)}
+                        onClick={handleTriggerScanner}
                       >
-                        Paste
+                        Scan
                       </button>
-                      <button
-                        type="button"
-                        className="ag-wbtn ag-wbtn-link"
-                        onClick={() => setupImportFileRef.current?.click()}
-                      >
-                        Import File
-                      </button>
-                      <input
-                        ref={setupImportFileRef}
-                        type="file"
-                        accept="application/json,.json,.txt"
-                        style={{ display: 'none' }}
-                        onChange={handleSetupImportFile}
-                      />
-                    </div>
-                  </div>
-                  <textarea
-                    id="ag-setup-import-input"
-                    className="ag-wallet-textarea mono"
-                    value={setupImportInput}
-                    onChange={(e) => {
-                      setSetupImportInput(e.target.value)
-                      setFeedback(null)
-                    }}
-                    placeholder="12-word recovery phrase, hex private key, nsec1…, or backup JSON"
-                  />
-                </div>
-
-                <div className="ag-wallet-field">
-                  <label className="ag-wallet-label" htmlFor="ag-setup-import-mint">
-                    Starting mint
-                  </label>
-                  <select
-                    id="ag-setup-import-mint"
-                    className="ag-wallet-select-full"
-                    value={setupMintUrl}
-                    onChange={(e) => setSetupMintUrl(e.target.value)}
-                  >
-                    {wallet.mints.map((m) => (
-                      <option key={m.url} value={m.url}>
-                        {m.label}
-                        {m.info?.feePpk === 0 ? ' · 0 fee' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <button
-                  type="button"
-                  className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
-                  disabled={importingSetup || !detectedSetupImport}
-                  onClick={() => void handleFinalizeImportWallet()}
-                >
-                  {importingSetup ? <Loader2 size={15} className="ag-wallet-spin" /> : null}
-                  <span>{importingSetup ? 'Importing & Scanning…' : 'Import & Restore'}</span>
-                </button>
-              </section>
-            )}
-          </div>
-        ) : (
-          <>
-            {/* Sleek Borderless Underline Nav */}
-            <nav className="ag-wallet-nav" aria-label="Agwallet sections">
-              {(
-                [
-                  { id: 'overview', label: 'Home' },
-                  { id: 'receive', label: 'Receive' },
-                  { id: 'send', label: 'Send' },
-                  { id: 'mints', label: 'Mints' },
-                  { id: 'history', label: 'History' },
-                ] as const
-              ).map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`ag-wallet-nav-btn ${tab === item.id ? 'active' : ''}`}
-                  onClick={() => switchTab(item.id)}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </nav>
-
-            {/* Body */}
-            <div className="ag-wallet-body">
-              {/* Airy Borderless Balance Hero */}
-              <section
-                className={`ag-wallet-hero ${tab !== 'overview' ? 'compact' : ''}`}
-                aria-label="Agwallet balance"
-              >
-                <div className="ag-wallet-balance-block">
-                  <div className="ag-wallet-balance-amount">
-                    <span>{wallet.activeMintBalanceSats.toLocaleString()}</span>
-                    <span className="ag-wallet-balance-unit">sats</span>
-                  </div>
-                  {wallet.totalBalanceSats !== wallet.activeMintBalanceSats && (
-                    <span className="ag-wallet-balance-total tabular">
-                      Total: {wallet.totalBalanceSats.toLocaleString()} sats
-                    </span>
-                  )}
-                </div>
-
-                <div className="ag-wallet-mint-pill-row">
-                  <select
-                    className="ag-wallet-select"
-                    value={wallet.activeMintUrl}
-                    onChange={(e) => wallet.selectMint(e.target.value)}
-                    aria-label="Active Mint"
-                  >
-                    {wallet.mints.map((m) => (
-                      <option key={m.url} value={m.url}>
-                        {m.label} ({(wallet.balancesByMint[m.url] ?? 0).toLocaleString()} sats)
-                      </option>
-                    ))}
-                  </select>
-
-                  {onOpenScanner && (
-                    <button
-                      type="button"
-                      className="ag-wallet-scan-icon-btn"
-                      onClick={() => {
-                        onClose()
-                        onOpenScanner()
-                      }}
-                      title="Scan QR"
-                      aria-label="Scan QR"
-                    >
-                      <ScanLine size={15} />
-                    </button>
-                  )}
-                </div>
-
-                {tab === 'overview' && (
-                  <div className="ag-wallet-hero-actions">
-                    <button
-                      type="button"
-                      className="ag-wbtn ag-wbtn-primary"
-                      onClick={() => switchTab('receive')}
-                    >
-                      <ArrowDownLeft size={15} />
-                      <span>Receive</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="ag-wbtn ag-wbtn-secondary"
-                      onClick={() => switchTab('send')}
-                    >
-                      <ArrowUpRight size={15} />
-                      <span>Send</span>
-                    </button>
-                  </div>
-                )}
-              </section>
-
-              {/* Global Feedback Strip */}
-              {feedback && (
-                <div className={`ag-wallet-banner ${feedback.kind}`} role="status">
-                  {feedback.kind === 'danger' ? <AlertCircle size={15} /> : <Check size={15} />}
-                  <span>{feedback.text}</span>
-                </div>
-              )}
-
-              {/* ===================== TAB 1: HOME ===================== */}
-              {tab === 'overview' && (
-                <>
-                  {/* Empty Balance 1-Tap Quick-Start */}
-                  {wallet.totalBalanceSats === 0 && (
-                    <section className="ag-wallet-section" aria-label="Fund your Agwallet">
-                      <h3 className="ag-wallet-section-title">Fund your Agwallet</h3>
-                      <div className="ag-wallet-fund-grid">
-                        <button
-                          type="button"
-                          className="ag-wallet-fund-btn"
-                          onClick={() => jumpToReceive('lightning')}
-                        >
-                          <Zap size={16} />
-                          <span>Lightning</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="ag-wallet-fund-btn"
-                          onClick={() => jumpToReceive('onchain')}
-                        >
-                          <Bitcoin size={16} />
-                          <span>On-Chain BTC</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="ag-wallet-fund-btn"
-                          onClick={() => jumpToReceive('cashu')}
-                        >
-                          <Coins size={16} />
-                          <span>Cashu Token</span>
-                        </button>
-                      </div>
-                    </section>
-                  )}
-
-                  {/* Lightning Address */}
-                  <section className="ag-wallet-field">
-                    <label className="ag-wallet-label" htmlFor="ag-wallet-lud16">
-                      Lightning Address
-                    </label>
-                    <div className="ag-wallet-input-row">
-                      <input
-                        id="ag-wallet-lud16"
-                        type="text"
-                        className="ag-wallet-input mono"
-                        value={lud16Draft}
-                        onChange={(e) => setLud16Draft(e.target.value)}
-                        placeholder="you@domain.com"
-                      />
-                      <button
-                        type="button"
-                        className="ag-wbtn ag-wbtn-secondary"
-                        disabled={savingLud16 || zaps.publishingProfile}
-                        onClick={() => void handleSaveLud16()}
-                      >
-                        {savingLud16 || zaps.publishingProfile ? (
-                          <Loader2 size={14} className="ag-wallet-spin" />
-                        ) : (
-                          'Save'
-                        )}
-                      </button>
-                    </div>
-                  </section>
-
-                  {/* Active On-Chain Swaps */}
-                  {activeBoltzSwaps.length > 0 && (
-                    <section className="ag-wallet-section">
-                      {activeBoltzSwaps.map((sw) => renderSwapBlock(sw))}
-                    </section>
-                  )}
-
-                  {/* Funded Multi-Mint Breakdown */}
-                  {fundedMints.length > 1 && (
-                    <section className="ag-wallet-section">
-                      <div className="ag-wallet-section-head">
-                        <h3 className="ag-wallet-section-title">Mints</h3>
-                        <button
-                          type="button"
-                          className="ag-wbtn ag-wbtn-link"
-                          onClick={() => switchTab('mints')}
-                        >
-                          Manage
-                        </button>
-                      </div>
-                      <div className="ag-wallet-flat-list">
-                        {fundedMints.map((m) => {
-                          const bal = wallet.balancesByMint[m.url] ?? 0
-                          const isActive = m.url === wallet.activeMintUrl
-                          return (
-                            <div key={m.url} className="ag-wallet-mint-row">
-                              <button
-                                type="button"
-                                className="ag-wallet-mint-main"
-                                onClick={() => wallet.selectMint(m.url)}
-                              >
-                                <div className="ag-wallet-mint-info">
-                                  <span className="ag-wallet-mint-name">
-                                    {isActive && <span className="ag-wallet-active-dot" />}
-                                    <span className="truncate">{m.label}</span>
-                                  </span>
-                                  <span className="ag-wallet-mint-sub">
-                                    <span className="ag-wallet-mint-host">
-                                      {formatMintHost(m.url)}
-                                    </span>
-                                  </span>
-                                </div>
-                                <span className="ag-wallet-mint-bal">
-                                  {bal.toLocaleString()} sats
-                                </span>
-                              </button>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </section>
-                  )}
-
-                  {/* Recent Activity */}
-                  <section className="ag-wallet-section">
-                    <div className="ag-wallet-section-head">
-                      <h3 className="ag-wallet-section-title">Recent Activity</h3>
-                      {wallet.history.length > 4 && (
-                        <button
-                          type="button"
-                          className="ag-wbtn ag-wbtn-link"
-                          onClick={() => switchTab('history')}
-                        >
-                          View all
-                        </button>
-                      )}
-                    </div>
-
-                    {wallet.history.length === 0 ? (
-                      <div className="ag-wallet-empty">No activity yet</div>
-                    ) : (
-                      <div className="ag-wallet-flat-list">
-                        {wallet.history.slice(0, 4).map((tx) => {
-                          const incoming = isIncomingTx(tx.type)
-                          return (
-                            <div key={tx.id} className="ag-wallet-tx-item">
-                              <div className="ag-wallet-tx-left">
-                                <span className={`ag-wallet-tx-icon ${incoming ? 'in' : ''}`}>
-                                  {incoming ? (
-                                    <ArrowDownLeft size={14} />
-                                  ) : (
-                                    <ArrowUpRight size={14} />
-                                  )}
-                                </span>
-                                <div className="ag-wallet-tx-copy">
-                                  <span className="ag-wallet-tx-title truncate">
-                                    {formatTxLabel(tx.type)}
-                                  </span>
-                                  <span className="ag-wallet-tx-sub truncate">
-                                    {tx.memo || tx.counterparty || formatMintHost(tx.mintUrl)}
-                                  </span>
-                                </div>
-                              </div>
-                              <div className="ag-wallet-tx-right">
-                                <span className={`ag-wallet-tx-amt ${incoming ? 'in' : ''}`}>
-                                  {incoming ? '+' : '-'}
-                                  {tx.amountSats.toLocaleString()} sats
-                                </span>
-                                <span className="ag-wallet-tx-time">
-                                  {formatRelativeTime(tx.createdAt)}
-                                </span>
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
                     )}
-                  </section>
-                </>
-              )}
-
-              {/* ===================== TAB 2: RECEIVE ===================== */}
-              {tab === 'receive' && (
-                <>
-                  <div className="ag-wallet-subtabs" role="tablist" aria-label="Receive method">
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={receiveMode === 'cashu'}
-                      className={`ag-wallet-subtab ${receiveMode === 'cashu' ? 'active' : ''}`}
-                      onClick={() => switchReceiveMode('cashu')}
-                    >
-                      <Coins size={13} />
-                      <span>Ecash</span>
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={receiveMode === 'lightning'}
-                      className={`ag-wallet-subtab ${receiveMode === 'lightning' ? 'active' : ''}`}
-                      onClick={() => switchReceiveMode('lightning')}
-                    >
-                      <Zap size={13} />
-                      <span>Lightning</span>
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={receiveMode === 'onchain'}
-                      className={`ag-wallet-subtab ${receiveMode === 'onchain' ? 'active' : ''}`}
-                      onClick={() => switchReceiveMode('onchain')}
-                    >
-                      <Bitcoin size={13} />
-                      <span>On-Chain</span>
-                    </button>
                   </div>
-
-                  {/* Receive: Ecash */}
-                  {receiveMode === 'cashu' && (
-                    <section className="ag-wallet-section">
-                      <div className="ag-wallet-field">
-                        <div className="ag-wallet-label-row">
-                          <label className="ag-wallet-label" htmlFor="ag-cashu-receive-token">
-                            Token
-                          </label>
-                          <div style={{ display: 'flex', gap: '0.35rem' }}>
-                            <button
-                              type="button"
-                              className="ag-wbtn ag-wbtn-link"
-                              onClick={() => void handlePasteInto(setCashuReceiveInput)}
-                            >
-                              Paste
-                            </button>
-                            {onOpenScanner && (
-                              <button
-                                type="button"
-                                className="ag-wbtn ag-wbtn-link"
-                                onClick={() => {
-                                  onClose()
-                                  onOpenScanner()
-                                }}
-                              >
-                                Scan
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <textarea
-                          id="ag-cashu-receive-token"
-                          className="ag-wallet-textarea mono"
-                          value={cashuReceiveInput}
-                          onChange={(e) => setCashuReceiveInput(e.target.value)}
-                          placeholder="cashuA… or cashuB…"
-                        />
-                      </div>
+                </div>
+                <textarea
+                  id="ag-cashu-receive-token"
+                  className="ag-wallet-textarea mono"
+                  value={cashuReceiveInput}
+                  onChange={(e) => setCashuReceiveInput(e.target.value)}
+                  placeholder="Paste ecash token…"
+                />
+              </div>
 
                       {cashuReceivePreview && (
                         <div className="ag-wallet-tonal">
@@ -2055,7 +2045,7 @@ function WalletModalInner({
                                 ? `${subPair.minSats.toLocaleString()}–${subPair.maxSats.toLocaleString()} sats · ${subPair.feePercent}% + ${subPair.minerFeeSats.toLocaleString()} sat fee`
                                 : subPairLoading
                                   ? 'Loading rates…'
-                                  : 'Boltz v2 submarine swap'}
+                                  : 'Bitcoin deposit swap'}
                             </span>
                             <button
                               type="button"
@@ -2086,7 +2076,7 @@ function WalletModalInner({
                                     switchTab('mints')
                                   }}
                                 >
-                                  Configure Boltz endpoint
+                                  Swap server settings
                                 </button>
                               </div>
                             </div>
@@ -2113,7 +2103,7 @@ function WalletModalInner({
                             <div className="ag-wallet-tonal">
                               <div className="ag-wallet-kv-list">
                                 <div className="ag-wallet-kv">
-                                  <span className="ag-wallet-kv-label">Est. BTC deposit</span>
+                                  <span className="ag-wallet-kv-label">Est. Bitcoin deposit</span>
                                   <span className="ag-wallet-kv-val tabular">
                                     {subEstimate.expectedDeposit.toLocaleString()} sats
                                   </span>
@@ -2149,7 +2139,7 @@ function WalletModalInner({
               )}
 
               {/* ===================== TAB 3: SEND ===================== */}
-              {tab === 'send' && (
+              {activeTab === 'send' && (
                 <>
                   <div className="ag-wallet-subtabs" role="tablist" aria-label="Send method">
                     <button
@@ -2180,7 +2170,7 @@ function WalletModalInner({
                       onClick={() => switchSendMode('onchain')}
                     >
                       <Bitcoin size={13} />
-                      <span>On-Chain</span>
+                      <span>Bitcoin</span>
                     </button>
                   </div>
 
@@ -2535,7 +2525,7 @@ function WalletModalInner({
                     </section>
                   )}
 
-                  {/* Send: On-Chain BTC */}
+                  {/* Send: Bitcoin */}
                   {sendMode === 'onchain' && (
                     <section className="ag-wallet-section">
                       {activeRevSwap ? (
@@ -2546,7 +2536,7 @@ function WalletModalInner({
                             className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm ag-wbtn-full"
                             onClick={() => setActiveRevSwapId(null)}
                           >
-                            New BTC Send
+                            New Bitcoin Send
                           </button>
                         </>
                       ) : (
@@ -2557,7 +2547,7 @@ function WalletModalInner({
                                 ? `${revPair.minSats.toLocaleString()}–${revPair.maxSats.toLocaleString()} sats · ${revPair.feePercent}% + ${(revPair.lockupMinerFeeSats + revPair.claimMinerFeeSats).toLocaleString()} sat fee`
                                 : revPairLoading
                                   ? 'Loading rates…'
-                                  : 'Boltz v2 reverse swap'}
+                                  : 'Bitcoin send swap'}
                             </span>
                             <button
                               type="button"
@@ -2588,7 +2578,7 @@ function WalletModalInner({
                                     switchTab('mints')
                                   }}
                                 >
-                                  Configure Boltz endpoint
+                                  Swap server settings
                                 </button>
                               </div>
                             </div>
@@ -2596,7 +2586,7 @@ function WalletModalInner({
 
                           <div className="ag-wallet-field">
                             <label className="ag-wallet-label" htmlFor="ag-btc-send-addr">
-                              BTC Address
+                              Bitcoin Address
                             </label>
                             <input
                               id="ag-btc-send-addr"
@@ -2660,7 +2650,7 @@ function WalletModalInner({
                             ) : (
                               <Bitcoin size={15} />
                             )}
-                            <span>{creatingRevSwap ? 'Sending…' : 'Send On-Chain'}</span>
+                            <span>{creatingRevSwap ? 'Sending…' : 'Send Bitcoin'}</span>
                           </button>
                         </>
                       )}
@@ -2669,167 +2659,123 @@ function WalletModalInner({
                 </>
               )}
 
-              {/* ===================== TAB 4: MINTS ===================== */}
-              {tab === 'mints' && (
+              {/* ===================== TAB 4: MINTS & BACKUP ===================== */}
+              {activeTab === 'mints' && (
                 <>
-                  <div className="ag-wallet-input-row">
-                    <input
-                      type="url"
-                      className="ag-wallet-input mono"
-                      value={customMintUrl}
-                      onChange={(e) => setCustomMintUrl(e.target.value)}
-                      placeholder="https://mint.example.com"
-                      aria-label="Add Cashu mint URL"
-                    />
-                    <button
-                      type="button"
-                      className="ag-wbtn ag-wbtn-primary"
-                      disabled={addingMint || !customMintUrl.trim()}
-                      onClick={() => void handleAddMint()}
-                    >
-                      {addingMint ? (
-                        <Loader2 size={14} className="ag-wallet-spin" />
-                      ) : (
-                        <Plus size={14} />
-                      )}
-                      <span>Add</span>
-                    </button>
-                  </div>
+                  <section className="ag-wallet-section">
+                    <h3 className="ag-wallet-section-title">Mints</h3>
+                    <div className="ag-wallet-input-row">
+                      <input
+                        type="url"
+                        className="ag-wallet-input mono"
+                        value={customMintUrl}
+                        onChange={(e) => setCustomMintUrl(e.target.value)}
+                        placeholder="https://mint.example.com"
+                        aria-label="Add mint URL"
+                      />
+                      <button
+                        type="button"
+                        className="ag-wbtn ag-wbtn-primary"
+                        disabled={addingMint || !customMintUrl.trim()}
+                        onClick={() => void handleAddMint()}
+                      >
+                        {addingMint ? (
+                          <Loader2 size={14} className="ag-wallet-spin" />
+                        ) : (
+                          <Plus size={14} />
+                        )}
+                        <span>Add</span>
+                      </button>
+                    </div>
 
-                  <section className="ag-wallet-flat-list" aria-label="Configured mints">
-                    {wallet.mints.map((mint) => {
-                      const bal = wallet.balancesByMint[mint.url] ?? 0
-                      const count = wallet.proofCountByMint[mint.url] ?? 0
-                      const isActive = mint.url === wallet.activeMintUrl
-                      const canRemove = bal === 0 && wallet.mints.length > 1
-                      const feeLabel =
-                        mint.info?.feePpk !== undefined && mint.info.feePpk !== null
-                          ? mint.info.feePpk === 0
-                            ? '0 fee'
-                            : `${mint.info.feePpk} ppk`
-                          : null
+                    <div className="ag-wallet-flat-list" aria-label="Configured mints">
+                      {wallet.mints.map((mint) => {
+                        const bal = wallet.balancesByMint[mint.url] ?? 0
+                        const count = wallet.proofCountByMint[mint.url] ?? 0
+                        const isActive = mint.url === wallet.activeMintUrl
+                        const canRemove = bal === 0 && wallet.mints.length > 1
+                        const feeLabel =
+                          mint.info?.feePpk !== undefined && mint.info.feePpk !== null
+                            ? mint.info.feePpk === 0
+                              ? 'No fee'
+                              : `${mint.info.feePpk} ppk`
+                            : null
 
-                      return (
-                        <div key={mint.url} className="ag-wallet-mint-row">
-                          <button
-                            type="button"
-                            className="ag-wallet-mint-main"
-                            onClick={() => wallet.selectMint(mint.url)}
-                          >
-                            <div className="ag-wallet-mint-info">
-                              <span className="ag-wallet-mint-name">
-                                {isActive && (
-                                  <span className="ag-wallet-active-dot" aria-label="Active mint" />
-                                )}
-                                <span className="truncate">{mint.label}</span>
-                              </span>
-                              <span className="ag-wallet-mint-sub">
-                                <span className="ag-wallet-mint-host" title={mint.url}>
-                                  {formatMintHost(mint.url)}
-                                </span>
-                                {feeLabel && <span>· {feeLabel}</span>}
-                              </span>
-                            </div>
-                            <div className="ag-wallet-mint-bal">
-                              <div>{bal.toLocaleString()} sats</div>
-                              {count > 0 && (
-                                <div className="ag-wallet-meta">
-                                  {count} proof{count === 1 ? '' : 's'}
-                                </div>
-                              )}
-                            </div>
-                          </button>
-
-                          <div className="ag-wallet-mint-actions">
+                        return (
+                          <div key={mint.url} className="ag-wallet-mint-row">
                             <button
                               type="button"
-                              className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
-                              disabled={inspectingMintUrl === mint.url}
-                              onClick={() => void handleInspectMint(mint.url)}
+                              className="ag-wallet-mint-main"
+                              onClick={() => wallet.selectMint(mint.url)}
                             >
-                              <RefreshCw
-                                size={12}
-                                className={
-                                  inspectingMintUrl === mint.url ? 'ag-wallet-spin' : undefined
-                                }
-                              />
-                              <span>Inspect</span>
-                            </button>
-                            {count > 0 && (
-                              <button
-                                type="button"
-                                className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
-                                disabled={verifyingMintUrl === mint.url}
-                                onClick={() => void handleVerifyMintProofs(mint.url)}
-                              >
-                                <span>
-                                  {verifyingMintUrl === mint.url ? 'Checking…' : 'Verify'}
+                              <div className="ag-wallet-mint-info">
+                                <span className="ag-wallet-mint-name">
+                                  {isActive && (
+                                    <span className="ag-wallet-active-dot" aria-label="Active mint" />
+                                  )}
+                                  <span className="truncate">{mint.label}</span>
                                 </span>
-                              </button>
-                            )}
-                            {canRemove && (
+                                <span className="ag-wallet-mint-sub">
+                                  <span className="ag-wallet-mint-host" title={mint.url}>
+                                    {formatMintHost(mint.url)}
+                                  </span>
+                                  {feeLabel && <span>· {feeLabel}</span>}
+                                </span>
+                              </div>
+                              <div className="ag-wallet-mint-bal">
+                                <div>{bal.toLocaleString()} sats</div>
+                              </div>
+                            </button>
+
+                            <div className="ag-wallet-mint-actions">
                               <button
                                 type="button"
                                 className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
-                                onClick={() => wallet.removeMint(mint.url)}
-                                title="Remove mint"
-                                aria-label={`Remove ${mint.label}`}
+                                disabled={inspectingMintUrl === mint.url}
+                                onClick={() => void handleInspectMint(mint.url)}
                               >
-                                <Trash2 size={12} />
+                                <RefreshCw
+                                  size={12}
+                                  className={
+                                    inspectingMintUrl === mint.url ? 'ag-wallet-spin' : undefined
+                                  }
+                                />
+                                <span>Check</span>
                               </button>
-                            )}
+                              {count > 0 && (
+                                <button
+                                  type="button"
+                                  className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
+                                  disabled={verifyingMintUrl === mint.url}
+                                  onClick={() => void handleVerifyMintProofs(mint.url)}
+                                >
+                                  <span>
+                                    {verifyingMintUrl === mint.url ? 'Checking…' : 'Verify'}
+                                  </span>
+                                </button>
+                              )}
+                              {canRemove && (
+                                <button
+                                  type="button"
+                                  className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
+                                  onClick={() => wallet.removeMint(mint.url)}
+                                  title="Remove mint"
+                                  aria-label={`Remove ${mint.label}`}
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      )
-                    })}
+                        )
+                      })}
+                    </div>
                   </section>
 
-                  <div className="ag-wallet-disclosure">
-                    <button
-                      type="button"
-                      className="ag-wallet-disclosure-btn"
-                      onClick={() => setShowAdvancedBoltz((v) => !v)}
-                      aria-expanded={showAdvancedBoltz}
-                    >
-                      {showAdvancedBoltz ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                      <span>Advanced</span>
-                    </button>
-
-                    {showAdvancedBoltz && (
-                      <div className="ag-wallet-field" style={{ marginTop: '0.55rem' }}>
-                        <label className="ag-wallet-label" htmlFor="ag-boltz-api-url">
-                          Boltz v2 API
-                        </label>
-                        <div className="ag-wallet-input-row">
-                          <input
-                            id="ag-boltz-api-url"
-                            type="url"
-                            className="ag-wallet-input mono"
-                            value={boltzUrlDraft}
-                            onChange={(e) => setBoltzUrlDraft(e.target.value)}
-                            placeholder={DEFAULT_BOLTZ_API_URL}
-                          />
-                          <button
-                            type="button"
-                            className="ag-wbtn ag-wbtn-secondary"
-                            onClick={handleSaveBoltzUrl}
-                          >
-                            Save
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </>
-              )}
-
-              {/* ===================== TAB 5: HISTORY & KEYS ===================== */}
-              {tab === 'history' && (
-                <>
-                  {/* Always-Accessible Recovery Key & Backup */}
-                  <section className="ag-wallet-section">
+                  {/* Always-Accessible Recovery Phrase & Backup */}
+                  <section className="ag-wallet-section ag-wallet-divider-top">
                     <div className="ag-wallet-section-head">
-                      <h3 className="ag-wallet-section-title">Recovery Key</h3>
+                      <h3 className="ag-wallet-section-title">Recovery &amp; Backup</h3>
                       <button
                         type="button"
                         className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
@@ -2855,7 +2801,7 @@ function WalletModalInner({
                         {wallet.privateKeyHex && (
                           <div className="ag-wallet-field">
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
-                              <span className="ag-wallet-meta">Private key (hex)</span>
+                              <span className="ag-wallet-meta">Private key</span>
                               <span
                                 className={`ag-wallet-pill ${wallet.mnemonic ? '' : 'accent'}`}
                               >
@@ -2919,7 +2865,7 @@ function WalletModalInner({
                     )}
 
                     <span className="ag-wallet-meta">
-                      Proofs live locally in this browser — export a backup before wiping.
+                      Stored locally on this device. Export a backup before clearing data.
                     </span>
 
                     <div className="ag-wallet-btn-row">
@@ -2957,7 +2903,7 @@ function WalletModalInner({
                           size={13}
                           className={restoringSeed ? 'ag-wallet-spin' : undefined}
                         />
-                        <span>{restoringSeed ? 'Scanning…' : 'Restore from Seed'}</span>
+                        <span>{restoringSeed ? 'Scanning…' : 'Restore from Phrase'}</span>
                       </button>
                       <button
                         type="button"
@@ -2971,7 +2917,7 @@ function WalletModalInner({
                         className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
                         onClick={handleRequestSwitchWallet}
                       >
-                        Import / New Agwallet
+                        Switch Wallet
                       </button>
                       <input
                         ref={backupFileInputRef}
@@ -2987,8 +2933,8 @@ function WalletModalInner({
                         <AlertCircle size={15} />
                         <div style={{ flex: 1 }}>
                           <div>
-                            This Agwallet holds {wallet.totalBalanceSats.toLocaleString()} sats.
-                            Export a backup before replacing it.
+                            This wallet holds {wallet.totalBalanceSats.toLocaleString()} sats.
+                            Export a backup first.
                           </div>
                           <div className="ag-wallet-btn-row" style={{ marginTop: '0.5rem' }}>
                             <button
@@ -3027,7 +2973,7 @@ function WalletModalInner({
                           className="ag-wallet-textarea mono"
                           value={importJsonText}
                           onChange={(e) => setImportJsonText(e.target.value)}
-                          placeholder='{"version": 1, "proofsByMint": { … }}'
+                          placeholder='{"version": 1, ...}'
                         />
                         <button
                           type="button"
@@ -3042,82 +2988,266 @@ function WalletModalInner({
                   </section>
 
                   {wallet.boltzSwaps.length > 0 && (
-                    <section className="ag-wallet-section">
+                    <section className="ag-wallet-section ag-wallet-divider-top">
+                      <h3 className="ag-wallet-section-title">Bitcoin Swaps</h3>
                       {wallet.boltzSwaps.slice(0, 5).map((sw) => renderSwapBlock(sw))}
                     </section>
                   )}
 
-                  <section className="ag-wallet-section">
-                    <div className="ag-wallet-section-head">
-                      <h3 className="ag-wallet-section-title">Activity</h3>
-                      {wallet.history.length > 0 && (
-                        <button
-                          type="button"
-                          className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
-                          onClick={() => wallet.clearHistory()}
-                        >
-                          Clear
-                        </button>
-                      )}
-                    </div>
+                  <div className="ag-wallet-disclosure">
+                    <button
+                      type="button"
+                      className="ag-wallet-disclosure-btn"
+                      onClick={() => setShowAdvancedBoltz((v) => !v)}
+                      aria-expanded={showAdvancedBoltz}
+                    >
+                      {showAdvancedBoltz ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      <span>Advanced</span>
+                    </button>
 
-                    {wallet.history.length === 0 ? (
-                      <div className="ag-wallet-empty">No activity yet</div>
-                    ) : (
-                      <div className="ag-wallet-flat-list">
-                        {wallet.history.map((tx) => {
-                          const incoming = isIncomingTx(tx.type)
-                          return (
-                            <div key={tx.id} className="ag-wallet-tx-item">
-                              <div className="ag-wallet-tx-left">
-                                <span className={`ag-wallet-tx-icon ${incoming ? 'in' : ''}`}>
-                                  {incoming ? (
-                                    <ArrowDownLeft size={14} />
-                                  ) : (
-                                    <ArrowUpRight size={14} />
-                                  )}
-                                </span>
-                                <div className="ag-wallet-tx-copy">
-                                  <span className="ag-wallet-tx-title truncate">
-                                    {formatTxLabel(tx.type)}
-                                  </span>
-                                  <span className="ag-wallet-tx-sub truncate">
-                                    {tx.memo || tx.counterparty || formatMintHost(tx.mintUrl)}
-                                    {tx.feeSats ? ` · ${tx.feeSats} sat fee` : ''}
-                                  </span>
-                                </div>
-                              </div>
-                              <div className="ag-wallet-tx-right">
-                                <span className={`ag-wallet-tx-amt ${incoming ? 'in' : ''}`}>
-                                  {incoming ? '+' : '-'}
-                                  {tx.amountSats.toLocaleString()} sats
-                                </span>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                                  {tx.txid && (
-                                    <a
-                                      href={getMempoolTxUrl(tx.txid)}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="ag-wallet-tx-time"
-                                      title="View on mempool.space"
-                                    >
-                                      tx ↗
-                                    </a>
-                                  )}
-                                  <span className="ag-wallet-tx-time">
-                                    {formatRelativeTime(tx.createdAt)}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          )
-                        })}
+                    {showAdvancedBoltz && (
+                      <div className="ag-wallet-field" style={{ marginTop: '0.55rem' }}>
+                        <label className="ag-wallet-label" htmlFor="ag-boltz-api-url">
+                          Swap server URL
+                        </label>
+                        <div className="ag-wallet-input-row">
+                          <input
+                            id="ag-boltz-api-url"
+                            type="url"
+                            className="ag-wallet-input mono"
+                            value={boltzUrlDraft}
+                            onChange={(e) => setBoltzUrlDraft(e.target.value)}
+                            placeholder={DEFAULT_BOLTZ_API_URL}
+                          />
+                          <button
+                            type="button"
+                            className="ag-wbtn ag-wbtn-secondary"
+                            onClick={handleSaveBoltzUrl}
+                          >
+                            Save
+                          </button>
+                        </div>
                       </div>
                     )}
-                  </section>
+                  </div>
                 </>
               )}
+    </>
+  )
+
+  const navItems = [
+    { id: 'overview' as const, desktopLabel: 'Overview', mobileLabel: 'Overview', icon: Wallet },
+    { id: 'receive' as const, desktopLabel: 'Receive', mobileLabel: 'Receive', icon: ArrowDownLeft },
+    { id: 'send' as const, desktopLabel: 'Send', mobileLabel: 'Send', icon: ArrowUpRight },
+    { id: 'mints' as const, desktopLabel: 'Mints & Backup', mobileLabel: 'Mints', icon: KeyRound },
+  ]
+
+  if (embedded) {
+    return (
+      <div className="ag-wallet-workspace" aria-label="Agwallet" data-no-swipe="true">
+        {/* Desktop Left 256px Rail */}
+        <aside className="ag-wallet-rail" aria-label="Agwallet navigation">
+          <header className="ag-wallet-rail-header">
+            <Wallet size={16} className="ag-wallet-brand-glyph" aria-hidden="true" />
+            <span className="ag-wallet-brand-name">Agwallet</span>
+          </header>
+
+          {!inSetupFlow && (
+            <>
+              <div className="ag-wallet-rail-balance">
+                <div className="ag-wallet-rail-balance-sats tabular">
+                  <span>{wallet.activeMintBalanceSats.toLocaleString()}</span>
+                  <span className="ag-wallet-rail-balance-unit">sats</span>
+                </div>
+                <span
+                  className="ag-wallet-rail-balance-mint mono truncate"
+                  title={wallet.activeMintUrl}
+                >
+                  {formatMintHost(wallet.activeMintUrl)}
+                </span>
+                {wallet.totalBalanceSats !== wallet.activeMintBalanceSats && (
+                  <span className="ag-wallet-rail-balance-total tabular">
+                    Total {wallet.totalBalanceSats.toLocaleString()} sats
+                  </span>
+                )}
+              </div>
+
+              <nav className="ag-wallet-rail-nav" aria-label="Agwallet sections">
+                {navItems.map((item) => {
+                  const Icon = item.icon
+                  const active = activeTab === item.id
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`ag-wallet-rail-item ${active ? 'active' : ''}`}
+                      aria-current={active ? 'page' : undefined}
+                      onClick={() => switchTab(item.id)}
+                    >
+                      <Icon size={15} />
+                      <span className="truncate">{item.desktopLabel}</span>
+                    </button>
+                  )
+                })}
+              </nav>
+
+              {onOpenScanner && (
+                <div className="ag-wallet-rail-footer">
+                  <button
+                    type="button"
+                    className="ag-wallet-rail-scan-btn"
+                    onClick={handleTriggerScanner}
+                  >
+                    <ScanLine size={15} />
+                    <span>Scan QR</span>
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </aside>
+
+        {/* Right Spacious Stage */}
+        <section className="ag-wallet-stage">
+          <header className="ag-wallet-stage-header">
+            <div className="ag-wallet-title-group">
+              {showSetupBackBtn && (
+                <button
+                  type="button"
+                  className="ag-wallet-back-btn"
+                  onClick={handleBack}
+                  aria-label="Back"
+                >
+                  <ArrowLeft size={17} />
+                </button>
+              )}
+              <h2 className="ag-wallet-stage-title ag-wallet-desktop-title">
+                {stageHeaderTitle}
+              </h2>
+              <h2 className="ag-wallet-stage-title ag-wallet-mobile-title">
+                {inSetupFlow ? stageHeaderTitle : 'Agwallet'}
+              </h2>
             </div>
+
+            {!inSetupFlow && (
+              <div className="ag-wallet-stage-header-actions">
+                <select
+                  className="ag-wallet-select"
+                  value={wallet.activeMintUrl}
+                  onChange={(e) => wallet.selectMint(e.target.value)}
+                  aria-label="Active Mint"
+                >
+                  {wallet.mints.map((m) => (
+                    <option key={m.url} value={m.url}>
+                      {m.label} ({(wallet.balancesByMint[m.url] ?? 0).toLocaleString()} sats)
+                    </option>
+                  ))}
+                </select>
+                {onOpenScanner && (
+                  <button
+                    type="button"
+                    className="ag-wallet-scan-icon-btn ag-wallet-mobile-scan-btn"
+                    onClick={handleTriggerScanner}
+                    aria-label="Scan QR"
+                  >
+                    <ScanLine size={15} />
+                  </button>
+                )}
+              </div>
+            )}
+          </header>
+
+          {!inSetupFlow && (
+            <div className="ag-wallet-mobile-nav-wrap">
+              <nav className="ag-wallet-mobile-nav" aria-label="Agwallet sections">
+                {navItems.map((item) => {
+                  const active = activeTab === item.id
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`ag-wallet-mobile-nav-btn ${active ? 'active' : ''}`}
+                      aria-current={active ? 'page' : undefined}
+                      onClick={() => switchTab(item.id)}
+                    >
+                      {item.mobileLabel}
+                    </button>
+                  )
+                })}
+              </nav>
+            </div>
+          )}
+
+          <div className="ag-wallet-stage-scroll">
+            <div className="ag-wallet-stage-inner">
+              {inSetupFlow ? setupBody : mainBody}
+            </div>
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className="ag-wallet-backdrop"
+      onClick={onClose}
+      role="presentation"
+      data-no-swipe="true"
+    >
+      <div
+        className="ag-wallet-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ag-wallet-modal-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Minimal Modal Header */}
+        <header className="ag-wallet-header">
+          <div className="ag-wallet-title-group">
+            {showSetupBackBtn && (
+              <button
+                type="button"
+                className="ag-wallet-back-btn"
+                onClick={handleBack}
+                aria-label="Back"
+              >
+                <ArrowLeft size={17} />
+              </button>
+            )}
+            <h2 id="ag-wallet-modal-title" className="ag-wallet-title">
+              {inSetupFlow ? stageHeaderTitle : 'Agwallet'}
+            </h2>
+          </div>
+
+          <button
+            type="button"
+            className="ag-wallet-close-btn"
+            onClick={onClose}
+            aria-label="Close Agwallet"
+          >
+            <X size={18} />
+          </button>
+        </header>
+
+        {inSetupFlow ? (
+          <div className="ag-wallet-body">{setupBody}</div>
+        ) : (
+          <>
+            <nav className="ag-wallet-nav" aria-label="Agwallet sections">
+              {navItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`ag-wallet-nav-btn ${activeTab === item.id ? 'active' : ''}`}
+                  onClick={() => switchTab(item.id)}
+                >
+                  {item.mobileLabel}
+                </button>
+              ))}
+            </nav>
+
+            <div className="ag-wallet-body">{mainBody}</div>
           </>
         )}
       </div>
@@ -3127,6 +3257,7 @@ function WalletModalInner({
 
 export function WalletModal({
   open,
+  embedded = false,
   onClose,
   wallet,
   zaps,
@@ -3135,15 +3266,16 @@ export function WalletModal({
   onSendToChat,
   activeChatLabel,
 }: WalletModalProps) {
-  if (!open || typeof document === 'undefined') return null
+  if (!open) return null
 
   const intentKey = initialIntent
     ? `${initialIntent.tab ?? ''}:${initialIntent.receiveMode ?? ''}:${initialIntent.sendMode ?? ''}:${initialIntent.payload ?? ''}`
     : 'default'
 
-  return createPortal(
+  const inner = (
     <WalletModalInner
       key={intentKey}
+      embedded={embedded}
       onClose={onClose}
       wallet={wallet}
       zaps={zaps}
@@ -3151,9 +3283,15 @@ export function WalletModal({
       onOpenScanner={onOpenScanner}
       onSendToChat={onSendToChat}
       activeChatLabel={activeChatLabel}
-    />,
-    document.body
+    />
   )
+
+  if (embedded) {
+    return inner
+  }
+
+  if (typeof document === 'undefined') return null
+  return createPortal(inner, document.body)
 }
 
 export default WalletModal

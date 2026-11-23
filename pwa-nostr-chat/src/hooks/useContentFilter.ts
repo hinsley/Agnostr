@@ -28,8 +28,9 @@ import {
   saveFilterVerdicts,
 } from '../lib/storage.ts'
 
-const MAX_FLAGGED_REVEAL_BLOBS = 24
-const MAX_IN_MEMORY_VERDICTS = 500
+const MAX_FLAGGED_REVEAL_BLOBS = 12
+const MAX_IN_MEMORY_VERDICTS = 250
+const MAX_SAFE_OBJECT_URLS = 120
 
 export interface UseContentFilterOptions {
   ownPubkeys: Set<string>
@@ -222,10 +223,28 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
   const storeSafeObjectUrl = useCallback(
     (cacheKey: string, blob: Blob, senderPubkey?: string): string => {
       const existing = safeObjectUrlsRef.current.get(cacheKey)
-      if (existing) return existing
+      if (existing) {
+        // Refresh LRU recency
+        safeObjectUrlsRef.current.delete(cacheKey)
+        safeObjectUrlsRef.current.set(cacheKey, existing)
+        return existing
+      }
       const url = URL.createObjectURL(blob)
       safeObjectUrlsRef.current.set(cacheKey, url)
       if (senderPubkey) trackSenderKey(senderPubkey, cacheKey)
+      while (safeObjectUrlsRef.current.size > MAX_SAFE_OBJECT_URLS) {
+        const oldestKey = safeObjectUrlsRef.current.keys().next().value
+        if (!oldestKey) break
+        const oldestUrl = safeObjectUrlsRef.current.get(oldestKey)
+        safeObjectUrlsRef.current.delete(oldestKey)
+        if (oldestUrl) {
+          try {
+            URL.revokeObjectURL(oldestUrl)
+          } catch {
+            // Ignore revoke failure
+          }
+        }
+      }
       setSafeUrlVersion((v) => v + 1)
       return url
     },
@@ -234,12 +253,24 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
 
   const storeFlaggedBlobForReveal = useCallback(
     (cacheKey: string, blob: Blob, senderPubkey?: string) => {
+      if (flaggedBlobsRef.current.has(cacheKey)) {
+        flaggedBlobsRef.current.delete(cacheKey)
+      }
       flaggedBlobsRef.current.set(cacheKey, blob)
       if (senderPubkey) trackSenderKey(senderPubkey, cacheKey)
       while (flaggedBlobsRef.current.size > MAX_FLAGGED_REVEAL_BLOBS) {
         const oldest = flaggedBlobsRef.current.keys().next().value
         if (!oldest) break
         flaggedBlobsRef.current.delete(oldest)
+        const evictedUrl = revealedFlaggedUrlsRef.current.get(oldest)
+        if (evictedUrl) {
+          revealedFlaggedUrlsRef.current.delete(oldest)
+          try {
+            URL.revokeObjectURL(evictedUrl)
+          } catch {
+            // Ignore revoke failure
+          }
+        }
       }
     },
     [trackSenderKey]
@@ -837,11 +868,28 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       return null
     }
     const existing = revealedFlaggedUrlsRef.current.get(cacheKey)
-    if (existing) return existing
+    if (existing) {
+      revealedFlaggedUrlsRef.current.delete(cacheKey)
+      revealedFlaggedUrlsRef.current.set(cacheKey, existing)
+      return existing
+    }
     const blob = flaggedBlobsRef.current.get(cacheKey)
     if (!blob) return null
     const url = URL.createObjectURL(blob)
     revealedFlaggedUrlsRef.current.set(cacheKey, url)
+    while (revealedFlaggedUrlsRef.current.size > MAX_FLAGGED_REVEAL_BLOBS) {
+      const oldestKey = revealedFlaggedUrlsRef.current.keys().next().value
+      if (!oldestKey) break
+      const oldestUrl = revealedFlaggedUrlsRef.current.get(oldestKey)
+      revealedFlaggedUrlsRef.current.delete(oldestKey)
+      if (oldestUrl) {
+        try {
+          URL.revokeObjectURL(oldestUrl)
+        } catch {
+          // Ignore revoke failure
+        }
+      }
+    }
     setSafeUrlVersion((v) => v + 1)
     return url
   }, [])

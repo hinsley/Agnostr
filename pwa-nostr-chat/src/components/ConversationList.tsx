@@ -13,7 +13,6 @@ import {
   Globe,
   GripVertical,
   Hash,
-  Headphones,
   Link2,
   Loader2,
   Lock,
@@ -30,7 +29,6 @@ import {
   Radio,
   ScanLine,
   Search,
-  Server,
   Settings,
   ShieldCheck,
   ShieldOff,
@@ -40,7 +38,7 @@ import {
   UserPlus,
   Users,
   Video,
-  Wallet,
+  Volume2,
   X,
   Zap,
 } from 'lucide-react'
@@ -63,7 +61,7 @@ import {
   parseQuickTuneInput,
 } from '../lib/radioChannel'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
-import { formatHandle, identiconDataUrl } from '../utils/identicon'
+import { formatHandle, identiconDataUrl, pubkeyToColor } from '../utils/identicon'
 
 export type ListTab = 'radio' | 'dms' | 'servers'
 
@@ -105,6 +103,9 @@ export interface ConversationListProps {
   engine: AgnostrEngine
   activeTab: ListTab
   collapsed?: boolean
+  isMobileViewport?: boolean
+  selectedServerId?: string | null
+  onSelectServer?: (serverId: string) => void
   onTabChange: (tab: ListTab) => void
   onTuneChannel: (geohash: string) => boolean | void
   onOpenDm: (pubkey: string, nickname?: string) => void
@@ -136,7 +137,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   engine,
   activeTab,
   collapsed = false,
-  onTabChange,
+  isMobileViewport = false,
+  selectedServerId = null,
+  onSelectServer,
   onTuneChannel,
   onOpenDm,
   onCloseDmThread,
@@ -146,10 +149,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onOpenCommandPalette,
   onExpandRadar,
   onOpenSettings,
-  amailOpen = false,
-  onOpenAmail,
   onOpenAmailCompose,
-  onOpenWallet,
   onOpenZap,
   onLocateMe,
   onFocusActiveCall,
@@ -165,7 +165,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const { openContextMenu } = useContextMenu()
   const [freqDraft, setFreqDraft] = useState('')
   const [dmDraft, setDmDraft] = useState('')
-  const [collapsedServers, setCollapsedServers] = useState<Record<string, boolean>>({})
+  const [localSelectedServerId, setLocalSelectedServerId] = useState<string | null>(null)
+  const [textSectionOpen, setTextSectionOpen] = useState(true)
+  const [voiceSectionOpen, setVoiceSectionOpen] = useState(true)
   const [addingChannelServerId, setAddingChannelServerId] = useState<string | null>(null)
   const [channelNameDraft, setChannelNameDraft] = useState('')
   const [creatingChannel, setCreatingChannel] = useState(false)
@@ -688,8 +690,107 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     engine.activeView.serverId === serverId &&
     engine.activeView.channelId === channelId
 
-  const toggleServerExpanded = (serverId: string) => {
-    setCollapsedServers((prev) => ({ ...prev, [serverId]: !prev[serverId] }))
+  const openServerHeaderMenu = (
+    e: React.MouseEvent,
+    server: ServerSummary,
+    canAddChannel: boolean
+  ) => {
+    const invite = engine.servers.buildInviteLink(server.id)
+    const items: ContextMenuItem[] = [
+      {
+        id: `srv-head-invite-${server.id}`,
+        label: 'Invite People',
+        icon: <UserPlus size={14} />,
+        onSelect: () => {
+          onPlaySound?.('click')
+          if (invite && onShowQr) {
+            onShowQr({
+              kind: 'server',
+              title: server.name,
+              subtitle: server.encrypted ? 'Encrypted Server Invite' : 'Server Invite',
+              url: invite.url,
+              codeLabel: 'Invite Code',
+              codeValue: invite.code,
+            })
+          } else {
+            onOpenServerSettings(server.id, 'overview')
+          }
+        },
+      },
+    ]
+
+    if (invite) {
+      items.push({
+        id: `srv-head-copy-${server.id}`,
+        label: 'Copy Invite Link',
+        icon: <Link2 size={14} />,
+        onSelect: () => {
+          onPlaySound?.('click')
+          navigator.clipboard?.writeText(invite.url).catch(() => {})
+          engine.pushToast('success', 'Invite link copied', server.name)
+        },
+      })
+    }
+
+    if (canAddChannel) {
+      items.push({
+        id: `srv-head-add-ch-${server.id}`,
+        label: 'Create Channel',
+        icon: <Plus size={14} />,
+        dividerBefore: true,
+        onSelect: () => {
+          onPlaySound?.('click')
+          setTextSectionOpen(true)
+          setAddingChannelServerId(server.id)
+          setChannelNameDraft('')
+        },
+      })
+    }
+
+    items.push(
+      {
+        id: `srv-head-settings-${server.id}`,
+        label: 'Server Settings',
+        icon: <Settings size={14} />,
+        dividerBefore: !canAddChannel,
+        onSelect: () => {
+          onPlaySound?.('click')
+          onOpenServerSettings(server.id, 'overview')
+        },
+      },
+      {
+        id: `srv-head-leave-${server.id}`,
+        label: 'Leave Server',
+        icon: <LogOut size={14} />,
+        danger: true,
+        dividerBefore: true,
+        onSelect: () => {
+          onPlaySound?.('click')
+          void engine.servers.leaveServer(server.id)
+        },
+      }
+    )
+
+    openContextMenu(e, {
+      header: server.name,
+      items,
+    })
+  }
+
+  const handleSelectServerEntry = (serverId: string) => {
+    setLocalSelectedServerId(serverId)
+    if (onSelectServer) {
+      onSelectServer(serverId)
+      return
+    }
+    const srv = engine.servers.joinedServers.find((s) => s.id === serverId)
+    if (srv) {
+      const targetCh =
+        srv.channels.find((c) => c.id === srv.lastActiveChannelId) ?? srv.channels[0]
+      if (targetCh) {
+        onSelectServerChannel(srv.id, targetCh.id)
+      }
+    }
   }
 
   const handleAddChannel = async (e: FormEvent, serverId: string) => {
@@ -831,196 +932,554 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   }
 
   const activeCall = engine.calls.activeCall
+  const joinedServers = engine.servers.joinedServers
+  const effectiveServerId =
+    selectedServerId || localSelectedServerId || engine.servers.activeServer?.id || null
+  const selectedServer: ServerSummary | null =
+    joinedServers.find((s) => s.id === effectiveServerId) ?? joinedServers[0] ?? null
+  const isMobileServersSplit = isMobileViewport && activeTab === 'servers'
+
+  const renderDiscordServerPane = (server: ServerSummary | null) => {
+    if (!server) {
+      return (
+        <div className="ag-srv-discord-pane">
+          <div className="ag-conv-header">
+            <span className="ag-conv-section-title">Servers</span>
+            <div className="ag-conv-header-actions">
+              <button
+                type="button"
+                className="ag-circle-btn"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  onOpenServerHub('create')
+                }}
+                title="Create or join server"
+                aria-label="Create or join server"
+              >
+                <Plus size={17} />
+              </button>
+            </div>
+          </div>
+
+          <div className="ag-srv-discord-empty">
+            <div className="ag-conv-empty-icon">
+              <Users size={22} />
+            </div>
+            <h3>No servers yet</h3>
+            <div className="ag-srv-empty-actions">
+              <button
+                type="button"
+                className="ag-srv-empty-primary"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  onOpenServerHub('create')
+                }}
+              >
+                <Plus size={14} />
+                <span>Create or Join</span>
+              </button>
+              <button
+                type="button"
+                className="ag-srv-empty-ghost"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  onOpenServerHub('explore')
+                }}
+              >
+                <Compass size={14} />
+                <span>Browse</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    const isActiveServer =
+      engine.activeView.type === 'server' && engine.activeView.serverId === server.id
+    const isInThisCall = activeCall?.mode === 'server' && activeCall.serverId === server.id
+    const callRoster = engine.calls.serverCallRosters[server.id] ?? []
+    const voiceParticipants = isInThisCall
+      ? activeCall.participants.map((p) => ({
+          pubkey: p.pubkey,
+          displayHandle: p.displayHandle,
+          isRecording: p.isRecording,
+        }))
+      : callRoster.map((r) => ({
+          pubkey: r.pubkey,
+          displayHandle: r.displayHandle,
+          isRecording: Boolean(r.isRecording),
+        }))
+    const voiceCount = Math.max(
+      engine.calls.getServerCallCount(server.id),
+      voiceParticipants.length
+    )
+    const voiceMax = engine.calls.maxParticipants
+    const voiceFull = voiceCount >= voiceMax && !isInThisCall
+    const anyoneRecording = voiceParticipants.some((p) => p.isRecording)
+    const canAddChannel =
+      server.kind === 'virtual' &&
+      (server.founderPubkey?.toLowerCase() === engine.identity.masterPubkey.toLowerCase() ||
+        (isActiveServer && engine.servers.canModerate))
+    const accentStyle = {
+      '--srv-accent': server.accentColor || 'var(--accent)',
+    } as CSSProperties
+
+    const visibleChannels = textSectionOpen
+      ? server.channels
+      : server.channels.filter(
+          (ch) =>
+            isServerChannelActive(server.id, ch.id) ||
+            (ch.unreadCount ?? 0) > 0 ||
+            (ch.mentionCount ?? 0) > 0
+        )
+
+    return (
+      <div className="ag-srv-discord-pane" style={accentStyle}>
+        {/* Aligned 52px Server Header */}
+        <button
+          type="button"
+          className="ag-srv-discord-header"
+          onClick={(e) => {
+            onPlaySound?.('click')
+            openServerHeaderMenu(e, server, canAddChannel)
+          }}
+          onContextMenu={(e) => openServerHeaderMenu(e, server, canAddChannel)}
+          aria-label={`${server.name} menu`}
+        >
+          <span className="ag-srv-discord-head-left truncate">
+            {server.encrypted ? (
+              <Lock size={13} className="ag-srv-discord-kind dm" aria-hidden="true" />
+            ) : (
+              <Globe size={13} className="ag-srv-discord-kind" aria-hidden="true" />
+            )}
+            <span className="ag-srv-discord-name truncate">{server.name}</span>
+          </span>
+          <ChevronDown size={15} className="ag-srv-discord-caret" aria-hidden="true" />
+        </button>
+
+        <div className="ag-srv-discord-scroll">
+          {server.kind === 'nip29' && server.isJoinedMember === false && (
+            <button
+              type="button"
+              className="ag-srv-join-community-btn"
+              onClick={() => void handleJoinNip29(server)}
+              disabled={joiningNip29ServerId === server.id}
+            >
+              {joiningNip29ServerId === server.id ? (
+                <Loader2 size={13} className="ag-spin" />
+              ) : (
+                <UserPlus size={13} />
+              )}
+              <span>{joiningNip29ServerId === server.id ? 'Joining…' : 'Join Server'}</span>
+            </button>
+          )}
+
+          {/* TEXT CHANNELS Category */}
+          <section className="ag-srv-discord-section" aria-label="Text channels">
+            <div className="ag-srv-discord-cat">
+              <button
+                type="button"
+                className="ag-srv-discord-cat-toggle"
+                onClick={() => setTextSectionOpen((v) => !v)}
+                aria-expanded={textSectionOpen}
+              >
+                {textSectionOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                <span>Text Channels</span>
+              </button>
+              {canAddChannel && (
+                <button
+                  type="button"
+                  className="ag-srv-discord-cat-add"
+                  onClick={() => {
+                    onPlaySound?.('click')
+                    setTextSectionOpen(true)
+                    setAddingChannelServerId(server.id)
+                    setChannelNameDraft('')
+                  }}
+                  title="Create channel"
+                  aria-label="Create channel"
+                >
+                  <Plus size={13} />
+                </button>
+              )}
+            </div>
+
+            <div className="ag-srv-channels">
+              {visibleChannels.map((ch) => {
+                const active = isServerChannelActive(server.id, ch.id)
+                const chUnread = ch.unreadCount ?? 0
+                const chMentions = ch.mentionCount ?? 0
+                const chHasUnread = chUnread > 0 || chMentions > 0
+                return (
+                  <button
+                    key={ch.id}
+                    type="button"
+                    className={`ag-srv-ch-row ${server.encrypted ? 'dm' : ''} ${active ? 'active' : ''} ${chHasUnread ? 'is-unread' : ''} ${chMentions > 0 ? 'has-pings' : ''}`}
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      onSelectServerChannel(server.id, ch.id)
+                    }}
+                    onContextMenu={(e) => openServerContextMenu(e, server, ch)}
+                  >
+                    <span className="ag-srv-ch-left truncate">
+                      {server.encrypted ? (
+                        <Lock size={13} className="ag-srv-ch-icon dm" />
+                      ) : (
+                        <Hash size={14} className="ag-srv-ch-icon" />
+                      )}
+                      <span className="truncate">{ch.name}</span>
+                    </span>
+                    {chMentions > 0 ? (
+                      <span
+                        className="ag-ping-badge tabular"
+                        title={`${chMentions} ${chMentions === 1 ? 'ping' : 'pings'}`}
+                      >
+                        {formatBadgeCount(chMentions)}
+                      </span>
+                    ) : chUnread > 0 ? (
+                      <span className="ag-unread-pill tabular" title={`${chUnread} unread`}>
+                        {formatBadgeCount(chUnread)}
+                      </span>
+                    ) : null}
+                  </button>
+                )
+              })}
+
+              {canAddChannel && addingChannelServerId === server.id && (
+                <form
+                  className="ag-srv-inline-add-form"
+                  onSubmit={(e) => void handleAddChannel(e, server.id)}
+                >
+                  <input
+                    type="text"
+                    className="ag-srv-inline-input"
+                    placeholder="channel-name"
+                    maxLength={28}
+                    value={channelNameDraft}
+                    onChange={(e) => setChannelNameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        setAddingChannelServerId(null)
+                        setChannelNameDraft('')
+                      }
+                    }}
+                    autoFocus
+                    disabled={creatingChannel}
+                    aria-label="New channel name"
+                  />
+                  <button
+                    type="submit"
+                    className="ag-srv-inline-ok"
+                    disabled={!channelNameDraft.trim() || creatingChannel}
+                  >
+                    {creatingChannel ? <Loader2 size={12} className="ag-spin" /> : 'Add'}
+                  </button>
+                  <button
+                    type="button"
+                    className="ag-srv-inline-cancel"
+                    onClick={() => {
+                      setAddingChannelServerId(null)
+                      setChannelNameDraft('')
+                    }}
+                    aria-label="Cancel"
+                  >
+                    <X size={13} />
+                  </button>
+                </form>
+              )}
+            </div>
+          </section>
+
+          {/* VOICE Category */}
+          <section className="ag-srv-discord-section" aria-label="Voice">
+            <div className="ag-srv-discord-cat">
+              <button
+                type="button"
+                className="ag-srv-discord-cat-toggle"
+                onClick={() => setVoiceSectionOpen((v) => !v)}
+                aria-expanded={voiceSectionOpen}
+              >
+                {voiceSectionOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                <span>Voice</span>
+              </button>
+            </div>
+
+            {(voiceSectionOpen || isInThisCall || voiceParticipants.length > 0) && (
+              <div className="ag-srv-discord-voice-group">
+                <div className={`ag-srv-discord-voice-row ${isInThisCall ? 'in-call' : ''}`}>
+                  <button
+                    type="button"
+                    className="ag-srv-discord-voice-btn"
+                    disabled={(!isInThisCall && voiceFull) || joiningVoiceServerId === server.id}
+                    onClick={() => {
+                      if (isInThisCall) {
+                        onFocusActiveCall?.()
+                      } else {
+                        void handleJoinVoice(server.id)
+                      }
+                    }}
+                  >
+                    {joiningVoiceServerId === server.id ? (
+                      <Loader2 size={14} className="ag-spin ag-srv-discord-voice-icon" />
+                    ) : (
+                      <Volume2 size={15} className="ag-srv-discord-voice-icon" />
+                    )}
+                    <span className="ag-srv-discord-voice-name truncate">Voice Lounge</span>
+                    {anyoneRecording && (
+                      <span className="ag-voice-rec-dot" aria-label="Recording in progress" />
+                    )}
+                    <span className="ag-srv-discord-voice-count tabular">
+                      {voiceCount}/{voiceMax}
+                    </span>
+                  </button>
+
+                  {isInThisCall && (
+                    <button
+                      type="button"
+                      className="ag-srv-discord-voice-leave"
+                      onClick={() => {
+                        onPlaySound?.('call-leave')
+                        engine.calls.leaveCall()
+                      }}
+                      title="Leave Voice Lounge"
+                      aria-label="Leave Voice Lounge"
+                    >
+                      <PhoneOff size={13} />
+                    </button>
+                  )}
+                </div>
+
+                {voiceParticipants.length > 0 && (
+                  <div className="ag-srv-discord-voice-users" role="list" aria-label="In voice">
+                    {voiceParticipants.map((p) => (
+                      <div key={p.pubkey} className="ag-srv-discord-voice-user" role="listitem">
+                        <img
+                          src={identiconDataUrl(p.pubkey)}
+                          alt=""
+                          width={22}
+                          height={22}
+                          className="ag-srv-discord-voice-avatar"
+                        />
+                        <span
+                          className="ag-srv-discord-voice-uname truncate"
+                          style={{ color: pubkeyToColor(p.pubkey) }}
+                        >
+                          {p.displayHandle}
+                        </span>
+                        {p.isRecording && (
+                          <span className="ag-voice-rec-dot" aria-label="Recording" />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <aside
-      className={`ag-conv-pane ${collapsed ? 'collapsed' : ''}`}
+      className={`ag-conv-pane ${collapsed ? 'collapsed' : ''} ${isMobileServersSplit ? 'is-mobile-servers' : ''}`}
       aria-label="Conversations"
     >
-      {/* Top Brand Header */}
-      <div className="ag-conv-header">
-        <div className="ag-conv-brand">
-          <img src="./icon.svg" alt="" className="ag-conv-logo" />
-          <span className="ag-conv-title">Agnostr</span>
-        </div>
+      {/* Top 52px Contextual Header (Radio & People views; Servers renders its own aligned 52px header) */}
+      {activeTab !== 'servers' && (
+        <div className="ag-conv-header">
+          <span className="ag-conv-section-title">
+            {activeTab === 'radio' ? 'Radio' : 'People'}
+          </span>
 
-        <div className="ag-conv-header-actions">
-          {/* Desktop quick Map & Settings buttons */}
-          <button
-            type="button"
-            className="ag-circle-btn ag-desktop-only"
-            onClick={onExpandRadar}
-            title="Open Full Map"
-            aria-label="Open interactive Geohash Map"
-          >
-            <MapIcon size={18} />
-          </button>
-          <button
-            type="button"
-            className="ag-circle-btn ag-desktop-only"
-            onClick={() => onOpenSettings()}
-            title="Settings (Cmd+,)"
-            aria-label="Open Settings"
-          >
-            <Settings size={18} />
-          </button>
-
-          {/* Mobile contextual quick action */}
-          {activeTab === 'servers' && (
-            <button
-              type="button"
-              className="ag-circle-btn ag-mobile-only"
-              onClick={() => onOpenServerHub('create')}
-              title="New or Join Server"
-              aria-label="New or Join Server"
-            >
-              <Plus size={19} />
-            </button>
-          )}
-          {activeTab === 'radio' && (
-            <button
-              type="button"
-              className={`ag-circle-btn ag-mobile-only ${engine.location.status === 'locating' ? 'locating' : ''}`}
-              onClick={onLocateMe}
-              disabled={engine.location.status === 'locating'}
-              title="Locate my area with GPS"
-              aria-label="Locate my area with GPS"
-            >
-              <Crosshair size={18} />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Rounded Search / Jump Trigger */}
-      <div className="ag-conv-search-wrap">
-        <button
-          type="button"
-          className="ag-conv-search-btn"
-          onClick={onOpenCommandPalette}
-          aria-label="Search or jump to geohash"
-        >
-          <Search size={15} className="ag-conv-search-icon" />
-          <span className="ag-conv-search-placeholder">Search or #geohash…</span>
-          <kbd className="ag-kbd ag-desktop-only">⌘K</kbd>
-        </button>
-      </div>
-
-      {/* Desktop 3-Pill Segmented Tab Switcher (Mobile uses MobileTabBar at bottom) */}
-      <div className="ag-conv-tabs-wrap ag-desktop-only" role="tablist" aria-label="Chat categories">
-        <div className="ag-conv-tabs">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'radio'}
-            className={`ag-conv-tab ${activeTab === 'radio' ? 'active' : ''}`}
-            onClick={() => onTabChange('radio')}
-          >
-            <span>Radio</span>
-            {engine.totalGeoMentions > 0 ? (
-              <span
-                className="ag-tab-count ping tabular"
-                title={`${engine.totalGeoMentions} pings · ${engine.totalGeoUnread} unread`}
-              >
-                {formatBadgeCount(engine.totalGeoMentions)}
-              </span>
-            ) : engine.totalGeoUnread > 0 ? (
-              <span
-                className="ag-tab-count tabular"
-                title={`${engine.totalGeoUnread} unread`}
-              >
-                {formatBadgeCount(engine.totalGeoUnread)}
-              </span>
-            ) : null}
-          </button>
-
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'servers'}
-            className={`ag-conv-tab ${activeTab === 'servers' ? 'active' : ''}`}
-            onClick={() => onTabChange('servers')}
-          >
-            <span>Servers</span>
-            {engine.servers.totalServerMentions > 0 ? (
-              <span
-                className="ag-tab-count ping tabular"
-                title={`${engine.servers.totalServerMentions} pings · ${engine.servers.totalServerUnread} unread`}
-              >
-                {formatBadgeCount(engine.servers.totalServerMentions)}
-              </span>
-            ) : engine.servers.totalServerUnread > 0 ? (
-              <span
-                className="ag-tab-count tabular"
-                title={`${engine.servers.totalServerUnread} unread`}
-              >
-                {formatBadgeCount(engine.servers.totalServerUnread)}
-              </span>
-            ) : null}
-          </button>
-
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'dms'}
-            className={`ag-conv-tab dm ${activeTab === 'dms' ? 'active' : ''}`}
-            onClick={() => onTabChange('dms')}
-          >
-            <span>People</span>
-            {engine.totalDmUnread > 0 && (
-              <span className="ag-tab-count ping tabular">
-                {formatBadgeCount(engine.totalDmUnread)}
-              </span>
+          <div className="ag-conv-header-actions">
+            {activeTab === 'radio' && (
+              <>
+                <button
+                  type="button"
+                  className={`ag-circle-btn ${engine.location.status === 'locating' ? 'locating' : ''}`}
+                  onClick={onLocateMe}
+                  disabled={engine.location.status === 'locating'}
+                  title="Locate my area"
+                  aria-label="Locate my area"
+                >
+                  <Crosshair size={16} />
+                </button>
+                <button
+                  type="button"
+                  className="ag-circle-btn ag-mobile-only"
+                  onClick={onExpandRadar}
+                  title="Open Map"
+                  aria-label="Open Map"
+                >
+                  <MapIcon size={16} />
+                </button>
+              </>
             )}
-          </button>
-        </div>
-      </div>
 
-      {/* Scrollable Tab Content */}
-      <div className="ag-conv-scroll">
-        {/* ================= RADIO TAB ================= */}
-        {activeTab === 'radio' && (
-          <div className="ag-conv-section-stack">
-            {/* Unified Radio Quick-Tune Row (Geohash, city, or topic + GPS + Map) */}
-            <div className="ag-radio-quickbar">
-              <form className="ag-jump-form" onSubmit={handleQuickTune}>
-                <span className="ag-jump-hash">#</span>
-                <input
-                  type="text"
-                  className="ag-jump-input"
-                  value={freqDraft}
-                  onChange={(e) => setFreqDraft(e.target.value)}
-                  placeholder="Geohash, city, or topic…"
-                  aria-label="Jump to geohash, city, or topic channel"
-                />
-                {freqDraft.trim() && (
-                  <button type="submit" className="ag-jump-go-btn" aria-label="Go">
-                    Go
+            {activeTab === 'dms' && (
+              <>
+                {onShowQr && (
+                  <button
+                    type="button"
+                    className="ag-circle-btn"
+                    onClick={handleOpenMyDmQr}
+                    title="My QR"
+                    aria-label="Show my DM QR code"
+                  >
+                    <QrCode size={16} />
                   </button>
                 )}
-              </form>
+                {onOpenScanner && (
+                  <button
+                    type="button"
+                    className="ag-circle-btn"
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      onOpenScanner()
+                    }}
+                    title="Scan QR"
+                    aria-label="Scan QR code"
+                  >
+                    <ScanLine size={16} />
+                  </button>
+                )}
+              </>
+            )}
 
-              <button
-                type="button"
-                className={`ag-quick-tool-btn ${engine.location.status === 'locating' ? 'locating' : ''}`}
-                onClick={onLocateMe}
-                disabled={engine.location.status === 'locating'}
-                title="Locate my area with GPS"
-                aria-label="Locate my area with GPS"
-              >
-                <Crosshair size={15} />
-              </button>
+            <button
+              type="button"
+              className="ag-circle-btn"
+              onClick={onOpenCommandPalette}
+              title="Search (⌘K)"
+              aria-label="Search or jump"
+            >
+              <Search size={16} />
+            </button>
+          </div>
+        </div>
+      )}
 
-              <button
-                type="button"
-                className="ag-quick-map-pill"
-                onClick={onExpandRadar}
-                title="Open Full Map"
-              >
-                <MapIcon size={13} />
-                <span>Map</span>
-              </button>
+      {/* Main Content Area: Discord Servers (Desktop or Mobile 2-Col Split) OR Scrollable Radio/People */}
+      {activeTab === 'servers' ? (
+        isMobileServersSplit ? (
+          <div className="ag-srv-mobile-split">
+            <div className="ag-srv-mobile-rail" role="list" aria-label="Servers">
+              {joinedServers.map((server) => {
+                const active = selectedServer?.id === server.id
+                const srvUnread = Math.max(
+                  server.unreadCount,
+                  engine.servers.getServerUnreadCount(server.id)
+                )
+                const srvMentions = Math.max(
+                  server.mentionCount,
+                  engine.servers.getServerMentionCount(server.id)
+                )
+                const hasUnread = srvUnread > 0 || srvMentions > 0
+                const isInCall =
+                  activeCall?.mode === 'server' && activeCall.serverId === server.id
+                const voiceCount = Math.max(
+                  engine.calls.getServerCallCount(server.id),
+                  isInCall
+                    ? activeCall.participants.length
+                    : (engine.calls.serverCallRosters[server.id] ?? []).length
+                )
+                const accentStyle = {
+                  '--srv-accent': server.accentColor || 'var(--accent)',
+                } as CSSProperties
+                return (
+                  <div key={server.id} className="ag-rail-slot" role="listitem">
+                    <button
+                      type="button"
+                      className={`ag-rail-tile ag-rail-srv compact ${active ? 'active' : ''} ${hasUnread ? 'has-unread' : ''}`}
+                      style={accentStyle}
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        handleSelectServerEntry(server.id)
+                      }}
+                      onContextMenu={(e) => openServerContextMenu(e, server)}
+                      aria-label={server.name}
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      <span className="ag-rail-indicator" aria-hidden="true" />
+                      {server.picture && /^https?:\/\//i.test(server.picture) ? (
+                        <img
+                          src={server.picture}
+                          alt=""
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          className="ag-rail-srv-img"
+                        />
+                      ) : server.icon?.trim() ? (
+                        <span className="ag-rail-srv-emoji" aria-hidden="true">
+                          {server.icon}
+                        </span>
+                      ) : (
+                        <span className="ag-rail-srv-mono mono" aria-hidden="true">
+                          {getServerMonogram(server.name)}
+                        </span>
+                      )}
+                      {srvMentions > 0 && (
+                        <span className="ag-rail-badge ping tabular">
+                          {formatBadgeCount(srvMentions)}
+                        </span>
+                      )}
+                      {voiceCount > 0 && (
+                        <span
+                          className={`ag-rail-voice-dot ${isInCall ? 'in-call' : ''}`}
+                          aria-hidden="true"
+                        />
+                      )}
+                    </button>
+                  </div>
+                )
+              })}
+
+              <div className="ag-rail-slot" role="listitem">
+                <button
+                  type="button"
+                  className="ag-rail-tile ag-rail-add compact"
+                  onClick={() => {
+                    onPlaySound?.('click')
+                    onOpenServerHub('create')
+                  }}
+                  aria-label="Create or join server"
+                >
+                  <Plus size={18} strokeWidth={2} />
+                </button>
+              </div>
             </div>
+
+            <div className="ag-srv-mobile-main">{renderDiscordServerPane(selectedServer)}</div>
+          </div>
+        ) : (
+          renderDiscordServerPane(selectedServer)
+        )
+      ) : (
+        <div className="ag-conv-scroll">
+          {/* ================= RADIO TAB ================= */}
+          {activeTab === 'radio' && (
+            <div className="ag-conv-section-stack">
+              <div className="ag-radio-quickbar">
+                <form className="ag-jump-form" onSubmit={handleQuickTune}>
+                  <span className="ag-jump-hash">#</span>
+                  <input
+                    type="text"
+                    className="ag-jump-input"
+                    value={freqDraft}
+                    onChange={(e) => setFreqDraft(e.target.value)}
+                    placeholder="Geohash, city, or topic…"
+                    aria-label="Jump to geohash, city, or topic channel"
+                  />
+                  {freqDraft.trim() && (
+                    <button type="submit" className="ag-jump-go-btn" aria-label="Go">
+                      Go
+                    </button>
+                  )}
+                </form>
+              </div>
 
             {/* Active Room (if not already listed in Pinned or Active Rooms) */}
             {showActiveRoomCard && (() => {
@@ -1041,9 +1500,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               const currentSubtitle = resolved.preview
                 ? resolved.preview
                 : isTopic
-                  ? 'Topic channel'
+                  ? 'Topic'
                   : engine.presence.isUncertainCount
-                    ? 'Geo Radio room'
+                    ? 'Radio room'
                     : `${engine.presence.onlineCount} online`
               return (
               <section className="ag-conv-group" aria-label="Current room">
@@ -1388,12 +1847,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 <div className="ag-conv-empty">
                   <p>
                     {engine.pulseRooms.length > 0
-                      ? 'All nearby active rooms are pinned above.'
-                      : 'Listening for active radio & topic rooms…'}
+                      ? 'All active rooms are pinned.'
+                      : 'Listening for active rooms…'}
                   </p>
                   <button type="button" className="ag-soft-pill-btn" onClick={onExpandRadar}>
                     <Compass size={14} />
-                    <span>Explore World Map</span>
+                    <span>Open Map</span>
                   </button>
                 </div>
               ) : (
@@ -1565,43 +2024,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
           return (
           <div className="ag-conv-section-stack">
-            {(onShowQr || onOpenScanner) && (
-              <div className="ag-dm-actions-row">
-                {onShowQr && (
-                  <button
-                    type="button"
-                    className="ag-dm-action-btn dm"
-                    onClick={handleOpenMyDmQr}
-                    title="Show your shareable DM link & QR code"
-                  >
-                    <QrCode size={15} />
-                    <span>My QR</span>
-                  </button>
-                )}
-                {onOpenScanner && (
-                  <button
-                    type="button"
-                    className="ag-dm-action-btn"
-                    onClick={() => {
-                      onPlaySound?.('click')
-                      onOpenScanner()
-                    }}
-                    title="Scan a DM or community invite QR code"
-                  >
-                    <ScanLine size={15} />
-                    <span>Scan QR</span>
-                  </button>
-                )}
-              </div>
-            )}
-
             <form className="ag-dm-jump-form" onSubmit={handleQuickStartDm}>
               <input
                 type="text"
                 className="ag-jump-input"
                 value={dmDraft}
                 onChange={(e) => setDmDraft(e.target.value)}
-                placeholder="Search people, paste DM link or npub…"
+                placeholder="Search or paste link / npub…"
                 aria-label="Search people or paste a DM link or npub"
               />
               {dmDraft.trim() && (
@@ -1614,13 +2043,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             {!hasVisiblePeople ? (
               <div className="ag-conv-empty-large">
                 <div className="ag-conv-empty-icon dm">
-                  <Users size={24} />
+                  <Users size={22} />
                 </div>
-                <h3>{hasAnyPeople ? 'No matching people' : 'No friends or messages yet'}</h3>
+                <h3>{hasAnyPeople ? 'No matching people' : 'No people yet'}</h3>
                 <p>
                   {hasAnyPeople
-                    ? 'Try another name, or paste a DM link / npub and press Open.'
-                    : 'Trust someone in a room or server to add them as a friend, or share your DM link & QR code.'}
+                    ? 'Try another name or paste an npub.'
+                    : 'Trust someone in a room or share your QR.'}
                 </p>
               </div>
             ) : (
@@ -1672,8 +2101,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                               <div className="ag-chat-row-bottom">
                                 <span className="ag-chat-row-preview truncate">
                                   {blocked
-                                    ? 'Muted user'
-                                    : thread.lastPreview || 'Encrypted conversation'}
+                                    ? 'Muted'
+                                    : thread.lastPreview || 'Encrypted chat'}
                                 </span>
                                 {visibleUnread > 0 && (
                                   <span
@@ -1806,7 +2235,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                                   className={`ag-chat-row-preview truncate ${peerNote ? 'is-note' : ''}`}
                                   title={peerNote || undefined}
                                 >
-                                  {peerNote || 'Trusted · Tap to message'}
+                                  {peerNote || 'Trusted'}
                                 </span>
                               </div>
                             </div>
@@ -1849,501 +2278,61 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           )
         })()}
 
-        {/* ================= SERVERS TAB ================= */}
-        {activeTab === 'servers' && (
-          <div className="ag-conv-section-stack">
-            <div className="ag-srv-top-cta-wrap">
-              <button
-                type="button"
-                className="ag-srv-new-btn"
-                onClick={() => {
-                  onPlaySound?.('click')
-                  onOpenServerHub('create')
-                }}
-              >
-                <Plus size={16} />
-                <span>New or Join Server</span>
-              </button>
-              {onOpenScanner && (
-                <button
-                  type="button"
-                  className="ag-srv-scan-btn"
-                  onClick={() => {
-                    onPlaySound?.('click')
-                    onOpenScanner()
-                  }}
-                  title="Scan a community invite QR code"
-                  aria-label="Scan QR code"
-                >
-                  <ScanLine size={15} />
-                  <span>Scan QR</span>
-                </button>
-              )}
-            </div>
+        </div>
+      )}
 
-            {engine.servers.joinedServers.length === 0 ? (
-              <div className="ag-conv-empty-large">
-                <div className="ag-conv-empty-icon">
-                  <Users size={24} />
-                </div>
-                <h3>No servers yet</h3>
-                <p>
-                  Create a private encrypted space with channels and voice calls, or explore public
-                  communities.
-                </p>
-                <button
-                  type="button"
-                  className="ag-soft-pill-btn"
-                  onClick={() => onOpenServerHub('explore')}
-                >
-                  <Compass size={14} />
-                  <span>Browse Communities</span>
-                </button>
-              </div>
-            ) : (
-              <div className="ag-srv-card-list">
-                {engine.servers.joinedServers.map((server) => {
-                  const isActiveServer =
-                    engine.activeView.type === 'server' && engine.activeView.serverId === server.id
-                  const isExpanded = !collapsedServers[server.id]
-                  const isInThisCall =
-                    activeCall?.mode === 'server' && activeCall.serverId === server.id
-                  const callRoster = engine.calls.serverCallRosters[server.id] ?? []
-                  const voiceParticipants = isInThisCall
-                    ? activeCall.participants.map((p) => ({
-                        pubkey: p.pubkey,
-                        displayHandle: p.displayHandle,
-                        isRecording: p.isRecording,
-                      }))
-                    : callRoster.map((r) => ({
-                        pubkey: r.pubkey,
-                        displayHandle: r.displayHandle,
-                        isRecording: Boolean(r.isRecording),
-                      }))
-                  const voiceCount = Math.max(
-                    engine.calls.getServerCallCount(server.id),
-                    voiceParticipants.length
-                  )
-                  const voiceMax = engine.calls.maxParticipants
-                  const voiceFull = voiceCount >= voiceMax && !isInThisCall
-                  const anyoneRecording = voiceParticipants.some((p) => p.isRecording)
-                  const canAddChannel =
-                    server.kind === 'virtual' &&
-                    (server.founderPubkey?.toLowerCase() ===
-                      engine.identity.masterPubkey.toLowerCase() ||
-                      (isActiveServer && engine.servers.canModerate))
-                  const accentStyle = {
-                    '--srv-accent': server.accentColor || 'var(--accent)',
-                  } as CSSProperties
-                  const srvUnread = Math.max(
-                    server.unreadCount,
-                    engine.servers.getServerUnreadCount(server.id)
-                  )
-                  const srvMentions = Math.max(
-                    server.mentionCount,
-                    engine.servers.getServerMentionCount(server.id)
-                  )
-                  const srvHasUnread = srvUnread > 0 || srvMentions > 0
-
-                  return (
-                    <div
-                      key={server.id}
-                      className={`ag-srv-card ${isActiveServer ? 'active' : ''} ${srvHasUnread ? 'is-unread' : ''} ${srvMentions > 0 ? 'has-pings' : ''}`}
-                      style={accentStyle}
-                    >
-                      <div
-                        className="ag-srv-card-head"
-                        onContextMenu={(e) => openServerContextMenu(e, server)}
-                      >
-                        <button
-                          type="button"
-                          className="ag-srv-card-toggle"
-                          onClick={() => toggleServerExpanded(server.id)}
-                          aria-expanded={isExpanded}
-                        >
-                          <div className="ag-srv-card-avatar">
-                            {server.picture && /^https?:\/\//i.test(server.picture) ? (
-                              <img
-                                src={server.picture}
-                                alt=""
-                                loading="lazy"
-                                referrerPolicy="no-referrer"
-                              />
-                            ) : server.icon?.trim() ? (
-                              <span>{server.icon}</span>
-                            ) : (
-                              <span className="mono">{getServerMonogram(server.name)}</span>
-                            )}
-                          </div>
-                          <div className="ag-srv-card-info">
-                            <div className="ag-srv-card-title-row">
-                              <span className="ag-srv-card-name truncate">{server.name}</span>
-                              {server.kind === 'nip29' ? (
-                                <Server
-                                  size={12}
-                                  className="ag-srv-type-icon mesh"
-                                  aria-label="NIP-29 Community"
-                                />
-                              ) : server.encrypted ? (
-                                <Lock
-                                  size={12}
-                                  className="ag-srv-type-icon dm"
-                                  aria-label="End-to-end encrypted"
-                                />
-                              ) : (
-                                <Globe
-                                  size={12}
-                                  className="ag-srv-type-icon"
-                                  aria-label="Public server"
-                                />
-                              )}
-                            </div>
-                            <span className="ag-srv-card-sub">
-                              {server.channels.length}{' '}
-                              {server.channels.length === 1 ? 'channel' : 'channels'}
-                              {voiceCount > 0 ? ` · ${voiceCount} in voice` : ''}
-                            </span>
-                          </div>
-                          {srvMentions > 0 ? (
-                            <span
-                              className="ag-ping-badge tabular"
-                              title={`${srvMentions} ${srvMentions === 1 ? 'ping' : 'pings'} · ${srvUnread} unread`}
-                            >
-                              {formatBadgeCount(srvMentions)}
-                            </span>
-                          ) : !isExpanded && srvUnread > 0 ? (
-                            <span
-                              className="ag-unread-pill tabular"
-                              title={`${srvUnread} unread`}
-                            >
-                              {formatBadgeCount(srvUnread)}
-                            </span>
-                          ) : null}
-                          <span className="ag-srv-chevron" aria-hidden="true">
-                            {isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                          </span>
-                        </button>
-
-                        <div className="ag-srv-card-quick">
-                          <button
-                            type="button"
-                            className="ag-mini-circle-btn"
-                            onClick={() => {
-                              onPlaySound?.('click')
-                              onOpenServerSettings(server.id, 'overview')
-                            }}
-                            title={`Invite people to ${server.name}`}
-                            aria-label={`Invite people to ${server.name}`}
-                          >
-                            <UserPlus size={14} />
-                          </button>
-                          <button
-                            type="button"
-                            className="ag-mini-circle-btn"
-                            onClick={() => {
-                              onPlaySound?.('click')
-                              onOpenServerSettings(server.id, 'overview')
-                            }}
-                            title={`${server.name} settings`}
-                            aria-label={`${server.name} settings`}
-                          >
-                            <Settings size={14} />
-                          </button>
-                        </div>
-                      </div>
-
-                      {isExpanded && (
-                        <div className="ag-srv-card-body">
-                          {server.kind === 'nip29' && server.isJoinedMember === false && (
-                            <button
-                              type="button"
-                              className="ag-srv-join-community-btn"
-                              onClick={() => void handleJoinNip29(server)}
-                              disabled={joiningNip29ServerId === server.id}
-                            >
-                              {joiningNip29ServerId === server.id ? (
-                                <Loader2 size={13} className="ag-spin" />
-                              ) : (
-                                <UserPlus size={13} />
-                              )}
-                              <span>
-                                {joiningNip29ServerId === server.id
-                                  ? 'Joining…'
-                                  : 'Join Community'}
-                              </span>
-                            </button>
-                          )}
-
-                          {/* Channels */}
-                          <div className="ag-srv-channels">
-                            {server.channels.map((ch) => {
-                              const active = isServerChannelActive(server.id, ch.id)
-                              const chUnread = ch.unreadCount ?? 0
-                              const chMentions = ch.mentionCount ?? 0
-                              const chHasUnread = chUnread > 0 || chMentions > 0
-                              return (
-                                <button
-                                  key={ch.id}
-                                  type="button"
-                                  className={`ag-srv-ch-row ${server.encrypted ? 'dm' : ''} ${active ? 'active' : ''} ${chHasUnread ? 'is-unread' : ''} ${chMentions > 0 ? 'has-pings' : ''}`}
-                                  onClick={() => {
-                                    onPlaySound?.('click')
-                                    onSelectServerChannel(server.id, ch.id)
-                                  }}
-                                  onContextMenu={(e) => openServerContextMenu(e, server, ch)}
-                                >
-                                  <span className="ag-srv-ch-left truncate">
-                                    {server.encrypted ? (
-                                      <Lock size={13} className="ag-srv-ch-icon dm" />
-                                    ) : (
-                                      <Hash size={14} className="ag-srv-ch-icon" />
-                                    )}
-                                    <span className="truncate">{ch.name}</span>
-                                  </span>
-                                  {chMentions > 0 ? (
-                                    <span
-                                      className="ag-ping-badge tabular"
-                                      title={`${chMentions} ${chMentions === 1 ? 'ping' : 'pings'} · ${chUnread} unread`}
-                                    >
-                                      {formatBadgeCount(chMentions)}
-                                    </span>
-                                  ) : chUnread > 0 ? (
-                                    <span
-                                      className="ag-unread-pill tabular"
-                                      title={`${chUnread} unread`}
-                                    >
-                                      {formatBadgeCount(chUnread)}
-                                    </span>
-                                  ) : null}
-                                </button>
-                              )
-                            })}
-
-                            {canAddChannel &&
-                              (addingChannelServerId === server.id ? (
-                                <form
-                                  className="ag-srv-inline-add-form"
-                                  onSubmit={(e) => void handleAddChannel(e, server.id)}
-                                >
-                                  <input
-                                    type="text"
-                                    className="ag-srv-inline-input"
-                                    placeholder="channel-name"
-                                    maxLength={28}
-                                    value={channelNameDraft}
-                                    onChange={(e) => setChannelNameDraft(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Escape') {
-                                        setAddingChannelServerId(null)
-                                        setChannelNameDraft('')
-                                      }
-                                    }}
-                                    autoFocus
-                                    disabled={creatingChannel}
-                                    aria-label="New channel name"
-                                  />
-                                  <button
-                                    type="submit"
-                                    className="ag-srv-inline-ok"
-                                    disabled={!channelNameDraft.trim() || creatingChannel}
-                                  >
-                                    {creatingChannel ? (
-                                      <Loader2 size={12} className="ag-spin" />
-                                    ) : (
-                                      'Add'
-                                    )}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="ag-srv-inline-cancel"
-                                    onClick={() => {
-                                      setAddingChannelServerId(null)
-                                      setChannelNameDraft('')
-                                    }}
-                                    aria-label="Cancel"
-                                  >
-                                    <X size={13} />
-                                  </button>
-                                </form>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="ag-srv-add-ch-btn"
-                                  onClick={() => {
-                                    setAddingChannelServerId(server.id)
-                                    setChannelNameDraft('')
-                                  }}
-                                >
-                                  <Plus size={13} />
-                                  <span>Add channel</span>
-                                </button>
-                              ))}
-                          </div>
-
-                          {/* Inline Voice Lounge */}
-                          <div className={`ag-srv-voice-row ${isInThisCall ? 'in-call' : ''}`}>
-                            <div className="ag-srv-voice-left">
-                              <Headphones size={14} className="ag-srv-voice-icon" />
-                              <span className="ag-srv-voice-label">Voice Lounge</span>
-                              <span className="ag-srv-voice-count tabular">
-                                {voiceCount}/{voiceMax}
-                              </span>
-                              {anyoneRecording && (
-                                <span
-                                  className="ag-voice-rec-dot"
-                                  title="Recording in progress"
-                                  aria-label="Recording in progress"
-                                />
-                              )}
-                            </div>
-
-                            <div className="ag-srv-voice-right">
-                              {voiceParticipants.length > 0 && (
-                                <div className="ag-srv-voice-avatars" aria-hidden="true">
-                                  {voiceParticipants.slice(0, 3).map((p) => (
-                                    <img
-                                      key={p.pubkey}
-                                      src={identiconDataUrl(p.pubkey)}
-                                      alt=""
-                                      className="ag-srv-voice-mini-avatar"
-                                    />
-                                  ))}
-                                </div>
-                              )}
-
-                              {isInThisCall ? (
-                                <button
-                                  type="button"
-                                  className="ag-srv-voice-pill leave"
-                                  onClick={() => {
-                                    onPlaySound?.('call-leave')
-                                    engine.calls.leaveCall()
-                                  }}
-                                  title="Leave Voice Lounge"
-                                >
-                                  <PhoneOff size={12} />
-                                  <span>Leave</span>
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="ag-srv-voice-pill join"
-                                  disabled={voiceFull || joiningVoiceServerId === server.id}
-                                  onClick={() => void handleJoinVoice(server.id)}
-                                  title={
-                                    voiceFull
-                                      ? `Voice Lounge full (${voiceCount}/${voiceMax})`
-                                      : 'Join Voice Lounge'
-                                  }
-                                >
-                                  {joiningVoiceServerId === server.id ? (
-                                    <Loader2 size={12} className="ag-spin" />
-                                  ) : (
-                                    <Phone size={12} />
-                                  )}
-                                  <span>{voiceFull ? 'Full' : 'Join'}</span>
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Bottom User Dock (Desktop left rail & Mobile Conversations drawer) */}
+      {/* Bottom User Dock (Compact Discord-style Profile + Quiet Status + Settings) */}
       <div className="ag-conv-footer">
         <button
           type="button"
           className="ag-profile-bar-btn"
           onClick={() => onOpenSettings('profile')}
-          title="Open Profile & Settings"
+          title="Profile"
         >
-          <img
-            src={identiconDataUrl(engine.identity.activePubkey)}
-            alt=""
-            className="ag-profile-avatar"
-          />
+          <span className="ag-profile-avatar-wrap">
+            <img
+              src={identiconDataUrl(engine.identity.activePubkey)}
+              alt=""
+              className="ag-profile-avatar"
+            />
+            <span
+              className={`ag-profile-status-dot ${engine.connectedRelayCount > 0 ? 'online' : 'reconnecting'}`}
+              aria-hidden="true"
+            />
+          </span>
           <div className="ag-profile-meta">
             <span className="ag-profile-name truncate">{engine.identity.nickname}</span>
             <span className="ag-profile-sub truncate">
-              {engine.connectedRelayCount > 0
-                ? `${engine.connectedRelayCount} relays connected`
-                : 'Reconnecting…'}
+              {engine.connectedRelayCount > 0 ? 'Online' : 'Reconnecting…'}
             </span>
           </div>
         </button>
 
         <div className="ag-conv-footer-actions">
-          {onOpenAmail && (
+          {pwa && !pwa.isInstalled && pwa.canPromptInstall && onOpenInstall && (
             <button
               type="button"
-              className={`ag-circle-btn ag-dock-icon-btn ${amailOpen ? 'active' : ''}`}
-              onClick={() => {
-                onPlaySound?.('click')
-                onOpenAmail('inbox')
-              }}
-              title={
-                engine.amail.unreadInboxCount > 0
-                  ? `Agmail (${engine.amail.unreadInboxCount} unread)`
-                  : 'Agmail'
-              }
-              aria-label={
-                engine.amail.unreadInboxCount > 0
-                  ? `Agmail (${engine.amail.unreadInboxCount} unread)`
-                  : 'Agmail'
-              }
-              aria-pressed={amailOpen}
-            >
-              <Mail size={18} aria-hidden="true" />
-              {engine.amail.unreadInboxCount > 0 && (
-                <span className="ag-ping-badge ag-dock-icon-badge tabular">
-                  {formatBadgeCount(engine.amail.unreadInboxCount)}
-                </span>
-              )}
-            </button>
-          )}
-
-          {onOpenWallet && (
-            <button
-              type="button"
-              className="ag-circle-btn ag-dock-icon-btn"
-              onClick={() => {
-                onPlaySound?.('click')
-                onOpenWallet({ tab: 'overview' })
-              }}
-              title={
-                engine.wallet.totalBalanceSats > 0
-                  ? `Agwallet · ${engine.wallet.totalBalanceSats.toLocaleString()} sats`
-                  : 'Agwallet'
-              }
-              aria-label={
-                engine.wallet.totalBalanceSats > 0
-                  ? `Agwallet · ${engine.wallet.totalBalanceSats.toLocaleString()} sats`
-                  : 'Agwallet'
-              }
-            >
-              <Wallet size={18} aria-hidden="true" />
-            </button>
-          )}
-
-          {pwa && !pwa.isInstalled && onOpenInstall && (
-            <button
-              type="button"
-              className="ag-circle-btn ag-dock-icon-btn"
+              className="ag-circle-btn ag-dock-icon-btn ag-mobile-only"
               onClick={onOpenInstall}
-              title="Install Agnostr App"
+              title="Install App"
               aria-label="Install Agnostr App"
             >
-              <Download size={17} aria-hidden="true" />
+              <Download size={16} aria-hidden="true" />
             </button>
           )}
+
+          <button
+            type="button"
+            className="ag-circle-btn ag-dock-icon-btn"
+            onClick={() => {
+              onPlaySound?.('click')
+              onOpenSettings()
+            }}
+            title="Settings"
+            aria-label="Settings"
+          >
+            <Settings size={16} aria-hidden="true" />
+          </button>
         </div>
       </div>
     </aside>
