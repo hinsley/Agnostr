@@ -49,6 +49,7 @@ const KEYS = {
   serverMsgChannel: (serverId: string, channelId: string) => `${PREFIX}smsgs:${serverId}:${channelId}`,
   customRelays: `${PREFIX}custom_relays`,
   dmThreads: `${PREFIX}dm_threads`,
+  dmClearedAt: `${PREFIX}dm_cleared_at`,
   deviceSeed: `${PREFIX}device_seed`,
   signMode: `${PREFIX}sign_mode`,
   localSecret: `${PREFIX}local_secret`,
@@ -648,6 +649,30 @@ export function saveDmThreads(threads: DmThread[]): void {
     messages: t.messages.slice(-150),
   }))
   safeSet(KEYS.dmThreads, JSON.stringify(capped))
+}
+
+const MAX_DM_CLEARED_ENTRIES = 500
+
+export function loadDmClearedAt(): Record<string, number> {
+  const parsed = safeJsonParse<Record<string, unknown>>(safeGet(KEYS.dmClearedAt), {})
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const out: Record<string, number> = {}
+  for (const [key, val] of Object.entries(parsed)) {
+    const pk = key.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk)) continue
+    if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+      out[pk] = Math.floor(val)
+    }
+  }
+  return out
+}
+
+export function saveDmClearedAt(map: Record<string, number>): void {
+  const entries = Object.entries(map)
+    .filter(([k, v]) => /^[0-9a-f]{64}$/.test(k) && typeof v === 'number' && Number.isFinite(v) && v > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_DM_CLEARED_ENTRIES)
+  safeSet(KEYS.dmClearedAt, JSON.stringify(Object.fromEntries(entries)))
 }
 
 interface GeoDirectoryCache {

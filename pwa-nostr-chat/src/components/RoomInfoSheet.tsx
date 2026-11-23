@@ -48,6 +48,7 @@ export interface RoomInfoSheetProps {
   onOpenServerSettings: (serverId: string, tab?: ServerSettingsTab) => void
   onExportTranscript: (format: 'md' | 'json') => void
   onLeftServer: () => void
+  onCloseDmThread?: (pubkey: string) => void
   onPlaySound?: (cue: SoundCue) => void
   onShowQr?: (target: QrShareTarget) => void
   onOpenScanner?: () => void
@@ -77,6 +78,7 @@ export function RoomInfoSheet({
   onOpenServerSettings,
   onExportTranscript,
   onLeftServer,
+  onCloseDmThread,
   onPlaySound,
   onShowQr,
   swipeProgress,
@@ -863,6 +865,28 @@ export function RoomInfoSheet({
                 <span>Export JSON</span>
               </button>
             </div>
+
+            <button
+              type="button"
+              className="ag-sheet-util-btn danger"
+              onClick={() => {
+                onPlaySound?.('click')
+                if (onCloseDmThread) {
+                  onCloseDmThread(thread.peerPubkey)
+                } else {
+                  engine.closeDmThread(thread.peerPubkey)
+                }
+                onClose()
+              }}
+            >
+              <Trash2 size={15} />
+              <span>Close &amp; Delete Chat</span>
+            </button>
+            {trusted && (
+              <p className="ag-sheet-util-note">
+                Deletes local DM history · Keeps peer trusted
+              </p>
+            )}
 
             <button
               type="button"

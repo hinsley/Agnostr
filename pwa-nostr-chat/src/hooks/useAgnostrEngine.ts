@@ -8,6 +8,7 @@ import type {
   ImageAttachment,
   LocationNote,
   PeerInfo,
+  PendingTrustRequest,
   PinnedChannel,
   PreparedImage,
   RecordedVoiceMemo,
@@ -374,6 +375,9 @@ export function useAgnostrEngine(): AgnostrEngine {
   // Whitelist-based receipt & Blossom media servers
   const [trustedPubkeys, setTrustedPubkeys] = useState<TrustedPeerEntry[]>(() => loadTrustedPubkeys())
   const trustedSet = useMemo(() => new Set(trustedPubkeys.map((t) => t.pubkey)), [trustedPubkeys])
+  const [pendingTrustRequest, setPendingTrustRequest] = useState<PendingTrustRequest | null>(null)
+  const pendingTrustRequestRef = useRef<PendingTrustRequest | null>(null)
+  pendingTrustRequestRef.current = pendingTrustRequest
   const [blossomServers, setBlossomServers] = useState<string[]>(() => loadBlossomServers())
   const [voiceSendPhase, setVoiceSendPhase] = useState<VoiceSendPhase>('idle')
 
@@ -474,6 +478,9 @@ export function useAgnostrEngine(): AgnostrEngine {
   const activeViewRef = useRef<ActiveView>(activeView)
   const notifyGeoMessageRef = useRef<(input: NotifyGeoMessageInput) => void>(() => {})
   const notifyLocationNoteRef = useRef<(input: NotifyLocationNoteInput) => void>(() => {})
+  const seedMemoTranscriptRef = useRef<
+    (memoKey: string, text: string, modelLabel?: string) => void
+  >(() => {})
 
   // Sync security-critical refs in useLayoutEffect so they are always up to date
   // BEFORE any child component's mount/update useEffect (e.g. TrustedImageView) runs!
@@ -1046,6 +1053,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     sendDirectVoiceMemo,
     sendDirectImageAttachment,
     clearThread,
+    closeThread: closeDmThreadRaw,
     clearAllDms,
   } = useDirectMessages({
     pool,
@@ -1069,6 +1077,13 @@ export function useAgnostrEngine(): AgnostrEngine {
     [activeDmPeer, dmThreads]
   )
 
+  const handleSeedMemoTranscript = useCallback(
+    (memoKey: string, text: string, modelLabel?: string) => {
+      seedMemoTranscriptRef.current(memoKey, text, modelLabel)
+    },
+    []
+  )
+
   // Discord-like Servers (Instant Virtual Public/E2EE + NIP-29 Relay Communities)
   const {
     engine: serversEngine,
@@ -1087,6 +1102,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     settings,
     blossomServers,
     setVoiceSendPhase,
+    onSeedMemoTranscript: handleSeedMemoTranscript,
     sendDirectMessage,
     pushToast,
   })
@@ -1126,6 +1142,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     pinnedGeohashes: pinnedGeohashList,
     identityVersion,
     blockedSet,
+    trustedSet,
     isExplicitlyTrusted: checkExplicitlyTrusted,
     strictWhitelistMode: settings.strictWhitelistMode,
     getPeerNickname: getCallPeerNickname,
@@ -1514,31 +1531,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     [ownPubkeys, trustedSet]
   )
 
-  const trustPubkey = useCallback(
-    (pubkeyOrNpub: string, label?: string): boolean => {
-      const pk = decodePubkeyInput(pubkeyOrNpub)
-      if (!pk) {
-        pushToast('warning', 'Invalid pubkey', 'Expected npub1… or 64-character hex pubkey.')
-        return false
-      }
-      const pickRealName = (raw?: string | null): string | undefined => {
-        const clean = raw?.trim().slice(0, 48)
-        return clean && !/^anon[0-9a-f]{4}$/i.test(clean) ? clean : undefined
-      }
-      const dmNick = dmThreads.find((t) => t.peerPubkey === pk)?.peerNickname
-      const serverNick = serversEngine.members.find((m) => m.pubkey === pk)?.nickname
-      const msgNick = messagesRef.current.find((m) => m.pubkey.toLowerCase() === pk)?.nickname
-      const callNick = callsEngine.activeCall?.participants.find(
-        (p) => p.pubkey.toLowerCase() === pk
-      )?.nickname
-      const cleanLabel =
-        pickRealName(label) ||
-        pickRealName(presenceTracker.getNickname(pk)) ||
-        pickRealName(dmNick) ||
-        pickRealName(serverNick) ||
-        pickRealName(msgNick) ||
-        pickRealName(callNick) ||
-        undefined
+  const commitTrustPubkey = useCallback(
+    (pk: string, cleanLabel?: string) => {
       // Synchronously update trustedSetRef before next render / child useEffect mounts
       if (!trustedSetRef.current.has(pk)) {
         const nextTrusted = new Set(trustedSetRef.current)
@@ -1576,12 +1570,81 @@ export function useAgnostrEngine(): AgnostrEngine {
       pushToast(
         'success',
         `Trusted ${cleanLabel ?? `#${pk.slice(-6)}`}`,
-        'Voice memos & media from this peer are now unlocked.'
+        'Media, voice memos, and P2P calls from this peer are now unlocked.'
       )
+    },
+    [pushToast]
+  )
+
+  const trustPubkey = useCallback(
+    (pubkeyOrNpub: string, label?: string): boolean => {
+      const pk = decodePubkeyInput(pubkeyOrNpub)
+      if (!pk) {
+        pushToast('warning', 'Invalid pubkey', 'Expected npub1… or 64-character hex pubkey.')
+        return false
+      }
+      if (ownPubkeysRef.current.has(pk)) {
+        return false
+      }
+      const pickRealName = (raw?: string | null): string | undefined => {
+        const clean = raw?.trim().slice(0, 48)
+        return clean && !/^anon[0-9a-f]{4}$/i.test(clean) ? clean : undefined
+      }
+      const dmNick = dmThreads.find((t) => t.peerPubkey === pk)?.peerNickname
+      const serverNick = serversEngine.members.find((m) => m.pubkey === pk)?.nickname
+      const msgNick = messagesRef.current.find((m) => m.pubkey.toLowerCase() === pk)?.nickname
+      const callNick = callsEngine.activeCall?.participants.find(
+        (p) => p.pubkey.toLowerCase() === pk
+      )?.nickname
+      const cleanLabel =
+        pickRealName(label) ||
+        pickRealName(presenceTracker.getNickname(pk)) ||
+        pickRealName(dmNick) ||
+        pickRealName(serverNick) ||
+        pickRealName(msgNick) ||
+        pickRealName(callNick) ||
+        undefined
+
+      // Already trusted: silently refresh label if better, no redundant confirmation modal
+      if (trustedSetRef.current.has(pk)) {
+        if (cleanLabel) {
+          setTrustedPubkeys((prev) => {
+            const idx = prev.findIndex((t) => t.pubkey === pk)
+            if (idx === -1 || prev[idx].label === cleanLabel) return prev
+            const next = [...prev]
+            next[idx] = { ...prev[idx], label: cleanLabel }
+            saveTrustedPubkeys(next)
+            return next
+          })
+        }
+        return true
+      }
+
+      // Central chokepoint: require explicit user confirmation before trusting any new peer
+      const req: PendingTrustRequest = {
+        pubkey: pk,
+        npub: encodeNpubSafe(pk),
+        label: cleanLabel,
+      }
+      pendingTrustRequestRef.current = req
+      setPendingTrustRequest(req)
       return true
     },
     [presenceTracker, dmThreads, serversEngine.members, callsEngine.activeCall, pushToast]
   )
+
+  const confirmPendingTrust = useCallback(() => {
+    const req = pendingTrustRequestRef.current
+    if (!req) return
+    pendingTrustRequestRef.current = null
+    setPendingTrustRequest(null)
+    commitTrustPubkey(req.pubkey, req.label)
+  }, [commitTrustPubkey])
+
+  const cancelPendingTrust = useCallback(() => {
+    pendingTrustRequestRef.current = null
+    setPendingTrustRequest(null)
+  }, [])
 
   // Keep persisted trusted peer labels fresh when real nicknames arrive from DMs or Server rosters
   useEffect(() => {
@@ -1728,6 +1791,14 @@ export function useAgnostrEngine(): AgnostrEngine {
             server: upload.server,
           }
 
+          if (attachment.sha256 && recorded.previewTranscript?.trim()) {
+            seedMemoTranscriptRef.current(
+              attachment.sha256,
+              recorded.previewTranscript,
+              recorded.previewTranscriptModel
+            )
+          }
+
           setVoiceSendPhase('publishing')
           const ok = await sendDirectVoiceMemo(activeView.peerPubkey, attachment, cleanCaption)
           if (ok) {
@@ -1754,6 +1825,14 @@ export function useAgnostrEngine(): AgnostrEngine {
           waveform: recorded.waveform,
           sha256: upload.sha256,
           server: upload.server,
+        }
+
+        if (attachment.sha256 && recorded.previewTranscript?.trim()) {
+          seedMemoTranscriptRef.current(
+            attachment.sha256,
+            recorded.previewTranscript,
+            recorded.previewTranscriptModel
+          )
         }
 
         setVoiceSendPhase('signing')
@@ -1870,6 +1949,25 @@ export function useAgnostrEngine(): AgnostrEngine {
     fetchVoiceMemoBlob,
     pushToast,
   })
+
+  useLayoutEffect(() => {
+    seedMemoTranscriptRef.current = transcriptionEngine.seedMemoTranscript
+  }, [transcriptionEngine.seedMemoTranscript])
+
+  const closeDmThread = useCallback(
+    (pubkey: string) => {
+      const pk = pubkey.trim().toLowerCase()
+      if (!pk) return
+      closeDmThreadRaw(pk)
+      if (
+        activeViewRef.current.type === 'dm' &&
+        activeViewRef.current.peerPubkey.toLowerCase() === pk
+      ) {
+        setActiveView({ type: 'channel', geohash: activeGeohash })
+      }
+    },
+    [closeDmThreadRaw, activeGeohash]
+  )
 
   // Push Notifications, Live Incoming DM Call Ringing & Optional NIP-98/VAPID Web Push Bridge
   const notificationRelayUrls = useMemo(
@@ -2279,6 +2377,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     setRecentChannels([DEFAULT_GEOHASH])
     setBlockedPubkeys([])
     setTrustedPubkeys([])
+    pendingTrustRequestRef.current = null
+    setPendingTrustRequest(null)
     setBlossomServers([...DEFAULT_BLOSSOM_SERVERS])
     setVoiceSendPhase('idle')
     setCustomRelays([])
@@ -2442,6 +2542,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     activeDmThread,
     totalDmUnread,
     openDmThread,
+    closeDmThread,
     sendDirectMessage,
 
     tuneGeohash,
@@ -2461,6 +2562,9 @@ export function useAgnostrEngine(): AgnostrEngine {
     isTrusted,
     isExplicitlyTrusted,
     trustPubkey,
+    pendingTrustRequest,
+    confirmPendingTrust,
+    cancelPendingTrust,
     untrustPubkey,
     clearTrustedPubkeys,
     strictWhitelistMode: settings.strictWhitelistMode,

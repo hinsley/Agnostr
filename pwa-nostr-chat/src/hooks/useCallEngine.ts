@@ -5,6 +5,7 @@ import {
   type ActiveCallSession,
   type CallEngine,
   type CallMediaType,
+  type CallParticipant,
   type GeoCallPresence,
   type IncomingCallOffer,
   type RecordingQualityPreset,
@@ -73,8 +74,9 @@ export interface UseCallEngineParams {
   pinnedGeohashes: string[]
   identityVersion: number
   blockedSet: Set<string>
+  trustedSet: Set<string>
   isExplicitlyTrusted: (pubkey: string) => boolean
-  strictWhitelistMode: boolean
+  strictWhitelistMode?: boolean
   getPeerNickname: (pubkey: string) => string | undefined
   pushToast: (level: ToastLevel, title: string, detail?: string) => void
 }
@@ -94,8 +96,8 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     pinnedGeohashes,
     identityVersion,
     blockedSet,
+    trustedSet,
     isExplicitlyTrusted,
-    strictWhitelistMode,
     getPeerNickname,
     pushToast,
   } = params
@@ -118,9 +120,6 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
   const isExplicitlyTrustedRef = useRef(isExplicitlyTrusted)
   isExplicitlyTrustedRef.current = isExplicitlyTrusted
-
-  const strictWhitelistRef = useRef(strictWhitelistMode)
-  strictWhitelistRef.current = strictWhitelistMode
 
   const getPeerNicknameRef = useRef(getPeerNickname)
   getPeerNicknameRef.current = getPeerNickname
@@ -193,10 +192,86 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     const current = activeCallRef.current
     if (!mesh || !current) return
 
-    const participants = mesh.getParticipantsSnapshot()
-    if (recorderRef.current?.isRecording()) {
-      recorderRef.current.syncParticipants(participants)
+    const rawMeshParticipants = mesh.getParticipantsSnapshot()
+    // Defense-in-depth: never expose media streams or record/transcribe untrusted remote peers
+    const trustedMeshParticipants: CallParticipant[] = []
+    for (const p of rawMeshParticipants) {
+      if (p.isSelf) {
+        trustedMeshParticipants.push({ ...p, isUntrusted: false })
+      } else if (isExplicitlyTrustedRef.current(p.pubkey)) {
+        trustedMeshParticipants.push({ ...p, isUntrusted: false })
+      }
     }
+
+    if (recorderRef.current?.isRecording()) {
+      recorderRef.current.syncParticipants(trustedMeshParticipants)
+    }
+
+    // Merge untrusted remote peers from the room's live presence roster as shielded tiles
+    // (zero RTCPeerConnection, zero MediaStream, zero audio/video) so the user can Trust them inline.
+    const participants: CallParticipant[] = [...trustedMeshParticipants]
+    const seenPks = new Set(participants.map((p) => p.pubkey.toLowerCase()))
+    const now = Date.now()
+
+    if (current.mode === 'server' && current.serverId) {
+      const srv = serversRef.current.find((s) => s.id === current.serverId)
+      const bannedSet = new Set((srv?.bannedPubkeys ?? []).map((b) => b.toLowerCase()))
+      const roomId = current.roomId ?? DEFAULT_SERVER_VOICE_ROOM_ID
+      const roster = rostersRef.current[current.serverId] ?? []
+      for (const peer of roster) {
+        if (peer.roomId !== roomId) continue
+        if (now - peer.lastSeenAt >= ROOM_PEER_TTL_MS) continue
+        const pk = peer.pubkey.toLowerCase()
+        if (seenPks.has(pk) || blockedSetRef.current.has(pk) || bannedSet.has(pk)) continue
+        if (isExplicitlyTrustedRef.current(pk)) continue
+        seenPks.add(pk)
+        participants.push({
+          pubkey: pk,
+          nickname: peer.nickname,
+          displayHandle: peer.displayHandle,
+          isSelf: false,
+          isUntrusted: true,
+          stream: null,
+          audioMuted: true,
+          videoEnabled: false,
+          screenSharing: false,
+          isRecording: Boolean(peer.isRecording),
+          isSpeaking: false,
+          audioLevel: 0,
+          iceState: 'new',
+          rttMs: null,
+          joinedAt: peer.lastSeenAt,
+        })
+      }
+    } else if (current.mode === 'geo' && current.geohash) {
+      const gh = normalizeGeohash(current.geohash)
+      const roster = geoRostersRef.current[gh] ?? []
+      for (const peer of roster) {
+        if (now - peer.lastSeenAt >= ROOM_PEER_TTL_MS) continue
+        const pk = peer.pubkey.toLowerCase()
+        if (seenPks.has(pk) || blockedSetRef.current.has(pk)) continue
+        if (isExplicitlyTrustedRef.current(pk)) continue
+        seenPks.add(pk)
+        participants.push({
+          pubkey: pk,
+          nickname: peer.nickname,
+          displayHandle: peer.displayHandle,
+          isSelf: false,
+          isUntrusted: true,
+          stream: null,
+          audioMuted: true,
+          videoEnabled: false,
+          screenSharing: false,
+          isRecording: Boolean(peer.isRecording),
+          isSpeaking: false,
+          audioLevel: 0,
+          iceState: 'new',
+          rttMs: null,
+          joinedAt: peer.lastSeenAt,
+        })
+      }
+    }
+
     const isDmConnected = current.mode === 'dm' && mesh.hasAnyConnectedPeer()
     const nextStatus =
       isDmConnected && (current.status === 'connecting' || current.status === 'ringing-out')
@@ -1282,14 +1357,13 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         lastSeenAt: now,
       })
 
-      // Connect to live peers already in this room (respecting block/ban & Trusted Peers Only)
+      // Connect WebRTC ONLY to explicitly Trusted peers already in this room (untrusted peers
+      // appear as shielded tiles with zero RTCPeerConnection / zero media until trusted!)
       const bannedSet = new Set(server.bannedPubkeys.map((p) => p.toLowerCase()))
       for (const peer of currentRoster) {
         const pk = peer.pubkey.toLowerCase()
         if (blockedSetRef.current.has(pk) || bannedSet.has(pk)) continue
-        if (!server.encrypted && strictWhitelistRef.current && !isExplicitlyTrustedRef.current(pk)) {
-          continue
-        }
+        if (!isExplicitlyTrustedRef.current(pk)) continue
         if (!mesh.canAddPeer(pk)) break
         mesh.connectToPeer(pk, peer.nickname)
         mesh.updatePeerMetadata(pk, {
@@ -1402,7 +1476,8 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             if (!currentActive || currentActive.mode !== 'geo' || currentActive.geohash !== gh) {
               return
             }
-            if (strictWhitelistRef.current && !isExplicitlyTrustedRef.current(sender)) {
+            // STRICT TRUST GATE: never decrypt or negotiate WebRTC SDP/ICE with untrusted peers!
+            if (!isExplicitlyTrustedRef.current(sender)) {
               return
             }
 
@@ -1413,7 +1488,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               const active = activeCallRef.current
               const mesh = meshRef.current
               if (!active || !mesh || active.mode !== 'geo' || active.geohash !== gh) return
-              if (strictWhitelistRef.current && !isExplicitlyTrustedRef.current(sender)) return
+              if (!isExplicitlyTrustedRef.current(sender)) return
 
               const eventTs =
                 typeof payload.ts === 'number' && Number.isFinite(payload.ts) && payload.ts > 0
@@ -1561,11 +1636,12 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       // Open direct NIP-44 subscription for selfGeoPk BEFORE publishing room-join or offers
       openGeoDirectSubscription(gh, geoMaterial)
 
-      // Synchronously create peer entries before broadcasting room-join so incoming offers never race
+      // Synchronously create peer entries ONLY for explicitly Trusted peers already in this room
+      // (untrusted peers appear as shielded tiles with zero RTCPeerConnection / zero media!)
       for (const peer of currentRoster) {
         const pk = peer.pubkey.toLowerCase()
         if (blockedSetRef.current.has(pk)) continue
-        if (strictWhitelistRef.current && !isExplicitlyTrustedRef.current(pk)) continue
+        if (!isExplicitlyTrustedRef.current(pk)) continue
         if (!mesh.canAddPeer(pk)) break
         mesh.connectToPeer(pk, peer.nickname)
         mesh.updatePeerMetadata(pk, {
@@ -1671,22 +1747,9 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
           if (!verifyEventCached(event)) return
 
           // STRICT TRUST GATE BEFORE DECRYPTING OR TOUCHING WEBRTC:
-          // Allow through only if sender is explicitly trusted OR we are actively inside a
-          // non-E2EE server call where direct NIP-44 carries room SDP/ICE.
-          const currentActive = activeCallRef.current
-          const activeServer =
-            currentActive?.mode === 'server' && currentActive.serverId
-              ? serversRef.current.find((s) => s.id === currentActive.serverId) ?? null
-              : null
-          const isExplicitTrusted = isExplicitlyTrustedRef.current(sender)
-          const allowPublicServerNegotiation = Boolean(
-            activeServer &&
-              !activeServer.encrypted &&
-              !activeServer.bannedPubkeys.some((p) => p.toLowerCase() === sender) &&
-              (!strictWhitelistRef.current || isExplicitTrusted)
-          )
-
-          if (!isExplicitTrusted && !allowPublicServerNegotiation) {
+          // Never negotiate WebRTC SDP/ICE or ring for any untrusted remote peer
+          // (enforced unconditionally for 1-on-1 DM calls AND Server/Community group calls).
+          if (!isExplicitlyTrustedRef.current(sender)) {
             // Silently drop untrusted signals — zero ringing, zero RTCPeerConnection, zero IP leak!
             return
           }
@@ -1712,7 +1775,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               const srv = serversRef.current.find((s) => s.id === active.serverId)
               if (!srv || srv.encrypted) return
               if (srv.bannedPubkeys.some((p) => p.toLowerCase() === sender)) return
-              if (strictWhitelistRef.current && !isExplicitlyTrustedRef.current(sender)) return
+              if (!isExplicitlyTrustedRef.current(sender)) return
               const directRoomId = payload.roomId || active.roomId || DEFAULT_SERVER_VOICE_ROOM_ID
               const directEventTs =
                 typeof payload.ts === 'number' && Number.isFinite(payload.ts) && payload.ts > 0
@@ -2017,6 +2080,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               const active = activeCallRef.current
               if (active?.mode === 'server' && active.serverId === srv.id && active.roomId === roomId) {
                 meshRef.current?.removePeer(sender)
+                syncActiveCallFromMesh()
               }
               return
             }
@@ -2049,23 +2113,27 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               const active = activeCallRef.current
               const mesh = meshRef.current
               if (active?.mode === 'server' && active.serverId === srv.id && active.roomId === roomId && mesh) {
-                // Respect Trusted Peers Only in non-E2EE public/NIP-29 servers
-                if (!srv.encrypted && strictWhitelistRef.current && !isExplicitlyTrustedRef.current(sender)) {
-                  return
+                if (isExplicitlyTrustedRef.current(sender)) {
+                  if (!mesh.hasPeer(sender) && mesh.canAddPeer(sender)) {
+                    mesh.connectToPeer(sender, nick)
+                  } else if (mesh.hasPeer(sender)) {
+                    // Peer may have just trusted us and re-emitted room-join — resend pending offer immediately
+                    mesh.resendOfferIfPending(sender)
+                  }
+                  mesh.updatePeerMetadata(sender, {
+                    nickname: nick,
+                    audioMuted: payload.audioMuted,
+                    videoEnabled: payload.videoEnabled,
+                    screenSharing: payload.screenSharing,
+                    isRecording: payload.recording,
+                  })
+                  notifyRemoteRecordingChange(sender, nick, payload.recording)
                 }
-                if (!mesh.hasPeer(sender) && mesh.canAddPeer(sender)) {
-                  mesh.connectToPeer(sender, nick)
-                }
-                mesh.updatePeerMetadata(sender, {
-                  nickname: nick,
-                  audioMuted: payload.audioMuted,
-                  videoEnabled: payload.videoEnabled,
-                  screenSharing: payload.screenSharing,
-                  isRecording: payload.recording,
-                })
-                notifyRemoteRecordingChange(sender, nick, payload.recording)
 
-                // Immediately echo a throttled room-ping on room-join so newcomer sees us fast
+                // Always sync so newly arrived/updated untrusted peers render as shielded tiles immediately
+                syncActiveCallFromMesh()
+
+                // Immediately echo a throttled room-ping on room-join so newcomers see us fast (presence only, zero WebRTC)
                 if (payload.action === 'room-join' && Date.now() - lastRoomPongRef.current > 1500) {
                   lastRoomPongRef.current = Date.now()
                   const myNick = identityManager.getNickname()
@@ -2113,21 +2181,25 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               })
               const active = activeCallRef.current
               if (active?.mode === 'server' && active.serverId === srv.id && active.roomId === roomId) {
-                meshRef.current?.updatePeerMetadata(sender, {
-                  nickname: nick,
-                  audioMuted: payload.audioMuted,
-                  videoEnabled: payload.videoEnabled,
-                  screenSharing: payload.screenSharing,
-                  isRecording: payload.recording,
-                })
-                notifyRemoteRecordingChange(sender, nick, payload.recording)
+                if (isExplicitlyTrustedRef.current(sender)) {
+                  meshRef.current?.updatePeerMetadata(sender, {
+                    nickname: nick,
+                    audioMuted: payload.audioMuted,
+                    videoEnabled: payload.videoEnabled,
+                    screenSharing: payload.screenSharing,
+                    isRecording: payload.recording,
+                  })
+                  notifyRemoteRecordingChange(sender, nick, payload.recording)
+                }
+                syncActiveCallFromMesh()
               }
               return
             }
 
-            // E2EE Private Server room-tunnelled WebRTC offer/answer/ice
+            // E2EE Private Server room-tunnelled WebRTC offer/answer/ice — STRICT TRUST GATE
             if (!srv.encrypted) return
             if (payload.targetPubkey !== selfPk) return
+            if (!isExplicitlyTrustedRef.current(sender)) return
             const active = activeCallRef.current
             const mesh = meshRef.current
             if (!active || !mesh || active.mode !== 'server' || active.serverId !== srv.id || active.roomId !== roomId) {
@@ -2259,6 +2331,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             const active = activeCallRef.current
             if (active?.mode === 'geo' && active.geohash === gh) {
               meshRef.current?.removePeer(sender)
+              syncActiveCallFromMesh()
             }
             return
           }
@@ -2293,22 +2366,27 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             const active = activeCallRef.current
             const mesh = meshRef.current
             if (active?.mode === 'geo' && active.geohash === gh && mesh) {
-              if (strictWhitelistRef.current && !isExplicitlyTrustedRef.current(sender)) {
-                return
+              if (isExplicitlyTrustedRef.current(sender)) {
+                if (!mesh.hasPeer(sender) && mesh.canAddPeer(sender)) {
+                  mesh.connectToPeer(sender, nick)
+                } else if (mesh.hasPeer(sender)) {
+                  // Peer may have just trusted us and re-emitted room-join — resend pending offer immediately
+                  mesh.resendOfferIfPending(sender)
+                }
+                mesh.updatePeerMetadata(sender, {
+                  nickname: nick,
+                  audioMuted: payload.audioMuted,
+                  videoEnabled: payload.videoEnabled,
+                  screenSharing: payload.screenSharing,
+                  isRecording: payload.recording,
+                })
+                notifyRemoteRecordingChange(sender, nick, payload.recording)
               }
-              if (!mesh.hasPeer(sender) && mesh.canAddPeer(sender)) {
-                mesh.connectToPeer(sender, nick)
-              }
-              mesh.updatePeerMetadata(sender, {
-                nickname: nick,
-                audioMuted: payload.audioMuted,
-                videoEnabled: payload.videoEnabled,
-                screenSharing: payload.screenSharing,
-                isRecording: payload.recording,
-              })
-              notifyRemoteRecordingChange(sender, nick, payload.recording)
 
-              // Throttled room-ping echo on room-join so newcomers discover us quickly
+              // Always sync so newly arrived/updated untrusted peers render as shielded tiles immediately
+              syncActiveCallFromMesh()
+
+              // Throttled room-ping echo on room-join so newcomers discover us quickly (presence only, zero WebRTC)
               if (payload.action === 'room-join' && Date.now() - lastGeoRoomPongRef.current > 1500) {
                 lastGeoRoomPongRef.current = Date.now()
                 const myNick = identityManager.getNickname()
@@ -2362,14 +2440,17 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
             const active = activeCallRef.current
             if (active?.mode === 'geo' && active.geohash === gh) {
-              meshRef.current?.updatePeerMetadata(sender, {
-                nickname: nick,
-                audioMuted: payload.audioMuted,
-                videoEnabled: payload.videoEnabled,
-                screenSharing: payload.screenSharing,
-                isRecording: payload.recording,
-              })
-              notifyRemoteRecordingChange(sender, nick, payload.recording)
+              if (isExplicitlyTrustedRef.current(sender)) {
+                meshRef.current?.updatePeerMetadata(sender, {
+                  nickname: nick,
+                  audioMuted: payload.audioMuted,
+                  videoEnabled: payload.videoEnabled,
+                  screenSharing: payload.screenSharing,
+                  isRecording: payload.recording,
+                })
+                notifyRemoteRecordingChange(sender, nick, payload.recording)
+              }
+              syncActiveCallFromMesh()
             }
           }
         },
@@ -2386,7 +2467,133 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     notifyRemoteRecordingChange,
     publishGeoRoomSignal,
     removeGeoRosterMember,
+    syncActiveCallFromMesh,
     upsertGeoRosterMember,
+  ])
+
+  // Live Dynamic Trust / Untrust Reactivity inside Server & Geo Radio group calls:
+  // - Untrusted -> immediately disconnect WebRTC, drop MediaStream, revert to shielded tile.
+  // - Newly Trusted -> immediately connect WebRTC & re-emit room-join so both sides connect live without rejoining!
+  useEffect(() => {
+    const active = activeCallRef.current
+    const mesh = meshRef.current
+    if (!active || !mesh) return
+    if (active.mode !== 'server' && active.mode !== 'geo') return
+
+    // 1. Immediately sever any connected/connecting peer that was removed from Trusted Peers
+    for (const p of mesh.getParticipantsSnapshot()) {
+      if (p.isSelf) continue
+      const pk = p.pubkey.toLowerCase()
+      if (!trustedSet.has(pk)) {
+        mesh.removePeer(pk)
+        remoteRecordingRef.current.delete(pk)
+      }
+    }
+
+    // 2. Connect any freshly trusted peer currently present in the active room call roster
+    const now = Date.now()
+    let newlyConnected = false
+
+    if (active.mode === 'server' && active.serverId) {
+      const srv = serversRef.current.find((s) => s.id === active.serverId)
+      if (srv) {
+        const roomId = active.roomId ?? DEFAULT_SERVER_VOICE_ROOM_ID
+        const bannedSet = new Set(srv.bannedPubkeys.map((b) => b.toLowerCase()))
+        const roster = rostersRef.current[srv.id] ?? []
+        for (const peer of roster) {
+          if (peer.roomId !== roomId) continue
+          if (now - peer.lastSeenAt >= ROOM_PEER_TTL_MS) continue
+          const pk = peer.pubkey.toLowerCase()
+          if (pk === masterPubkey || blockedSetRef.current.has(pk) || bannedSet.has(pk)) continue
+          if (!trustedSet.has(pk)) continue
+          if (!mesh.hasPeer(pk) && mesh.canAddPeer(pk)) {
+            mesh.connectToPeer(pk, peer.nickname)
+            mesh.updatePeerMetadata(pk, {
+              nickname: peer.nickname,
+              audioMuted: peer.audioMuted,
+              videoEnabled: peer.hasVideo,
+              isRecording: Boolean(peer.isRecording),
+            })
+            if (peer.isRecording) {
+              notifyRemoteRecordingChange(pk, peer.nickname, true)
+            }
+            newlyConnected = true
+          }
+        }
+        if (newlyConnected) {
+          const nick = identityManager.getNickname()
+          const hasVid = mesh.getLocalCameraOn() || mesh.getLocalScreenSharing()
+          void publishRoomSignal(srv, roomId, {
+            v: 1,
+            action: 'room-join',
+            serverId: srv.id,
+            roomId,
+            nickname: nick,
+            media: hasVid ? 'video' : 'audio',
+            audioMuted: mesh.getLocalMuted(),
+            videoEnabled: mesh.getLocalCameraOn(),
+            screenSharing: mesh.getLocalScreenSharing(),
+            recording: mesh.getLocalRecording(),
+            ts: Date.now(),
+          })
+        }
+      }
+    } else if (active.mode === 'geo' && active.geohash) {
+      const gh = normalizeGeohash(active.geohash)
+      const roomId = active.roomId ?? getGeoCallRoomId(gh)
+      const selfGeoPk = activeGeoMaterialRef.current?.pubkey.toLowerCase() ?? ''
+      const roster = geoRostersRef.current[gh] ?? []
+      for (const peer of roster) {
+        if (now - peer.lastSeenAt >= ROOM_PEER_TTL_MS) continue
+        const pk = peer.pubkey.toLowerCase()
+        if (pk === selfGeoPk || blockedSetRef.current.has(pk)) continue
+        if (!trustedSet.has(pk)) continue
+        if (!mesh.hasPeer(pk) && mesh.canAddPeer(pk)) {
+          mesh.connectToPeer(pk, peer.nickname)
+          mesh.updatePeerMetadata(pk, {
+            nickname: peer.nickname,
+            audioMuted: peer.audioMuted,
+            videoEnabled: peer.hasVideo,
+            isRecording: Boolean(peer.isRecording),
+          })
+          if (peer.isRecording) {
+            notifyRemoteRecordingChange(pk, peer.nickname, true)
+          }
+          newlyConnected = true
+        }
+      }
+      if (newlyConnected) {
+        const nick = identityManager.getNickname()
+        const hasVid = mesh.getLocalCameraOn() || mesh.getLocalScreenSharing()
+        void publishGeoRoomSignal(
+          gh,
+          {
+            v: 1,
+            action: 'room-join',
+            geohash: gh,
+            roomId,
+            nickname: nick,
+            media: hasVid ? 'video' : 'audio',
+            audioMuted: mesh.getLocalMuted(),
+            videoEnabled: mesh.getLocalCameraOn(),
+            screenSharing: mesh.getLocalScreenSharing(),
+            recording: mesh.getLocalRecording(),
+            ts: Date.now(),
+          },
+          activeGeoMaterialRef.current ?? undefined
+        )
+      }
+    }
+
+    syncActiveCallFromMesh()
+  }, [
+    trustedSet,
+    masterPubkey,
+    identityManager,
+    notifyRemoteRecordingChange,
+    publishGeoRoomSignal,
+    publishRoomSignal,
+    syncActiveCallFromMesh,
   ])
 
   // Expire stale room presence entries after 30s (Servers + Geo Radio)
@@ -2397,6 +2604,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       const activeGeoSelfPk = activeGeoMaterialRef.current?.pubkey.toLowerCase() ?? null
       const currentActive = activeCallRef.current
 
+      let activeRoomRosterChanged = false
       setServerCallRosters((prev) => {
         let changed = false
         const next: Record<string, RoomCallPresence[]> = {}
@@ -2410,6 +2618,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               changed = true
               if (currentActive?.mode === 'server' && currentActive.serverId === serverId) {
                 meshRef.current?.removePeer(p.pubkey)
+                activeRoomRosterChanged = true
               }
             }
             return fresh
@@ -2443,6 +2652,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               changed = true
               if (currentActive?.mode === 'geo' && currentActive.geohash === gh) {
                 meshRef.current?.removePeer(p.pubkey)
+                activeRoomRosterChanged = true
               }
             }
             return fresh
@@ -2457,6 +2667,9 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         geoRostersRef.current = next
         return next
       })
+      if (activeRoomRosterChanged) {
+        syncActiveCallFromMesh()
+      }
       // Prune old timestamp ledger entries (> 5 min) so maps stay bounded
       const ledgerCutoff = now - 5 * 60 * 1000
       for (const [k, ts] of lastLeaveTsByRoomPeerRef.current.entries()) {
@@ -2468,7 +2681,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     }, ROSTER_SWEEP_INTERVAL_MS)
 
     return () => window.clearInterval(timer)
-  }, [identityManager])
+  }, [identityManager, syncActiveCallFromMesh])
 
   // Send room-leave / call-hangup and dispose tracks cleanly on page unload
   useEffect(() => {
@@ -2554,10 +2767,13 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       return
     }
 
-    // Start new call recording
+    // Start new call recording (defense-in-depth: strictly exclude untrusted remote peers)
     try {
       recordingBytesRef.current = 0
-      const startInfo = recorder.start(mesh.getParticipantsSnapshot(), {
+      const trustedForRecording = mesh
+        .getParticipantsSnapshot()
+        .filter((p) => p.isSelf || isExplicitlyTrustedRef.current(p.pubkey))
+      const startInfo = recorder.start(trustedForRecording, {
         quality: recordingQualityRef.current,
         onBytesChange: (bytes) => {
           recordingBytesRef.current = bytes

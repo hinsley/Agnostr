@@ -36,6 +36,8 @@ export interface CallParticipant {
   nickname: string
   displayHandle: string
   isSelf: boolean
+  /** True for remote group-call peers who are not yet in Trusted Peers (zero WebRTC / zero media) */
+  isUntrusted?: boolean
   stream: MediaStream | null
   audioMuted: boolean
   videoEnabled: boolean

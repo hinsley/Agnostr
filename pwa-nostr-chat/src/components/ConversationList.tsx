@@ -84,6 +84,7 @@ export interface ConversationListProps {
   onTabChange: (tab: ListTab) => void
   onTuneChannel: (geohash: string) => boolean | void
   onOpenDm: (pubkey: string, nickname?: string) => void
+  onCloseDmThread?: (pubkey: string) => void
   onSelectServerChannel: (serverId: string, channelId: string) => void
   onOpenServerHub: (initialTab?: ServerHubTab) => void
   onOpenServerSettings: (serverId: string, initialTab?: ServerSettingsTab) => void
@@ -108,6 +109,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onTabChange,
   onTuneChannel,
   onOpenDm,
+  onCloseDmThread,
   onSelectServerChannel,
   onOpenServerHub,
   onOpenServerSettings,
@@ -278,7 +280,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       peerDisplayHandle: string
       lastMessageAt?: number
       messageCount?: number
-    }
+    },
+    options?: { isDmThread?: boolean }
   ) => {
     const trusted = engine.isExplicitlyTrusted(peer.peerPubkey)
     const blocked = engine.isPeerBlocked(peer.peerPubkey)
@@ -393,15 +396,31 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           navigator.clipboard?.writeText(npub).catch(() => {})
           engine.pushToast('info', 'Copied npub')
         },
-      },
-      {
-        id: `dm-block-${peer.peerPubkey}`,
-        label: blocked ? 'Unblock Peer' : 'Block Peer',
-        icon: <Ban size={15} />,
-        danger: !blocked,
-        onSelect: () => engine.toggleBlockPeer(peer.peerPubkey, peer.peerDisplayHandle),
       }
     )
+
+    if (options?.isDmThread && onCloseDmThread) {
+      items.push({
+        id: `dm-close-${peer.peerPubkey}`,
+        label: 'Close Chat',
+        icon: <X size={15} />,
+        danger: true,
+        dividerBefore: true,
+        onSelect: () => {
+          onPlaySound?.('click')
+          onCloseDmThread(peer.peerPubkey)
+        },
+      })
+    }
+
+    items.push({
+      id: `dm-block-${peer.peerPubkey}`,
+      label: blocked ? 'Unblock Peer' : 'Block Peer',
+      icon: <Ban size={15} />,
+      danger: !blocked,
+      dividerBefore: !(options?.isDmThread && onCloseDmThread),
+      onSelect: () => engine.toggleBlockPeer(peer.peerPubkey, peer.peerDisplayHandle),
+    })
 
     openContextMenu(e, {
       header: peer.peerDisplayHandle,
@@ -410,13 +429,17 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   }
 
   const openDmContextMenu = (e: React.MouseEvent, thread: DmThread) => {
-    openPeerDmContextMenu(e, {
-      peerPubkey: thread.peerPubkey,
-      peerNickname: thread.peerNickname,
-      peerDisplayHandle: thread.peerDisplayHandle,
-      lastMessageAt: thread.lastMessageAt,
-      messageCount: thread.messages.length,
-    })
+    openPeerDmContextMenu(
+      e,
+      {
+        peerPubkey: thread.peerPubkey,
+        peerNickname: thread.peerNickname,
+        peerDisplayHandle: thread.peerDisplayHandle,
+        lastMessageAt: thread.lastMessageAt,
+        messageCount: thread.messages.length,
+      },
+      { isDmThread: true }
+    )
   }
 
   const openServerContextMenu = (
@@ -511,10 +534,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   }
 
   const isChannelActive = (gh: string) =>
-    engine.activeView.type === 'channel' && engine.activeView.geohash === gh
+    engine.activeView.type === 'channel' &&
+    engine.activeView.geohash.toLowerCase() === gh.toLowerCase()
 
   const isDmActive = (pk: string) =>
-    engine.activeView.type === 'dm' && engine.activeView.peerPubkey === pk
+    engine.activeView.type === 'dm' &&
+    engine.activeView.peerPubkey.toLowerCase() === pk.toLowerCase()
 
   const isServerChannelActive = (serverId: string, channelId: string) =>
     engine.activeView.type === 'server' &&
@@ -567,11 +592,16 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     }
   }
 
-  const liveRooms = engine.pulseRooms.slice(0, 12)
-  const pinnedHashes = new Set(engine.pinnedChannels.map((p) => p.geohash))
-  const liveHashes = new Set(liveRooms.map((r) => r.geohash))
-  const showActiveRoomCard =
-    !pinnedHashes.has(engine.activeGeohash) && !liveHashes.has(engine.activeGeohash)
+  const pulseByHash = new Map(
+    engine.pulseRooms.map((room) => [room.geohash.toLowerCase(), room])
+  )
+  const pinnedSet = new Set(engine.pinnedChannels.map((p) => p.geohash.toLowerCase()))
+  const activeGhLower = engine.activeGeohash.toLowerCase()
+  const liveRooms = engine.pulseRooms
+    .filter((room) => !pinnedSet.has(room.geohash.toLowerCase()))
+    .slice(0, 12)
+  const liveSet = new Set(liveRooms.map((r) => r.geohash.toLowerCase()))
+  const showActiveRoomCard = !pinnedSet.has(activeGhLower) && !liveSet.has(activeGhLower)
 
   const activeCall = engine.calls.activeCall
 
@@ -895,6 +925,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 {engine.pinnedChannels.map((pin) => {
                   const ghKey = pin.geohash.toLowerCase()
                   const active = isChannelActive(pin.geohash)
+                  const livePulse = pulseByHash.get(ghKey)
                   const unread = Math.max(pin.unreadCount, engine.unreadCounts[ghKey] ?? 0)
                   const mentions = Math.max(pin.mentionCount, engine.mentionCounts[ghKey] ?? 0)
                   const hasUnread = unread > 0 || mentions > 0
@@ -902,11 +933,21 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   const inCall =
                     activeCall?.mode === 'geo' &&
                     (activeCall.geohash ?? '').toLowerCase() === ghKey
+                  const displayCity = pin.label || livePulse?.nearestCity || undefined
+                  const subtitle = livePulse?.lastPreview
+                    ? livePulse.lastPreview
+                    : livePulse && livePulse.peerCount > 0
+                      ? `${livePulse.peerCount} ${livePulse.peerCount === 1 ? 'person' : 'people'} active`
+                      : livePulse && livePulse.messageCount > 0
+                        ? `${livePulse.messageCount} recent ${livePulse.messageCount === 1 ? 'message' : 'messages'}`
+                        : active && !engine.presence.isUncertainCount && engine.presence.onlineCount > 0
+                          ? `${engine.presence.onlineCount} online · Pinned`
+                          : 'Pinned room · Ephemeral'
                   return (
                     <div
                       key={pin.geohash}
                       className={`ag-chat-row-wrap ${active ? 'active' : ''} ${hasUnread ? 'is-unread' : ''} ${mentions > 0 ? 'has-pings' : ''}`}
-                      onContextMenu={(e) => openRoomContextMenu(e, pin.geohash, pin.label)}
+                      onContextMenu={(e) => openRoomContextMenu(e, pin.geohash, displayCity)}
                     >
                       <button
                         type="button"
@@ -920,11 +961,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           <div className="ag-chat-row-top">
                             <span className="ag-chat-row-name truncate">
                               <span className="mono">#{pin.geohash}</span>
-                              {pin.label && <span className="ag-chat-row-city"> · {pin.label}</span>}
+                              {displayCity && <span className="ag-chat-row-city"> · {displayCity}</span>}
                             </span>
+                            {livePulse ? (
+                              <span className="ag-chat-row-time tabular">
+                                {formatRelativeTime(livePulse.lastActivityAt)}
+                              </span>
+                            ) : active ? (
+                              <span className="ag-chat-row-time">live</span>
+                            ) : null}
                           </div>
                           <div className="ag-chat-row-bottom">
-                            <span className="ag-chat-row-preview truncate">Pinned room · Ephemeral</span>
+                            <span className="ag-chat-row-preview truncate">{subtitle}</span>
                             <span className="ag-row-badges">
                               {callCount > 0 && (
                                 <span
@@ -946,6 +994,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                                 <span className="ag-unread-pill tabular" title={`${unread} unread`}>
                                   {formatBadgeCount(unread)}
                                 </span>
+                              ) : livePulse && livePulse.peerCount > 0 ? (
+                                <span className="ag-row-peer-count tabular">{livePulse.peerCount}</span>
                               ) : null}
                             </span>
                           </div>
@@ -971,21 +1021,17 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               </section>
             )}
 
-            {/* Live Active Rooms */}
-            <section className="ag-conv-group" aria-label="Live active rooms">
-              <div className="ag-conv-group-head">
-                <span className="ag-conv-group-label">Live Active Rooms</span>
-                {liveRooms.length > 0 && (
-                  <span className="ag-live-dot-label">
-                    <span className="ag-live-dot" />
-                    Live
-                  </span>
-                )}
-              </div>
+            {/* Active Rooms */}
+            <section className="ag-conv-group" aria-label="Active rooms">
+              <div className="ag-conv-group-label">Active Rooms</div>
 
               {liveRooms.length === 0 ? (
                 <div className="ag-conv-empty">
-                  <p>Listening for nearby active rooms…</p>
+                  <p>
+                    {engine.pulseRooms.length > 0
+                      ? 'All nearby active rooms are pinned above.'
+                      : 'Listening for nearby active rooms…'}
+                  </p>
                   <button type="button" className="ag-soft-pill-btn" onClick={onExpandRadar}>
                     <Compass size={14} />
                     <span>Explore World Map</span>
@@ -1325,6 +1371,22 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                             >
                               <ShieldCheck size={11} />
                               <span>Trust</span>
+                            </button>
+                          )}
+
+                          {onCloseDmThread && (
+                            <button
+                              type="button"
+                              className="ag-row-close-btn"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                onPlaySound?.('click')
+                                onCloseDmThread(thread.peerPubkey)
+                              }}
+                              title="Close chat"
+                              aria-label={`Close chat with ${thread.peerNickname}`}
+                            >
+                              <X size={14} />
                             </button>
                           )}
                         </div>

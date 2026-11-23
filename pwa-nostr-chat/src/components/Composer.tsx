@@ -27,7 +27,7 @@ import { formatVoiceDuration, isVoiceRecordingSupported } from '../lib/voiceReco
 import { useBackHandler } from '../hooks/useBackNavigation'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon'
 import { CameraCaptureModal } from './CameraCaptureModal'
-import { VoiceRecorderBar } from './VoiceRecorderBar'
+import { VoiceRecorderBar, type VoicePreviewTranscript } from './VoiceRecorderBar'
 
 const MEDIA_PHASE_LABEL: Record<VoiceSendPhase, string> = {
   idle: 'Send',
@@ -600,12 +600,42 @@ export const Composer: React.FC<ComposerProps> = ({
 
   const handleSendVoiceMemo = async (
     recorded: RecordedVoiceMemo,
-    caption: string
+    caption: string,
+    previewTranscript?: VoicePreviewTranscript
   ): Promise<boolean> => {
+    const cleanTranscript = previewTranscript?.text.trim()
+    const payload: RecordedVoiceMemo = cleanTranscript
+      ? {
+          ...recorded,
+          previewTranscript: cleanTranscript,
+          previewTranscriptModel: previewTranscript?.modelLabel,
+        }
+      : recorded
     const ok = isServer
-      ? await engine.servers.sendVoiceMemo(recorded, caption)
-      : await engine.sendVoiceMemo(recorded, caption)
+      ? await engine.servers.sendVoiceMemo(payload, caption)
+      : await engine.sendVoiceMemo(payload, caption)
     if (ok) {
+      onSent?.(isViolet)
+    }
+    return ok
+  }
+
+  const handleSendTranscribedText = async (text: string): Promise<boolean> => {
+    const trimmed = text.trim()
+    if (!trimmed || isSending || !canSign) return false
+
+    let ok = false
+    if (isServer) {
+      ok = await engine.servers.sendMessage(trimmed)
+    } else if (isDm && dmThread) {
+      ok = await engine.sendDirectMessage(dmThread.peerPubkey, trimmed, dmThread.protocol)
+    } else {
+      ok = await engine.sendInput(trimmed)
+    }
+
+    if (ok) {
+      setHistory((prev) => [trimmed, ...prev.filter((x) => x !== trimmed)].slice(0, 30))
+      setHistoryIdx(-1)
       onSent?.(isViolet)
     }
     return ok
@@ -754,9 +784,9 @@ export const Composer: React.FC<ComposerProps> = ({
         )}
 
         {/* Contextual Reply Strip */}
-        {activeReply && !voiceMode && (
+        {activeReply && (
           <div
-            className={`ag-composer-reply-strip ${isViolet ? 'dm' : ''} ${pendingImage ? 'has-next' : ''}`}
+            className={`ag-composer-reply-strip ${isViolet ? 'dm' : ''} ${pendingImage && !voiceMode ? 'has-next' : ''}`}
           >
             <div className="ag-composer-reply-left">
               <CornerUpLeft size={14} className="ag-composer-reply-icon" />
@@ -842,10 +872,12 @@ export const Composer: React.FC<ComposerProps> = ({
         {voiceMode ? (
           <VoiceRecorderBar
             isDm={isViolet}
-            hasBanner={false}
+            hasBanner={Boolean(activeReply)}
             sending={isSending}
             voiceSendPhase={engine.voiceSendPhase}
+            transcription={engine.transcription}
             onSend={handleSendVoiceMemo}
+            onSendText={handleSendTranscribedText}
             onCancel={handleCancelVoice}
             onErrorToast={handleVoiceErrorToast}
           />

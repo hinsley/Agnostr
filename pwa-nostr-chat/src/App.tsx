@@ -34,6 +34,7 @@ import IncomingCallBanner from './components/IncomingCallBanner'
 import ImageLightboxModal, { type LightboxImagePayload } from './components/ImageLightboxModal'
 import QrShareModal, { type QrShareTarget } from './components/QrShareModal'
 import QrScannerModal from './components/QrScannerModal'
+import TrustConfirmModal from './components/TrustConfirmModal'
 import { ContextMenuProvider } from './components/ContextMenu'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
@@ -530,7 +531,9 @@ export function App() {
         return
       }
       if (e.key === 'Escape') {
-        if (qrScannerOpen) {
+        if (engine.pendingTrustRequest) {
+          engine.cancelPendingTrust()
+        } else if (qrScannerOpen) {
           setQrScannerOpen(false)
         } else if (qrShareTarget) {
           setQrShareTarget(null)
@@ -563,6 +566,7 @@ export function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [
+    engine,
     qrScannerOpen,
     qrShareTarget,
     cmdkOpen,
@@ -609,6 +613,7 @@ export function App() {
 
   const swipeDisabled =
     !isMobileViewport ||
+    Boolean(engine.pendingTrustRequest) ||
     settingsState.open ||
     radarExpanded ||
     serverHubState.open ||
@@ -671,6 +676,10 @@ export function App() {
   const { pushToast } = engine
 
   const handleBackNavigation = useCallback((): boolean => {
+    if (engine.pendingTrustRequest) {
+      engine.cancelPendingTrust()
+      return true
+    }
     if (qrScannerOpen) {
       setQrScannerOpen(false)
       return true
@@ -730,6 +739,7 @@ export function App() {
     }
     return false
   }, [
+    engine,
     qrScannerOpen,
     qrShareTarget,
     lightboxImage,
@@ -760,11 +770,10 @@ export function App() {
   })
 
   const hasActiveBackTarget =
+    Boolean(engine.pendingTrustRequest) ||
     qrScannerOpen ||
     Boolean(qrShareTarget) ||
     Boolean(lightboxImage) ||
-    Boolean(qrShareTarget) ||
-    qrScannerOpen ||
     cmdkOpen ||
     Boolean(inspectedPeer) ||
     Boolean(serverSettingsState.serverId) ||
@@ -933,6 +942,24 @@ export function App() {
       setMobileScreen('chat')
     },
     [engine]
+  )
+
+  const handleCloseDmThread = useCallback(
+    (pubkey: string) => {
+      const targetPk = pubkey.toLowerCase()
+      const wasActiveDm =
+        engine.activeView.type === 'dm' &&
+        engine.activeView.peerPubkey.toLowerCase() === targetPk
+      engine.closeDmThread(pubkey)
+      if (wasActiveDm) {
+        setRoomInfoOpen(false)
+        if (isMobileViewport) {
+          setListTab('dms')
+          setMobileScreen('list')
+        }
+      }
+    },
+    [engine, isMobileViewport]
   )
 
   const handleMentionPeer = useCallback((handle: string) => {
@@ -1209,6 +1236,7 @@ export function App() {
             onTabChange={setListTab}
             onTuneChannel={handleTuneChannel}
             onOpenDm={handleOpenDm}
+            onCloseDmThread={handleCloseDmThread}
             onSelectServerChannel={handleSelectServerChannel}
             onOpenServerHub={handleOpenServerHub}
             onOpenServerSettings={handleOpenServerSettings}
@@ -1291,20 +1319,18 @@ export function App() {
           </div>
         )}
 
-        {/* Active P2P Voice & Video Call Stage */}
-        {activeCall && (
-          <CallStage
-            calls={engine.calls}
-            engine={engine}
-            expanded={callExpanded}
-            compactFloating={callCompactFloating}
-            onToggleExpand={() => setCallExpanded((v) => !v)}
-            onInspectPeer={setInspectedPeer}
-            onOpenDm={handleOpenDm}
-            onReturnToCall={handleReturnToActiveCall}
-            onPlaySound={playSound}
-          />
-        )}
+        {/* Active P2P Voice & Video Call Stage (+ Post-Call Transcript Save Prompt) */}
+        <CallStage
+          calls={engine.calls}
+          engine={engine}
+          expanded={callExpanded}
+          compactFloating={callCompactFloating}
+          onToggleExpand={() => setCallExpanded((v) => !v)}
+          onInspectPeer={setInspectedPeer}
+          onOpenDm={handleOpenDm}
+          onReturnToCall={handleReturnToActiveCall}
+          onPlaySound={playSound}
+        />
 
         {/* Live Geo Radio Group Call Join Banner (shown when peers are in this room's call) */}
         {showGeoCallJoinBanner && (
@@ -1413,6 +1439,7 @@ export function App() {
           onClose={() => setRoomInfoOpen(false)}
           onInspectPeer={setInspectedPeer}
           onStartDm={handleOpenDm}
+          onCloseDmThread={handleCloseDmThread}
           onTuneChannel={handleTuneChannel}
           onExpandRadar={handleExpandRadar}
           onOpenServerSettings={handleOpenServerSettings}
@@ -1607,6 +1634,13 @@ export function App() {
           }}
         />
       )}
+
+      {/* Global Trust Peer Security Warning Confirmation Dialog */}
+      <TrustConfirmModal
+        request={engine.pendingTrustRequest}
+        onConfirm={engine.confirmPendingTrust}
+        onCancel={engine.cancelPendingTrust}
+      />
 
       {/* Non-Blocking Notifications */}
       <ToastStack toasts={engine.toasts} onDismiss={engine.dismissToast} />

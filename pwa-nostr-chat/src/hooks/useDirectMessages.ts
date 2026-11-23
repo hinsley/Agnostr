@@ -24,7 +24,12 @@ import {
 } from '../lib/identity.ts'
 import type { PresenceTracker } from '../lib/presenceService.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
-import { loadDmThreads, saveDmThreads } from '../lib/storage.ts'
+import {
+  loadDmClearedAt,
+  loadDmThreads,
+  saveDmClearedAt,
+  saveDmThreads,
+} from '../lib/storage.ts'
 import { formatVoiceDuration } from '../lib/voiceRecorder.ts'
 
 const DM_LOOKBACK_SEC = 3 * 24 * 60 * 60 // 3 days to account for NIP-59 ±2d randomized timestamps
@@ -97,6 +102,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   } = opts
 
   const [threads, setThreads] = useState<DmThread[]>(() => loadDmThreads())
+  const dmClearedAtRef = useRef<Record<string, number>>(loadDmClearedAt())
   const processedWrapIdsRef = useRef<Set<string>>(new Set())
   const dmBacklogSettledRef = useRef<boolean>(false)
   const activeDmPeerRef = useRef<string | null>(activeDmPeer)
@@ -205,6 +211,17 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             const senderPk = decrypted.senderPubkey.toLowerCase()
             if (blockedRef.current.has(senderPk)) return
             if (recipientByPubkey.has(senderPk)) return // Ignore self-echo wraps
+
+            // Drop pre-deletion relay backlog wraps so closed DM threads never resurrect on reload,
+            // while still allowing any brand-new DM sent after closeThread() to open a fresh thread.
+            const clearedAtSec = dmClearedAtRef.current[senderPk] ?? 0
+            if (clearedAtSec > 0) {
+              const rumorSec =
+                typeof decrypted.timestampMs === 'number' && Number.isFinite(decrypted.timestampMs)
+                  ? Math.floor(decrypted.timestampMs / 1000)
+                  : decrypted.createdAt
+              if (rumorSec <= clearedAtSec) return
+            }
 
             if (decrypted.ackType && decrypted.embeddedMessageId) {
               setThreads((prev) =>
@@ -761,8 +778,25 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     )
   }, [])
 
+  const closeThread = useCallback((peerPubkey: string) => {
+    const pk = peerPubkey.trim().toLowerCase()
+    if (!pk) return
+    const nextClearedAt: Record<string, number> = {
+      ...dmClearedAtRef.current,
+      [pk]: Math.floor(Date.now() / 1000),
+    }
+    dmClearedAtRef.current = nextClearedAt
+    saveDmClearedAt(nextClearedAt)
+    setThreads((prev) => {
+      const next = prev.filter((t) => t.peerPubkey !== pk)
+      saveDmThreads(next)
+      return next
+    })
+  }, [])
+
   const clearAllDms = useCallback(() => {
     processedWrapIdsRef.current.clear()
+    dmClearedAtRef.current = {}
     setThreads([])
   }, [])
 
@@ -779,6 +813,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     sendDirectVoiceMemo,
     sendDirectImageAttachment,
     clearThread,
+    closeThread,
     clearAllDms,
   }
 }

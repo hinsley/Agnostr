@@ -176,6 +176,7 @@ export interface UseServersOptions {
   settings: AppSettings
   blossomServers: string[]
   setVoiceSendPhase: (phase: VoiceSendPhase) => void
+  onSeedMemoTranscript?: (memoKey: string, text: string, modelLabel?: string) => void
   sendDirectMessage: (peerPubkey: string, content: string) => Promise<boolean>
   pushToast: (level: ToastLevel, title: string, detail?: string) => void
 }
@@ -200,6 +201,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     settings,
     blossomServers,
     setVoiceSendPhase,
+    onSeedMemoTranscript,
     sendDirectMessage,
     pushToast,
   } = opts
@@ -1772,6 +1774,14 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           }
         }
 
+        if (attachment.sha256 && recorded.previewTranscript?.trim()) {
+          onSeedMemoTranscript?.(
+            attachment.sha256,
+            recorded.previewTranscript,
+            recorded.previewTranscriptModel
+          )
+        }
+
         setVoiceSendPhase('publishing')
         const body =
           server.encrypted
@@ -1793,7 +1803,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         setSending(false)
       }
     },
-    [activeServer, activeChannel, pool, blossomServers, identityManager, setVoiceSendPhase, sendMessage, pushToast]
+    [activeServer, activeChannel, pool, blossomServers, identityManager, setVoiceSendPhase, onSeedMemoTranscript, sendMessage, pushToast]
   )
 
   const sendImageAttachment = useCallback(

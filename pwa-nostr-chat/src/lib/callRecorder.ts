@@ -296,7 +296,8 @@ export class CallRecorderController {
     this.chunks = []
     this.recordedBytes = 0
     this.onBytesChange = options?.onBytesChange ?? null
-    this.latestParticipants = [...participants]
+    const trustedOnly = participants.filter((p) => p.isSelf || !p.isUntrusted)
+    this.latestParticipants = [...trustedOnly]
 
     // 1. Set up dynamic Web Audio mixer for all participants
     const ctx = new AudioCtxCtor()
@@ -417,11 +418,12 @@ export class CallRecorderController {
   }
 
   syncParticipants(participants: readonly CallParticipant[]): void {
-    this.latestParticipants = [...participants]
+    const trustedOnly = participants.filter((p) => p.isSelf || !p.isUntrusted)
+    this.latestParticipants = [...trustedOnly]
     if (!this.audioCtx || !this.audioDest) return
 
     const activePubkeys = new Set<string>()
-    for (const p of participants) {
+    for (const p of trustedOnly) {
       const pk = p.pubkey.toLowerCase()
       activePubkeys.add(pk)
 

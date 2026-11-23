@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { nip19 } from 'nostr-tools'
 import {
   AlertCircle,
@@ -24,6 +25,7 @@ import {
   PhoneCall,
   PhoneOff,
   Radio,
+  ShieldAlert,
   ShieldCheck,
   Square,
   Trash2,
@@ -35,6 +37,7 @@ import {
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { CallEngine, CallParticipant, PeerIceConnectionState } from '../types/calls.ts'
+import type { LiveCaptionEntry } from '../types/transcription.ts'
 import {
   RECORDING_QUALITY_PRESETS,
   getRecordingQualitySpec,
@@ -86,10 +89,22 @@ function formatCaptionClock(unixMs: number): string {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
+      hour12: false,
     })
   } catch {
     return ''
   }
+}
+
+function formatTranscriptLine(entry: LiveCaptionEntry, startedAtMs: number): string {
+  const who = entry.isSelf ? `${entry.displayHandle} (you)` : entry.displayHandle
+  const wallClock = formatCaptionClock(entry.timestamp)
+  const elapsed =
+    startedAtMs > 0
+      ? ` | +${formatCallDuration(startedAtMs, Math.max(startedAtMs, entry.timestamp))}`
+      : ''
+  const ts = wallClock ? `[${wallClock}${elapsed}] ` : ''
+  return `${ts}${who}: ${entry.text}`
 }
 
 function iceLedClass(state: PeerIceConnectionState): string {
@@ -236,20 +251,24 @@ function safeEncodeNpub(pubkey: string): string {
 function ParticipantTile({
   participant,
   compact,
+  shielded,
+  onTrustPeer,
   onContextMenu,
 }: {
   participant: CallParticipant
   compact: boolean
+  shielded: boolean
+  onTrustPeer?: () => void
   onContextMenu?: (e: ReactMouseEvent) => void
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
 
   const liveVideoTrack =
-    participant.stream && (participant.videoEnabled || participant.screenSharing)
+    !shielded && participant.stream && (participant.videoEnabled || participant.screenSharing)
       ? (participant.stream.getVideoTracks().find((t) => t.readyState === 'live') ?? null)
       : null
   const liveVideoTrackId = liveVideoTrack?.id ?? null
-  const hasLiveVideo = liveVideoTrack !== null
+  const hasLiveVideo = !shielded && liveVideoTrack !== null
 
   useEffect(() => {
     const el = videoRef.current
@@ -264,6 +283,13 @@ function ParticipantTile({
       window.removeEventListener('touchend', unlockListener, true)
       window.removeEventListener('click', unlockListener, true)
       unlockListener = null
+    }
+
+    if (shielded) {
+      if (el.srcObject) {
+        el.srcObject = null
+      }
+      return
     }
 
     const attemptPlay = () => {
@@ -329,9 +355,53 @@ function ParticipantTile({
       cleanupUnlock()
       liveVideoTrack?.removeEventListener('unmute', handleTrackUnmute)
     }
-  }, [hasLiveVideo, participant.stream, liveVideoTrackId, liveVideoTrack])
+  }, [shielded, hasLiveVideo, participant.stream, liveVideoTrackId, liveVideoTrack])
 
   const handleColor = pubkeyToColor(participant.pubkey)
+
+  if (shielded) {
+    return (
+      <div
+        className={`ag-call-tile is-shielded ${compact ? 'is-compact' : ''}`}
+        onContextMenu={onContextMenu}
+      >
+        <div className="ag-call-shield-body">
+          <div className="ag-call-shield-avatar-wrap">
+            <img
+              src={identiconDataUrl(participant.pubkey)}
+              alt=""
+              width={compact ? 30 : 40}
+              height={compact ? 30 : 40}
+              className="ag-call-shield-avatar"
+            />
+            <span className="ag-call-shield-icon-badge" aria-hidden="true">
+              <ShieldAlert size={compact ? 11 : 13} />
+            </span>
+          </div>
+          <span className="ag-call-shield-name truncate" style={{ color: handleColor }}>
+            {participant.displayHandle}
+          </span>
+          <span className="ag-call-shield-caption">Untrusted · Camera &amp; audio hidden</span>
+          {onTrustPeer && (
+            <button
+              type="button"
+              className="ag-call-shield-trust-btn"
+              onClick={(e) => {
+                e.stopPropagation()
+                onTrustPeer()
+              }}
+              title={`Trust ${participant.displayHandle} to connect audio and camera`}
+              aria-label={`Trust ${participant.displayHandle}`}
+            >
+              <ShieldCheck size={13} />
+              <span>Trust</span>
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   const avatarSize = compact ? 44 : 60
   const levelScale = 1 + Math.min(0.32, participant.audioLevel * 0.45)
 
@@ -440,8 +510,40 @@ export function CallStage({
   const [qualityMenuOpen, setQualityMenuOpen] = useState(false)
   const [transcriptOpen, setTranscriptOpen] = useState(false)
   const [copiedTranscript, setCopiedTranscript] = useState(false)
+  const [promptCopied, setPromptCopied] = useState(false)
+  const [promptSaved, setPromptSaved] = useState(false)
   const qualityWrapRef = useRef<HTMLDivElement | null>(null)
   const transcriptListRef = useRef<HTMLDivElement | null>(null)
+  const promptDismissTimerRef = useRef<number | null>(null)
+  const promptCopyTimerRef = useRef<number | null>(null)
+  const endedTranscript = transcription.endedCallTranscript
+  const endedTranscriptId = endedTranscript?.id ?? null
+
+  useEffect(() => {
+    setPromptCopied(false)
+    setPromptSaved(false)
+    return () => {
+      if (promptDismissTimerRef.current !== null) {
+        window.clearTimeout(promptDismissTimerRef.current)
+        promptDismissTimerRef.current = null
+      }
+      if (promptCopyTimerRef.current !== null) {
+        window.clearTimeout(promptCopyTimerRef.current)
+        promptCopyTimerRef.current = null
+      }
+    }
+  }, [endedTranscriptId])
+
+  useEffect(() => {
+    if (activeCall || !endedTranscript) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        transcription.dismissEndedCallTranscript()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [activeCall, endedTranscript, transcription])
 
   useEffect(() => {
     if (!activeCall) return
@@ -493,10 +595,111 @@ export function CallStage({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [expanded, activeCall, isQualityPopoverVisible, transcriptOpen, onToggleExpand])
 
-  if (!activeCall) return null
+  if (!activeCall) {
+    if (!endedTranscript) return null
+
+    const lineCount = endedTranscript.entries.length
+
+    const handlePromptSave = () => {
+      if (promptSaved) return
+      transcription.downloadEndedCallTranscript()
+      onPlaySound?.('click')
+      setPromptSaved(true)
+      if (promptDismissTimerRef.current !== null) {
+        window.clearTimeout(promptDismissTimerRef.current)
+      }
+      promptDismissTimerRef.current = window.setTimeout(() => {
+        promptDismissTimerRef.current = null
+        transcription.dismissEndedCallTranscript()
+      }, 1100)
+    }
+
+    const handlePromptCopy = async () => {
+      if (!endedTranscript.plainText.trim()) return
+      try {
+        await navigator.clipboard.writeText(endedTranscript.plainText)
+        onPlaySound?.('click')
+        setPromptCopied(true)
+        engine.pushToast('success', 'Copied timestamped transcript')
+        if (promptCopyTimerRef.current !== null) {
+          window.clearTimeout(promptCopyTimerRef.current)
+        }
+        promptCopyTimerRef.current = window.setTimeout(() => {
+          promptCopyTimerRef.current = null
+          setPromptCopied(false)
+        }, 1800)
+      } catch {
+        engine.pushToast('error', 'Failed to copy transcript')
+      }
+    }
+
+    const handlePromptDismiss = () => {
+      if (promptDismissTimerRef.current !== null) {
+        window.clearTimeout(promptDismissTimerRef.current)
+        promptDismissTimerRef.current = null
+      }
+      onPlaySound?.('click')
+      transcription.dismissEndedCallTranscript()
+    }
+
+    return createPortal(
+      <aside
+        className="ag-transcript-save-prompt"
+        role="status"
+        aria-live="polite"
+        aria-label="Save call transcript"
+      >
+        <div className="ag-transcript-prompt-top">
+          <span className="ag-transcript-prompt-icon" aria-hidden="true">
+            <Captions size={15} />
+          </span>
+          <div className="ag-transcript-prompt-copy">
+            <span className="ag-transcript-prompt-title">Save call transcript?</span>
+            <span className="ag-transcript-prompt-sub truncate">
+              {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {endedTranscript.callTitle}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="ag-transcript-prompt-dismiss"
+            onClick={handlePromptDismiss}
+            title="Dismiss"
+            aria-label="Dismiss transcript prompt"
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        <div className="ag-transcript-prompt-actions">
+          <button
+            type="button"
+            className={`ag-transcript-prompt-btn primary ${promptSaved ? 'is-done' : ''}`}
+            onClick={handlePromptSave}
+          >
+            {promptSaved ? <Check size={13} /> : <Download size={13} />}
+            <span>{promptSaved ? 'Saved' : 'Save .md'}</span>
+          </button>
+          <button
+            type="button"
+            className="ag-transcript-prompt-btn"
+            onClick={() => void handlePromptCopy()}
+          >
+            {promptCopied ? <Check size={13} /> : <Copy size={13} />}
+            <span>{promptCopied ? 'Copied' : 'Copy'}</span>
+          </button>
+        </div>
+      </aside>,
+      document.body,
+    )
+  }
+
+  const isParticipantShielded = (p: CallParticipant) =>
+    !p.isSelf && (Boolean(p.isUntrusted) || !engine.isTrusted(p.pubkey))
 
   const remoteParticipants = activeCall.participants.filter((p) => !p.isSelf)
-  const activeSpeaker = activeCall.participants.find((p) => p.isSpeaking) ?? null
+  const trustedRemoteParticipants = remoteParticipants.filter((p) => !isParticipantShielded(p))
+  const activeSpeaker =
+    activeCall.participants.find((p) => p.isSpeaking && !isParticipantShielded(p)) ?? null
   const count = Math.max(1, Math.min(activeCall.maxParticipants, activeCall.participants.length))
 
   const recorders = activeCall.participants.filter((p) => p.isRecording)
@@ -584,7 +787,7 @@ export function CallStage({
 
   const audioSinks = (
     <div className="sr-only" aria-hidden="true">
-      {remoteParticipants.map((p) => (
+      {trustedRemoteParticipants.map((p) => (
         <RemoteAudioTrack
           key={p.pubkey}
           stream={p.stream}
@@ -738,14 +941,20 @@ export function CallStage({
     ? transcription.liveCaptions.slice(-3).filter((entry) => nowMs - entry.timestamp < 24_000)
     : []
 
+  const transcriptStartMs =
+    activeCall.connectedAt ?? activeCall.startedAt ?? transcription.liveCaptions[0]?.timestamp ?? 0
+
   const handleCopyTranscript = async () => {
-    const { content } = transcription.exportCallTranscriptMarkdown()
-    if (!content.trim()) return
+    if (transcription.liveCaptions.length === 0) return
+    const plainText = transcription.liveCaptions
+      .map((entry) => formatTranscriptLine(entry, transcriptStartMs))
+      .join('\n')
+    if (!plainText.trim()) return
     try {
-      await navigator.clipboard.writeText(content)
+      await navigator.clipboard.writeText(plainText)
       setCopiedTranscript(true)
       onPlaySound?.('click')
-      engine.pushToast('success', 'Copied call transcript')
+      engine.pushToast('success', 'Copied timestamped transcript')
       window.setTimeout(() => setCopiedTranscript(false), 1800)
     } catch {
       engine.pushToast('error', 'Failed to copy transcript')
@@ -913,7 +1122,7 @@ export function CallStage({
 
   const openTranscriptContextMenu = (
     e: ReactMouseEvent,
-    entry: { displayHandle: string; text: string },
+    entry: LiveCaptionEntry,
   ) => {
     openContextMenu(e, {
       header: entry.displayHandle,
@@ -923,7 +1132,10 @@ export function CallStage({
           label: 'Copy Line',
           icon: <Copy size={14} />,
           onSelect: () => {
-            void copyCallText(`${entry.displayHandle}: ${entry.text}`, 'Copied transcript line')
+            void copyCallText(
+              formatTranscriptLine(entry, transcriptStartMs),
+              'Copied transcript line',
+            )
           },
         },
         {
@@ -1057,14 +1269,26 @@ export function CallStage({
 
           {/* Responsive 1–6 Participant Tile Grid */}
           <div className="ag-call-grid" data-count={count}>
-            {activeCall.participants.map((participant) => (
-              <ParticipantTile
-                key={participant.pubkey}
-                participant={participant}
-                compact={!expanded && count > 2}
-                onContextMenu={(e) => openParticipantContextMenu(e, participant)}
-              />
-            ))}
+            {activeCall.participants.map((participant) => {
+              const shielded = isParticipantShielded(participant)
+              return (
+                <ParticipantTile
+                  key={participant.pubkey}
+                  participant={participant}
+                  compact={!expanded && count > 2}
+                  shielded={shielded}
+                  onTrustPeer={
+                    shielded
+                      ? () => {
+                          onPlaySound?.('click')
+                          engine.trustPubkey(participant.pubkey, participant.nickname)
+                        }
+                      : undefined
+                  }
+                  onContextMenu={(e) => openParticipantContextMenu(e, participant)}
+                />
+              )
+            })}
           </div>
 
           {/* Live Captions & Model Download Progress Overlay */}

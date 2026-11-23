@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ActiveCallSession } from '../types/calls.ts'
 import type { ToastLevel, VoiceMemoAttachment } from '../types/protocol.ts'
 import type {
+  EndedCallTranscript,
   LiveCaptionEntry,
   MemoTranscriptState,
   TranscriptionEngine,
@@ -65,6 +66,12 @@ interface PendingMemoRequest {
   resolve: () => void
 }
 
+interface PendingBlobRequest {
+  kind: 'blob'
+  resolve: (text: string) => void
+  reject: (err: Error) => void
+}
+
 interface PendingLiveRequest {
   kind: 'live'
   callId: string
@@ -78,6 +85,7 @@ interface PendingLiveRequest {
 type PendingWorkerRequest =
   | PendingLoadRequest
   | PendingMemoRequest
+  | PendingBlobRequest
   | PendingLiveRequest
 
 interface QueuedMemoItem {
@@ -101,6 +109,71 @@ function formatClock(ms: number): string {
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+function formatDurationClock(totalMs: number): string {
+  const totalSec = Math.max(0, Math.floor(totalMs / 1000))
+  const hrs = Math.floor(totalSec / 3600)
+  const mins = Math.floor((totalSec % 3600) / 60)
+  const secs = totalSec % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return hrs > 0 ? `${hrs}:${pad(mins)}:${pad(secs)}` : `${pad(mins)}:${pad(secs)}`
+}
+
+function formatIsoDate(ms: number): string {
+  try {
+    return new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
+  } catch {
+    return ''
+  }
+}
+
+function buildCallTranscriptArtifact(opts: {
+  callTitle: string
+  startedAt: number
+  endedAt: number
+  modelLabel: string
+  hfModelId: string
+  entries: readonly LiveCaptionEntry[]
+}): { filename: string; markdown: string; plainText: string } {
+  const stamp = new Date(opts.endedAt).toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  const slug = slugifyTitle(opts.callTitle)
+  const durationLabel = formatDurationClock(Math.max(0, opts.endedAt - opts.startedAt))
+
+  const mdLines: string[] = [
+    `# Agnostr Call Transcript — ${opts.callTitle}`,
+    '',
+    `- **Date**: ${formatIsoDate(opts.startedAt)}`,
+    `- **Started**: ${formatClock(opts.startedAt)}`,
+    `- **Ended**: ${formatClock(opts.endedAt)}`,
+    `- **Duration**: ${durationLabel}`,
+    `- **Model**: ${opts.modelLabel} (${opts.hfModelId})`,
+    `- **Entries**: ${opts.entries.length}`,
+    '',
+    '---',
+    '',
+  ]
+
+  const plainLines: string[] = []
+  for (const entry of opts.entries) {
+    const who = entry.isSelf
+      ? `${entry.displayHandle} (you)`
+      : entry.displayHandle
+    const wallClock = formatClock(entry.timestamp)
+    const elapsedTag =
+      opts.startedAt > 0
+        ? ` | +${formatDurationClock(Math.max(0, entry.timestamp - opts.startedAt))}`
+        : ''
+    const tsLabel = `[${wallClock}${elapsedTag}]`
+    mdLines.push(`- **${tsLabel} ${who}**: ${entry.text}`)
+    plainLines.push(`${tsLabel} ${who}: ${entry.text}`)
+  }
+
+  return {
+    filename: `agnostr-transcript-${slug}-${stamp}.md`,
+    markdown: mdLines.join('\n'),
+    plainText: plainLines.join('\n'),
+  }
 }
 
 function deleteIndexedDbSafe(name: string): Promise<void> {
@@ -149,6 +222,8 @@ export function useTranscription(
   const [runtimeDevice, setRuntimeDevice] =
     useState<TranscriptionRuntimeDevice | null>(null)
   const [modelError, setModelError] = useState<string | null>(null)
+  const modelErrorRef = useRef<string | null>(modelError)
+  modelErrorRef.current = modelError
 
   const initialPersistedTranscripts = useMemo(() => loadMemoTranscriptCache(), [])
   const persistedTranscriptsRef = useRef<Record<string, PersistedMemoTranscriptEntry>>(
@@ -174,6 +249,8 @@ export function useTranscription(
   )
   const [liveCaptionsEnabled, setLiveCaptionsEnabled] = useState<boolean>(false)
   const [liveCaptions, setLiveCaptions] = useState<LiveCaptionEntry[]>([])
+  const [endedCallTranscript, setEndedCallTranscript] =
+    useState<EndedCallTranscript | null>(null)
 
   const workerRef = useRef<Worker | null>(null)
   const capturerRef = useRef<LiveStreamSpeechCapturer | null>(null)
@@ -186,6 +263,23 @@ export function useTranscription(
   const activeCallRef = useRef<ActiveCallSession | null>(activeCall)
   activeCallRef.current = activeCall
   const lastCallIdRef = useRef<string | null>(activeCall?.callId ?? null)
+  const activeCallMetaRef = useRef<{
+    callId: string
+    title: string
+    startedAt: number
+  } | null>(
+    activeCall
+      ? {
+          callId: activeCall.callId,
+          title: activeCall.title,
+          startedAt: activeCall.connectedAt ?? activeCall.startedAt,
+        }
+      : null
+  )
+  const liveCaptionsRef = useRef<LiveCaptionEntry[]>(liveCaptions)
+  liveCaptionsRef.current = liveCaptions
+  const endedCallTranscriptRef = useRef<EndedCallTranscript | null>(endedCallTranscript)
+  endedCallTranscriptRef.current = endedCallTranscript
 
   const activeModelRef = useRef<TranscriptionModelSpec>(activeModel)
   activeModelRef.current = activeModel
@@ -245,6 +339,8 @@ export function useTranscription(
         req.resolve(false)
       } else if (req.kind === 'memo') {
         req.resolve()
+      } else if (req.kind === 'blob') {
+        req.reject(new Error('Transcription worker was stopped.'))
       }
     }
     pendingRef.current.clear()
@@ -291,7 +387,11 @@ export function useTranscription(
       }
 
       if (msg.type === 'dropped') {
+        const dropped = pendingRef.current.get(msg.requestId)
         pendingRef.current.delete(msg.requestId)
+        if (dropped?.kind === 'blob') {
+          dropped.reject(new Error('Transcription request was dropped.'))
+        }
         return
       }
 
@@ -345,6 +445,11 @@ export function useTranscription(
           return
         }
 
+        if (pending.kind === 'blob') {
+          pending.resolve(msg.text.trim())
+          return
+        }
+
         if (pending.kind === 'live') {
           const text = msg.text.trim()
           if (
@@ -365,9 +470,12 @@ export function useTranscription(
           }
           setLiveCaptions((prev) => {
             const next = [...prev, entry]
-            return next.length > MAX_CALL_CAPTION_ENTRIES
-              ? next.slice(-MAX_CALL_CAPTION_ENTRIES)
-              : next
+            const capped =
+              next.length > MAX_CALL_CAPTION_ENTRIES
+                ? next.slice(-MAX_CALL_CAPTION_ENTRIES)
+                : next
+            liveCaptionsRef.current = capped
+            return capped
           })
           return
         }
@@ -376,6 +484,10 @@ export function useTranscription(
       if (msg.type === 'error') {
         if (pending.kind === 'load') {
           pending.resolve(false)
+          return
+        }
+        if (pending.kind === 'blob') {
+          pending.reject(new Error(msg.error || 'Unable to transcribe audio.'))
           return
         }
         if (pending.kind === 'memo') {
@@ -413,6 +525,8 @@ export function useTranscription(
       for (const req of pendingRef.current.values()) {
         if (req.kind === 'load') {
           req.resolve(false)
+        } else if (req.kind === 'blob') {
+          req.reject(new Error(errMsg))
         } else if (req.kind === 'memo') {
           setMemoTranscripts((prev) => ({
             ...prev,
@@ -812,6 +926,79 @@ export function useTranscription(
     [drainMemoQueue]
   )
 
+  const transcribeAudioBlob = useCallback(
+    async (blob: Blob): Promise<string> => {
+      const pcm16k = await decodeBlobToPcm16k(blob)
+      const model = activeModelRef.current
+      const targetKey = loadedKeyForModel(model)
+
+      if (loadedModelKeyRef.current !== targetKey || !workerRef.current) {
+        const ok = await preloadModel()
+        if (!ok) {
+          throw new Error(
+            modelErrorRef.current || `Failed to load ${model.label} for transcription.`
+          )
+        }
+      }
+
+      const activeNow = activeModelRef.current
+      const worker = ensureWorker()
+      const requestId = nextRequestId('blob')
+
+      return await new Promise<string>((resolve, reject) => {
+        pendingRef.current.set(requestId, {
+          kind: 'blob',
+          resolve,
+          reject,
+        })
+        const payload: WorkerInMessage = {
+          type: 'transcribe',
+          requestId,
+          kind: 'memo',
+          engine: activeNow.engine,
+          hfModelId: activeNow.hfModelId,
+          dtype: activeNow.dtype,
+          pcm16k,
+        }
+        worker.postMessage(payload, [pcm16k.buffer])
+      })
+    },
+    [ensureWorker, nextRequestId, preloadModel]
+  )
+
+  const seedMemoTranscript = useCallback(
+    (memoKey: string, text: string, modelLabel?: string) => {
+      const cleanKey = memoKey.trim()
+      const cleanText = text.trim()
+      if (!cleanKey || !cleanText) return
+      const resolvedModel = modelLabel?.trim() || activeModelRef.current.label
+      const now = Date.now()
+      const nextPersisted = saveMemoTranscriptCache({
+        ...persistedTranscriptsRef.current,
+        [cleanKey]: {
+          text: cleanText,
+          modelLabel: resolvedModel,
+          updatedAt: now,
+        },
+      })
+      persistedTranscriptsRef.current = nextPersisted
+      setCachedTranscriptCount(Object.keys(nextPersisted).length)
+
+      const entry: MemoTranscriptState = {
+        status: 'done',
+        text: cleanText,
+        modelLabel: resolvedModel,
+        updatedAt: now,
+      }
+      setMemoTranscripts((prev) => {
+        const next = { ...prev, [cleanKey]: entry }
+        memoTranscriptsRef.current = next
+        return next
+      })
+    },
+    []
+  )
+
   const handleCapturedSpeechSegment = useCallback(
     (segment: CapturedSpeechSegment) => {
       if (!liveCaptionsEnabledRef.current) return
@@ -892,16 +1079,60 @@ export function useTranscription(
         setLiveCaptionsEnabled(false)
       }
       if (lastCallIdRef.current !== null) {
+        const prevCallId = lastCallIdRef.current
+        const capturedEntries = liveCaptionsRef.current
+        const meta = activeCallMetaRef.current
+        if (capturedEntries.length > 0) {
+          const endedAt = Date.now()
+          const startedAt =
+            meta?.startedAt ?? capturedEntries[0]?.timestamp ?? endedAt
+          const callTitle = meta?.title || 'Call'
+          const model = activeModelRef.current
+          const artifact = buildCallTranscriptArtifact({
+            callTitle,
+            startedAt,
+            endedAt,
+            modelLabel: model.label,
+            hfModelId: model.hfModelId,
+            entries: capturedEntries,
+          })
+          const snapshot: EndedCallTranscript = {
+            id: `${prevCallId}:${endedAt}`,
+            callTitle,
+            startedAt,
+            endedAt,
+            modelLabel: model.label,
+            entries: [...capturedEntries],
+            filename: artifact.filename,
+            markdown: artifact.markdown,
+            plainText: artifact.plainText,
+          }
+          endedCallTranscriptRef.current = snapshot
+          setEndedCallTranscript(snapshot)
+        }
         lastCallIdRef.current = null
+        activeCallMetaRef.current = null
+        liveCaptionsRef.current = []
         setLiveCaptions([])
       }
       return
     }
 
+    activeCallMetaRef.current = {
+      callId: activeCall.callId,
+      title: activeCall.title,
+      startedAt: activeCall.connectedAt ?? activeCall.startedAt,
+    }
+
     // Detect brand-new call join/start -> apply autoTranscribe default for this call
     const isNewCall = lastCallIdRef.current !== currentCallId
     if (isNewCall) {
+      if (endedCallTranscriptRef.current) {
+        endedCallTranscriptRef.current = null
+        setEndedCallTranscript(null)
+      }
       if (lastCallIdRef.current !== null) {
+        liveCaptionsRef.current = []
         setLiveCaptions([])
       }
       lastCallIdRef.current = currentCallId
@@ -934,10 +1165,13 @@ export function useTranscription(
       return
     }
 
+    const trustedParticipants = activeCall.participants.filter(
+      (p) => p.isSelf || !p.isUntrusted
+    )
     if (!capturerRef.current) {
       const capturer = new LiveStreamSpeechCapturer(handleCapturedSpeechSegment)
       capturerRef.current = capturer
-      void capturer.start(activeCall.participants).catch((err) => {
+      void capturer.start(trustedParticipants).catch((err) => {
         stopCapturer()
         liveCaptionsEnabledRef.current = false
         setLiveCaptionsEnabled(false)
@@ -948,7 +1182,7 @@ export function useTranscription(
         )
       })
     } else {
-      capturerRef.current.syncParticipants(activeCall.participants)
+      capturerRef.current.syncParticipants(trustedParticipants)
     }
   }, [
     activeCall,
@@ -968,37 +1202,67 @@ export function useTranscription(
   }, [clearMemoQueue, stopCapturer, terminateWorker])
 
   const clearCallTranscript = useCallback(() => {
+    liveCaptionsRef.current = []
     setLiveCaptions([])
   }, [])
 
   const exportCallTranscriptMarkdown = useCallback(() => {
-    const callTitle = activeCallRef.current?.title || 'Call'
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-    const slug = slugifyTitle(callTitle)
-    const lines: string[] = [
-      `# Agnostr Call Transcript — ${callTitle}`,
-      '',
-      `- **Exported**: ${new Date().toISOString()}`,
-      `- **Model**: ${activeModelRef.current.label} (${activeModelRef.current.hfModelId})`,
-      `- **Entries**: ${liveCaptions.length}`,
-      '',
-      '---',
-      '',
-    ]
-
-    for (const entry of liveCaptions) {
-      const who = entry.isSelf
-        ? `${entry.displayHandle} (you)`
-        : entry.displayHandle
-      lines.push(`- **[${formatClock(entry.timestamp)}] ${who}**: ${entry.text}`)
-    }
+    const now = Date.now()
+    const call = activeCallRef.current
+    const meta = activeCallMetaRef.current
+    const callTitle = call?.title || meta?.title || 'Call'
+    const startedAt =
+      call?.connectedAt ??
+      call?.startedAt ??
+      meta?.startedAt ??
+      liveCaptions[0]?.timestamp ??
+      now
+    const artifact = buildCallTranscriptArtifact({
+      callTitle,
+      startedAt,
+      endedAt: now,
+      modelLabel: activeModelRef.current.label,
+      hfModelId: activeModelRef.current.hfModelId,
+      entries: liveCaptions,
+    })
 
     return {
-      filename: `agnostr-transcript-${slug}-${stamp}.md`,
+      filename: artifact.filename,
       mimeType: 'text/markdown;charset=utf-8',
-      content: lines.join('\n'),
+      content: artifact.markdown,
     }
   }, [liveCaptions])
+
+  const dismissEndedCallTranscript = useCallback(() => {
+    endedCallTranscriptRef.current = null
+    setEndedCallTranscript(null)
+  }, [])
+
+  const downloadEndedCallTranscript = useCallback(() => {
+    const snap = endedCallTranscriptRef.current
+    if (!snap) return
+    try {
+      const blob = new Blob([snap.markdown], {
+        type: 'text/markdown;charset=utf-8',
+      })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = snap.filename
+      a.rel = 'noopener'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      pushToastRef.current('success', 'Call transcript saved', snap.filename)
+    } catch {
+      pushToastRef.current(
+        'error',
+        'Unable to download transcript',
+        'Try copying the transcript to your clipboard instead.'
+      )
+    }
+  }, [])
 
   const resetAllTranscription = useCallback(() => {
     clearMemoQueue()
@@ -1008,7 +1272,11 @@ export function useTranscription(
     terminateWorker()
     liveCaptionsEnabledRef.current = false
     setLiveCaptionsEnabled(false)
+    liveCaptionsRef.current = []
     setLiveCaptions([])
+    endedCallTranscriptRef.current = null
+    setEndedCallTranscript(null)
+    activeCallMetaRef.current = null
     setMemoTranscripts({})
     setCachedTranscriptCount(0)
     customModelsRef.current = []
@@ -1045,11 +1313,16 @@ export function useTranscription(
       cachedTranscriptCount,
       clearTranscriptCache,
       transcribeVoiceMemo,
+      transcribeAudioBlob,
+      seedMemoTranscript,
       liveCaptionsEnabled,
       toggleLiveCaptions,
       liveCaptions,
       clearCallTranscript,
       exportCallTranscriptMarkdown,
+      endedCallTranscript,
+      dismissEndedCallTranscript,
+      downloadEndedCallTranscript,
     }),
     [
       models,
@@ -1070,11 +1343,16 @@ export function useTranscription(
       cachedTranscriptCount,
       clearTranscriptCache,
       transcribeVoiceMemo,
+      transcribeAudioBlob,
+      seedMemoTranscript,
       liveCaptionsEnabled,
       toggleLiveCaptions,
       liveCaptions,
       clearCallTranscript,
       exportCallTranscriptMarkdown,
+      endedCallTranscript,
+      dismissEndedCallTranscript,
+      downloadEndedCallTranscript,
     ]
   )
 

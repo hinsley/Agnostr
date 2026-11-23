@@ -126,6 +126,10 @@ export interface RecordedVoiceMemo {
   waveform: number[]
   /** Local preview object URL (revoked on discard/send) */
   previewUrl: string
+  /** Optional pre-send local transcript generated before uploading */
+  previewTranscript?: string
+  /** Optional model label that produced previewTranscript */
+  previewTranscriptModel?: string
 }
 
 export interface ImageAttachment {
@@ -156,6 +160,12 @@ export interface TrustedPeerEntry {
   npub: string
   label?: string
   addedAt: number // unix ms
+}
+
+export interface PendingTrustRequest {
+  pubkey: string
+  npub: string
+  label?: string
 }
 
 export type VoiceSendPhase = 'idle' | 'encrypting' | 'uploading' | 'signing' | 'publishing'
@@ -400,6 +410,7 @@ export interface AgnostrEngine {
   activeDmThread: DmThread | null
   totalDmUnread: number
   openDmThread: (peerPubkey: string, nicknameHint?: string, preferredProtocol?: DmProtocol) => void
+  closeDmThread: (pubkey: string) => void
   sendDirectMessage: (peerPubkey: string, content: string, protocol?: DmProtocol) => Promise<boolean>
 
   // Channel & messaging actions
@@ -423,6 +434,9 @@ export interface AgnostrEngine {
   /** True only if pubkey is explicitly stored in trustedPubkeys */
   isExplicitlyTrusted: (pubkey: string) => boolean
   trustPubkey: (pubkeyOrNpub: string, label?: string) => boolean
+  pendingTrustRequest: PendingTrustRequest | null
+  confirmPendingTrust: () => void
+  cancelPendingTrust: () => void
   untrustPubkey: (pubkey: string) => void
   clearTrustedPubkeys: () => void
   strictWhitelistMode: boolean

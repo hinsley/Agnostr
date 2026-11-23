@@ -3129,6 +3129,14 @@
   color: #ffffff;
 }
 
+.ag-sheet-util-note {
+  margin: -0.15rem 0 0.1rem;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.35;
+}
+
 .ag-sheet-empty {
   margin: 0;
   padding: 0.9rem;
@@ -5342,5 +5350,327 @@
   .ag-peer-modal {
     padding: 0.85rem;
     border-radius: var(--radius-md);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   TrustConfirmModal (High-Priority Safety Dialog via Portal, z-index: 9995)
+   -------------------------------------------------------------------------- */
+.ag-trust-confirm-backdrop {
+  position: fixed;
+  top: var(--ag-vvt, 0px);
+  left: 0;
+  right: 0;
+  bottom: auto;
+  height: var(--ag-vvh, 100dvh);
+  z-index: 9995;
+  padding:
+    calc(1rem + env(safe-area-inset-top, 0px))
+    0.85rem
+    calc(1rem + env(safe-area-inset-bottom, 0px));
+  background-color: var(--bg-overlay);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overscroll-behavior: contain;
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-trust-confirm-modal {
+  width: min(468px, 100%);
+  max-height: calc(var(--ag-vvh, 100dvh) - 2rem);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 1.15rem;
+  border-radius: var(--radius-xl);
+  background-color: var(--bg-surface);
+  border: 1px solid color-mix(in srgb, var(--status-danger) 36%, var(--border-strong));
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  animation: ag-scale-in var(--dur-med) var(--ease-spring);
+}
+
+.ag-trust-confirm-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.72rem;
+  min-width: 0;
+}
+
+.ag-trust-confirm-badge {
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-md);
+  background-color: var(--status-danger-soft);
+  border: 1px solid color-mix(in srgb, var(--status-danger) 38%, transparent);
+  color: var(--status-danger);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ag-trust-confirm-title-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.14rem;
+}
+
+.ag-trust-confirm-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.ag-trust-confirm-target {
+  font-weight: 700;
+}
+
+.ag-trust-confirm-subtitle {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--status-danger);
+  letter-spacing: 0.01em;
+}
+
+.ag-trust-confirm-close {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background-color: transparent;
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-trust-confirm-close:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-trust-confirm-id-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-trust-confirm-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  flex-shrink: 0;
+  background-color: var(--bg-canvas);
+}
+
+.ag-trust-confirm-npub-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  padding: 0.25rem 0.45rem;
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: left;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-trust-confirm-npub-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-trust-confirm-npub-btn svg {
+  flex-shrink: 0;
+}
+
+.ag-trust-confirm-copied-icon {
+  color: var(--accent);
+}
+
+.ag-trust-confirm-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.7rem 0.78rem;
+  border-radius: var(--radius-md);
+  background-color: var(--status-danger-soft);
+  border: 1px solid color-mix(in srgb, var(--status-danger) 36%, transparent);
+}
+
+.ag-trust-confirm-callout-icon {
+  color: var(--status-danger);
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.ag-trust-confirm-callout-text {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.ag-trust-confirm-risks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.52rem;
+}
+
+.ag-trust-confirm-risk-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.58rem;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.ag-trust-confirm-risk-item strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.ag-trust-confirm-risk-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--status-warn);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 0.05rem;
+}
+
+.ag-trust-confirm-footer-note {
+  margin: 0;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.ag-trust-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-top: 0.1rem;
+}
+
+.ag-trust-confirm-cancel-btn,
+.ag-trust-confirm-accept-btn {
+  min-height: 40px;
+  padding: 0 0.95rem;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
+}
+
+.ag-trust-confirm-cancel-btn {
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+}
+
+.ag-trust-confirm-cancel-btn:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-trust-confirm-cancel-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ag-trust-confirm-accept-btn {
+  background-color: var(--status-danger);
+  border: 1px solid var(--status-danger);
+  color: #ffffff;
+}
+
+.ag-trust-confirm-accept-btn:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--status-danger) 35%, transparent);
+}
+
+.ag-trust-confirm-accept-btn:focus-visible {
+  outline: 2px solid var(--status-danger);
+  outline-offset: 2px;
+}
+
+@media (max-width: 867px) {
+  .ag-trust-confirm-backdrop {
+    padding:
+      calc(0.65rem + env(safe-area-inset-top, 0px))
+      0.65rem
+      calc(0.65rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .ag-trust-confirm-modal {
+    padding: 0.95rem;
+    border-radius: var(--radius-lg);
+    gap: 0.72rem;
+  }
+
+  .ag-trust-confirm-close {
+    width: 40px;
+    height: 40px;
+  }
+
+  .ag-trust-confirm-actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .ag-trust-confirm-cancel-btn,
+  .ag-trust-confirm-accept-btn {
+    width: 100%;
+    min-height: 44px;
+    height: 44px;
   }
 }

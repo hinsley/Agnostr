@@ -51,6 +51,18 @@ export interface LiveCaptionEntry {
   timestamp: number // unix ms
 }
 
+export interface EndedCallTranscript {
+  id: string
+  callTitle: string
+  startedAt: number
+  endedAt: number
+  modelLabel: string
+  entries: LiveCaptionEntry[]
+  filename: string
+  markdown: string
+  plainText: string
+}
+
 export interface PersistedTranscriptionConfig {
   activeModelId: string
   autoTranscribe: boolean
@@ -88,6 +100,8 @@ export interface TranscriptionEngine {
     memo: VoiceMemoAttachment,
     senderPubkey: string
   ) => Promise<void>
+  transcribeAudioBlob: (blob: Blob) => Promise<string>
+  seedMemoTranscript: (memoKey: string, text: string, modelLabel?: string) => void
 
   // Live per-speaker call captions (CC) & rolling/full transcript
   liveCaptionsEnabled: boolean
@@ -99,4 +113,7 @@ export interface TranscriptionEngine {
     content: string
     mimeType: string
   }
+  endedCallTranscript: EndedCallTranscript | null
+  dismissEndedCallTranscript: () => void
+  downloadEndedCallTranscript: () => void
 }

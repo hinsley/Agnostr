@@ -249,7 +249,7 @@ export class LiveStreamSpeechCapturer {
   }
 
   async start(participants: readonly CallParticipant[]): Promise<void> {
-    this.latestParticipants = [...participants]
+    this.latestParticipants = participants.filter((p) => p.isSelf || !p.isUntrusted)
     if (this.disposed) return
 
     if (!this.initPromise) {
@@ -262,7 +262,8 @@ export class LiveStreamSpeechCapturer {
   }
 
   syncParticipants(participants: readonly CallParticipant[]): void {
-    this.latestParticipants = [...participants]
+    const trustedOnly = participants.filter((p) => p.isSelf || !p.isUntrusted)
+    this.latestParticipants = [...trustedOnly]
     if (this.disposed || !this.audioCtx || !this.silentSink) return
 
     if (this.audioCtx.state === 'suspended') {
@@ -270,7 +271,7 @@ export class LiveStreamSpeechCapturer {
     }
 
     const activePubkeys = new Set<string>()
-    for (const p of participants) {
+    for (const p of trustedOnly) {
       const pk = p.pubkey.toLowerCase()
       activePubkeys.add(pk)
 
