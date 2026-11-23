@@ -304,7 +304,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=')) return
       const currentHash = normalizeGeohash(rawHash)
       if (currentHash !== activeGeohash) {
-        window.history.replaceState(null, '', `#${activeGeohash}`)
+        window.history.replaceState(window.history.state, '', `#${activeGeohash}`)
       }
     } catch {
       // Ignore

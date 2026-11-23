@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { RefreshCw, WifiOff, X } from 'lucide-react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
+import { useBackNavigation } from './hooks/useBackNavigation'
 import { useMobileSwipeDrawers } from './hooks/useMobileSwipeDrawers'
 import { useMobileViewport } from './hooks/useMobileViewport'
 import { usePwa } from './hooks/usePwa'
@@ -578,6 +579,107 @@ export function App() {
     setRoomInfoOpen(false)
   }, [])
 
+  const { pushToast } = engine
+
+  const handleBackNavigation = useCallback((): boolean => {
+    if (lightboxImage) {
+      setLightboxImage(null)
+      return true
+    }
+    if (cmdkOpen) {
+      setCmdkOpen(false)
+      return true
+    }
+    if (inspectedPeer) {
+      setInspectedPeer(null)
+      return true
+    }
+    if (serverSettingsState.serverId) {
+      setServerSettingsState({ serverId: null, tab: 'overview' })
+      return true
+    }
+    if (serverHubState.open) {
+      closeServerHub()
+      return true
+    }
+    if (installModalOpen) {
+      setInstallModalOpen(false)
+      return true
+    }
+    if (radarExpanded) {
+      setRadarExpanded(false)
+      return true
+    }
+    if (settingsState.open) {
+      setSettingsState((prev) => ({ ...prev, open: false }))
+      return true
+    }
+    if (activeCall && callExpanded) {
+      setCallExpanded(false)
+      return true
+    }
+    if (roomInfoOpen) {
+      setRoomInfoOpen(false)
+      return true
+    }
+    if (searchOpen) {
+      setSearchOpen(false)
+      setSearchQuery('')
+      return true
+    }
+    if (isMobileViewport && mobileScreen === 'chat') {
+      handleMobileBack()
+      return true
+    }
+    return false
+  }, [
+    lightboxImage,
+    cmdkOpen,
+    inspectedPeer,
+    serverSettingsState.serverId,
+    serverHubState.open,
+    closeServerHub,
+    installModalOpen,
+    radarExpanded,
+    settingsState.open,
+    activeCall,
+    callExpanded,
+    roomInfoOpen,
+    searchOpen,
+    isMobileViewport,
+    mobileScreen,
+    handleMobileBack,
+  ])
+
+  const handleBackExitHint = useCallback(() => {
+    pushToast('info', 'Press back again to exit')
+  }, [pushToast])
+
+  const { rearmGuard } = useBackNavigation({
+    onBack: handleBackNavigation,
+    onExitHint: handleBackExitHint,
+  })
+
+  const hasActiveBackTarget =
+    Boolean(lightboxImage) ||
+    cmdkOpen ||
+    Boolean(inspectedPeer) ||
+    Boolean(serverSettingsState.serverId) ||
+    serverHubState.open ||
+    installModalOpen ||
+    radarExpanded ||
+    settingsState.open ||
+    Boolean(activeCall && callExpanded) ||
+    roomInfoOpen ||
+    searchOpen ||
+    (isMobileViewport && mobileScreen === 'chat')
+
+  useEffect(() => {
+    if (hasActiveBackTarget) {
+      rearmGuard()
+    }
+  }, [hasActiveBackTarget, rearmGuard])
+
   const mobileNavActiveTab: ListTab =
     mobileScreen === 'chat'
       ? isDm
@@ -744,7 +846,6 @@ export function App() {
     radioAudio.play('click')
   }, [])
 
-  const { pushToast } = engine
   const handleOpenInstall = useCallback(() => {
     radioAudio.play('click')
     if (pwa.canPromptInstall) {

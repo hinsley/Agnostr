@@ -256,7 +256,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     setPendingInvite(null)
     try {
       if ((window.location.hash || '').toLowerCase().startsWith('#invite=')) {
-        window.history.replaceState(null, '', `#${activeGeohash}`)
+        window.history.replaceState(window.history.state, '', `#${activeGeohash}`)
       }
     } catch {
       // Ignore

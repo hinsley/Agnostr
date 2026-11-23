@@ -2418,6 +2418,92 @@
   flex-shrink: 0;
 }
 
+/* Attach-Media Upward Popover Menu (Take Photo / Choose Photo) */
+.ag-attach-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.ag-attach-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  min-width: 204px;
+  max-width: min(260px, calc(100vw - 24px));
+  padding: 5px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: var(--z-popover);
+  transform-origin: bottom left;
+  animation: ag-scale-in var(--dur-fast) var(--ease-out);
+}
+
+.ag-attach-menu-item {
+  width: 100%;
+  min-height: 38px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  color: var(--text-primary);
+  transition:
+    background-color var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-attach-menu-item:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+}
+
+.ag-attach-menu-item:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.ag-attach-menu-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-attach-menu.dm .ag-attach-menu-icon {
+  background-color: var(--dm-soft);
+  color: var(--dm-accent);
+}
+
+.ag-attach-menu-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ag-attach-menu-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+
+.ag-attach-menu-sub {
+  font-size: 11.5px;
+  line-height: 1.25;
+  color: var(--text-muted);
+}
+
 .ag-composer-icon-btn {
   width: 32px;
   height: 32px;
@@ -3626,6 +3712,22 @@
   .ag-composer-send-btn {
     width: 38px;
     height: 38px;
+  }
+
+  .ag-attach-menu {
+    min-width: 214px;
+    max-width: calc(100vw - 20px);
+    bottom: calc(100% + 8px);
+  }
+
+  .ag-attach-menu-item {
+    min-height: 44px;
+    padding: 8px 10px;
+  }
+
+  .ag-attach-menu-icon {
+    width: 30px;
+    height: 30px;
   }
 
   .ag-voice-mini-bar {

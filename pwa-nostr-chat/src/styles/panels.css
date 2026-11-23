@@ -4061,6 +4061,258 @@
 }
 
 /* --------------------------------------------------------------------------
+   Camera Capture Modal (Instant Photo Capture in Composer)
+   -------------------------------------------------------------------------- */
+.ag-camera-modal-backdrop {
+  z-index: calc(var(--z-modal) + 15);
+}
+
+.ag-camera-modal {
+  width: min(620px, 100%);
+  max-height: min(90dvh, 720px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  animation: ag-scale-in var(--dur-med) var(--ease-spring);
+}
+
+.ag-camera-modal-head {
+  flex: 0 0 auto;
+  height: 54px;
+  padding: 0 0.85rem 0 1.05rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+}
+
+.ag-camera-modal-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.ag-camera-modal-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-camera-modal-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-camera-close-btn {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+}
+
+.ag-camera-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 280px;
+  aspect-ratio: 4 / 3;
+  max-height: 58dvh;
+  width: 100%;
+  background-color: #090a0d;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ag-camera-video,
+.ag-camera-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background-color: #090a0d;
+}
+
+.ag-camera-video.mirrored {
+  transform: scaleX(-1);
+}
+
+.ag-camera-video.hidden {
+  opacity: 0;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ag-camera-overlay-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.78rem;
+  padding: 1.5rem;
+  text-align: center;
+  background-color: var(--bg-canvas);
+  color: var(--text-secondary);
+}
+
+.ag-camera-state-icon {
+  color: var(--accent);
+}
+
+.ag-camera-state-text {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.ag-camera-error-badge {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--status-danger-soft);
+  border: 1px solid color-mix(in srgb, var(--status-danger) 35%, transparent);
+  color: var(--status-danger);
+}
+
+.ag-camera-error-msg {
+  margin: 0;
+  max-width: 340px;
+  font-size: var(--text-sm);
+  line-height: 1.48;
+  color: var(--text-primary);
+}
+
+.ag-camera-error-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 0.2rem;
+}
+
+.ag-camera-controls {
+  flex: 0 0 auto;
+  padding: 0.9rem 1.1rem;
+  border-top: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+}
+
+.ag-camera-shutter-bar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.ag-camera-side-slot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.ag-camera-side-slot.end {
+  justify-content: flex-end;
+}
+
+.ag-camera-util-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-camera-util-btn:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+
+.ag-camera-util-btn:active {
+  transform: scale(0.95);
+}
+
+.ag-camera-shutter-btn {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-full);
+  padding: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+  border: 3px solid var(--text-primary);
+  transition:
+    transform 100ms ease,
+    border-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease,
+    opacity var(--dur-fast) ease;
+}
+
+.ag-camera-shutter-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--accent-glow);
+}
+
+.ag-camera-shutter-btn:active:not(:disabled) {
+  transform: scale(0.93);
+}
+
+.ag-camera-shutter-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.ag-camera-shutter-core {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-camera-shutter-btn:hover:not(:disabled) .ag-camera-shutter-core {
+  background-color: var(--accent-hover);
+}
+
+.ag-camera-review-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+}
+
+.ag-camera-action-btn {
+  min-height: 44px;
+  height: 44px;
+  padding: 0 1.05rem;
+}
+
+/* --------------------------------------------------------------------------
    Native Mobile Sheet & Settings Stack (<868px)
    Visual Viewport Anchored (--ag-vvt / --ag-vvh) for iOS & Android Keyboards
    -------------------------------------------------------------------------- */
@@ -4082,7 +4334,7 @@
       calc(0.75rem + env(safe-area-inset-bottom, 0px));
   }
 
-  html[data-keyboard-open='true'] .ag-modal-backdrop:not(.ag-set-backdrop) {
+  html[data-keyboard-open='true'] .ag-modal-backdrop:not(.ag-set-backdrop):not(.ag-camera-modal-backdrop) {
     padding-bottom: 0.75rem;
   }
 
@@ -4352,6 +4604,49 @@
 
   .ag-set-notif-seg button {
     min-height: 36px;
+  }
+
+  .ag-camera-modal-backdrop {
+    top: var(--ag-vvt, 0px);
+    left: 0;
+    right: 0;
+    bottom: auto;
+    height: var(--ag-vvh, 100dvh);
+    padding: 0;
+    overscroll-behavior: contain;
+  }
+
+  .ag-camera-modal {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: var(--ag-vvh, 100dvh);
+    border-radius: 0;
+    border: none;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  html[data-keyboard-open='true'] .ag-camera-modal {
+    padding-bottom: 0;
+  }
+
+  .ag-camera-close-btn {
+    display: inline-flex;
+    width: 44px;
+    height: 44px;
+  }
+
+  .ag-camera-viewport {
+    aspect-ratio: auto;
+    max-height: none;
+    min-height: 0;
+  }
+
+  .ag-camera-review-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
   }
 }
 

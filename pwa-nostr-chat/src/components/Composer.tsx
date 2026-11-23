@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowUp,
+  Camera,
   CornerUpLeft,
+  Image as ImageIcon,
   ImagePlus,
   Loader2,
   Lock,
@@ -22,7 +24,9 @@ import {
   revokeImagePreviewUrl,
 } from '../lib/imageProcessor'
 import { formatVoiceDuration, isVoiceRecordingSupported } from '../lib/voiceRecorder'
+import { useBackHandler } from '../hooks/useBackNavigation'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon'
+import { CameraCaptureModal } from './CameraCaptureModal'
 import { VoiceRecorderBar } from './VoiceRecorderBar'
 
 const MEDIA_PHASE_LABEL: Record<VoiceSendPhase, string> = {
@@ -37,6 +41,13 @@ function dataTransferHasFiles(dt: DataTransfer | null): boolean {
   if (!dt) return false
   if (dt.types && Array.from(dt.types).includes('Files')) return true
   return dt.files.length > 0
+}
+
+function isMobileCameraCaptureDevice(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false
+  const coarse = Boolean(window.matchMedia?.('(pointer: coarse)').matches)
+  const mobileUa = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+  return coarse || mobileUa
 }
 
 export interface ComposerProps {
@@ -68,11 +79,15 @@ export const Composer: React.FC<ComposerProps> = ({
   const [history, setHistory] = useState<string[]>([])
   const [historyIdx, setHistoryIdx] = useState(-1)
   const [voiceMode, setVoiceMode] = useState(false)
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false)
+  const [cameraModalOpen, setCameraModalOpen] = useState(false)
   const [pendingImage, setPendingImage] = useState<PreparedImage | null>(null)
   const [preparingImage, setPreparingImage] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const cameraInputRef = useRef<HTMLInputElement | null>(null)
+  const attachWrapRef = useRef<HTMLDivElement | null>(null)
   const pendingImageRef = useRef<PreparedImage | null>(null)
   const contextEpochRef = useRef(0)
   const dragDepthRef = useRef(0)
@@ -126,12 +141,41 @@ export const Composer: React.FC<ComposerProps> = ({
     prevTargetKeyRef.current = activeTargetKey
     if (pkChanged || targetChanged) {
       setVoiceMode(false)
+      setAttachMenuOpen(false)
+      setCameraModalOpen(false)
       clearPendingImage()
       setPreparingImage(false)
       dragDepthRef.current = 0
       setDragActive(false)
     }
   }, [engine.identity.masterPubkey, activeTargetKey, clearPendingImage])
+
+  // Close attach-media popover on outside tap/click or Escape
+  useEffect(() => {
+    if (!attachMenuOpen) return
+    const handlePointerDown = (e: PointerEvent) => {
+      const wrap = attachWrapRef.current
+      if (wrap && !wrap.contains(e.target as Node)) {
+        setAttachMenuOpen(false)
+      }
+    }
+    const handleKeyDownClose = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        setAttachMenuOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', handlePointerDown)
+    window.addEventListener('keydown', handleKeyDownClose, true)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      window.removeEventListener('keydown', handleKeyDownClose, true)
+    }
+  }, [attachMenuOpen])
+
+  useBackHandler(attachMenuOpen, () => setAttachMenuOpen(false))
+  useBackHandler(cameraModalOpen, () => setCameraModalOpen(false))
 
   // Handle external mention or snippet insertions
   useEffect(() => {
@@ -308,6 +352,22 @@ export const Composer: React.FC<ComposerProps> = ({
     if (file) {
       void stageImageFile(file)
     }
+  }
+
+  const handleTakePhoto = () => {
+    setAttachMenuOpen(false)
+    if (!canSign || isSending || preparingImage) return
+    if (isMobileCameraCaptureDevice()) {
+      cameraInputRef.current?.click()
+      return
+    }
+    setCameraModalOpen(true)
+  }
+
+  const handleChoosePhoto = () => {
+    setAttachMenuOpen(false)
+    if (!canSign || isSending || preparingImage) return
+    fileInputRef.current?.click()
   }
 
   const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -605,6 +665,17 @@ export const Composer: React.FC<ComposerProps> = ({
           tabIndex={-1}
         />
 
+        <input
+          ref={cameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="sr-only"
+          onChange={handleFileInputChange}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
+
         {dragActive && (
           <div className="ag-composer-drop-overlay" role="status">
             <ImagePlus size={18} />
@@ -786,27 +857,72 @@ export const Composer: React.FC<ComposerProps> = ({
               void handleSubmit(true)
             }}
           >
-            {/* Left Compact Image Picker Button */}
-            <button
-              type="button"
-              className={`ag-composer-icon-btn ${isViolet ? 'dm' : ''} ${pendingImage ? 'active' : ''}`}
-              disabled={!canSign || isSending || preparingImage}
-              onClick={() => fileInputRef.current?.click()}
-              title={
-                !canSign
-                  ? 'Configure a signing key in Settings to send images'
-                  : isViolet
-                    ? 'Attach encrypted image (EXIF stripped)'
-                    : 'Attach image (EXIF stripped)'
-              }
-              aria-label={isViolet ? 'Attach encrypted image' : 'Attach image'}
-            >
-              {preparingImage ? (
-                <Loader2 size={17} className="ag-spin" />
-              ) : (
-                <ImagePlus size={18} />
+            {/* Left Compact Attach-Media Button + Upward Popover Menu */}
+            <div className="ag-attach-wrap" ref={attachWrapRef}>
+              {attachMenuOpen && (
+                <div
+                  className={`ag-attach-menu ${isViolet ? 'dm' : ''}`}
+                  role="menu"
+                  aria-label="Attach photo"
+                  data-no-swipe="true"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="ag-attach-menu-item"
+                    onClick={handleTakePhoto}
+                  >
+                    <span className="ag-attach-menu-icon" aria-hidden="true">
+                      <Camera size={16} />
+                    </span>
+                    <span className="ag-attach-menu-copy">
+                      <span className="ag-attach-menu-label">Take Photo</span>
+                      <span className="ag-attach-menu-sub">Use camera</span>
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="ag-attach-menu-item"
+                    onClick={handleChoosePhoto}
+                  >
+                    <span className="ag-attach-menu-icon" aria-hidden="true">
+                      <ImageIcon size={16} />
+                    </span>
+                    <span className="ag-attach-menu-copy">
+                      <span className="ag-attach-menu-label">Choose Photo</span>
+                      <span className="ag-attach-menu-sub">Library or file</span>
+                    </span>
+                  </button>
+                </div>
               )}
-            </button>
+
+              <button
+                type="button"
+                className={`ag-composer-icon-btn ${isViolet ? 'dm' : ''} ${pendingImage || attachMenuOpen ? 'active' : ''}`}
+                disabled={!canSign || isSending || preparingImage}
+                onPointerDown={keepTextareaFocused}
+                onMouseDown={keepTextareaFocused}
+                onClick={() => setAttachMenuOpen((v) => !v)}
+                aria-haspopup="menu"
+                aria-expanded={attachMenuOpen}
+                title={
+                  !canSign
+                    ? 'Configure a signing key in Settings to send images'
+                    : isViolet
+                      ? 'Attach or take encrypted photo (EXIF stripped)'
+                      : 'Attach or take photo (EXIF stripped)'
+                }
+                aria-label={isViolet ? 'Attach encrypted photo' : 'Attach photo'}
+              >
+                {preparingImage ? (
+                  <Loader2 size={17} className="ag-spin" />
+                ) : (
+                  <ImagePlus size={18} />
+                )}
+              </button>
+            </div>
 
             {/* Full-Width Auto-Growing Input (16px on mobile; never disabled while sending) */}
             <textarea
@@ -818,6 +934,7 @@ export const Composer: React.FC<ComposerProps> = ({
               enterKeyHint="send"
               placeholder={placeholder}
               onChange={(e) => {
+                if (attachMenuOpen) setAttachMenuOpen(false)
                 setDraft(e.target.value)
                 setCursorPos(e.target.selectionStart ?? e.target.value.length)
               }}
@@ -835,6 +952,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 className={`ag-composer-icon-btn ${isViolet ? 'dm' : ''}`}
                 disabled={!voiceSupported || !canSign || isSending || preparingImage}
                 onClick={() => {
+                  setAttachMenuOpen(false)
                   clearPendingImage()
                   setVoiceMode(true)
                 }}
@@ -871,6 +989,19 @@ export const Composer: React.FC<ComposerProps> = ({
           </form>
         )}
       </div>
+
+      <CameraCaptureModal
+        open={cameraModalOpen}
+        onClose={() => setCameraModalOpen(false)}
+        onCapture={(file) => {
+          setCameraModalOpen(false)
+          void stageImageFile(file)
+        }}
+        onFallbackChooseFile={() => {
+          setCameraModalOpen(false)
+          fileInputRef.current?.click()
+        }}
+      />
     </div>
   )
 }

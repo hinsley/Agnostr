@@ -35,6 +35,7 @@ import {
   getRecordingQualitySpec,
 } from '../lib/callRecorder.ts'
 import type { SoundCue } from '../utils/sound.ts'
+import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
 
 export interface CallStageProps {
@@ -433,6 +434,10 @@ export function CallStage({
 
   const isQualityPopoverVisible =
     qualityMenuOpen && Boolean(activeCall) && !activeCall?.localRecording
+
+  // Android / PWA Back button closes CallStage overlays (LIFO: quality menu -> transcript)
+  useBackHandler(Boolean(activeCall) && transcriptOpen, () => setTranscriptOpen(false))
+  useBackHandler(isQualityPopoverVisible, () => setQualityMenuOpen(false))
 
   useEffect(() => {
     if (!isQualityPopoverVisible) return

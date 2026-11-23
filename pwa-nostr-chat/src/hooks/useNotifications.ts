@@ -141,7 +141,7 @@ export function useNotifications(
       const parsed = parseNotifyHash(window.location.hash || '')
       if (parsed) {
         try {
-          window.history.replaceState(null, '', `#${activeGeohash}`)
+          window.history.replaceState(window.history.state, '', `#${activeGeohash}`)
         } catch {
           // Ignore
         }
@@ -291,7 +291,7 @@ export function useNotifications(
       if (parsed) {
         setPendingAction(parsed)
         try {
-          window.history.replaceState(null, '', `#${activeGeohash}`)
+          window.history.replaceState(window.history.state, '', `#${activeGeohash}`)
         } catch {
           // Ignore
         }
