@@ -12,6 +12,7 @@ import {
   Radio,
   Search,
   ShieldCheck,
+  Users,
   Video,
   Zap,
 } from 'lucide-react'
@@ -30,11 +31,13 @@ function getServerMonogram(name: string): string {
 export interface ChannelHeaderProps {
   engine: AgnostrEngine
   sidebarCollapsed: boolean
+  userListOpen?: boolean
   roomInfoOpen: boolean
   searchOpen: boolean
   hasOtherUnread?: boolean
   onMobileBack: () => void
   onToggleSidebar: () => void
+  onToggleUserList?: () => void
   onOpenRoomInfo: () => void
   onOpenTrustedSettings: () => void
   onToggleSearch: () => void
@@ -46,11 +49,13 @@ export interface ChannelHeaderProps {
 export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   engine,
   sidebarCollapsed,
+  userListOpen = false,
   roomInfoOpen,
   searchOpen,
   hasOtherUnread = false,
   onMobileBack,
   onToggleSidebar,
+  onToggleUserList,
   onOpenRoomInfo,
   onOpenTrustedSettings,
   onToggleSearch,
@@ -390,6 +395,19 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 <Languages size={17} />
               </button>
 
+              {onToggleUserList && (
+                <button
+                  type="button"
+                  className={`ag-circle-btn ${userListOpen ? 'active' : ''}`}
+                  onClick={onToggleUserList}
+                  title={userListOpen ? 'Hide user list' : 'Show user list'}
+                  aria-label={userListOpen ? 'Hide user list' : 'Show user list'}
+                  aria-pressed={userListOpen}
+                >
+                  <Users size={18} />
+                </button>
+              )}
+
               <button
                 type="button"
                 className={`ag-circle-btn ${roomInfoOpen ? 'active' : ''}`}
@@ -452,6 +470,19 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
               >
                 <Search size={18} />
               </button>
+
+              {onToggleUserList && (
+                <button
+                  type="button"
+                  className={`ag-circle-btn ${userListOpen ? 'active' : ''}`}
+                  onClick={onToggleUserList}
+                  title={userListOpen ? 'Hide member list' : 'Show member list'}
+                  aria-label={userListOpen ? 'Hide member list' : 'Show member list'}
+                  aria-pressed={userListOpen}
+                >
+                  <Users size={18} />
+                </button>
+              )}
 
               <button
                 type="button"
@@ -554,6 +585,19 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
               >
                 <Search size={18} />
               </button>
+
+              {onToggleUserList && (
+                <button
+                  type="button"
+                  className={`ag-circle-btn ${userListOpen ? 'active' : ''}`}
+                  onClick={onToggleUserList}
+                  title={userListOpen ? 'Hide user list' : 'Show user list'}
+                  aria-label={userListOpen ? 'Hide user list' : 'Show user list'}
+                  aria-pressed={userListOpen}
+                >
+                  <Users size={18} />
+                </button>
+              )}
 
               <button
                 type="button"

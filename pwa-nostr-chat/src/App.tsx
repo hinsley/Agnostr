@@ -33,6 +33,7 @@ import type { WalletInitialIntent, ZapTarget } from './types/wallet'
 import { radioAudio, type SoundCue } from './utils/sound'
 import { identiconDataUrl, shortPubkey } from './utils/identicon'
 import ConversationList, { type ListTab } from './components/ConversationList'
+import UserListPane from './components/UserListPane'
 import MobileTabBar from './components/MobileTabBar'
 import ChannelHeader from './components/ChannelHeader'
 import SearchBar from './components/SearchBar'
@@ -90,6 +91,8 @@ export function App() {
     typeof window !== 'undefined' ? window.innerWidth <= 867 : false
   )
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [userListCollapsed, setUserListCollapsed] = useState(false)
+  const [mobileUserListOpen, setMobileUserListOpen] = useState(false)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
 
   useEffect(() => {
@@ -283,6 +286,7 @@ export function App() {
     setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     if (activeCall.mode === 'geo' && activeCall.geohash) {
       engine.tuneGeohash(activeCall.geohash)
@@ -311,6 +315,7 @@ export function App() {
     if (navigatedNotifTsRef.current !== receivedAt) {
       navigatedNotifTsRef.current = receivedAt
       setAmailState({ open: false, section: 'inbox', composeTo: null })
+      setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       setCmdkOpen(false)
       setRadarExpanded(false)
@@ -558,6 +563,7 @@ export function App() {
     ) {
       setServerSettingsState({ serverId: null, tab: 'overview' })
       setSettingsState({ open: false, tab: undefined })
+      setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       setRadarExpanded(false)
       setInstallModalOpen(false)
@@ -651,7 +657,10 @@ export function App() {
       if (mod && e.key.toLowerCase() === 'i') {
         e.preventDefault()
         setRoomInfoOpen((v) => {
-          if (!v) setMobileScreen('chat')
+          if (!v) {
+            setMobileUserListOpen(false)
+            setMobileScreen('chat')
+          }
           return !v
         })
         return
@@ -707,6 +716,8 @@ export function App() {
           setCallExpanded(false)
         } else if (inspectedPeer) {
           setInspectedPeer(null)
+        } else if (mobileUserListOpen) {
+          setMobileUserListOpen(false)
         } else if (roomInfoOpen) {
           setRoomInfoOpen(false)
         } else if (searchOpen) {
@@ -736,6 +747,7 @@ export function App() {
     installModalOpen,
     callExpanded,
     inspectedPeer,
+    mobileUserListOpen,
     roomInfoOpen,
     searchOpen,
   ])
@@ -751,6 +763,7 @@ export function App() {
   const handleOpenAmail = useCallback((section: AmailInitialSection = 'inbox') => {
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setWalletState({ open: false, intent: undefined })
     setZapTarget(null)
@@ -761,6 +774,7 @@ export function App() {
   const handleOpenAmailCompose = useCallback((pubkey: string, nickname?: string) => {
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setWalletState({ open: false, intent: undefined })
     setZapTarget(null)
@@ -771,12 +785,35 @@ export function App() {
   const handleOpenSettings = useCallback((tab?: SettingsTab) => {
     setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setSettingsState({ open: true, tab })
   }, [])
 
+  const handleOpenRoomInfo = useCallback(() => {
+    setMobileUserListOpen(false)
+    setMobileScreen('chat')
+    setRoomInfoOpen(true)
+  }, [])
+
+  const handleToggleUserList = useCallback(() => {
+    radioAudio.play('click')
+    if (isMobileViewport) {
+      setMobileUserListOpen((open) => {
+        if (!open) {
+          setMobileScreen('chat')
+          setRoomInfoOpen(false)
+        }
+        return !open
+      })
+    } else {
+      setUserListCollapsed((v) => !v)
+    }
+  }, [isMobileViewport])
+
   const handleLeftDrawerOpenChange = useCallback((open: boolean) => {
     if (open) {
+      setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       setMobileScreen('list')
     } else {
@@ -787,9 +824,10 @@ export function App() {
   const handleRightDrawerOpenChange = useCallback((open: boolean) => {
     if (open) {
       setMobileScreen('chat')
-      setRoomInfoOpen(true)
-    } else {
       setRoomInfoOpen(false)
+      setMobileUserListOpen(true)
+    } else {
+      setMobileUserListOpen(false)
     }
   }, [])
 
@@ -822,8 +860,8 @@ export function App() {
     isSwipingRight,
   } = useMobileSwipeDrawers({
     leftOpen: mobileScreen === 'list',
-    rightOpen: roomInfoOpen,
-    disabled: swipeDisabled,
+    rightOpen: mobileUserListOpen,
+    disabled: swipeDisabled || roomInfoOpen,
     onLeftOpenChange: handleLeftDrawerOpenChange,
     onRightOpenChange: handleRightDrawerOpenChange,
   })
@@ -832,6 +870,7 @@ export function App() {
     if (engine.activeView.type === 'dm') setListTab('dms')
     else if (engine.activeView.type === 'server') setListTab('servers')
     else setListTab('radio')
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setMobileScreen('list')
   }, [engine.activeView.type])
@@ -840,6 +879,7 @@ export function App() {
     setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setListTab(tab)
     setMobileScreen('list')
@@ -848,6 +888,7 @@ export function App() {
   const handleMobileTabMap = useCallback(() => {
     setAmailState({ open: false, section: 'inbox', composeTo: null })
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setRadarExpanded((open) => !open)
     radioAudio.play('click')
@@ -856,6 +897,7 @@ export function App() {
   const handleMobileTabSettings = useCallback(() => {
     setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setSettingsState((prev) =>
       prev.open ? { ...prev, open: false } : { open: true, tab: undefined }
@@ -934,6 +976,10 @@ export function App() {
       setCallExpanded(false)
       return true
     }
+    if (mobileUserListOpen) {
+      setMobileUserListOpen(false)
+      return true
+    }
     if (roomInfoOpen) {
       setRoomInfoOpen(false)
       return true
@@ -969,6 +1015,7 @@ export function App() {
     settingsState.open,
     activeCall,
     callExpanded,
+    mobileUserListOpen,
     roomInfoOpen,
     searchOpen,
     isMobileViewport,
@@ -1027,6 +1074,7 @@ export function App() {
     amailState.open ||
     settingsState.open ||
     Boolean(activeCall && callExpanded) ||
+    mobileUserListOpen ||
     roomInfoOpen ||
     searchOpen ||
     (isMobileViewport && mobileScreen === 'chat')
@@ -1055,6 +1103,7 @@ export function App() {
         setAmailState({ open: false, section: 'inbox', composeTo: null })
         setListTab('radio')
         setMobileScreen('chat')
+        setMobileUserListOpen(false)
         setRoomInfoOpen(false)
         setRadarExpanded(false)
       }
@@ -1070,6 +1119,7 @@ export function App() {
       setAmailState({ open: false, section: 'inbox', composeTo: null })
       setListTab('servers')
       setMobileScreen('chat')
+      setMobileUserListOpen(false)
       setRoomInfoOpen(false)
     },
     [engine.servers]
@@ -1082,6 +1132,7 @@ export function App() {
   const handleOpenServerSettings = useCallback(
     (serverId: string, initialTab: ServerSettingsTab = 'overview') => {
       setServerSettingsState({ serverId, tab: initialTab })
+      setMobileUserListOpen(false)
       setRoomInfoOpen(false)
     },
     []
@@ -1107,6 +1158,7 @@ export function App() {
     setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setWalletState({ open: true, intent })
   }, [])
@@ -1215,6 +1267,7 @@ export function App() {
         setZapTarget(null)
         setRadarExpanded(false)
         setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+        setMobileUserListOpen(false)
         setRoomInfoOpen(false)
         setInspectedPeer(null)
         engine.openDmThread(target.pubkey, target.nickname)
@@ -1242,6 +1295,7 @@ export function App() {
       setZapTarget(null)
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+      setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       void engine.servers.joinFromInvite(parsed).then((joined) => {
         if (joined) {
@@ -1279,6 +1333,7 @@ export function App() {
       setAmailState({ open: false, section: 'inbox', composeTo: null })
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+      setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       setListTab('radio')
       setMobileScreen('chat')
@@ -1289,6 +1344,7 @@ export function App() {
 
   const handleLeftServer = useCallback(() => {
     setServerSettingsState({ serverId: null, tab: 'overview' })
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     engine.tuneGeohash(engine.activeGeohash)
     setListTab('radio')
@@ -1300,6 +1356,7 @@ export function App() {
       radioAudio.play('click')
       setAmailState({ open: false, section: 'inbox', composeTo: null })
       setInspectedPeer(null)
+      setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       setListTab('dms')
       setMobileScreen('chat')
@@ -1338,6 +1395,7 @@ export function App() {
     radioAudio.play('click')
     engine.closeDmThread(pubkey)
     if (wasActiveDm) {
+      setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       if (isMobileViewport) {
         setListTab('dms')
@@ -1373,6 +1431,7 @@ export function App() {
     const clean = handle.startsWith('@') ? handle : `@${handle}`
     setExternalDraftToken({ id: Date.now(), text: `${clean} ` })
     setInspectedPeer(null)
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setMobileScreen('chat')
   }, [])
@@ -1458,6 +1517,7 @@ export function App() {
     setAmailState({ open: false, section: 'inbox', composeTo: null })
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRadarExpanded(true)
+    setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     radioAudio.play('click')
   }, [])
@@ -1616,12 +1676,17 @@ export function App() {
     <div
       className={`ag-app ag-shell ${panicFlash ? 'ag-panic-active' : ''}`}
       data-mobile-screen={mobileScreen}
-      data-right-drawer={roomInfoOpen ? 'open' : 'closed'}
+      data-right-drawer={mobileUserListOpen ? 'open' : 'closed'}
     >
       <div
         ref={shellBodyRef}
         className={`ag-shell-body ${isSwipingLeft ? 'is-swiping-left' : ''} ${isSwipingRight ? 'is-swiping-right' : ''}`}
-        style={{ '--ag-left-drawer-p': String(leftProgress) } as CSSProperties}
+        style={
+          {
+            '--ag-left-drawer-p': String(leftProgress),
+            '--ag-right-drawer-p': String(rightProgress),
+          } as CSSProperties
+        }
       >
         {/* Dimmed Interactive Scrim behind Mobile Left Slide-Over Sidebar */}
         <div
@@ -1679,12 +1744,14 @@ export function App() {
         <ChannelHeader
           engine={engine}
           sidebarCollapsed={sidebarCollapsed}
+          userListOpen={isMobileViewport ? mobileUserListOpen : !userListCollapsed}
           roomInfoOpen={roomInfoOpen}
           searchOpen={searchOpen}
           hasOtherUnread={totalUnreadBadge > 0}
           onMobileBack={handleMobileBack}
           onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
-          onOpenRoomInfo={() => handleRightDrawerOpenChange(true)}
+          onToggleUserList={handleToggleUserList}
+          onOpenRoomInfo={handleOpenRoomInfo}
           onOpenTrustedSettings={() => handleOpenSettings('privacy')}
           onToggleSearch={() => {
             setSearchOpen((v) => {
@@ -1846,11 +1913,39 @@ export function App() {
         />
         </main>
 
+        {/* Dimmed Interactive Scrim behind Mobile Right Slide-Out User List Tray */}
+        <div
+          className={`ag-right-drawer-scrim ${mobileUserListOpen ? 'active' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
+          onClick={() => setMobileUserListOpen(false)}
+          aria-hidden="true"
+        />
+
+        {/* Right Pane (Desktop User List) / Interactive Swipe-Left Slide-Out Tray (Mobile <868px) */}
+        <div
+          className={`ag-users-col ${mobileUserListOpen ? 'open' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
+          aria-hidden={
+            isMobileViewport && !mobileUserListOpen && !isSwipingRight ? true : undefined
+          }
+        >
+          <UserListPane
+            engine={engine}
+            collapsed={userListCollapsed}
+            onCloseMobile={() => setMobileUserListOpen(false)}
+            onInspectPeer={setInspectedPeer}
+            onStartDm={handleOpenDm}
+            onMentionPeer={handleMentionPeer}
+            onEditPeerNote={handleOpenPeerNote}
+            onOpenZap={handleOpenZap}
+            onOpenAmailCompose={({ pubkey, nickname }) => handleOpenAmailCompose(pubkey, nickname)}
+            onPlaySound={playSound}
+          />
+        </div>
+
         {/* Clean Chat / Room / Server Info Slide-Over Sheet (In-Shell Drawer on Mobile) */}
         <RoomInfoSheet
           open={roomInfoOpen}
-          swipeProgress={isMobileViewport ? rightProgress : undefined}
-          isSwiping={isSwipingRight}
+          swipeProgress={undefined}
+          isSwiping={false}
           inShell={isMobileViewport}
           engine={engine}
           onClose={() => setRoomInfoOpen(false)}
@@ -2020,7 +2115,7 @@ export function App() {
         onOpenServerHub={handleOpenServerHub}
         onExpandRadar={handleExpandRadar}
         onLocateMe={() => void handleLocateMe()}
-        onOpenRoomInfo={() => handleRightDrawerOpenChange(true)}
+        onOpenRoomInfo={handleOpenRoomInfo}
         onOpenSettings={handleOpenSettings}
         onOpenAmail={handleOpenAmail}
         onOpenWallet={handleOpenWallet}

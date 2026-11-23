@@ -21,6 +21,7 @@
 
   /* Compact High-Density Layout Dimensions */
   --sidebar-w: 280px;
+  --users-w: 248px;
   --inspector-w: 380px;
   --sheet-w: 380px;
   --header-h: 52px;
@@ -285,4 +286,11 @@
   --shadow-md: 0 6px 20px rgba(15, 23, 42, 0.09);
   --shadow-lg: 0 18px 46px rgba(15, 23, 42, 0.14);
   --ambient-glow: none;
+}
+
+@media (min-width: 868px) and (max-width: 1079px) {
+  :root {
+    --sidebar-w: 256px;
+    --users-w: 224px;
+  }
 }

@@ -109,7 +109,7 @@ function shouldIgnoreSwipeTarget(target: EventTarget | null, container: HTMLElem
 
 /**
  * Interactive 60fps finger-following mobile swipe engine for Left (ConversationList)
- * and Right (RoomInfoSheet) slide-over drawers inside `.ag-shell-body`.
+ * and Right (UserListPane) slide-over drawers inside `.ag-shell-body`.
  */
 export function useMobileSwipeDrawers(
   options: UseMobileSwipeDrawersOptions
@@ -157,7 +157,7 @@ export function useMobileSwipeDrawers(
 
       const touch = e.touches[0]
       const now = performance.now()
-      const drawerWidth = Math.max(240, Math.min(vw * 0.86, 336))
+      const drawerWidth = Math.max(240, Math.min(vw * 0.86, 320))
 
       sessionRef.current = {
         touchId: touch.identifier,
@@ -235,6 +235,10 @@ export function useMobileSwipeDrawers(
             }
           }
 
+          session.drawerWidth = Math.max(
+            240,
+            Math.min(session.viewportWidth * 0.86, session.activeDrawer === 'left' ? 336 : 320)
+          )
           session.lock = 'horizontal'
           const active = document.activeElement
           if (active instanceof HTMLElement && active !== document.body) {

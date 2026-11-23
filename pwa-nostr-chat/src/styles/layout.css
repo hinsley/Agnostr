@@ -52,11 +52,13 @@ body,
 }
 
 /* Desktop defaults for mobile swipe drawer containers */
-.ag-drawer-scrim {
+.ag-drawer-scrim,
+.ag-right-drawer-scrim {
   display: none;
 }
 
-.ag-conv-col {
+.ag-conv-col,
+.ag-users-col {
   display: contents;
 }
 
@@ -85,6 +87,35 @@ body,
   width: 0;
   flex-basis: 0;
   border-right-color: transparent;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* --------------------------------------------------------------------------
+   Right Pane: User List (248px Desktop, Slide-Out Mobile Tray)
+   -------------------------------------------------------------------------- */
+.ag-users-pane {
+  width: var(--users-w);
+  flex: 0 0 var(--users-w);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-surface);
+  border-left: 1px solid var(--border-subtle);
+  overflow: hidden;
+  z-index: 20;
+  padding-top: env(safe-area-inset-top, 0px);
+  transition:
+    width var(--dur-med) var(--ease-out),
+    flex-basis var(--dur-med) var(--ease-out),
+    opacity var(--dur-fast) ease;
+}
+
+.ag-users-pane.collapsed {
+  width: 0;
+  flex-basis: 0;
+  border-left-color: transparent;
   opacity: 0;
   pointer-events: none;
 }
@@ -308,6 +339,71 @@ body,
     box-shadow: var(--shadow-lg);
   }
 
+  /* Interactive dimmed backdrop behind mobile Right Slide-Out User List Tray */
+  .ag-right-drawer-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 23;
+    background-color: var(--bg-overlay);
+    opacity: var(--ag-right-drawer-p, 0);
+    pointer-events: none;
+    transition: opacity 240ms cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: opacity;
+  }
+
+  .ag-right-drawer-scrim.active {
+    pointer-events: auto;
+  }
+
+  .ag-right-drawer-scrim.is-swiping {
+    transition: none;
+  }
+
+  /* Mobile Right Slide-Out User List Tray (inside .ag-shell-body above .ag-main & below .ag-mobile-tabbar) */
+  .ag-users-col {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: min(86vw, 320px);
+    max-width: 86vw;
+    z-index: 24;
+    transform: translate3d(calc((1 - var(--ag-right-drawer-p, 0)) * 100%), 0, 0);
+    transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
+    pointer-events: none;
+  }
+
+  .ag-users-col.open {
+    pointer-events: auto;
+  }
+
+  .ag-users-col.is-swiping {
+    transition: none;
+    pointer-events: auto;
+  }
+
+  .ag-users-pane,
+  .ag-users-pane.collapsed {
+    width: 100%;
+    height: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
+    border-left: 1px solid transparent;
+    opacity: 1;
+    pointer-events: inherit;
+    transition: none;
+  }
+
+  .ag-users-col.open .ag-users-pane,
+  .ag-users-col.is-swiping .ag-users-pane {
+    border-left-color: var(--border-default);
+    box-shadow: var(--shadow-lg);
+  }
+
   /* Keep Chat always mounted underneath slide-over drawers for 60fps swipe reveal */
   .ag-main {
     width: 100%;
@@ -323,7 +419,9 @@ body,
 
   @media (prefers-reduced-motion: reduce) {
     .ag-conv-col,
-    .ag-drawer-scrim {
+    .ag-drawer-scrim,
+    .ag-users-col,
+    .ag-right-drawer-scrim {
       transition: none;
     }
   }
