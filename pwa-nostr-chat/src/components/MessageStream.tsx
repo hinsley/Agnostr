@@ -102,11 +102,36 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   onOpenLightbox,
 }) => {
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const bottomRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
+  const lastClientHeightRef = useRef(0)
   const [showJumpBtn, setShowJumpBtn] = useState(false)
   const [unseenBelow, setUnseenBelow] = useState(0)
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null)
+
+  const scrollContainerToBottom = useCallback((smooth = false) => {
+    const container = scrollRef.current
+    if (!container) return
+    const targetTop = Math.max(0, container.scrollHeight - container.clientHeight)
+    if (smooth) {
+      container.scrollTo({ top: targetTop, behavior: 'smooth' })
+    } else {
+      container.scrollTop = container.scrollHeight
+    }
+  }, [])
+
+  const scrollMessageIntoContainer = useCallback((targetEl: HTMLElement, smooth = true) => {
+    const container = scrollRef.current
+    if (!container) return
+    const containerRect = container.getBoundingClientRect()
+    const targetRect = targetEl.getBoundingClientRect()
+    const offsetInContainer = targetRect.top - containerRect.top + container.scrollTop
+    const maxTop = Math.max(0, container.scrollHeight - container.clientHeight)
+    const centeredTop = Math.max(
+      0,
+      Math.min(maxTop, offsetInContainer - (container.clientHeight - targetRect.height) / 2)
+    )
+    container.scrollTo({ top: centeredTop, behavior: smooth ? 'smooth' : 'auto' })
+  }, [])
 
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
   const isServer =
@@ -220,7 +245,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     setUnseenBelow(0)
     setActiveActionMsgId(null)
     requestAnimationFrame(() => {
-      bottomRef.current?.scrollIntoView({ block: 'end' })
+      scrollContainerToBottom(false)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamKey])
@@ -234,26 +259,74 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     if (delta > 0) {
       if (stickToBottomRef.current) {
         requestAnimationFrame(() => {
-          bottomRef.current?.scrollIntoView({ block: 'end' })
+          scrollContainerToBottom(false)
         })
       } else {
         setUnseenBelow((c) => c + delta)
       }
     }
-  }, [displayMessages.length])
+  }, [displayMessages.length, scrollContainerToBottom])
 
-  // Scroll to active search hit when navigating search results
+  // Keep pinned to latest message when the virtual keyboard opens or composer height changes
+  useEffect(() => {
+    const container = scrollRef.current
+    if (!container) return
+    lastClientHeightRef.current = container.clientHeight
+
+    let rafId: number | null = null
+    const pinIfStuck = () => {
+      if (rafId !== null) window.cancelAnimationFrame(rafId)
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null
+        const el = scrollRef.current
+        if (!el) return
+        lastClientHeightRef.current = el.clientHeight
+        if (stickToBottomRef.current) {
+          scrollContainerToBottom(false)
+        }
+      })
+    }
+
+    const vv = window.visualViewport
+    vv?.addEventListener('resize', pinIfStuck)
+
+    const ro =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            pinIfStuck()
+          })
+        : null
+    ro?.observe(container)
+
+    return () => {
+      if (rafId !== null) window.cancelAnimationFrame(rafId)
+      vv?.removeEventListener('resize', pinIfStuck)
+      ro?.disconnect()
+    }
+  }, [scrollContainerToBottom])
+
+  // Scroll to active search hit when navigating search results (container-only, never scrolls window)
   useEffect(() => {
     if (!activeSearchMessageId) return
     const el = document.getElementById(`msg-${activeSearchMessageId}`)
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      scrollMessageIntoContainer(el, true)
     }
-  }, [activeSearchMessageId])
+  }, [activeSearchMessageId, scrollMessageIntoContainer])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+    // If container height just shrank (e.g. mobile keyboard opened) while anchored to bottom,
+    // immediately re-pin instead of clearing stickToBottomRef.
+    const prevHeight = lastClientHeightRef.current
+    if (prevHeight > 0 && el.clientHeight < prevHeight - 4 && stickToBottomRef.current) {
+      lastClientHeightRef.current = el.clientHeight
+      el.scrollTop = el.scrollHeight
+      return
+    }
+    lastClientHeightRef.current = el.clientHeight
+
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
     const atBottom = distFromBottom <= 64
     stickToBottomRef.current = atBottom
@@ -268,17 +341,20 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     stickToBottomRef.current = true
     setShowJumpBtn(false)
     setUnseenBelow(0)
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    scrollContainerToBottom(true)
     engine.markChannelRead()
-  }, [engine])
+  }, [engine, scrollContainerToBottom])
 
-  const handleJumpToMessage = useCallback((id: string) => {
-    const el = document.getElementById(`msg-${id}`)
-    if (!el) return
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    el.classList.add('is-search-active')
-    window.setTimeout(() => el.classList.remove('is-search-active'), 1600)
-  }, [])
+  const handleJumpToMessage = useCallback(
+    (id: string) => {
+      const el = document.getElementById(`msg-${id}`)
+      if (!el) return
+      scrollMessageIntoContainer(el, true)
+      el.classList.add('is-search-active')
+      window.setTimeout(() => el.classList.remove('is-search-active'), 1600)
+    },
+    [scrollMessageIntoContainer]
+  )
 
   const handleInspectAuthor = useCallback(
     (pubkey: string, nickname: string) => {
@@ -694,7 +770,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
               )
             })
           )}
-          <div ref={bottomRef} style={{ height: 1 }} />
         </div>
       </div>
 

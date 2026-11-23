@@ -2313,6 +2313,10 @@
 
 .ag-pwa-modal {
   width: min(100%, 420px);
+  max-height: min(90dvh, 680px);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
   background-color: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-xl);
@@ -2603,6 +2607,8 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 0.9rem 0.9rem 1.25rem;
   display: flex;
   flex-direction: column;
@@ -3150,6 +3156,8 @@
   border-right: 1px solid var(--border-subtle);
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .ag-set-nav-head {
@@ -3265,6 +3273,8 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 0.95rem 1.15rem 1.35rem;
 }
 
@@ -4048,10 +4058,40 @@
 
 /* --------------------------------------------------------------------------
    Native Mobile Sheet & Settings Stack (<868px)
+   Visual Viewport Anchored (--ag-vvt / --ag-vvh) for iOS & Android Keyboards
    -------------------------------------------------------------------------- */
 @media (max-width: 867px) {
+  .ag-modal-backdrop,
+  .ag-sheet-backdrop {
+    top: var(--ag-vvt, 0px);
+    left: 0;
+    right: 0;
+    bottom: auto;
+    height: var(--ag-vvh, 100dvh);
+    overscroll-behavior: contain;
+  }
+
+  .ag-modal-backdrop {
+    padding:
+      calc(0.75rem + env(safe-area-inset-top, 0px))
+      0.75rem
+      calc(0.75rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  html[data-keyboard-open='true'] .ag-modal-backdrop:not(.ag-set-backdrop) {
+    padding-bottom: 0.75rem;
+  }
+
+  .ag-peer-modal,
+  .ag-pwa-modal {
+    max-height: 100%;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
   .ag-info-sheet {
-    width: 100vw;
+    width: 100%;
+    height: 100%;
     border-left: none;
   }
 
@@ -4068,14 +4108,19 @@
   }
 
   .ag-settings-modal {
-    width: 100vw;
-    height: 100dvh;
+    width: 100%;
+    height: 100%;
     max-width: none;
-    max-height: none;
+    max-height: var(--ag-vvh, 100dvh);
     border-radius: 0;
     border: none;
     padding-top: env(safe-area-inset-top, 0px);
     padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  html[data-keyboard-open='true'] .ag-settings-modal,
+  html[data-keyboard-open='true'] .ag-info-sheet {
+    padding-bottom: 0;
   }
 
   .ag-set-mobile-bar {
@@ -4170,11 +4215,23 @@
     min-height: 40px;
   }
 
-  /* iOS Safari auto-zoom guard across all Settings & Sheet inputs */
+  /* iOS Safari auto-zoom guard across all Modal, Sheet & Panel inputs */
   .ag-settings-modal .ag-input,
   .ag-info-sheet .ag-input {
     font-size: 16px;
     min-height: 44px;
+  }
+
+  .ag-modal-backdrop input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  .ag-modal-backdrop textarea,
+  .ag-modal-backdrop select,
+  .ag-sheet-backdrop input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  .ag-sheet-backdrop textarea,
+  .ag-sheet-backdrop select,
+  .ag-inspector input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  .ag-inspector textarea,
+  .ag-inspector select {
+    font-size: 16px;
   }
 
   .ag-set-notif-banner-actions {
@@ -4197,19 +4254,25 @@
   .ag-inspector-backdrop {
     display: block;
     position: fixed;
-    inset: 0;
+    top: var(--ag-vvt, 0px);
+    left: 0;
+    right: 0;
+    bottom: auto;
+    height: var(--ag-vvh, 100dvh);
     background-color: var(--bg-overlay);
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
     z-index: var(--z-drawer-backdrop);
+    overscroll-behavior: contain;
     animation: ag-fade-in var(--dur-fast) ease;
   }
 
   .ag-inspector {
     position: fixed;
-    top: 0;
+    top: var(--ag-vvt, 0px);
     right: 0;
-    bottom: 0;
+    bottom: auto;
+    height: var(--ag-vvh, 100dvh);
     width: min(92vw, 356px);
     flex: none;
     z-index: var(--z-drawer);
@@ -4227,10 +4290,11 @@
   }
 }
 
-/* Mobile Input Font-Size Guard (Prevents iOS Safari Auto-Zoom) */
-@media (max-width: 767px) {
+/* Mobile Input Font-Size Guard & Compact Modals (<= 768px) */
+@media (max-width: 768px) {
   .ag-inspector .ag-input,
-  .ag-inspector .ag-textarea {
+  .ag-inspector .ag-textarea,
+  .ag-inspector select {
     font-size: 16px;
   }
 

@@ -442,6 +442,8 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 0.55rem 0.65rem;
   display: flex;
   flex-direction: column;
@@ -502,6 +504,8 @@
   padding: 0.6rem 0.75rem;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
   align-content: stretch;
   justify-content: center;
 }
@@ -1268,7 +1272,11 @@
 /* Full-Screen Mobile (<= 640px) & Standalone PWA Incoming DM Call Screen */
 .ag-incoming-fullscreen {
   position: fixed;
-  inset: 0;
+  top: var(--ag-vvt, 0px);
+  left: 0;
+  right: 0;
+  bottom: auto;
+  height: var(--ag-vvh, 100dvh);
   z-index: calc(var(--z-modal) + 40);
   background:
     radial-gradient(
@@ -1281,6 +1289,9 @@
   -webkit-backdrop-filter: blur(28px) saturate(140%);
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   animation: ag-fade-in var(--dur-fast) var(--ease-out);
 }
 
@@ -1298,7 +1309,7 @@
 .ag-incoming-fs-inner {
   width: 100%;
   max-width: 440px;
-  height: 100%;
+  min-height: 100%;
   margin: 0 auto;
   padding:
     calc(1.1rem + env(safe-area-inset-top, 0px))
@@ -1928,31 +1939,22 @@
 }
 
 /* --------------------------------------------------------------------------
-   Responsive & Mobile Adaptation (<768px)
+   Responsive & Mobile Adaptation (<= 867px Visual Viewport Lock + <= 768px)
    -------------------------------------------------------------------------- */
-@media (max-width: 767px) {
-  .ag-call-floating-bar {
-    padding: 0.35rem 0.55rem;
-    gap: 0.45rem;
-  }
-
-  .ag-call-float-btn {
-    width: 36px;
-    height: 36px;
-  }
-
-  .ag-call-stage-docked {
-    max-height: 46dvh;
-    min-height: 184px;
-  }
-
+@media (max-width: 867px) {
   .ag-call-modal-backdrop {
     padding: 0;
+    top: var(--ag-vvt, 0px);
+    left: 0;
+    right: 0;
+    bottom: auto;
+    height: var(--ag-vvh, 100dvh);
+    overscroll-behavior: contain;
   }
 
   .ag-call-modal-frame {
-    width: 100vw;
-    height: 100dvh;
+    width: 100%;
+    height: 100%;
     max-width: none;
     max-height: none;
     border-radius: 0;
@@ -1965,6 +1967,58 @@
 
   .ag-call-stage-expanded .ag-call-controls {
     padding-bottom: calc(0.7rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  html[data-keyboard-open='true'] .ag-call-stage-expanded .ag-call-controls {
+    padding-bottom: 0.5rem;
+  }
+
+  html[data-keyboard-open='true'] .ag-incoming-fs-inner {
+    padding-bottom: 1.1rem;
+  }
+
+  .ag-incoming-call {
+    top: calc(var(--ag-vvt, 0px) + 0.55rem + env(safe-area-inset-top, 0px));
+    max-height: calc(var(--ag-vvh, 100dvh) - var(--ag-mobile-tabbar-h, 56px) - 1.5rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* Compact docked call stage when virtual keyboard shrinks visual viewport */
+  html[data-keyboard-open='true'] .ag-call-stage-docked {
+    min-height: 120px;
+    max-height: min(36%, calc(var(--ag-vvh, 100dvh) * 0.36));
+  }
+
+  html[data-keyboard-open='true'] .ag-call-stage-docked .ag-call-grid {
+    grid-auto-rows: minmax(68px, 1fr);
+    padding: 0.32rem 0.5rem;
+  }
+
+  /* iOS Safari auto-zoom guard on call/TURN form inputs */
+  .ag-turn-form input,
+  .ag-turn-form textarea,
+  .ag-turn-form select {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  .ag-call-floating-bar {
+    padding: 0.35rem 0.55rem;
+    gap: 0.45rem;
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  .ag-call-float-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .ag-call-stage-docked {
+    max-height: min(44%, calc(var(--ag-vvh, 100dvh) * 0.44));
+    min-height: 176px;
   }
 
   .ag-call-grid[data-count='5'],
@@ -1997,7 +2051,7 @@
   }
 
   .ag-incoming-call {
-    top: calc(0.55rem + env(safe-area-inset-top, 0px));
+    top: calc(var(--ag-vvt, 0px) + 0.55rem + env(safe-area-inset-top, 0px));
     left: 0.6rem;
     right: 0.6rem;
     transform: none;
@@ -2023,11 +2077,6 @@
   .ag-incoming-actions .ag-btn {
     min-height: 42px;
     height: 42px;
-  }
-
-  /* iOS Safari auto-zoom guard on TURN inputs */
-  .ag-turn-form .ag-input {
-    font-size: 16px;
   }
 
   .ag-call-transcript-pane {

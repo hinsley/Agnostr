@@ -329,6 +329,7 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
   padding: 2px 8px 12px;
   overscroll-behavior-y: contain;
 }
@@ -1195,7 +1196,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   3. Native Mobile Bottom Tab Bar (< 868px)
+   3. Always-Present Flex-Flow Native Mobile Bottom Tab Bar (< 868px)
    -------------------------------------------------------------------------- */
 .ag-mobile-tabbar {
   display: none;
@@ -1206,13 +1207,23 @@
     display: flex;
     align-items: stretch;
     justify-content: space-around;
-    flex-shrink: 0;
-    min-height: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
+    flex: 0 0 auto;
+    position: relative;
+    z-index: var(--z-sticky);
+    width: 100%;
+    min-height: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px));
     padding: 4px 4px max(5px, env(safe-area-inset-bottom, 0px));
     background-color: var(--bg-glass);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border-top: 1px solid var(--border-subtle);
+  }
+
+  /* Compact keyboard-open tabbar: flush above virtual keyboard, drop home-indicator padding */
+  html[data-keyboard-open='true'] .ag-mobile-tabbar {
+    height: var(--ag-mobile-tabbar-h, 46px);
+    min-height: var(--ag-mobile-tabbar-h, 46px);
+    padding: 2px 4px;
   }
 
   .ag-mtab-btn {
@@ -1226,6 +1237,11 @@
     color: var(--text-muted);
     border-radius: var(--radius-sm);
     transition: color var(--dur-fast) ease;
+  }
+
+  html[data-keyboard-open='true'] .ag-mtab-btn {
+    min-height: 40px;
+    gap: 1px;
   }
 
   .ag-mtab-btn.active {
@@ -1242,6 +1258,15 @@
     align-items: center;
     justify-content: center;
     height: 22px;
+  }
+
+  html[data-keyboard-open='true'] .ag-mtab-icon-wrap {
+    height: 19px;
+  }
+
+  html[data-keyboard-open='true'] .ag-mtab-icon-wrap svg {
+    width: 18px;
+    height: 18px;
   }
 
   .ag-mtab-badge {
@@ -1271,6 +1296,10 @@
     font-size: 11px;
     font-weight: 600;
     line-height: 1.1;
+  }
+
+  html[data-keyboard-open='true'] .ag-mtab-label {
+    font-size: 10px;
   }
 }
 
@@ -2200,6 +2229,8 @@
   bottom: calc(100% + 6px);
   max-height: 260px;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
   border-radius: var(--radius-lg);
   background-color: var(--bg-surface);
   border: 1px solid var(--border-default);
@@ -3301,7 +3332,10 @@
 
 .ag-cmdk-list {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
   padding: 6px;
 }
 
@@ -3621,14 +3655,43 @@
     display: none;
   }
 
+  .ag-modal-scrim {
+    top: var(--ag-vvt, 0px);
+    bottom: auto;
+    height: var(--ag-vvh, 100dvh);
+    padding: max(12px, env(safe-area-inset-top, 0px)) 10px 10px;
+    overscroll-behavior: contain;
+  }
+
+  .ag-cmdk-modal {
+    max-height: calc(var(--ag-vvh, 100dvh) - max(24px, env(safe-area-inset-top, 0px) + 12px));
+  }
+
+  .ag-autocomplete-popup {
+    max-height: min(210px, calc(var(--ag-vvh, 100dvh) - 165px));
+  }
+
+  html[data-keyboard-open='true'] .ag-composer-input {
+    max-height: 96px;
+  }
+
   .ag-toast-stack {
+    position: absolute;
     left: 12px;
     right: 12px;
-    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 10px);
+    bottom: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px) + 10px);
     max-width: none;
   }
 
   .ag-app[data-mobile-screen='chat'] .ag-toast-stack {
-    bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px) + 64px);
+  }
+
+  html[data-keyboard-open='true'] .ag-toast-stack {
+    bottom: calc(var(--ag-mobile-tabbar-h, 46px) + 8px);
+  }
+
+  html[data-keyboard-open='true'] .ag-app[data-mobile-screen='chat'] .ag-toast-stack {
+    bottom: calc(var(--ag-mobile-tabbar-h, 46px) + 58px);
   }
 }

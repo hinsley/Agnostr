@@ -1,11 +1,32 @@
 /* ==========================================================================
-   Agnostr High-Density 2-Pane Desktop & 2-Screen Mobile Layout
+   Agnostr High-Density 2-Pane Desktop & Visual-Viewport Locked Mobile Layout
    Desktop (>= 868px): 280px ConversationList | Full-Width 1fr Chat Stream
-   Mobile  (<  868px): Native 2-Screen Stack ('list' w/ Bottom TabBar <-> 'chat')
+   Mobile  (<  868px): Fixed visualViewport Shell + Flex-Flow Always-Present TabBar
    ========================================================================== */
 
-.ag-app {
+:root {
+  --ag-vvh: 100dvh;
+  --ag-vvt: 0px;
+  --ag-mobile-tabbar-h: 56px;
+}
+
+html[data-keyboard-open='true'] {
+  --ag-mobile-tabbar-h: 46px;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+.ag-app,
+.ag-shell {
   display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
   height: 100dvh;
@@ -19,6 +40,17 @@
   animation: ag-panic-flash 650ms var(--ease-out);
 }
 
+/* Primary Flex Body (Row on Desktop, Column on Mobile above MobileTabBar) */
+.ag-shell-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  position: relative;
+}
+
 /* --------------------------------------------------------------------------
    Left Pane: Unified Conversation List (280px Desktop, Full-Screen Mobile List)
    -------------------------------------------------------------------------- */
@@ -26,6 +58,7 @@
   width: var(--sidebar-w);
   flex: 0 0 var(--sidebar-w);
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background-color: var(--bg-surface);
@@ -53,6 +86,7 @@
 .ag-main {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -109,8 +143,10 @@
 
 .ag-stream-scroll {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
   padding: 0.5rem 0 1rem;
   scroll-behavior: auto;
   overscroll-behavior-y: contain;
@@ -153,9 +189,19 @@
 }
 
 /* --------------------------------------------------------------------------
-   Mobile Native 2-Screen Stack (< 868px)
+   Mobile Visual-Viewport Locked Shell + Always-Present Flex-Flow TabBar (< 868px)
    -------------------------------------------------------------------------- */
 @media (max-width: 867px) {
+  html,
+  body {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
   .ag-mobile-only {
     display: inline-flex !important;
   }
@@ -164,17 +210,47 @@
     display: none !important;
   }
 
+  .ag-app,
+  .ag-shell {
+    position: fixed;
+    top: var(--ag-vvt, 0px);
+    left: 0;
+    right: 0;
+    width: 100%;
+    height: var(--ag-vvh, 100dvh);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .ag-shell-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
   .ag-conv-pane,
   .ag-conv-pane.collapsed {
     width: 100%;
-    flex: 1 1 100%;
+    height: auto;
+    flex: 1 1 auto;
+    min-height: 0;
     border-right: none;
     opacity: 1;
     pointer-events: auto;
     transition: none;
   }
 
-  /* Native 2-screen switching */
+  .ag-main {
+    height: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  /* Native 2-screen switching inside .ag-shell-body while MobileTabBar stays ALWAYS present below */
   .ag-app[data-mobile-screen='chat'] .ag-conv-pane {
     display: none;
   }
@@ -192,8 +268,19 @@
     padding: 0.4rem 0 0.75rem;
   }
 
+  /* Composer sits directly above flex-flow MobileTabBar (tabbar owns bottom safe area) */
   .ag-composer-dock {
-    padding: 0.3rem 10px max(0.6rem, env(safe-area-inset-bottom, 0px));
+    padding: 6px 10px 6px;
+  }
+
+  html[data-keyboard-open='true'] .ag-composer-dock {
+    padding: 4px 8px 4px;
+  }
+
+  .ag-backdrop {
+    top: var(--ag-vvt, 0px);
+    bottom: auto;
+    height: var(--ag-vvh, 100dvh);
   }
 }
 

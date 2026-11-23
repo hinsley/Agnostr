@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCw, WifiOff, X } from 'lucide-react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
+import { useMobileViewport } from './hooks/useMobileViewport'
 import { usePwa } from './hooks/usePwa'
 import { doesContentMentionUser } from './lib/bitchatProtocol'
 import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
 import type { ServerMessage, ServerSummary } from './types/servers'
 import { radioAudio, type SoundCue } from './utils/sound'
 import ConversationList, { type ListTab } from './components/ConversationList'
+import MobileTabBar from './components/MobileTabBar'
 import ChannelHeader from './components/ChannelHeader'
 import SearchBar from './components/SearchBar'
 import MessageStream from './components/MessageStream'
@@ -44,6 +46,7 @@ const ZERO_ARG_COMMANDS = new Set([
 ])
 
 export function App() {
+  useMobileViewport()
   const engine = useAgnostrEngine()
 
   const [listTab, setListTab] = useState<ListTab>('radio')
@@ -507,6 +510,21 @@ export function App() {
     setMobileScreen('list')
   }, [engine.activeView.type])
 
+  const handleMobileSelectTab = useCallback((tab: ListTab) => {
+    setListTab(tab)
+    setMobileScreen('list')
+    setRoomInfoOpen(false)
+  }, [])
+
+  const mobileNavActiveTab: ListTab =
+    mobileScreen === 'chat'
+      ? isDm
+        ? 'dms'
+        : isServer
+          ? 'servers'
+          : 'radio'
+      : listTab
+
   const handleTuneChannel = useCallback(
     (geohash: string): boolean => {
       const ok = engine.tuneGeohash(geohash)
@@ -816,37 +834,38 @@ export function App() {
 
   return (
     <div
-      className={`ag-app ${panicFlash ? 'ag-panic-active' : ''}`}
+      className={`ag-app ag-shell ${panicFlash ? 'ag-panic-active' : ''}`}
       data-mobile-screen={mobileScreen}
     >
-      {/* Left Pane (Desktop 320px) / Full-Screen Home List (Mobile <868px) */}
-      <ConversationList
-        engine={engine}
-        activeTab={listTab}
-        collapsed={sidebarCollapsed}
-        onTabChange={setListTab}
-        onTuneChannel={handleTuneChannel}
-        onOpenDm={handleOpenDm}
-        onSelectServerChannel={handleSelectServerChannel}
-        onOpenServerHub={handleOpenServerHub}
-        onOpenServerSettings={handleOpenServerSettings}
-        onOpenCommandPalette={() => setCmdkOpen(true)}
-        onExpandRadar={handleExpandRadar}
-        onOpenSettings={handleOpenSettings}
-        onLocateMe={() => void handleLocateMe()}
-        onFocusActiveCall={() => {
-          setMobileScreen('chat')
-          setCallExpanded(true)
-        }}
-        pwa={pwa}
-        onOpenInstall={handleOpenInstall}
-        onPlaySound={playSound}
-      />
+      <div className="ag-shell-body">
+        {/* Left Pane (Desktop 320px) / Full-Screen Home List (Mobile <868px) */}
+        <ConversationList
+          engine={engine}
+          activeTab={listTab}
+          collapsed={sidebarCollapsed}
+          onTabChange={setListTab}
+          onTuneChannel={handleTuneChannel}
+          onOpenDm={handleOpenDm}
+          onSelectServerChannel={handleSelectServerChannel}
+          onOpenServerHub={handleOpenServerHub}
+          onOpenServerSettings={handleOpenServerSettings}
+          onOpenCommandPalette={() => setCmdkOpen(true)}
+          onExpandRadar={handleExpandRadar}
+          onOpenSettings={handleOpenSettings}
+          onLocateMe={() => void handleLocateMe()}
+          onFocusActiveCall={() => {
+            setMobileScreen('chat')
+            setCallExpanded(true)
+          }}
+          pwa={pwa}
+          onOpenInstall={handleOpenInstall}
+          onPlaySound={playSound}
+        />
 
-      {/* Main Chat Stage */}
-      <main
-        className={`ag-main ${isDm ? 'dm-mode' : isServerE2ee ? 'server-e2ee-mode' : ''}`}
-      >
+        {/* Main Chat Stage */}
+        <main
+          className={`ag-main ${isDm ? 'dm-mode' : isServerE2ee ? 'server-e2ee-mode' : ''}`}
+        >
         <ChannelHeader
           engine={engine}
           sidebarCollapsed={sidebarCollapsed}
@@ -960,7 +979,18 @@ export function App() {
           externalDraftToken={externalDraftToken}
           onSent={(isEncrypted) => radioAudio.play(isEncrypted ? 'dm' : 'send')}
         />
-      </main>
+        </main>
+      </div>
+
+      {/* Always-Present Native Mobile Bottom Tab Bar (< 868px, Flex Flow) */}
+      <MobileTabBar
+        activeTab={mobileNavActiveTab}
+        dmUnread={engine.totalDmUnread}
+        serverUnread={engine.servers.totalServerUnread}
+        onSelectTab={handleMobileSelectTab}
+        onOpenMap={handleExpandRadar}
+        onOpenSettings={() => handleOpenSettings()}
+      />
 
       {/* Clean Chat / Room / Server Info Slide-Over Sheet */}
       <RoomInfoSheet

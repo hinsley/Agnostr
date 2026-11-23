@@ -34,7 +34,6 @@ import type { ServerHubTab } from './ServerHubModal'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { SettingsTab } from './SettingsModal'
 import { identiconDataUrl } from '../utils/identicon'
-import { MobileTabBar } from './MobileTabBar'
 
 export type ListTab = 'radio' | 'dms' | 'servers'
 
@@ -938,16 +937,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           </button>
         )}
       </div>
-
-      {/* Native Mobile Bottom Tab Bar (< 868px) */}
-      <MobileTabBar
-        activeTab={activeTab}
-        dmUnread={engine.totalDmUnread}
-        serverUnread={engine.servers.totalServerUnread}
-        onSelectTab={onTabChange}
-        onOpenMap={onExpandRadar}
-        onOpenSettings={() => onOpenSettings()}
-      />
     </aside>
   )
 }

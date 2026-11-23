@@ -145,7 +145,7 @@ export const Composer: React.FC<ComposerProps> = ({
     requestAnimationFrame(() => {
       const el = textareaRef.current
       if (el) {
-        el.focus()
+        el.focus({ preventScroll: true })
         el.setSelectionRange(el.value.length, el.value.length)
       }
     })
@@ -233,7 +233,7 @@ export const Composer: React.FC<ComposerProps> = ({
     const next = `/${cmd.name}${needsArg ? ' ' : ''}`
     setDraft(next)
     setCursorPos(next.length)
-    textareaRef.current?.focus()
+    textareaRef.current?.focus({ preventScroll: true })
   }
 
   const applyMentionCompletion = (peer: MentionCandidate, startIdx: number, endIdx: number) => {
@@ -245,7 +245,7 @@ export const Composer: React.FC<ComposerProps> = ({
     requestAnimationFrame(() => {
       const el = textareaRef.current
       if (el) {
-        el.focus()
+        el.focus({ preventScroll: true })
         el.setSelectionRange(nextCursor, nextCursor)
       }
     })
@@ -285,7 +285,7 @@ export const Composer: React.FC<ComposerProps> = ({
         }
         pendingImageRef.current = prepared
         setPendingImage(prepared)
-        requestAnimationFrame(() => textareaRef.current?.focus())
+        requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
       } catch (err) {
         if (contextEpochRef.current !== prepEpoch) return
         pushToast(
@@ -368,9 +368,35 @@ export const Composer: React.FC<ComposerProps> = ({
     }
   }
 
-  const handleSubmit = async () => {
+  const keepTextareaFocused = (e: React.SyntheticEvent) => {
+    e.preventDefault()
+  }
+
+  const handleSubmit = async (keepFocus = false) => {
     const trimmed = draft.trim()
     if ((!trimmed && !pendingImage) || isSending || preparingImage || !canSign) return
+
+    const textarea = textareaRef.current
+    const shouldKeepFocus =
+      Boolean(textarea) && (document.activeElement === textarea || keepFocus)
+
+    const restoreFocusSynchronously = () => {
+      if (!shouldKeepFocus) return
+      const el = textareaRef.current
+      if (!el) return
+      el.style.height = 'auto'
+      el.focus({ preventScroll: true })
+      requestAnimationFrame(() => {
+        const cur = textareaRef.current
+        if (
+          cur &&
+          document.activeElement !== cur &&
+          (document.activeElement === document.body || document.activeElement === null)
+        ) {
+          cur.focus({ preventScroll: true })
+        }
+      })
+    }
 
     if (pendingImage) {
       const staged = pendingImage
@@ -380,6 +406,8 @@ export const Composer: React.FC<ComposerProps> = ({
         setHistoryIdx(-1)
       }
       setDraft('')
+      setCursorPos(0)
+      restoreFocusSynchronously()
 
       const ok = isServer
         ? await engine.servers.sendImageAttachment(staged, caption)
@@ -389,7 +417,7 @@ export const Composer: React.FC<ComposerProps> = ({
         clearPendingImage()
         onSent?.(isViolet)
       } else {
-        setDraft(trimmed)
+        setDraft((curr) => (curr ? curr : trimmed))
       }
       return
     }
@@ -397,6 +425,8 @@ export const Composer: React.FC<ComposerProps> = ({
     setHistory((prev) => [trimmed, ...prev.filter((x) => x !== trimmed)].slice(0, 30))
     setHistoryIdx(-1)
     setDraft('')
+    setCursorPos(0)
+    restoreFocusSynchronously()
 
     let ok = false
     if (isServer) {
@@ -420,7 +450,7 @@ export const Composer: React.FC<ComposerProps> = ({
     if (ok) {
       onSent?.(isViolet)
     } else {
-      setDraft(trimmed)
+      setDraft((curr) => (curr ? curr : trimmed))
     }
   }
 
@@ -600,10 +630,9 @@ export const Composer: React.FC<ComposerProps> = ({
                 role="option"
                 aria-selected={idx === selectedIndex}
                 className={`ag-ac-item ${idx === selectedIndex ? 'selected' : ''}`}
-                onMouseDown={(e) => {
-                  e.preventDefault()
-                  applyCommandCompletion(cmd)
-                }}
+                onPointerDown={keepTextareaFocused}
+                onMouseDown={keepTextareaFocused}
+                onClick={() => applyCommandCompletion(cmd)}
               >
                 <div className="ag-ac-left">
                   <span className="ag-ac-cmd">/{cmd.name}</span>
@@ -631,10 +660,11 @@ export const Composer: React.FC<ComposerProps> = ({
                 role="option"
                 aria-selected={idx === selectedIndex}
                 className={`ag-ac-item ${idx === selectedIndex ? 'selected' : ''}`}
-                onMouseDown={(e) => {
-                  e.preventDefault()
+                onPointerDown={keepTextareaFocused}
+                onMouseDown={keepTextareaFocused}
+                onClick={() =>
                   applyMentionCompletion(peer, autocomplete.startIdx, autocomplete.endIdx)
-                }}
+                }
               >
                 <div className="ag-ac-left">
                   <img
@@ -669,6 +699,8 @@ export const Composer: React.FC<ComposerProps> = ({
             <button
               type="button"
               className="ag-mini-circle-btn"
+              onPointerDown={keepTextareaFocused}
+              onMouseDown={keepTextareaFocused}
               onClick={() =>
                 isServer ? engine.servers.setReplyingTo(null) : engine.setReplyingTo(null)
               }
@@ -723,6 +755,8 @@ export const Composer: React.FC<ComposerProps> = ({
             <button
               type="button"
               className="ag-composer-img-discard"
+              onPointerDown={keepTextareaFocused}
+              onMouseDown={keepTextareaFocused}
               onClick={clearPendingImage}
               disabled={isSending}
               title="Discard image (Esc)"
@@ -749,7 +783,7 @@ export const Composer: React.FC<ComposerProps> = ({
             className={`ag-composer-bar ${isViolet ? 'dm' : ''} ${activeReply || pendingImage ? 'with-strip' : ''}`}
             onSubmit={(e) => {
               e.preventDefault()
-              void handleSubmit()
+              void handleSubmit(true)
             }}
           >
             {/* Left Compact Image Picker Button */}
@@ -774,13 +808,14 @@ export const Composer: React.FC<ComposerProps> = ({
               )}
             </button>
 
-            {/* Full-Width Auto-Growing Input (16px on mobile) */}
+            {/* Full-Width Auto-Growing Input (16px on mobile; never disabled while sending) */}
             <textarea
               ref={textareaRef}
               className="ag-composer-input"
               rows={1}
               value={draft}
               disabled={!canSign}
+              enterKeyHint="send"
               placeholder={placeholder}
               onChange={(e) => {
                 setDraft(e.target.value)
@@ -793,7 +828,7 @@ export const Composer: React.FC<ComposerProps> = ({
               aria-label={placeholder}
             />
 
-            {/* Right Compact Action Cluster: Mic + Accent Send */}
+            {/* Right Compact Action Cluster: Mic + Accent Send (stably mounted) */}
             <div className="ag-composer-right">
               <button
                 type="button"
@@ -821,6 +856,8 @@ export const Composer: React.FC<ComposerProps> = ({
                 type="submit"
                 className={`ag-composer-send-btn ${isViolet ? 'dm' : ''} ${hasContentToSend ? 'ready' : ''}`}
                 disabled={!hasContentToSend || isSending || preparingImage || !canSign}
+                onPointerDown={keepTextareaFocused}
+                onMouseDown={keepTextareaFocused}
                 title={imagePhaseText ?? 'Send message'}
                 aria-label="Send message"
               >

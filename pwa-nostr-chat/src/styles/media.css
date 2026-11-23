@@ -715,7 +715,24 @@
   }
 }
 
-@media (max-width: 767px) {
+@media (max-width: 867px) {
+  .ag-lightbox-backdrop {
+    top: var(--ag-vvt, 0px);
+    left: 0;
+    right: 0;
+    bottom: auto;
+    height: var(--ag-vvh, 100dvh);
+    overscroll-behavior: contain;
+  }
+
+  .ag-lightbox-caption {
+    max-height: calc(var(--ag-vvh, 100dvh) * 0.24);
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+@media (max-width: 768px) {
   .ag-img-card,
   .ag-img-media {
     max-width: min(300px, 100%);
