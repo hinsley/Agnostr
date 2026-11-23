@@ -455,6 +455,9 @@ export interface AgnostrEngine {
   cancelPendingTrust: () => void
   untrustPubkey: (pubkey: string) => void
   clearTrustedPubkeys: () => void
+  /** Local private notes per peer pubkey (lowercase 64-hex -> trimmed note, non-empty only), synced across linked devices */
+  peerNotes: Record<string, string>
+  setPeerNote: (pubkey: string, note: string) => void
   strictWhitelistMode: boolean
   setStrictWhitelistMode: (enabled: boolean) => void
   /** Count of text messages in active channel currently hidden by strictWhitelistMode */

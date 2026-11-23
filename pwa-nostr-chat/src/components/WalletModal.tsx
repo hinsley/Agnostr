@@ -477,7 +477,7 @@ function WalletModalInner({
       sentTokens: [],
       boltzSwaps: [],
     }
-    downloadJsonFile(`agnostr-cashu-key-${dateStamp}.json`, JSON.stringify(payload, null, 2))
+    downloadJsonFile(`agwallet-key-${dateStamp}.json`, JSON.stringify(payload, null, 2))
     setFeedback({ kind: 'accent', text: 'Key backup exported.' })
   }, [draftKeys, setupMintUrl, wallet.mints])
 
@@ -492,7 +492,7 @@ function WalletModalInner({
     setTab('overview')
     setRevealKeys(false)
     setConfirmSwitchWallet(false)
-    setFeedback({ kind: 'accent', text: 'Wallet ready.' })
+    setFeedback({ kind: 'accent', text: 'Agwallet ready.' })
   }, [draftKeys, setupMintUrl, wallet])
 
   const detectedSetupImport = useMemo(
@@ -528,13 +528,13 @@ function WalletModalInner({
         kind: 'accent',
         text:
           res.restoredSats > 0
-            ? `Wallet imported · restored ${res.restoredSats.toLocaleString()} sats`
-            : 'Wallet imported.',
+            ? `Agwallet imported · restored ${res.restoredSats.toLocaleString()} sats`
+            : 'Agwallet imported.',
       })
     } catch (err) {
       setFeedback({
         kind: 'danger',
-        text: err instanceof Error ? err.message : 'Could not import wallet.',
+        text: err instanceof Error ? err.message : 'Could not import Agwallet.',
       })
     } finally {
       setImportingSetup(false)
@@ -988,7 +988,7 @@ function WalletModalInner({
   const handleExportBackupFile = useCallback(() => {
     const json = wallet.exportWalletKeyJson()
     const dateStamp = new Date().toISOString().slice(0, 10)
-    downloadJsonFile(`agnostr-cashu-backup-${dateStamp}.json`, json)
+    downloadJsonFile(`agwallet-backup-${dateStamp}.json`, json)
     setFeedback({ kind: 'accent', text: 'Backup exported.' })
   }, [wallet])
 
@@ -1250,10 +1250,10 @@ function WalletModalInner({
             )}
             <h2 id="ag-wallet-modal-title" className="ag-wallet-title">
               {setupMode === 'create'
-                ? 'New Wallet'
+                ? 'New Agwallet'
                 : setupMode === 'import'
-                  ? 'Import Wallet'
-                  : 'Wallet'}
+                  ? 'Import Agwallet'
+                  : 'Agwallet'}
             </h2>
           </div>
 
@@ -1261,7 +1261,7 @@ function WalletModalInner({
             type="button"
             className="ag-wallet-close-btn"
             onClick={onClose}
-            aria-label="Close wallet"
+            aria-label="Close Agwallet"
             title="Close (Esc)"
           >
             <X size={18} />
@@ -1281,7 +1281,7 @@ function WalletModalInner({
             {/* Mode 0: Choose Create or Import */}
             {setupMode === 'choose' && (
               <div className="ag-wallet-setup-choose">
-                <h3 className="ag-wallet-setup-heading">Set up Wallet</h3>
+                <h3 className="ag-wallet-setup-heading">Set up Agwallet</h3>
                 <p className="ag-wallet-setup-sub">
                   Create a self-custodial Cashu wallet or import an existing key.
                 </p>
@@ -1291,14 +1291,14 @@ function WalletModalInner({
                     className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
                     onClick={enterCreateMode}
                   >
-                    Create New Wallet
+                    Create New Agwallet
                   </button>
                   <button
                     type="button"
                     className="ag-wbtn ag-wbtn-secondary ag-wbtn-full"
                     onClick={enterImportMode}
                   >
-                    Import Wallet
+                    Import Agwallet
                   </button>
                 </div>
               </div>
@@ -1308,7 +1308,10 @@ function WalletModalInner({
             {setupMode === 'create' && draftKeys && (
               <section className="ag-wallet-section">
                 <div className="ag-wallet-label-row">
-                  <span className="ag-wallet-label">Recovery phrase</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                    <span className="ag-wallet-label">Recovery phrase</span>
+                    <span className="ag-wallet-pill accent">Save this</span>
+                  </div>
                   <button
                     type="button"
                     className="ag-wbtn ag-wbtn-link"
@@ -1322,7 +1325,10 @@ function WalletModalInner({
 
                 <div className="ag-wallet-field">
                   <div className="ag-wallet-label-row">
-                    <span className="ag-wallet-label">Private key (hex)</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                      <span className="ag-wallet-label">Private key (hex)</span>
+                      <span className="ag-wallet-pill">Derived</span>
+                    </div>
                     <button
                       type="button"
                       className="ag-wbtn ag-wbtn-link"
@@ -1391,7 +1397,7 @@ function WalletModalInner({
                   className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
                   onClick={handleFinalizeCreateWallet}
                 >
-                  Create Wallet
+                  Create Agwallet
                 </button>
               </section>
             )}
@@ -1479,7 +1485,7 @@ function WalletModalInner({
         ) : (
           <>
             {/* Sleek Borderless Underline Nav */}
-            <nav className="ag-wallet-nav" aria-label="Wallet sections">
+            <nav className="ag-wallet-nav" aria-label="Agwallet sections">
               {(
                 [
                   { id: 'overview', label: 'Home' },
@@ -1505,7 +1511,7 @@ function WalletModalInner({
               {/* Airy Borderless Balance Hero */}
               <section
                 className={`ag-wallet-hero ${tab !== 'overview' ? 'compact' : ''}`}
-                aria-label="Wallet balance"
+                aria-label="Agwallet balance"
               >
                 <div className="ag-wallet-balance-block">
                   <div className="ag-wallet-balance-amount">
@@ -1584,8 +1590,8 @@ function WalletModalInner({
                 <>
                   {/* Empty Balance 1-Tap Quick-Start */}
                   {wallet.totalBalanceSats === 0 && (
-                    <section className="ag-wallet-section" aria-label="Fund your wallet">
-                      <h3 className="ag-wallet-section-title">Fund your wallet</h3>
+                    <section className="ag-wallet-section" aria-label="Fund your Agwallet">
+                      <h3 className="ag-wallet-section-title">Fund your Agwallet</h3>
                       <div className="ag-wallet-fund-grid">
                         <button
                           type="button"
@@ -2836,11 +2842,26 @@ function WalletModalInner({
 
                     {revealKeys ? (
                       <div className="ag-wallet-section">
-                        {wallet.mnemonic && renderSeedGrid(wallet.mnemonic)}
+                        {wallet.mnemonic && (
+                          <div className="ag-wallet-field">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                              <span className="ag-wallet-meta">Recovery phrase</span>
+                              <span className="ag-wallet-pill accent">Save this</span>
+                            </div>
+                            {renderSeedGrid(wallet.mnemonic)}
+                          </div>
+                        )}
 
                         {wallet.privateKeyHex && (
                           <div className="ag-wallet-field">
-                            <span className="ag-wallet-meta">Private key (hex)</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                              <span className="ag-wallet-meta">Private key (hex)</span>
+                              <span
+                                className={`ag-wallet-pill ${wallet.mnemonic ? '' : 'accent'}`}
+                              >
+                                {wallet.mnemonic ? 'Derived' : 'Save this'}
+                              </span>
+                            </div>
                             <div className="ag-wallet-code-box" title={wallet.privateKeyHex}>
                               {wallet.privateKeyHex}
                             </div>
@@ -2950,7 +2971,7 @@ function WalletModalInner({
                         className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
                         onClick={handleRequestSwitchWallet}
                       >
-                        Import / New Wallet
+                        Import / New Agwallet
                       </button>
                       <input
                         ref={backupFileInputRef}
@@ -2966,7 +2987,7 @@ function WalletModalInner({
                         <AlertCircle size={15} />
                         <div style={{ flex: 1 }}>
                           <div>
-                            This wallet holds {wallet.totalBalanceSats.toLocaleString()} sats.
+                            This Agwallet holds {wallet.totalBalanceSats.toLocaleString()} sats.
                             Export a backup before replacing it.
                           </div>
                           <div className="ag-wallet-btn-row" style={{ marginTop: '0.5rem' }}>

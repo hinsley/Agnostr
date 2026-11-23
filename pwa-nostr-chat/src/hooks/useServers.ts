@@ -73,6 +73,11 @@ import {
 import type { PresenceTracker } from '../lib/presenceService.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 import {
+  KeyedFifoQueue,
+  sortChannelMessagesWithPending,
+  swapPendingWithSigned,
+} from '../lib/sendQueue.ts'
+import {
   clearServerChannelMessagesStorage,
   loadJoinedServers,
   loadServerChannelMessages,
@@ -291,6 +296,19 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const onIngestEventTagsRef = useRef(onIngestEventTags)
   const bgSeenIdsRef = useRef<Set<string>>(new Set())
   const serverUnreadItemsRef = useRef<Map<string, ServerUnreadItem[]>>(new Map())
+  const serverSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
+  const inFlightSendCountRef = useRef<number>(0)
+  const optimisticSeqRef = useRef<number>(0)
+  const replyingToRef = useRef<ServerMessage | null>(replyingTo)
+
+  const adjustInFlightSend = useCallback((delta: number) => {
+    inFlightSendCountRef.current = Math.max(0, inFlightSendCountRef.current + delta)
+    setSending(inFlightSendCountRef.current > 0)
+  }, [])
+
+  useLayoutEffect(() => {
+    replyingToRef.current = replyingTo
+  }, [replyingTo])
 
   useLayoutEffect(() => {
     activeServerChanKeyRef.current = activeServerChanKey
@@ -906,9 +924,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 return m
               })
 
-              return [...backfilledPrev, hydrated]
-                .sort((a, b) => a.createdAt - b.createdAt)
-                .slice(-350)
+              return sortChannelMessagesWithPending(
+                [...backfilledPrev, hydrated],
+                'pending-srv-'
+              ).slice(-350)
             })
 
             if (!isHistoryReplay && !alreadyCountedUnread && !parsed.isOwn && !parsed.isSystem) {
@@ -1556,7 +1575,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         const createRes = await pool.publish([relayUrl], signedCreate, 6000)
 
         if (createRes.acceptedRelays.length === 0) {
-          const reason = createRes.rejectedRelays[0]?.reason || 'Relay rejected kind 9007 group creation.'
+          const reason = createRes.rejectedRelays[0]?.reason || 'Relay rejected group creation.'
           pushToast('error', 'NIP-29 group creation failed', reason)
           return null
         }
@@ -1828,23 +1847,45 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   )
 
   // Messaging (text + voice + image + reactions + delete)
-  const sendMessageInternal = useCallback(
-    async (
-      rawText: string,
-      voiceAttachment?: VoiceMemoAttachment,
-      imageAttachment?: ImageAttachment,
-      targetOverride?: { server: ServerSummary; channel: ServerChannel; replyTarget?: ServerMessage | null },
+  // Internal non-enqueuing publish step executed strictly inside `serverSendQueueRef`
+  const publishServerMessageDirect = useCallback(
+    async (params: {
+      server: ServerSummary
+      channel: ServerChannel
+      tempId: string
+      body: string
+      replyTarget: ServerMessage | null
+      voiceAttachment?: VoiceMemoAttachment
+      imageAttachment?: ImageAttachment
       onPublishedId?: (id: string) => void
-    ): Promise<boolean> => {
-      const text = rawText.trim()
-      const server = targetOverride?.server ?? activeServer
-      const channel = targetOverride?.channel ?? activeChannel
-      if (!server || !channel || !pool) return false
-      if (!text && !voiceAttachment && !imageAttachment) return false
+      wipeGen: number
+      nick: string
+      masterPk: string
+      powEnabled: boolean
+      powTargetBits: number
+      lightningAddr: string | null
+    }): Promise<boolean> => {
+      const {
+        server,
+        channel,
+        tempId,
+        body,
+        replyTarget,
+        voiceAttachment,
+        imageAttachment,
+        onPublishedId,
+        wipeGen,
+        nick,
+        masterPk,
+        powEnabled,
+        powTargetBits,
+        lightningAddr,
+      } = params
+      if (!pool) return false
+      if (identityManager.getWipeGeneration() !== wipeGen) return false
 
       const chanId = channel.id
       const targetKey = makeServerChanKey(server.id, chanId)
-      const replyTarget = targetOverride !== undefined ? (targetOverride.replyTarget ?? null) : replyingTo
       const isVirtual = server.kind === 'virtual'
       const targetRelays = isVirtual
         ? server.relays.length > 0
@@ -1855,56 +1896,64 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           : []
       if (targetRelays.length === 0) return false
 
-      setSending(true)
+      let activeMsgId = tempId
       try {
-        const nick = identityManager.getNickname()
-        const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
         const previousIds =
           rawMessagesKeyRef.current === targetKey
-            ? rawMessagesRef.current.filter((m) => !m.isSystem).map((m) => m.id)
+            ? rawMessagesRef.current
+                .filter((m) => !m.isSystem && !m.id.startsWith('pending-srv-'))
+                .map((m) => m.id)
             : loadServerChannelMessages(server.id, chanId)
-                .filter((m) => !m.isSystem)
+                .filter((m) => !m.isSystem && !m.id.startsWith('pending-srv-'))
                 .map((m) => m.id)
 
         const tmpl = isVirtual
           ? await buildVirtualChatTemplate({
               server,
               channelId: chanId,
-              content: text,
+              content: body,
               nickname: nick,
               replyTo: replyTarget,
               voiceMemo: voiceAttachment,
               imageAttachment,
-              lightningAddress: lightningAddressRef.current,
+              lightningAddress: lightningAddr,
             })
           : buildNip29ChatTemplate({
               groupId: server.groupId || chanId,
-              content: text,
+              content: body,
               nickname: nick,
               previousIds,
               replyTo: replyTarget,
               voiceMemo: voiceAttachment,
               imageAttachment,
-              lightningAddress: lightningAddressRef.current,
+              lightningAddress: lightningAddr,
             })
 
-        if (isVirtual && settings.powEnabled && settings.powTargetBits > 0 && masterPk) {
-          const nonceTag = await mineNip13NonceTag(tmpl, masterPk, settings.powTargetBits, 450)
+        if (isVirtual && powEnabled && powTargetBits > 0 && masterPk) {
+          const nonceTag = await mineNip13NonceTag(tmpl, masterPk, powTargetBits, 450)
           if (nonceTag) tmpl.tags = [...tmpl.tags, nonceTag]
         }
 
+        if (identityManager.getWipeGeneration() !== wipeGen) return false
         const signed = await identityManager.signEvent(tmpl)
+        if (identityManager.getWipeGeneration() !== wipeGen) return false
+
+        activeMsgId = signed.id
         onPublishedId?.(signed.id)
 
-        const optimistic: ServerMessage = {
+        // Atomically promote tempId -> signed.id into confirmed messages BEFORE publishing,
+        // keeping any remaining queued pending-srv-* placeholders pinned at the tail.
+        const signedPk = signed.pubkey.toLowerCase()
+        const signedCreatedAt = clampTimestamp(signed.created_at)
+        const signedMsg: ServerMessage = {
           id: signed.id,
           serverId: server.id,
           channelId: chanId,
-          pubkey: signed.pubkey.toLowerCase(),
+          pubkey: signedPk,
           nickname: nick,
-          displayHandle: formatDisplayHandle(nick, signed.pubkey.toLowerCase()),
-          content: text,
-          createdAt: clampTimestamp(signed.created_at),
+          displayHandle: formatDisplayHandle(nick, signedPk),
+          content: body,
+          createdAt: signedCreatedAt,
           tags: signed.tags,
           isOwn: true,
           encrypted: server.encrypted,
@@ -1919,26 +1968,20 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 }
               : undefined,
           reactions: [],
-          mentions: extractMentions(text),
+          mentions: extractMentions(body),
           voiceMemo: voiceAttachment,
           imageAttachment,
           deliveryStatus: 'sending',
         }
-
         updateServerChannelMessages(
           server.id,
           chanId,
-          (prev) => {
-            if (prev.some((m) => m.id === optimistic.id)) return null
-            return [...prev, optimistic].sort((a, b) => a.createdAt - b.createdAt)
-          },
+          (prev) => swapPendingWithSigned(prev, tempId, signedMsg, 'pending-srv-'),
           { allowBackgroundPersist: true }
         )
-        if (activeServerChanKeyRef.current === targetKey) {
-          setReplyingTo(null)
-        }
 
         const res = await pool.publish(targetRelays, signed)
+        if (identityManager.getWipeGeneration() !== wipeGen) return false
         const ok = res.acceptedRelays.length > 0
 
         updateServerChannelMessages(
@@ -1961,15 +2004,146 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         )
 
         if (!ok) {
-          const reason = res.rejectedRelays[0]?.reason || 'No connected server relay accepted the message.'
+          const reason =
+            res.rejectedRelays[0]?.reason || 'No connected server relay accepted the message.'
           pushToast('error', 'Message failed to send', reason)
         }
         return ok
       } catch (err) {
-        pushToast('error', 'Failed to send message', err instanceof Error ? err.message : 'Signing error')
+        if (identityManager.getWipeGeneration() === wipeGen) {
+          updateServerChannelMessages(
+            server.id,
+            chanId,
+            (prev) => {
+              let changed = false
+              const next = prev.map((m) => {
+                if (m.id !== activeMsgId && m.id !== tempId) return m
+                changed = true
+                return {
+                  ...m,
+                  deliveryStatus: 'failed' as ServerMessage['deliveryStatus'],
+                }
+              })
+              return changed ? next : null
+            },
+            { allowBackgroundPersist: true }
+          )
+          pushToast(
+            'error',
+            'Failed to send message',
+            err instanceof Error ? err.message : 'Signing error'
+          )
+        }
         return false
+      }
+    },
+    [pool, identityManager, updateServerChannelMessages, pushToast]
+  )
+
+  const sendMessage = useCallback(
+    async (
+      rawText: string,
+      options?: { onPublishedId?: (id: string) => void }
+    ): Promise<boolean> => {
+      const text = rawText.trim()
+      const server = activeServer
+      const channel = activeChannel
+      if (!server || !channel || !pool || !text) return false
+
+      const chanId = channel.id
+      const targetKey = makeServerChanKey(server.id, chanId)
+      const isVirtual = server.kind === 'virtual'
+      const targetRelays = isVirtual
+        ? server.relays.length > 0
+          ? server.relays
+          : [...CORE_DM_RELAYS]
+        : server.relayUrl
+          ? [server.relayUrl]
+          : []
+      if (targetRelays.length === 0) return false
+
+      // Synchronously capture channel, reply target, signer metadata & append optimistic message
+      // BEFORE awaiting the per-channel FIFO queue so rapid sends appear in exact 1 -> 2 -> 3 order.
+      const replyTarget = replyingToRef.current
+      replyingToRef.current = null
+      if (activeServerChanKeyRef.current === targetKey) {
+        setReplyingTo(null)
+      }
+
+      const nick = identityManager.getNickname()
+      const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const wipeGen = identityManager.getWipeGeneration()
+      const powEnabled = settings.powEnabled
+      const powTargetBits = settings.powTargetBits
+      const lightningAddr = lightningAddressRef.current
+
+      const tempId = `pending-srv-${Date.now()}-${++optimisticSeqRef.current}`
+      const nowSec = clampTimestamp(Math.floor(Date.now() / 1000))
+      const optimistic: ServerMessage = {
+        id: tempId,
+        serverId: server.id,
+        channelId: chanId,
+        pubkey: masterPk,
+        nickname: nick,
+        displayHandle: formatDisplayHandle(nick, masterPk),
+        content: text,
+        createdAt: nowSec,
+        tags: [],
+        isOwn: true,
+        encrypted: server.encrypted,
+        powBits: 0,
+        replyTo:
+          replyTarget && !replyTarget.isSystem
+            ? {
+                id: replyTarget.id,
+                pubkey: replyTarget.pubkey,
+                nickname: replyTarget.nickname,
+                preview: replyTarget.content.slice(0, 120),
+              }
+            : undefined,
+        reactions: [],
+        mentions: extractMentions(text),
+        deliveryStatus: 'sending',
+      }
+
+      options?.onPublishedId?.(tempId)
+      updateServerChannelMessages(
+        server.id,
+        chanId,
+        (prev) => {
+          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
+          const placed: ServerMessage = {
+            ...optimistic,
+            createdAt: Math.max(nowSec, lastSec),
+          }
+          return [...prev, placed]
+        },
+        { allowBackgroundPersist: true }
+      )
+
+      adjustInFlightSend(1)
+      try {
+        return await serverSendQueueRef.current.enqueue(
+          `srv:${server.id}:${chanId}`,
+          () =>
+            publishServerMessageDirect({
+              server,
+              channel,
+              tempId,
+              body: text,
+              replyTarget,
+              onPublishedId: options?.onPublishedId,
+              wipeGen,
+              nick,
+              masterPk,
+              powEnabled,
+              powTargetBits,
+              lightningAddr,
+            }),
+          () => false
+        )
       } finally {
-        setSending(false)
+        adjustInFlightSend(-1)
       }
     },
     [
@@ -1977,21 +2151,12 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       activeChannel,
       pool,
       identityManager,
-      replyingTo,
       settings.powEnabled,
       settings.powTargetBits,
       updateServerChannelMessages,
-      pushToast,
+      adjustInFlightSend,
+      publishServerMessageDirect,
     ]
-  )
-
-  const sendMessage = useCallback(
-    async (
-      rawText: string,
-      options?: { onPublishedId?: (id: string) => void }
-    ): Promise<boolean> =>
-      sendMessageInternal(rawText, undefined, undefined, undefined, options?.onPublishedId),
-    [sendMessageInternal]
   )
 
   const sendVoiceMemo = useCallback(
@@ -2001,97 +2166,191 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
       const server = activeServer
       const channel = activeChannel
-      const replyTarget = replyingTo
+      const chanId = channel.id
+      const targetKey = makeServerChanKey(server.id, chanId)
+      const replyTarget = replyingToRef.current
+      replyingToRef.current = null
+      if (activeServerChanKeyRef.current === targetKey) {
+        setReplyingTo(null)
+      }
+
       const cleanMime = cleanMimeType(recorded.mime)
       const cleanCaption = caption?.trim() ?? ''
+      const nick = identityManager.getNickname()
+      const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const wipeGen = identityManager.getWipeGeneration()
+      const powEnabled = settings.powEnabled
+      const powTargetBits = settings.powTargetBits
+      const lightningAddr = lightningAddressRef.current
+      const uploadServers = [...blossomServers]
 
-      setSending(true)
+      const tempId = `pending-srv-${Date.now()}-${++optimisticSeqRef.current}`
+      const nowSec = clampTimestamp(Math.floor(Date.now() / 1000))
+      const optimistic: ServerMessage = {
+        id: tempId,
+        serverId: server.id,
+        channelId: chanId,
+        pubkey: masterPk,
+        nickname: nick,
+        displayHandle: formatDisplayHandle(nick, masterPk),
+        content: cleanCaption || 'Sending voice memo…',
+        createdAt: nowSec,
+        tags: [],
+        isOwn: true,
+        encrypted: server.encrypted,
+        powBits: 0,
+        replyTo:
+          replyTarget && !replyTarget.isSystem
+            ? {
+                id: replyTarget.id,
+                pubkey: replyTarget.pubkey,
+                nickname: replyTarget.nickname,
+                preview: replyTarget.content.slice(0, 120),
+              }
+            : undefined,
+        reactions: [],
+        mentions: extractMentions(cleanCaption),
+        deliveryStatus: 'sending',
+      }
+
+      updateServerChannelMessages(
+        server.id,
+        chanId,
+        (prev) => {
+          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
+          return [...prev, { ...optimistic, createdAt: Math.max(nowSec, lastSec) }]
+        },
+        { allowBackgroundPersist: true }
+      )
+
+      adjustInFlightSend(1)
       try {
-        const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
-        let attachment: VoiceMemoAttachment
+        return await serverSendQueueRef.current.enqueue(
+          `srv:${server.id}:${chanId}`,
+          async () => {
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            try {
+              const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
+              let attachment: VoiceMemoAttachment
 
-        if (server.kind === 'virtual' && server.encrypted) {
-          setVoiceSendPhase('encrypting')
-          const { ciphertext, encryption } = await encryptVoiceBytesAesGcm(rawBytes)
-          setVoiceSendPhase('uploading')
-          const upload = await uploadBlobToBlossom({
-            bytes: ciphertext,
-            mime: 'application/octet-stream',
-            servers: blossomServers,
-            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
-          })
-          attachment = {
-            url: upload.url,
-            mime: cleanMime,
-            size: recorded.size,
-            durationSec: recorded.durationSec,
-            waveform: recorded.waveform,
-            sha256: upload.sha256,
-            encryption,
-            server: upload.server,
-          }
-        } else {
-          setVoiceSendPhase('uploading')
-          const upload = await uploadBlobToBlossom({
-            bytes: rawBytes,
-            mime: cleanMime,
-            servers: blossomServers,
-            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
-          })
-          attachment = {
-            url: upload.url,
-            mime: cleanMime,
-            size: upload.size,
-            durationSec: recorded.durationSec,
-            waveform: recorded.waveform,
-            sha256: upload.sha256,
-            server: upload.server,
-          }
-        }
+              if (server.kind === 'virtual' && server.encrypted) {
+                setVoiceSendPhase('encrypting')
+                const { ciphertext, encryption } = await encryptVoiceBytesAesGcm(rawBytes)
+                setVoiceSendPhase('uploading')
+                const upload = await uploadBlobToBlossom({
+                  bytes: ciphertext,
+                  mime: 'application/octet-stream',
+                  servers: uploadServers,
+                  signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
+                })
+                attachment = {
+                  url: upload.url,
+                  mime: cleanMime,
+                  size: recorded.size,
+                  durationSec: recorded.durationSec,
+                  waveform: recorded.waveform,
+                  sha256: upload.sha256,
+                  encryption,
+                  server: upload.server,
+                }
+              } else {
+                setVoiceSendPhase('uploading')
+                const upload = await uploadBlobToBlossom({
+                  bytes: rawBytes,
+                  mime: cleanMime,
+                  servers: uploadServers,
+                  signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
+                })
+                attachment = {
+                  url: upload.url,
+                  mime: cleanMime,
+                  size: upload.size,
+                  durationSec: recorded.durationSec,
+                  waveform: recorded.waveform,
+                  sha256: upload.sha256,
+                  server: upload.server,
+                }
+              }
 
-        if (attachment.sha256 && recorded.previewTranscript?.trim()) {
-          onSeedMemoTranscript?.(
-            attachment.sha256,
-            recorded.previewTranscript,
-            recorded.previewTranscriptModel
-          )
-        }
+              if (attachment.sha256 && recorded.previewTranscript?.trim()) {
+                onSeedMemoTranscript?.(
+                  attachment.sha256,
+                  recorded.previewTranscript,
+                  recorded.previewTranscriptModel
+                )
+              }
 
-        setVoiceSendPhase('publishing')
-        const body =
-          server.encrypted
-            ? cleanCaption
-            : cleanCaption
-              ? `${cleanCaption}\n${attachment.url}`
-              : attachment.url
+              setVoiceSendPhase('publishing')
+              const body = server.encrypted
+                ? cleanCaption
+                : cleanCaption
+                  ? `${cleanCaption}\n${attachment.url}`
+                  : attachment.url
 
-        const ok = await sendMessageInternal(body, attachment, undefined, {
-          server,
-          channel,
-          replyTarget,
-        })
-        if (ok) {
-          revokeVoicePreviewUrl(recorded)
-        }
-        return ok
-      } catch (err) {
-        pushToast('error', 'Server voice memo failed', err instanceof Error ? err.message : 'Upload error')
-        return false
+              const ok = await publishServerMessageDirect({
+                server,
+                channel,
+                tempId,
+                body,
+                replyTarget,
+                voiceAttachment: attachment,
+                wipeGen,
+                nick,
+                masterPk,
+                powEnabled,
+                powTargetBits,
+                lightningAddr,
+              })
+              if (ok) {
+                revokeVoicePreviewUrl(recorded)
+              }
+              return ok
+            } catch (err) {
+              if (identityManager.getWipeGeneration() === wipeGen) {
+                updateServerChannelMessages(
+                  server.id,
+                  chanId,
+                  (prev) => {
+                    let changed = false
+                    const next = prev.map((m) => {
+                      if (m.id !== tempId) return m
+                      changed = true
+                      return { ...m, deliveryStatus: 'failed' as ServerMessage['deliveryStatus'] }
+                    })
+                    return changed ? next : null
+                  },
+                  { allowBackgroundPersist: true }
+                )
+                pushToast(
+                  'error',
+                  'Server voice memo failed',
+                  err instanceof Error ? err.message : 'Upload error'
+                )
+              }
+              return false
+            } finally {
+              setVoiceSendPhase('idle')
+            }
+          },
+          () => false
+        )
       } finally {
-        setVoiceSendPhase('idle')
-        setSending(false)
+        adjustInFlightSend(-1)
       }
     },
     [
       activeServer,
       activeChannel,
-      replyingTo,
       pool,
       blossomServers,
       identityManager,
+      settings.powEnabled,
+      settings.powTargetBits,
       setVoiceSendPhase,
       onSeedMemoTranscript,
-      sendMessageInternal,
+      updateServerChannelMessages,
+      adjustInFlightSend,
+      publishServerMessageDirect,
       pushToast,
     ]
   )
@@ -2103,89 +2362,187 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
       const server = activeServer
       const channel = activeChannel
-      const replyTarget = replyingTo
+      const chanId = channel.id
+      const targetKey = makeServerChanKey(server.id, chanId)
+      const replyTarget = replyingToRef.current
+      replyingToRef.current = null
+      if (activeServerChanKeyRef.current === targetKey) {
+        setReplyingTo(null)
+      }
+
       const cleanMime = cleanMimeType(image.mime, 'image/webp')
       const cleanCaption = caption?.trim() ?? ''
+      const nick = identityManager.getNickname()
+      const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const wipeGen = identityManager.getWipeGeneration()
+      const powEnabled = settings.powEnabled
+      const powTargetBits = settings.powTargetBits
+      const lightningAddr = lightningAddressRef.current
+      const uploadServers = [...blossomServers]
 
-      setSending(true)
+      const tempId = `pending-srv-${Date.now()}-${++optimisticSeqRef.current}`
+      const nowSec = clampTimestamp(Math.floor(Date.now() / 1000))
+      const optimistic: ServerMessage = {
+        id: tempId,
+        serverId: server.id,
+        channelId: chanId,
+        pubkey: masterPk,
+        nickname: nick,
+        displayHandle: formatDisplayHandle(nick, masterPk),
+        content: cleanCaption || 'Sending image…',
+        createdAt: nowSec,
+        tags: [],
+        isOwn: true,
+        encrypted: server.encrypted,
+        powBits: 0,
+        replyTo:
+          replyTarget && !replyTarget.isSystem
+            ? {
+                id: replyTarget.id,
+                pubkey: replyTarget.pubkey,
+                nickname: replyTarget.nickname,
+                preview: replyTarget.content.slice(0, 120),
+              }
+            : undefined,
+        reactions: [],
+        mentions: extractMentions(cleanCaption),
+        deliveryStatus: 'sending',
+      }
+
+      updateServerChannelMessages(
+        server.id,
+        chanId,
+        (prev) => {
+          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
+          return [...prev, { ...optimistic, createdAt: Math.max(nowSec, lastSec) }]
+        },
+        { allowBackgroundPersist: true }
+      )
+
+      adjustInFlightSend(1)
       try {
-        const rawBytes = new Uint8Array(await image.blob.arrayBuffer())
-        let attachment: ImageAttachment
+        return await serverSendQueueRef.current.enqueue(
+          `srv:${server.id}:${chanId}`,
+          async () => {
+            if (identityManager.getWipeGeneration() !== wipeGen) {
+              revokeImagePreviewUrl(image)
+              return false
+            }
+            try {
+              const rawBytes = new Uint8Array(await image.blob.arrayBuffer())
+              let attachment: ImageAttachment
 
-        if (server.kind === 'virtual' && server.encrypted) {
-          setVoiceSendPhase('encrypting')
-          const { ciphertext, encryption } = await encryptMediaBytesAesGcm(rawBytes)
-          setVoiceSendPhase('uploading')
-          const upload = await uploadBlobToBlossom({
-            bytes: ciphertext,
-            mime: 'application/octet-stream',
-            servers: blossomServers,
-            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
-          })
-          attachment = {
-            url: upload.url,
-            mime: cleanMime,
-            sha256: upload.sha256,
-            size: image.size,
-            width: image.width,
-            height: image.height,
-            alt: image.fileName,
-            encryption,
-            server: upload.server,
+              if (server.kind === 'virtual' && server.encrypted) {
+                setVoiceSendPhase('encrypting')
+                const { ciphertext, encryption } = await encryptMediaBytesAesGcm(rawBytes)
+                setVoiceSendPhase('uploading')
+                const upload = await uploadBlobToBlossom({
+                  bytes: ciphertext,
+                  mime: 'application/octet-stream',
+                  servers: uploadServers,
+                  signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
+                })
+                attachment = {
+                  url: upload.url,
+                  mime: cleanMime,
+                  sha256: upload.sha256,
+                  size: image.size,
+                  width: image.width,
+                  height: image.height,
+                  alt: image.fileName,
+                  encryption,
+                  server: upload.server,
+                }
+              } else {
+                setVoiceSendPhase('uploading')
+                const upload = await uploadBlobToBlossom({
+                  bytes: rawBytes,
+                  mime: cleanMime,
+                  servers: uploadServers,
+                  signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
+                })
+                attachment = {
+                  url: upload.url,
+                  mime: cleanMime,
+                  sha256: upload.sha256,
+                  size: upload.size,
+                  width: image.width,
+                  height: image.height,
+                  alt: image.fileName,
+                  server: upload.server,
+                }
+              }
+
+              setVoiceSendPhase('publishing')
+              const body = server.encrypted
+                ? cleanCaption
+                : cleanCaption
+                  ? `${cleanCaption}\n${attachment.url}`
+                  : attachment.url
+
+              return await publishServerMessageDirect({
+                server,
+                channel,
+                tempId,
+                body,
+                replyTarget,
+                imageAttachment: attachment,
+                wipeGen,
+                nick,
+                masterPk,
+                powEnabled,
+                powTargetBits,
+                lightningAddr,
+              })
+            } catch (err) {
+              if (identityManager.getWipeGeneration() === wipeGen) {
+                updateServerChannelMessages(
+                  server.id,
+                  chanId,
+                  (prev) => {
+                    let changed = false
+                    const next = prev.map((m) => {
+                      if (m.id !== tempId) return m
+                      changed = true
+                      return { ...m, deliveryStatus: 'failed' as ServerMessage['deliveryStatus'] }
+                    })
+                    return changed ? next : null
+                  },
+                  { allowBackgroundPersist: true }
+                )
+                pushToast(
+                  'error',
+                  'Server image upload failed',
+                  err instanceof Error ? err.message : 'Upload error'
+                )
+              }
+              return false
+            } finally {
+              revokeImagePreviewUrl(image)
+              setVoiceSendPhase('idle')
+            }
+          },
+          () => {
+            revokeImagePreviewUrl(image)
+            return false
           }
-        } else {
-          setVoiceSendPhase('uploading')
-          const upload = await uploadBlobToBlossom({
-            bytes: rawBytes,
-            mime: cleanMime,
-            servers: blossomServers,
-            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
-          })
-          attachment = {
-            url: upload.url,
-            mime: cleanMime,
-            sha256: upload.sha256,
-            size: upload.size,
-            width: image.width,
-            height: image.height,
-            alt: image.fileName,
-            server: upload.server,
-          }
-        }
-
-        setVoiceSendPhase('publishing')
-        const body = server.encrypted
-          ? cleanCaption
-          : cleanCaption
-            ? `${cleanCaption}\n${attachment.url}`
-            : attachment.url
-
-        const ok = await sendMessageInternal(body, undefined, attachment, {
-          server,
-          channel,
-          replyTarget,
-        })
-        if (ok) {
-          revokeImagePreviewUrl(image)
-        }
-        return ok
-      } catch (err) {
-        pushToast('error', 'Server image upload failed', err instanceof Error ? err.message : 'Upload error')
-        return false
+        )
       } finally {
-        setVoiceSendPhase('idle')
-        setSending(false)
+        adjustInFlightSend(-1)
       }
     },
     [
       activeServer,
       activeChannel,
-      replyingTo,
       pool,
       blossomServers,
       identityManager,
+      settings.powEnabled,
+      settings.powTargetBits,
       setVoiceSendPhase,
-      sendMessageInternal,
+      updateServerChannelMessages,
+      adjustInFlightSend,
+      publishServerMessageDirect,
       pushToast,
     ]
   )
@@ -2677,7 +3034,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           const toAdd = validIncoming.filter((m) => !seen.has(m.id))
           if (toAdd.length === 0) return null
           addedCount = toAdd.length
-          return backfillServerReplies([...prev, ...toAdd].sort((a, b) => a.createdAt - b.createdAt))
+          return backfillServerReplies(
+            sortChannelMessagesWithPending([...prev, ...toAdd], 'pending-srv-')
+          )
         },
         { persist: true, allowBackgroundPersist: true }
       )
@@ -2687,6 +3046,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   )
 
   const resetAllServers = useCallback(() => {
+    serverSendQueueRef.current.clearAll()
+    inFlightSendCountRef.current = 0
+    setSending(false)
+    replyingToRef.current = null
     exploreUnsubRef.current?.()
     exploreUnsubRef.current = null
     bgSeenIdsRef.current.clear()

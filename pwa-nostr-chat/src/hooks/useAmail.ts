@@ -282,7 +282,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
         refreshFromStorage()
         onLocalChangeRef.current?.()
-        pushToastRef.current?.('info', `New Amail from ${fromName}`, incoming.subject)
+        pushToastRef.current?.('info', `New Agmail from ${fromName}`, incoming.subject)
         return
       }
 
@@ -430,7 +430,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
       const resolved = resolveContactPubkeyInput(input.toPubkey)
       if (!resolved) {
-        pushToastRef.current?.('error', 'Invalid Amail recipient', 'Provide a valid npub or hex pubkey.')
+        pushToastRef.current?.('error', 'Invalid Agmail recipient', 'Provide a valid npub or hex pubkey.')
         return null
       }
 
@@ -522,7 +522,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           onLocalChangeRef.current?.()
           pushToastRef.current?.(
             'success',
-            'Amail sealed & dispatched',
+            'Agmail sealed & dispatched',
             `Relayed to ${relayed} mesh courier${relayed === 1 ? '' : 's'}`
           )
           return updated
@@ -532,13 +532,13 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         onLocalChangeRef.current?.()
         pushToastRef.current?.(
           'success',
-          'Amail queued in mesh vault',
+          'Agmail queued in mesh vault',
           'Will relay automatically when couriers connect'
         )
         return sentMsg
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Failed to encrypt Amail.'
-        pushToastRef.current?.('error', 'Failed to send Amail', msg)
+        const msg = err instanceof Error ? err.message : 'Failed to encrypt Agmail.'
+        pushToastRef.current?.('error', 'Failed to send Agmail', msg)
         return null
       }
     },
@@ -827,7 +827,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
     await storage.init()
     await storage.purgeRelayVault()
     refreshFromStorage()
-    pushToastRef.current?.('info', 'Relay vault purged', 'Your own Amail messages remain untouched.')
+    pushToastRef.current?.('info', 'Relay vault purged', 'Your own Agmail messages remain untouched.')
   }, [refreshFromStorage])
 
   /* ------------------------------------------------------------------------

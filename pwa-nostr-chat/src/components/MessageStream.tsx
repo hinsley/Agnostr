@@ -22,8 +22,8 @@ import type { AgnostrEngine, GeoMessage, PeerInfo } from '../types/protocol'
 import type { ServerMessage } from '../types/servers'
 import {
   TRANSLATION_LANGUAGE_OPTIONS,
+  TRANSLATOR_MODELS,
   translationCacheKey,
-  TRANSLATOR_MODEL_LABEL,
 } from '../types/translator'
 import type { ZapTarget } from '../types/wallet'
 import type { ServerSettingsTab } from './ServerSettingsModal'
@@ -601,8 +601,10 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     engine.zaps.watchEventIds(watchedZapIdsKey.split(','))
   }, [watchedZapIdsKey, engine.zaps])
 
-  // Double-Column Translator Mode (`LFM3-1.7B`) — auto-translate recent visible messages when ON
+  // Double-Column Translator Mode — auto-translate recent visible messages when ON
   const translator = engine.translator
+  const translatorShortLabel =
+    TRANSLATOR_MODELS[translator.modelKey]?.shortLabel ?? translator.modelLabel
   const translatorEnabled = translator.settings.enabled
   const myLanguage = translator.settings.myLanguage
   const outgoingEnabled = translator.settings.outgoingEnabled
@@ -663,7 +665,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         </div>
       )}
 
-      {/* Compact Double-Column Translator Controls Strip (LFM3-1.7B) */}
+      {/* Compact Double-Column Translator Controls Strip */}
       {translatorEnabled && (
         <div className="ag-translator-bar" role="region" aria-label="Translator controls">
           <div className="ag-translator-bar-row">
@@ -715,10 +717,13 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
             <div className="ag-translator-bar-right">
               {translator.modelStatus === 'downloading' ? (
-                <span className="ag-translator-model-status downloading tabular">
+                <span
+                  className="ag-translator-model-status downloading tabular"
+                  title={translator.modelLabel}
+                >
                   <Loader2 size={12} className="ag-spin" />
                   <span>
-                    {TRANSLATOR_MODEL_LABEL} · {Math.round(translator.downloadProgress)}%
+                    {translatorShortLabel} · {Math.round(translator.downloadProgress)}%
                   </span>
                 </span>
               ) : translator.modelStatus === 'error' ? (
@@ -732,9 +737,12 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   <span>Retry model</span>
                 </button>
               ) : (
-                <span className="ag-translator-model-status ready ag-desktop-only">
+                <span
+                  className="ag-translator-model-status ready ag-desktop-only"
+                  title={`${translator.modelLabel} · On-device translation`}
+                >
                   <Columns2 size={11} />
-                  <span>{TRANSLATOR_MODEL_LABEL}</span>
+                  <span>{translatorShortLabel}</span>
                 </span>
               )}
 
@@ -905,7 +913,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   </h2>
                   <p className="ag-empty-sub">
                     {activeIsTopic
-                      ? 'Live topic channel (kind 23333) — say hello to start chatting.'
+                      ? 'Live topic channel — say hello to start chatting.'
                       : 'Say hello to start chatting with people nearby.'}
                   </p>
                 </div>

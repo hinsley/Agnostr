@@ -101,6 +101,11 @@ import {
 } from '../lib/radioChannel.ts'
 import { RelayPool } from '../lib/relayPool.ts'
 import {
+  KeyedFifoQueue,
+  sortChannelMessagesWithPending,
+  swapPendingWithSigned,
+} from '../lib/sendQueue.ts'
+import {
   clearChannelMessagesStorage,
   DEFAULT_SETTINGS,
   formatTranscriptExport,
@@ -113,6 +118,7 @@ import {
   loadGeoDirectoryCache,
   loadLocalSecret,
   loadNickname,
+  loadPeerNotes,
   loadPinnedChannels,
   loadRecentChannels,
   loadSettings,
@@ -128,6 +134,7 @@ import {
   saveGeoDirectoryCache,
   saveLocalSecret,
   saveNickname,
+  savePeerNotes,
   savePinnedChannels,
   saveRecentChannels,
   saveSettings,
@@ -433,6 +440,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   // Whitelist-based receipt & Blossom media servers
   const [trustedPubkeys, setTrustedPubkeys] = useState<TrustedPeerEntry[]>(() => loadTrustedPubkeys())
   const trustedSet = useMemo(() => new Set(trustedPubkeys.map((t) => t.pubkey)), [trustedPubkeys])
+  const [peerNotes, setPeerNotes] = useState<Record<string, string>>(() => loadPeerNotes())
 
   const locationNotes = useMemo(() => {
     if (locationNotesState.channelKey !== activeGeohash) return []
@@ -511,6 +519,19 @@ export function useAgnostrEngine(): AgnostrEngine {
   const relaySelectionRef = useRef(relaySelection)
   const activeServerRelaysRef = useRef<string[]>([])
   const zapsIngestEventTagsRef = useRef<(pubkey: string, tags: string[][]) => void>(() => {})
+  const radioSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
+  const inFlightSendCountRef = useRef<number>(0)
+  const optimisticRadioSeqRef = useRef<number>(0)
+  const replyingToRef = useRef<GeoMessage | null>(replyingTo)
+
+  const adjustInFlightSend = useCallback((delta: number) => {
+    inFlightSendCountRef.current = Math.max(0, inFlightSendCountRef.current + delta)
+    setSending(inFlightSendCountRef.current > 0)
+  }, [])
+
+  useLayoutEffect(() => {
+    replyingToRef.current = replyingTo
+  }, [replyingTo])
 
   // Sync security-critical refs in useLayoutEffect so they are always up to date
   // BEFORE any child component's mount/update useEffect (e.g. TrustedImageView) runs!
@@ -1006,9 +1027,10 @@ export function useAgnostrEngine(): AgnostrEngine {
                 return updated
               })
 
-              return [...backfilledPrev, hydrated]
-                .sort((a, b) => a.createdAt - b.createdAt)
-                .slice(-350)
+              return sortChannelMessagesWithPending(
+                [...backfilledPrev, hydrated],
+                'pending-radio-'
+              ).slice(-350)
             })
 
             if (!isHistoryReplay && !parsed.isOwn && !isStale() && !blockedSetRef.current.has(pk)) {
@@ -1661,7 +1683,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (toAdd.length === 0) return null
           addedCount = toAdd.length
           return backfillReplyReferences(
-            [...prev, ...toAdd].sort((a, b) => a.createdAt - b.createdAt)
+            sortChannelMessagesWithPending([...prev, ...toAdd], 'pending-radio-')
           )
         },
         { persist: true, allowBackgroundPersist: true }
@@ -1670,6 +1692,36 @@ export function useAgnostrEngine(): AgnostrEngine {
     },
     [updateChannelMessages]
   )
+
+  const setPeerNote = useCallback((pubkeyOrNpub: string, rawNote: string) => {
+    const pk = decodePubkeyInput(pubkeyOrNpub)
+    if (!pk) return
+    const clean = rawNote.trim().slice(0, 400)
+    setPeerNotes((prev) => {
+      const existing = prev[pk] ?? ''
+      if (existing === clean) return prev
+      const next = { ...prev }
+      if (clean) {
+        next[pk] = clean
+      } else {
+        delete next[pk]
+      }
+      savePeerNotes(next)
+      return next
+    })
+  }, [])
+
+  const handleApplySyncedPeerNotes = useCallback((nextNotes: Record<string, string>) => {
+    const clean: Record<string, string> = {}
+    for (const [rawPk, rawText] of Object.entries(nextNotes)) {
+      const pk = rawPk.trim().toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawText !== 'string') continue
+      const trimmed = rawText.trim().slice(0, 400)
+      if (trimmed) clean[pk] = trimmed
+    }
+    setPeerNotes(clean)
+    savePeerNotes(clean)
+  }, [])
 
   const {
     deviceSync: deviceSyncEngine,
@@ -1688,6 +1740,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     pinnedChannels,
     dmClearedAt,
     lightningAddress: zapsEngine.lightningAddress,
+    peerNotes,
     dmThreads,
     activeGeohash,
     activeRadioMessages: messages,
@@ -1699,6 +1752,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     onApplyDmClearedAt: mergeSyncedDmClearedAt,
     onApplyLightningAddress: handleApplySyncedLightningAddress,
     onApplyNickname: handleApplySyncedNickname,
+    onApplyPeerNotes: handleApplySyncedPeerNotes,
     onMergeDmMessages: mergeSyncedDmMessages,
     onMergeServerMessages: mergeSyncedServerMessages,
     onMergeRadioMessages: handleMergeSyncedRadioMessages,
@@ -1918,111 +1972,209 @@ export function useAgnostrEngine(): AgnostrEngine {
       const content = rawText.trim()
       if (!content || !pool) return false
 
+      // Synchronously capture channel, relays, reply target, signer metadata & append optimistic message
+      // BEFORE awaiting the per-channel FIFO queue so rapid sends appear in exact 1 -> 2 -> 3 order.
       const gh = activeGeohashRef.current
-      const targetRelays = relaySelection.channelRelays
+      const targetRelays = [...relaySelectionRef.current.channelRelays]
       const isTopic = isTopicChannel(gh)
       const nick = identityManager.getNickname()
       const activeKey = identityManager.getKeyMaterialForGeohash(gh)
-      const replyTarget = replyOverride !== undefined ? replyOverride : replyingTo
+      const replyTarget = replyOverride !== undefined ? replyOverride : replyingToRef.current
+      const isTeleported = location.isTeleported
+      const broadcastClientTag = settings.broadcastClientTag
+      const lightningAddr = zapsEngine.lightningAddress
+      const powEnabled = settings.powEnabled
+      const powTargetBits = settings.powTargetBits
+      const wipeGen = identityManager.getWipeGeneration()
 
-      setSending(true)
-      try {
-        const template = isTopic
-          ? buildNamedRadioChatTemplate({
-              content,
-              topic: gh,
-              nickname: nick,
-              replyTo: replyTarget,
-              broadcastClientTag: settings.broadcastClientTag,
-              lightningAddress: zapsEngine.lightningAddress,
-            })
-          : buildGeohashChatTemplate({
-              content,
-              geohash: gh,
-              nickname: nick,
-              isTeleported: location.isTeleported,
-              replyTo: replyTarget,
-              broadcastClientTag: settings.broadcastClientTag,
-              lightningAddress: zapsEngine.lightningAddress,
-            })
-
-        // Mine 8-bit NIP-13 PoW non-blocking when enabled and pubkey is known
-        if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
-          const nonceTag = await mineNip13NonceTag(template, activeKey.pubkey, settings.powTargetBits, 450)
-          if (nonceTag) {
-            template.tags = [...template.tags, nonceTag]
-          }
-        }
-
-        const signed = await identityManager.signEvent(template, gh)
-        onPublishedId?.(signed.id)
-        const findParent = (id: string) =>
-          messagesChannelRef.current === gh
-            ? messagesRef.current.find((m) => m.id === id)
-            : undefined
-        const optimistic = isTopic
-          ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, findParent)
-          : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
-        if (optimistic) {
-          optimistic.deliveryStatus = 'sending'
-          optimistic.isOwn = true
-          updateChannelMessages(
-            gh,
-            (prev) => {
-              if (prev.some((m) => m.id === optimistic.id)) return null
-              return [...prev, optimistic].sort((a, b) => a.createdAt - b.createdAt)
-            },
-            { allowBackgroundPersist: true }
-          )
-        }
-
+      if (replyOverride === undefined) {
+        replyingToRef.current = null
         if (activeGeohashRef.current === gh) {
           setReplyingTo(null)
         }
+      }
 
-        const res = await pool.publish(targetRelays, signed)
-        const ok = res.acceptedRelays.length > 0
-
-        updateChannelMessages(
-          gh,
-          (prev) => {
-            let changed = false
-            const next = prev.map((m) => {
-              if (m.id !== signed.id) return m
-              changed = true
-              return {
-                ...m,
-                deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
-                relayCount: res.acceptedRelays.length,
+      const tempId = `pending-radio-${Date.now()}-${++optimisticRadioSeqRef.current}`
+      const nowSec = Math.floor(Date.now() / 1000)
+      const activePk = activeKey.pubkey.toLowerCase()
+      const optimisticBase: GeoMessage = {
+        id: tempId,
+        geohash: gh,
+        pubkey: activePk,
+        nickname: nick,
+        displayHandle: formatDisplayHandle(nick, activePk),
+        content,
+        createdAt: nowSec,
+        tags: [],
+        isOwn: true,
+        isTeleported: !isTopic && isTeleported,
+        isMeshBridge: false,
+        isAgnostrClient: broadcastClientTag,
+        powBits: 0,
+        replyTo:
+          replyTarget && !replyTarget.isSystem
+            ? {
+                id: replyTarget.id,
+                pubkey: replyTarget.pubkey,
+                nickname: replyTarget.nickname,
+                preview: replyTarget.content.slice(0, 120),
               }
-            })
-            return changed ? next : null
-          },
-          { allowBackgroundPersist: true }
-        )
+            : undefined,
+        reactions: [],
+        mentions: extractMentions(content),
+        deliveryStatus: 'sending',
+      }
 
-        if (!ok) {
-          pushToast('error', 'Failed to broadcast message', 'No connected relay accepted the event.')
-        }
-        return ok
-      } catch (err) {
-        pushToast('error', 'Signing failed', err instanceof Error ? err.message : 'Unable to sign event.')
-        return false
+      onPublishedId?.(tempId)
+      updateChannelMessages(
+        gh,
+        (prev) => {
+          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
+          return [...prev, { ...optimisticBase, createdAt: Math.max(nowSec, lastSec) }]
+        },
+        { allowBackgroundPersist: true }
+      )
+
+      adjustInFlightSend(1)
+      try {
+        return await radioSendQueueRef.current.enqueue(
+          `radio:${gh}`,
+          async () => {
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            let activeMsgId = tempId
+            try {
+              const template = isTopic
+                ? buildNamedRadioChatTemplate({
+                    content,
+                    topic: gh,
+                    nickname: nick,
+                    replyTo: replyTarget,
+                    broadcastClientTag,
+                    lightningAddress: lightningAddr,
+                  })
+                : buildGeohashChatTemplate({
+                    content,
+                    geohash: gh,
+                    nickname: nick,
+                    isTeleported,
+                    replyTo: replyTarget,
+                    broadcastClientTag,
+                    lightningAddress: lightningAddr,
+                  })
+
+              // Mine 8-bit NIP-13 PoW non-blocking when enabled and pubkey is known
+              if (powEnabled && powTargetBits > 0 && activeKey.pubkey) {
+                const nonceTag = await mineNip13NonceTag(
+                  template,
+                  activeKey.pubkey,
+                  powTargetBits,
+                  450
+                )
+                if (nonceTag) {
+                  template.tags = [...template.tags, nonceTag]
+                }
+              }
+
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+              const signed = await identityManager.signEvent(template, gh)
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+
+              activeMsgId = signed.id
+              onPublishedId?.(signed.id)
+
+              const findParent = (id: string) =>
+                messagesChannelRef.current === gh
+                  ? messagesRef.current.find((m) => m.id === id)
+                  : undefined
+              const parsed = isTopic
+                ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+                : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+
+              if (parsed) {
+                parsed.deliveryStatus = 'sending'
+                parsed.isOwn = true
+                // Atomically promote tempId -> signed.id into confirmed messages BEFORE publishing,
+                // keeping any remaining queued pending-radio-* placeholders pinned at the tail.
+                updateChannelMessages(
+                  gh,
+                  (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-radio-'),
+                  { allowBackgroundPersist: true }
+                )
+              }
+
+              const res = await pool.publish(targetRelays, signed)
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+              const ok = res.acceptedRelays.length > 0
+
+              updateChannelMessages(
+                gh,
+                (prev) => {
+                  let changed = false
+                  const next = prev.map((m) => {
+                    if (m.id !== signed.id) return m
+                    changed = true
+                    return {
+                      ...m,
+                      deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
+                      relayCount: res.acceptedRelays.length,
+                    }
+                  })
+                  return changed ? next : null
+                },
+                { allowBackgroundPersist: true }
+              )
+
+              if (!ok) {
+                pushToast(
+                  'error',
+                  'Failed to broadcast message',
+                  'No connected relay accepted the event.'
+                )
+              }
+              return ok
+            } catch (err) {
+              if (identityManager.getWipeGeneration() === wipeGen) {
+                updateChannelMessages(
+                  gh,
+                  (prev) => {
+                    let changed = false
+                    const next = prev.map((m) => {
+                      if (m.id !== activeMsgId && m.id !== tempId) return m
+                      changed = true
+                      return {
+                        ...m,
+                        deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
+                      }
+                    })
+                    return changed ? next : null
+                  },
+                  { allowBackgroundPersist: true }
+                )
+                pushToast(
+                  'error',
+                  'Signing failed',
+                  err instanceof Error ? err.message : 'Unable to sign event.'
+                )
+              }
+              return false
+            }
+          },
+          () => false
+        )
       } finally {
-        setSending(false)
+        adjustInFlightSend(-1)
       }
     },
     [
       pool,
       identityManager,
-      replyingTo,
       location.isTeleported,
       settings.powEnabled,
       settings.powTargetBits,
       settings.broadcastClientTag,
       zapsEngine.lightningAddress,
-      relaySelection.channelRelays,
       updateChannelMessages,
+      adjustInFlightSend,
       pushToast,
     ]
   )
@@ -2117,7 +2269,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
           pushToast('success', `Note dropped in #${gh}`, `Pinned across ${res.acceptedRelays.length} relays (24h).`)
         } else {
-          pushToast('error', 'Dead-drop failed', 'No relay accepted the kind-1 location note.')
+          pushToast('error', 'Dead-drop failed', 'No relay accepted the location note.')
         }
         return ok
       } catch (err) {
@@ -2445,7 +2597,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   // Voice memo send (Blossom BUD-02 + NIP-92 imeta for public; AES-256-GCM + kind 1059 for DMs; delegates to Servers in server view)
   const sendVoiceMemo = useCallback(
     async (recorded: RecordedVoiceMemo, caption?: string): Promise<boolean> => {
-      if (activeView.type === 'server') {
+      const view = activeViewRef.current
+      if (view.type === 'server') {
         return await serversEngine.sendVoiceMemo(recorded, caption)
       }
       if (!pool) return false
@@ -2455,192 +2608,301 @@ export function useAgnostrEngine(): AgnostrEngine {
       }
 
       const gh = activeGeohashRef.current
-      const targetRelays = relaySelection.channelRelays
-      const replyTarget = replyingTo
-      const targetDmPeer = activeView.type === 'dm' ? activeView.peerPubkey : null
+      const targetRelays = [...relaySelectionRef.current.channelRelays]
+      const targetDmPeer = view.type === 'dm' ? view.peerPubkey : null
       const isDm = targetDmPeer !== null
       const cleanMime = cleanMimeType(recorded.mime)
       const cleanCaption = caption?.trim() ?? ''
+      const uploadServers = [...blossomServers]
+      const wipeGen = identityManager.getWipeGeneration()
 
-      setSending(true)
-      try {
-        const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
+      if (isDm && targetDmPeer) {
+        adjustInFlightSend(1)
+        try {
+          const ok = await sendDirectVoiceMemo(
+            targetDmPeer,
+            async () => {
+              const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
+              setVoiceSendPhase('encrypting')
+              const { ciphertext, encryption } = await encryptVoiceBytesAesGcm(rawBytes)
 
-        if (isDm && targetDmPeer) {
-          setVoiceSendPhase('encrypting')
-          const { ciphertext, encryption } = await encryptVoiceBytesAesGcm(rawBytes)
+              setVoiceSendPhase('uploading')
+              const upload = await uploadBlobToBlossom({
+                bytes: ciphertext,
+                mime: 'application/octet-stream',
+                servers: uploadServers,
+                signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+              })
 
-          setVoiceSendPhase('uploading')
-          const upload = await uploadBlobToBlossom({
-            bytes: ciphertext,
-            mime: 'application/octet-stream',
-            servers: blossomServers,
-            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
-          })
+              const attachment: VoiceMemoAttachment = {
+                url: upload.url,
+                mime: cleanMime,
+                size: recorded.size,
+                durationSec: recorded.durationSec,
+                waveform: recorded.waveform,
+                sha256: upload.sha256,
+                encryption,
+                server: upload.server,
+              }
 
-          const attachment: VoiceMemoAttachment = {
-            url: upload.url,
-            mime: cleanMime,
-            size: recorded.size,
-            durationSec: recorded.durationSec,
-            waveform: recorded.waveform,
-            sha256: upload.sha256,
-            encryption,
-            server: upload.server,
-          }
+              if (attachment.sha256 && recorded.previewTranscript?.trim()) {
+                seedMemoTranscriptRef.current(
+                  attachment.sha256,
+                  recorded.previewTranscript,
+                  recorded.previewTranscriptModel
+                )
+              }
 
-          if (attachment.sha256 && recorded.previewTranscript?.trim()) {
-            seedMemoTranscriptRef.current(
-              attachment.sha256,
-              recorded.previewTranscript,
-              recorded.previewTranscriptModel
-            )
-          }
-
-          setVoiceSendPhase('publishing')
-          const ok = await sendDirectVoiceMemo(targetDmPeer, attachment, cleanCaption)
+              setVoiceSendPhase('publishing')
+              return attachment
+            },
+            cleanCaption
+          )
           if (ok) {
             revokeVoicePreviewUrl(recorded)
-            pushToast('success', 'Encrypted voice memo sent', 'AES-256-GCM audio delivered inside E2EE gift wrap.')
+            pushToast(
+              'success',
+              'Encrypted voice memo sent',
+              'AES-256-GCM audio delivered inside E2EE gift wrap.'
+            )
           }
           return ok
+        } finally {
+          setVoiceSendPhase('idle')
+          adjustInFlightSend(-1)
         }
+      }
 
-        // Public geohash channel: upload audio to Blossom + publish kind 20000 with NIP-92 imeta
-        setVoiceSendPhase('uploading')
-        const upload = await uploadBlobToBlossom({
-          bytes: rawBytes,
-          mime: cleanMime,
-          servers: blossomServers,
-          signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
-        })
+      const replyTarget = replyingToRef.current
+      replyingToRef.current = null
+      if (activeGeohashRef.current === gh) {
+        setReplyingTo(null)
+      }
 
-        const attachment: VoiceMemoAttachment = {
-          url: upload.url,
-          mime: cleanMime,
-          size: upload.size,
-          durationSec: recorded.durationSec,
-          waveform: recorded.waveform,
-          sha256: upload.sha256,
-          server: upload.server,
-        }
+      const isTopic = isTopicChannel(gh)
+      const nick = identityManager.getNickname()
+      const activeKey = identityManager.getKeyMaterialForGeohash(gh)
+      const activePk = activeKey.pubkey.toLowerCase()
+      const isTeleported = location.isTeleported
+      const broadcastClientTag = settings.broadcastClientTag
+      const lightningAddr = zapsEngine.lightningAddress
+      const powEnabled = settings.powEnabled
+      const powTargetBits = settings.powTargetBits
 
-        if (attachment.sha256 && recorded.previewTranscript?.trim()) {
-          seedMemoTranscriptRef.current(
-            attachment.sha256,
-            recorded.previewTranscript,
-            recorded.previewTranscriptModel
-          )
-        }
-
-        setVoiceSendPhase('signing')
-        const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
-        const isTopic = isTopicChannel(gh)
-        const activeKey = identityManager.getKeyMaterialForGeohash(gh)
-        const template = isTopic
-          ? buildNamedRadioChatTemplate({
-              content,
-              topic: gh,
-              nickname: identityManager.getNickname(),
-              replyTo: replyTarget,
-              voiceMemo: attachment,
-              broadcastClientTag: settings.broadcastClientTag,
-              lightningAddress: zapsEngine.lightningAddress,
-            })
-          : buildGeohashChatTemplate({
-              content,
-              geohash: gh,
-              nickname: identityManager.getNickname(),
-              isTeleported: location.isTeleported,
-              replyTo: replyTarget,
-              voiceMemo: attachment,
-              broadcastClientTag: settings.broadcastClientTag,
-              lightningAddress: zapsEngine.lightningAddress,
-            })
-
-        if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
-          const nonceTag = await mineNip13NonceTag(template, activeKey.pubkey, settings.powTargetBits, 450)
-          if (nonceTag) {
-            template.tags = [...template.tags, nonceTag]
-          }
-        }
-
-        const signed = await identityManager.signEvent(template, gh)
-        const findParent = (id: string) =>
-          messagesChannelRef.current === gh
-            ? messagesRef.current.find((m) => m.id === id)
-            : undefined
-        const optimistic = isTopic
-          ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, findParent)
-          : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
-        if (optimistic) {
-          optimistic.deliveryStatus = 'sending'
-          optimistic.isOwn = true
-          updateChannelMessages(
-            gh,
-            (prev) => {
-              if (prev.some((m) => m.id === optimistic.id)) return null
-              return [...prev, optimistic].sort((a, b) => a.createdAt - b.createdAt)
-            },
-            { allowBackgroundPersist: true }
-          )
-        }
-
-        if (activeGeohashRef.current === gh) {
-          setReplyingTo(null)
-        }
-        setVoiceSendPhase('publishing')
-
-        const res = await pool.publish(targetRelays, signed)
-        const ok = res.acceptedRelays.length > 0
-
-        updateChannelMessages(
-          gh,
-          (prev) => {
-            let changed = false
-            const next = prev.map((m) => {
-              if (m.id !== signed.id) return m
-              changed = true
-              return {
-                ...m,
-                deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
-                relayCount: res.acceptedRelays.length,
+      const tempId = `pending-radio-${Date.now()}-${++optimisticRadioSeqRef.current}`
+      const nowSec = Math.floor(Date.now() / 1000)
+      const optimisticBase: GeoMessage = {
+        id: tempId,
+        geohash: gh,
+        pubkey: activePk,
+        nickname: nick,
+        displayHandle: formatDisplayHandle(nick, activePk),
+        content: cleanCaption || 'Sending voice memo…',
+        createdAt: nowSec,
+        tags: [],
+        isOwn: true,
+        isTeleported: !isTopic && isTeleported,
+        isMeshBridge: false,
+        isAgnostrClient: broadcastClientTag,
+        powBits: 0,
+        replyTo:
+          replyTarget && !replyTarget.isSystem
+            ? {
+                id: replyTarget.id,
+                pubkey: replyTarget.pubkey,
+                nickname: replyTarget.nickname,
+                preview: replyTarget.content.slice(0, 120),
               }
-            })
-            return changed ? next : null
-          },
-          { allowBackgroundPersist: true }
-        )
+            : undefined,
+        reactions: [],
+        mentions: extractMentions(cleanCaption),
+        deliveryStatus: 'sending',
+      }
 
-        if (ok) {
-          revokeVoicePreviewUrl(recorded)
-        } else {
-          pushToast('error', 'Voice memo publish failed', 'Uploaded to Blossom, but no Nostr relay accepted the event.')
-        }
-        return ok
-      } catch (err) {
-        pushToast('error', 'Voice memo failed', err instanceof Error ? err.message : 'Unable to upload voice memo.')
-        return false
+      updateChannelMessages(
+        gh,
+        (prev) => {
+          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
+          return [...prev, { ...optimisticBase, createdAt: Math.max(nowSec, lastSec) }]
+        },
+        { allowBackgroundPersist: true }
+      )
+
+      adjustInFlightSend(1)
+      try {
+        return await radioSendQueueRef.current.enqueue(
+          `radio:${gh}`,
+          async () => {
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            let activeMsgId = tempId
+            try {
+              const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
+
+              // Public geohash/topic channel: upload audio to Blossom + publish with NIP-92 imeta
+              setVoiceSendPhase('uploading')
+              const upload = await uploadBlobToBlossom({
+                bytes: rawBytes,
+                mime: cleanMime,
+                servers: uploadServers,
+                signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+              })
+
+              const attachment: VoiceMemoAttachment = {
+                url: upload.url,
+                mime: cleanMime,
+                size: upload.size,
+                durationSec: recorded.durationSec,
+                waveform: recorded.waveform,
+                sha256: upload.sha256,
+                server: upload.server,
+              }
+
+              if (attachment.sha256 && recorded.previewTranscript?.trim()) {
+                seedMemoTranscriptRef.current(
+                  attachment.sha256,
+                  recorded.previewTranscript,
+                  recorded.previewTranscriptModel
+                )
+              }
+
+              setVoiceSendPhase('signing')
+              const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
+              const template = isTopic
+                ? buildNamedRadioChatTemplate({
+                    content,
+                    topic: gh,
+                    nickname: nick,
+                    replyTo: replyTarget,
+                    voiceMemo: attachment,
+                    broadcastClientTag,
+                    lightningAddress: lightningAddr,
+                  })
+                : buildGeohashChatTemplate({
+                    content,
+                    geohash: gh,
+                    nickname: nick,
+                    isTeleported,
+                    replyTo: replyTarget,
+                    voiceMemo: attachment,
+                    broadcastClientTag,
+                    lightningAddress: lightningAddr,
+                  })
+
+              if (powEnabled && powTargetBits > 0 && activeKey.pubkey) {
+                const nonceTag = await mineNip13NonceTag(
+                  template,
+                  activeKey.pubkey,
+                  powTargetBits,
+                  450
+                )
+                if (nonceTag) {
+                  template.tags = [...template.tags, nonceTag]
+                }
+              }
+
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+              const signed = await identityManager.signEvent(template, gh)
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+
+              activeMsgId = signed.id
+              const findParent = (id: string) =>
+                messagesChannelRef.current === gh
+                  ? messagesRef.current.find((m) => m.id === id)
+                  : undefined
+              const parsed = isTopic
+                ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+                : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+              if (parsed) {
+                parsed.deliveryStatus = 'sending'
+                parsed.isOwn = true
+                updateChannelMessages(
+                  gh,
+                  (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-radio-'),
+                  { allowBackgroundPersist: true }
+                )
+              }
+
+              setVoiceSendPhase('publishing')
+              const res = await pool.publish(targetRelays, signed)
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+              const ok = res.acceptedRelays.length > 0
+
+              updateChannelMessages(
+                gh,
+                (prev) => {
+                  let changed = false
+                  const next = prev.map((m) => {
+                    if (m.id !== signed.id) return m
+                    changed = true
+                    return {
+                      ...m,
+                      deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
+                      relayCount: res.acceptedRelays.length,
+                    }
+                  })
+                  return changed ? next : null
+                },
+                { allowBackgroundPersist: true }
+              )
+
+              if (ok) {
+                revokeVoicePreviewUrl(recorded)
+              } else {
+                pushToast(
+                  'error',
+                  'Voice memo publish failed',
+                  'Uploaded to Blossom, but no Nostr relay accepted the event.'
+                )
+              }
+              return ok
+            } catch (err) {
+              if (identityManager.getWipeGeneration() === wipeGen) {
+                updateChannelMessages(
+                  gh,
+                  (prev) => {
+                    let changed = false
+                    const next = prev.map((m) => {
+                      if (m.id !== activeMsgId && m.id !== tempId) return m
+                      changed = true
+                      return {
+                        ...m,
+                        deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
+                      }
+                    })
+                    return changed ? next : null
+                  },
+                  { allowBackgroundPersist: true }
+                )
+                pushToast(
+                  'error',
+                  'Voice memo failed',
+                  err instanceof Error ? err.message : 'Unable to upload voice memo.'
+                )
+              }
+              return false
+            } finally {
+              setVoiceSendPhase('idle')
+            }
+          },
+          () => false
+        )
       } finally {
-        setVoiceSendPhase('idle')
-        setSending(false)
+        adjustInFlightSend(-1)
       }
     },
     [
       pool,
-      activeView,
       serversEngine,
       blossomServers,
       identityManager,
       sendDirectVoiceMemo,
       location.isTeleported,
-      replyingTo,
       settings.powEnabled,
       settings.powTargetBits,
       settings.broadcastClientTag,
       zapsEngine.lightningAddress,
-      relaySelection.channelRelays,
       updateChannelMessages,
+      adjustInFlightSend,
       pushToast,
     ]
   )
@@ -2773,185 +3035,303 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const sendImageAttachment = useCallback(
     async (image: PreparedImage, caption?: string): Promise<boolean> => {
-      if (!pool || image.size <= 0) return false
+      if (!pool || image.size <= 0) {
+        revokeImagePreviewUrl(image)
+        return false
+      }
 
-      if (activeView.type === 'server') {
+      const view = activeViewRef.current
+      if (view.type === 'server') {
         return await serversEngine.sendImageAttachment(image, caption)
       }
 
       const gh = activeGeohashRef.current
-      const targetRelays = relaySelection.channelRelays
-      const replyTarget = replyingTo
-      const targetDmPeer = activeView.type === 'dm' ? activeView.peerPubkey : null
+      const targetRelays = [...relaySelectionRef.current.channelRelays]
+      const targetDmPeer = view.type === 'dm' ? view.peerPubkey : null
       const isDm = targetDmPeer !== null
       const cleanMime = cleanMimeType(image.mime, 'image/webp')
       const cleanCaption = caption?.trim() ?? ''
+      const uploadServers = [...blossomServers]
+      const wipeGen = identityManager.getWipeGeneration()
 
-      setSending(true)
-      try {
-        const rawBytes = new Uint8Array(await image.blob.arrayBuffer())
+      if (isDm && targetDmPeer) {
+        adjustInFlightSend(1)
+        try {
+          const ok = await sendDirectImageAttachment(
+            targetDmPeer,
+            async () => {
+              const rawBytes = new Uint8Array(await image.blob.arrayBuffer())
+              setVoiceSendPhase('encrypting')
+              const { ciphertext, encryption } = await encryptMediaBytesAesGcm(rawBytes)
 
-        if (isDm && targetDmPeer) {
-          setVoiceSendPhase('encrypting')
-          const { ciphertext, encryption } = await encryptMediaBytesAesGcm(rawBytes)
+              setVoiceSendPhase('uploading')
+              const upload = await uploadBlobToBlossom({
+                bytes: ciphertext,
+                mime: 'application/octet-stream',
+                servers: uploadServers,
+                signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+              })
 
-          setVoiceSendPhase('uploading')
-          const upload = await uploadBlobToBlossom({
-            bytes: ciphertext,
-            mime: 'application/octet-stream',
-            servers: blossomServers,
-            signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
-          })
+              const attachment: ImageAttachment = {
+                url: upload.url,
+                mime: cleanMime,
+                sha256: upload.sha256,
+                size: image.size,
+                width: image.width,
+                height: image.height,
+                alt: image.fileName,
+                encryption,
+                server: upload.server,
+              }
 
-          const attachment: ImageAttachment = {
-            url: upload.url,
-            mime: cleanMime,
-            sha256: upload.sha256,
-            size: image.size,
-            width: image.width,
-            height: image.height,
-            alt: image.fileName,
-            encryption,
-            server: upload.server,
-          }
-
-          setVoiceSendPhase('publishing')
-          const ok = await sendDirectImageAttachment(targetDmPeer, attachment, cleanCaption)
+              setVoiceSendPhase('publishing')
+              return attachment
+            },
+            cleanCaption
+          )
           if (ok) {
-            revokeImagePreviewUrl(image)
-            pushToast('success', 'Encrypted image sent', 'AES-256-GCM image delivered inside E2EE gift wrap.')
+            pushToast(
+              'success',
+              'Encrypted image sent',
+              'AES-256-GCM image delivered inside E2EE gift wrap.'
+            )
           }
           return ok
-        }
-
-        // Public geohash channel: upload EXIF-stripped image to Blossom + publish kind 20000 with NIP-92 imeta
-        setVoiceSendPhase('uploading')
-        const upload = await uploadBlobToBlossom({
-          bytes: rawBytes,
-          mime: cleanMime,
-          servers: blossomServers,
-          signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
-        })
-
-        const attachment: ImageAttachment = {
-          url: upload.url,
-          mime: cleanMime,
-          sha256: upload.sha256,
-          size: upload.size,
-          width: image.width,
-          height: image.height,
-          alt: image.fileName,
-          server: upload.server,
-        }
-
-        setVoiceSendPhase('signing')
-        const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
-        const isTopic = isTopicChannel(gh)
-        const activeKey = identityManager.getKeyMaterialForGeohash(gh)
-        const template = isTopic
-          ? buildNamedRadioChatTemplate({
-              content,
-              topic: gh,
-              nickname: identityManager.getNickname(),
-              replyTo: replyTarget,
-              imageAttachment: attachment,
-              broadcastClientTag: settings.broadcastClientTag,
-              lightningAddress: zapsEngine.lightningAddress,
-            })
-          : buildGeohashChatTemplate({
-              content,
-              geohash: gh,
-              nickname: identityManager.getNickname(),
-              isTeleported: location.isTeleported,
-              replyTo: replyTarget,
-              imageAttachment: attachment,
-              broadcastClientTag: settings.broadcastClientTag,
-              lightningAddress: zapsEngine.lightningAddress,
-            })
-
-        if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
-          const nonceTag = await mineNip13NonceTag(template, activeKey.pubkey, settings.powTargetBits, 450)
-          if (nonceTag) {
-            template.tags = [...template.tags, nonceTag]
-          }
-        }
-
-        const signed = await identityManager.signEvent(template, gh)
-        const findParent = (id: string) =>
-          messagesChannelRef.current === gh
-            ? messagesRef.current.find((m) => m.id === id)
-            : undefined
-        const optimistic = isTopic
-          ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, findParent)
-          : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
-        if (optimistic) {
-          optimistic.deliveryStatus = 'sending'
-          optimistic.isOwn = true
-          updateChannelMessages(
-            gh,
-            (prev) => {
-              if (prev.some((m) => m.id === optimistic.id)) return null
-              return [...prev, optimistic].sort((a, b) => a.createdAt - b.createdAt)
-            },
-            { allowBackgroundPersist: true }
-          )
-        }
-
-        if (activeGeohashRef.current === gh) {
-          setReplyingTo(null)
-        }
-        setVoiceSendPhase('publishing')
-
-        const res = await pool.publish(targetRelays, signed)
-        const ok = res.acceptedRelays.length > 0
-
-        updateChannelMessages(
-          gh,
-          (prev) => {
-            let changed = false
-            const next = prev.map((m) => {
-              if (m.id !== signed.id) return m
-              changed = true
-              return {
-                ...m,
-                deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
-                relayCount: res.acceptedRelays.length,
-              }
-            })
-            return changed ? next : null
-          },
-          { allowBackgroundPersist: true }
-        )
-
-        if (ok) {
+        } finally {
           revokeImagePreviewUrl(image)
-        } else {
-          pushToast('error', 'Image publish failed', 'Uploaded to Blossom, but no Nostr relay accepted the event.')
+          setVoiceSendPhase('idle')
+          adjustInFlightSend(-1)
         }
-        return ok
-      } catch (err) {
-        pushToast('error', 'Image upload failed', err instanceof Error ? err.message : 'Unable to upload image.')
-        return false
+      }
+
+      const replyTarget = replyingToRef.current
+      replyingToRef.current = null
+      if (activeGeohashRef.current === gh) {
+        setReplyingTo(null)
+      }
+
+      const isTopic = isTopicChannel(gh)
+      const nick = identityManager.getNickname()
+      const activeKey = identityManager.getKeyMaterialForGeohash(gh)
+      const activePk = activeKey.pubkey.toLowerCase()
+      const isTeleported = location.isTeleported
+      const broadcastClientTag = settings.broadcastClientTag
+      const lightningAddr = zapsEngine.lightningAddress
+      const powEnabled = settings.powEnabled
+      const powTargetBits = settings.powTargetBits
+
+      const tempId = `pending-radio-${Date.now()}-${++optimisticRadioSeqRef.current}`
+      const nowSec = Math.floor(Date.now() / 1000)
+      const optimisticBase: GeoMessage = {
+        id: tempId,
+        geohash: gh,
+        pubkey: activePk,
+        nickname: nick,
+        displayHandle: formatDisplayHandle(nick, activePk),
+        content: cleanCaption || 'Sending image…',
+        createdAt: nowSec,
+        tags: [],
+        isOwn: true,
+        isTeleported: !isTopic && isTeleported,
+        isMeshBridge: false,
+        isAgnostrClient: broadcastClientTag,
+        powBits: 0,
+        replyTo:
+          replyTarget && !replyTarget.isSystem
+            ? {
+                id: replyTarget.id,
+                pubkey: replyTarget.pubkey,
+                nickname: replyTarget.nickname,
+                preview: replyTarget.content.slice(0, 120),
+              }
+            : undefined,
+        reactions: [],
+        mentions: extractMentions(cleanCaption),
+        deliveryStatus: 'sending',
+      }
+
+      updateChannelMessages(
+        gh,
+        (prev) => {
+          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
+          return [...prev, { ...optimisticBase, createdAt: Math.max(nowSec, lastSec) }]
+        },
+        { allowBackgroundPersist: true }
+      )
+
+      adjustInFlightSend(1)
+      try {
+        return await radioSendQueueRef.current.enqueue(
+          `radio:${gh}`,
+          async () => {
+            if (identityManager.getWipeGeneration() !== wipeGen) {
+              revokeImagePreviewUrl(image)
+              return false
+            }
+            let activeMsgId = tempId
+            try {
+              const rawBytes = new Uint8Array(await image.blob.arrayBuffer())
+
+              // Public geohash/topic channel: upload EXIF-stripped image to Blossom + publish with NIP-92 imeta
+              setVoiceSendPhase('uploading')
+              const upload = await uploadBlobToBlossom({
+                bytes: rawBytes,
+                mime: cleanMime,
+                servers: uploadServers,
+                signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+              })
+
+              const attachment: ImageAttachment = {
+                url: upload.url,
+                mime: cleanMime,
+                sha256: upload.sha256,
+                size: upload.size,
+                width: image.width,
+                height: image.height,
+                alt: image.fileName,
+                server: upload.server,
+              }
+
+              setVoiceSendPhase('signing')
+              const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
+              const template = isTopic
+                ? buildNamedRadioChatTemplate({
+                    content,
+                    topic: gh,
+                    nickname: nick,
+                    replyTo: replyTarget,
+                    imageAttachment: attachment,
+                    broadcastClientTag,
+                    lightningAddress: lightningAddr,
+                  })
+                : buildGeohashChatTemplate({
+                    content,
+                    geohash: gh,
+                    nickname: nick,
+                    isTeleported,
+                    replyTo: replyTarget,
+                    imageAttachment: attachment,
+                    broadcastClientTag,
+                    lightningAddress: lightningAddr,
+                  })
+
+              if (powEnabled && powTargetBits > 0 && activeKey.pubkey) {
+                const nonceTag = await mineNip13NonceTag(
+                  template,
+                  activeKey.pubkey,
+                  powTargetBits,
+                  450
+                )
+                if (nonceTag) {
+                  template.tags = [...template.tags, nonceTag]
+                }
+              }
+
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+              const signed = await identityManager.signEvent(template, gh)
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+
+              activeMsgId = signed.id
+              const findParent = (id: string) =>
+                messagesChannelRef.current === gh
+                  ? messagesRef.current.find((m) => m.id === id)
+                  : undefined
+              const parsed = isTopic
+                ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+                : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+              if (parsed) {
+                parsed.deliveryStatus = 'sending'
+                parsed.isOwn = true
+                updateChannelMessages(
+                  gh,
+                  (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-radio-'),
+                  { allowBackgroundPersist: true }
+                )
+              }
+
+              setVoiceSendPhase('publishing')
+              const res = await pool.publish(targetRelays, signed)
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+              const ok = res.acceptedRelays.length > 0
+
+              updateChannelMessages(
+                gh,
+                (prev) => {
+                  let changed = false
+                  const next = prev.map((m) => {
+                    if (m.id !== signed.id) return m
+                    changed = true
+                    return {
+                      ...m,
+                      deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
+                      relayCount: res.acceptedRelays.length,
+                    }
+                  })
+                  return changed ? next : null
+                },
+                { allowBackgroundPersist: true }
+              )
+
+              if (!ok) {
+                pushToast(
+                  'error',
+                  'Image publish failed',
+                  'Uploaded to Blossom, but no Nostr relay accepted the event.'
+                )
+              }
+              return ok
+            } catch (err) {
+              if (identityManager.getWipeGeneration() === wipeGen) {
+                updateChannelMessages(
+                  gh,
+                  (prev) => {
+                    let changed = false
+                    const next = prev.map((m) => {
+                      if (m.id !== activeMsgId && m.id !== tempId) return m
+                      changed = true
+                      return {
+                        ...m,
+                        deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
+                      }
+                    })
+                    return changed ? next : null
+                  },
+                  { allowBackgroundPersist: true }
+                )
+                pushToast(
+                  'error',
+                  'Image upload failed',
+                  err instanceof Error ? err.message : 'Unable to upload image.'
+                )
+              }
+              return false
+            } finally {
+              revokeImagePreviewUrl(image)
+              setVoiceSendPhase('idle')
+            }
+          },
+          () => {
+            revokeImagePreviewUrl(image)
+            return false
+          }
+        )
       } finally {
-        setVoiceSendPhase('idle')
-        setSending(false)
+        adjustInFlightSend(-1)
       }
     },
     [
       pool,
-      activeView,
       serversEngine,
       blossomServers,
       identityManager,
       sendDirectImageAttachment,
       location.isTeleported,
-      replyingTo,
       settings.powEnabled,
       settings.powTargetBits,
       settings.broadcastClientTag,
       zapsEngine.lightningAddress,
-      relaySelection.channelRelays,
       updateChannelMessages,
+      adjustInFlightSend,
       pushToast,
     ]
   )
@@ -3105,6 +3485,10 @@ export function useAgnostrEngine(): AgnostrEngine {
     blockedSetRef.current = new Set()
     resetAllNotifications()
     resetAllTranscription()
+    radioSendQueueRef.current.clearAll()
+    inFlightSendCountRef.current = 0
+    setSending(false)
+    replyingToRef.current = null
     contentFilterEngine.resetAll()
     translatorEngine.resetAll()
     walletEngine.resetAll()
@@ -3138,6 +3522,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     setRecentChannels([DEFAULT_GEOHASH])
     setBlockedPubkeys([])
     setTrustedPubkeys([])
+    setPeerNotes({})
     pendingTrustRequestRef.current = null
     setPendingTrustRequest(null)
     setBlossomServers([...DEFAULT_BLOSSOM_SERVERS])
@@ -3158,7 +3543,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     pushToast(
       'warning',
       'Panic Wipe Complete',
-      'All local keys, caches, Amail vault, wallet proofs, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.'
+      'All local keys, caches, Agmail vault, Agwallet proofs, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.'
     )
   }, [
     pool,
@@ -3402,6 +3787,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     cancelPendingTrust,
     untrustPubkey,
     clearTrustedPubkeys,
+    peerNotes,
+    setPeerNote,
     strictWhitelistMode: settings.strictWhitelistMode,
     setStrictWhitelistMode,
     hiddenByWhitelistCount,

@@ -11,6 +11,7 @@ import type {
   DeviceSyncCrdtState,
   LinkedDeviceInfo,
   PersistedDeviceSyncState,
+  SyncedPeerNoteRecord,
 } from '../types/deviceSync.ts'
 import type {
   NotificationFilterMode,
@@ -59,6 +60,7 @@ const KEYS = {
   recentChannels: `${PREFIX}recent_channels`,
   blockedPubkeys: `${PREFIX}blocked_pubkeys`,
   trusted: `${PREFIX}trusted`,
+  peerNotes: `${PREFIX}peer_notes`,
   blossomServers: `${PREFIX}blossom_servers`,
   iceServers: `${PREFIX}ice_servers`,
   recordingQuality: `${PREFIX}recording_quality`,
@@ -274,6 +276,41 @@ export function loadTrustedPubkeys(): TrustedPeerEntry[] {
 
 export function saveTrustedPubkeys(entries: TrustedPeerEntry[]): void {
   safeSet(KEYS.trusted, JSON.stringify(entries))
+}
+
+const MAX_PEER_NOTE_CHARS = 400
+const MAX_PEER_NOTES = 500
+
+export function loadPeerNotes(): Record<string, string> {
+  const parsed = safeJsonParse<Record<string, unknown>>(safeGet(KEYS.peerNotes), {})
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const out: Record<string, string> = {}
+  let count = 0
+  for (const [rawKey, rawVal] of Object.entries(parsed)) {
+    if (count >= MAX_PEER_NOTES) break
+    const pk = rawKey.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawVal !== 'string') continue
+    const clean = rawVal.trim().slice(0, MAX_PEER_NOTE_CHARS)
+    if (!clean) continue
+    out[pk] = clean
+    count += 1
+  }
+  return out
+}
+
+export function savePeerNotes(notes: Record<string, string>): void {
+  const out: Record<string, string> = {}
+  let count = 0
+  for (const [rawKey, rawVal] of Object.entries(notes)) {
+    if (count >= MAX_PEER_NOTES) break
+    const pk = rawKey.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawVal !== 'string') continue
+    const clean = rawVal.trim().slice(0, MAX_PEER_NOTE_CHARS)
+    if (!clean) continue
+    out[pk] = clean
+    count += 1
+  }
+  safeSet(KEYS.peerNotes, JSON.stringify(out))
 }
 
 export function loadBlossomServers(): string[] {
@@ -958,6 +995,26 @@ export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
                 : 0,
           }
         : { value: '', updatedAt: 0 },
+    peerNotes:
+      rawCrdt.peerNotes &&
+      typeof rawCrdt.peerNotes === 'object' &&
+      !Array.isArray(rawCrdt.peerNotes)
+        ? (() => {
+            const cleaned: Record<string, SyncedPeerNoteRecord> = {}
+            for (const [rawPk, entry] of Object.entries(rawCrdt.peerNotes)) {
+              const pk = rawPk.trim().toLowerCase()
+              if (!/^[0-9a-f]{64}$/.test(pk) || !entry || typeof entry !== 'object') continue
+              const text =
+                typeof entry.text === 'string' ? entry.text.trim().slice(0, MAX_PEER_NOTE_CHARS) : ''
+              const updatedAt =
+                typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
+                  ? entry.updatedAt
+                  : 0
+              cleaned[pk] = { text, updatedAt }
+            }
+            return cleaned
+          })()
+        : {},
   }
 
   const linkedDevices: LinkedDeviceInfo[] = Array.isArray(parsed.linkedDevices)
@@ -1013,6 +1070,7 @@ export function saveDeviceSyncState(state: PersistedDeviceSyncState): void {
       dmClearedAt: state.crdt.dmClearedAt,
       lud16: state.crdt.lud16,
       nickname: state.crdt.nickname,
+      peerNotes: state.crdt.peerNotes ?? {},
     },
     linkedDevices: state.linkedDevices.slice(0, 16),
   }
@@ -1073,7 +1131,7 @@ export function formatTranscriptExport(
           channel: displayChannel,
           channelType: isTopic ? 'topic' : 'geohash',
           ...(isTopic
-            ? { topicSlug, kind: 23333 }
+            ? { topicSlug }
             : {
                 precision: cell.precision,
                 level: cell.label,
@@ -1107,7 +1165,7 @@ export function formatTranscriptExport(
     '',
     `- **Exported**: ${new Date().toISOString()}`,
     ...(isTopic
-      ? [`- **Scope**: Named Topic Radio (kind 23333 · global)`]
+      ? [`- **Scope**: Named Topic Radio (global)`]
       : [
           `- **Scope**: ${cell.label} (${cell.approxSizeLabel})${cell.nearestCity ? ` · ${cell.nearestCity}` : ''}`,
           `- **Coordinates**: ${cell.center.lat.toFixed(4)}, ${cell.center.lon.toFixed(4)}`,

@@ -46,11 +46,26 @@ export function PeerInspectorModal({
 }: PeerInspectorModalProps) {
   const [copiedKey, setCopiedKey] = useState<'npub' | 'hex' | 'lud16' | null>(null)
   const peerPubkey = peer?.pubkey ?? null
+  const peerPubkeyLower = peerPubkey ? peerPubkey.toLowerCase() : null
+  const savedNote = peerPubkeyLower ? (engine.peerNotes[peerPubkeyLower] ?? '') : ''
+  const [noteDraft, setNoteDraft] = useState(savedNote)
+  const [noteSavedFlash, setNoteSavedFlash] = useState(false)
+
+  useEffect(() => {
+    setNoteDraft(savedNote)
+    setNoteSavedFlash(false)
+  }, [peerPubkeyLower, savedNote])
 
   useEffect(() => {
     if (!peerPubkey) return
     void engine.zaps.lookupPeerLightningAddress(peerPubkey)
   }, [peerPubkey, engine.zaps])
+
+  useEffect(() => {
+    if (!noteSavedFlash) return
+    const timer = window.setTimeout(() => setNoteSavedFlash(false), 1600)
+    return () => window.clearTimeout(timer)
+  }, [noteSavedFlash])
 
   useEffect(() => {
     if (!peer) return
@@ -117,6 +132,24 @@ export function PeerInspectorModal({
       engine.untrustPubkey(livePeer.pubkey)
     } else {
       engine.trustPubkey(livePeer.pubkey, livePeer.nickname)
+    }
+  }
+
+  const trimmedNoteDraft = noteDraft.trim()
+  const isNoteDirty = trimmedNoteDraft !== savedNote
+
+  const handleCommitNote = () => {
+    if (!isNoteDirty) return
+    engine.setPeerNote(livePeer.pubkey, trimmedNoteDraft)
+    setNoteDraft(trimmedNoteDraft)
+    setNoteSavedFlash(true)
+  }
+
+  const handleClearNote = () => {
+    setNoteDraft('')
+    if (savedNote) {
+      engine.setPeerNote(livePeer.pubkey, '')
+      setNoteSavedFlash(true)
     }
   }
 
@@ -292,6 +325,65 @@ export function PeerInspectorModal({
             )}
           </div>
         </div>
+
+        {/* Private Note (Synced Across Devices) */}
+        {!livePeer.isSelf && (
+          <div className="ag-peer-modal-section">
+            <div className="ag-peer-note-box">
+              <div className="ag-peer-note-head">
+                <label htmlFor="ag-peer-inspector-note" className="ag-section-label">
+                  PRIVATE NOTE
+                </label>
+                <div className="ag-peer-note-status">
+                  {noteSavedFlash ? (
+                    <span className="ag-peer-note-saved">Saved</span>
+                  ) : savedNote ? (
+                    <span className="ag-peer-note-meta">Synced across devices</span>
+                  ) : null}
+                  {(savedNote || noteDraft.trim()) && (
+                    <button
+                      type="button"
+                      className="ag-peer-note-clear"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={handleClearNote}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+              <textarea
+                id="ag-peer-inspector-note"
+                className="ag-peer-note-textarea"
+                rows={2}
+                maxLength={400}
+                placeholder="Add a private note…"
+                value={noteDraft}
+                onChange={(e) => setNoteDraft(e.target.value)}
+                onBlur={handleCommitNote}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                    e.preventDefault()
+                    handleCommitNote()
+                  }
+                }}
+              />
+              {isNoteDirty && (
+                <div className="ag-peer-note-foot">
+                  <span className="ag-peer-note-count mono">{noteDraft.length}/400</span>
+                  <button
+                    type="button"
+                    className="ag-peer-note-save-btn"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={handleCommitNote}
+                  >
+                    Save
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Trust Info */}
         {!livePeer.isSelf && (

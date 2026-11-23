@@ -6472,3 +6472,114 @@
     height: 44px;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Private Peer Note Editor (PeerInspectorModal & RoomInfoSheet Contact Info)
+   -------------------------------------------------------------------------- */
+.ag-peer-note-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+  padding: 0.68rem 0.78rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+}
+
+.ag-peer-note-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.ag-peer-note-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.ag-peer-note-meta {
+  color: var(--text-muted);
+}
+
+.ag-peer-note-saved {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ag-peer-note-clear {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  padding: 0.1rem 0.25rem;
+  border-radius: var(--radius-xs);
+  transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease;
+}
+
+.ag-peer-note-clear:hover {
+  color: var(--status-danger);
+  background-color: var(--status-danger-soft);
+}
+
+.ag-peer-note-textarea {
+  width: 100%;
+  min-height: 52px;
+  padding: 0.48rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  resize: vertical;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-peer-note-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.ag-peer-note-textarea:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.ag-peer-note-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.ag-peer-note-count {
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.ag-peer-note-save-btn {
+  min-height: 28px;
+  padding: 0 0.72rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--accent);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  transition: filter var(--dur-fast) ease;
+}
+
+.ag-peer-note-save-btn:hover {
+  filter: brightness(1.08);
+}
+
+@media (max-width: 867px) {
+  .ag-peer-note-textarea {
+    font-size: 16px;
+  }
+}

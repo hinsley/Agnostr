@@ -293,7 +293,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                       )}
                     </span>
                     {isTopicRadio && (
-                      <span className="ag-header-topic-pill ag-hide-xs">Topic · 23333</span>
+                      <span className="ag-header-topic-pill ag-hide-xs">Topic</span>
                     )}
                   </div>
                   <div className="ag-header-sub truncate">
@@ -382,7 +382,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 title={
                   translatorEnabled
                     ? `Exit Translator Mode (${translatorLang})`
-                    : `Translate chat (${translatorLang} · LFM3-1.7B)`
+                    : `Translate chat (${translatorLang})`
                 }
                 aria-label={translatorEnabled ? 'Exit Translator Mode' : 'Open Translator Mode'}
                 aria-pressed={translatorEnabled}
@@ -435,7 +435,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 title={
                   translatorEnabled
                     ? `Exit Translator Mode (${translatorLang})`
-                    : `Translate chat (${translatorLang} · LFM3-1.7B)`
+                    : `Translate chat (${translatorLang})`
                 }
                 aria-label={translatorEnabled ? 'Exit Translator Mode' : 'Open Translator Mode'}
                 aria-pressed={translatorEnabled}
@@ -525,7 +525,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 title={
                   translatorEnabled
                     ? `Exit Translator Mode (${translatorLang})`
-                    : `Translate chat (${translatorLang} · LFM3-1.7B)`
+                    : `Translate chat (${translatorLang})`
                 }
                 aria-label={translatorEnabled ? 'Exit Translator Mode' : 'Open Translator Mode'}
                 aria-pressed={translatorEnabled}

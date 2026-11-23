@@ -302,7 +302,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       })
 
       syncRuntimeSeed(next)
-      pushToastRef.current?.('success', 'Cashu wallet created', formatMintHost(next.activeMintUrl))
+      pushToastRef.current?.('success', 'Agwallet created', formatMintHost(next.activeMintUrl))
     },
     [commitState, setActiveQuoteSynced, syncRuntimeSeed]
   )
@@ -462,7 +462,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
       pushToastRef.current?.(
         'success',
-        'Wallet backup restored',
+        'Agwallet backup restored',
         `+${importedProofs} proof${importedProofs === 1 ? '' : 's'} · ${totalSats.toLocaleString()} sats total`
       )
       return { importedMints, importedProofs, totalSats }
@@ -578,12 +578,12 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
           'success',
           restoredSats > 0
             ? `Imported & restored ${restoredSats.toLocaleString()} sats`
-            : 'Wallet imported',
+            : 'Agwallet imported',
           formatMintHost(stateRef.current.activeMintUrl)
         )
         return { mode: detected.mode, restoredSats, restoredProofs }
       } catch (err) {
-        const msg = normalizeMintError(err, 'Failed to import wallet key.')
+        const msg = normalizeMintError(err, 'Failed to import Agwallet key.')
         setLastError(msg)
         throw new Error(msg)
       } finally {
@@ -717,7 +717,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       if (!norm) return false
       const prev = stateRef.current
       if (prev.mints.length <= 1) {
-        setLastError('Keep at least one active Cashu mint in your wallet.')
+        setLastError('Keep at least one active Cashu mint in your Agwallet.')
         return false
       }
       const bal = sumStoredProofs(prev.proofsByMint[norm])

@@ -456,7 +456,7 @@ function ZapModalInner({
 
               <div className="ag-zap-wallet-strip">
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Wallet</div>
+                  <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Agwallet</div>
                   <div className="ag-wallet-meta truncate">
                     {formatMintHost(bestMintUrl)} · {bestMintBalance.toLocaleString()} sats
                   </div>

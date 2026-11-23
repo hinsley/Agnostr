@@ -112,6 +112,21 @@ export function RoomInfoSheet({
 
   const dmPeerPubkey =
     open && engine.activeView.type === 'dm' ? (engine.activeDmThread?.peerPubkey ?? null) : null
+  const dmPeerPubkeyLower = dmPeerPubkey ? dmPeerPubkey.toLowerCase() : null
+  const savedDmNote = dmPeerPubkeyLower ? (engine.peerNotes[dmPeerPubkeyLower] ?? '') : ''
+  const [dmNoteDraft, setDmNoteDraft] = useState(savedDmNote)
+  const [dmNoteSavedFlash, setDmNoteSavedFlash] = useState(false)
+
+  useEffect(() => {
+    setDmNoteDraft(savedDmNote)
+    setDmNoteSavedFlash(false)
+  }, [dmPeerPubkeyLower, savedDmNote])
+
+  useEffect(() => {
+    if (!dmNoteSavedFlash) return
+    const timer = window.setTimeout(() => setDmNoteSavedFlash(false), 1600)
+    return () => window.clearTimeout(timer)
+  }, [dmNoteSavedFlash])
 
   useEffect(() => {
     if (!dmPeerPubkey) return
@@ -378,7 +393,7 @@ export function RoomInfoSheet({
     const channelLabel = formatRadioChannelLabel(activeGeohash)
     const cityLabel = isTopic ? null : cell.nearestCity || cell.label
     const subtitle = isTopic
-      ? 'Topic Radio · kind 23333'
+      ? 'Topic Radio'
       : presence.isUncertainCount
         ? 'High-precision room'
         : `${presence.onlineCount} online`
@@ -931,6 +946,88 @@ export function RoomInfoSheet({
             </button>
           )}
         </div>
+
+        {/* Private Note (Synced Across Devices) */}
+        <section className="ag-sheet-section">
+          <div className="ag-peer-note-box">
+            <div className="ag-peer-note-head">
+              <label htmlFor="ag-sheet-dm-note" className="ag-section-label">
+                PRIVATE NOTE
+              </label>
+              <div className="ag-peer-note-status">
+                {dmNoteSavedFlash ? (
+                  <span className="ag-peer-note-saved">Saved</span>
+                ) : savedDmNote ? (
+                  <span className="ag-peer-note-meta">Synced across devices</span>
+                ) : null}
+                {(savedDmNote || dmNoteDraft.trim()) && (
+                  <button
+                    type="button"
+                    className="ag-peer-note-clear"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setDmNoteDraft('')
+                      if (savedDmNote) {
+                        engine.setPeerNote(thread.peerPubkey, '')
+                        setDmNoteSavedFlash(true)
+                        onPlaySound?.('click')
+                      }
+                    }}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+            <textarea
+              id="ag-sheet-dm-note"
+              className="ag-peer-note-textarea"
+              rows={2}
+              maxLength={400}
+              placeholder="Add a private note…"
+              value={dmNoteDraft}
+              onChange={(e) => setDmNoteDraft(e.target.value)}
+              onBlur={() => {
+                const trimmed = dmNoteDraft.trim()
+                if (trimmed === savedDmNote) return
+                engine.setPeerNote(thread.peerPubkey, trimmed)
+                setDmNoteDraft(trimmed)
+                setDmNoteSavedFlash(true)
+              }}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  e.preventDefault()
+                  const trimmed = dmNoteDraft.trim()
+                  if (trimmed !== savedDmNote) {
+                    engine.setPeerNote(thread.peerPubkey, trimmed)
+                    setDmNoteDraft(trimmed)
+                    setDmNoteSavedFlash(true)
+                    onPlaySound?.('click')
+                  }
+                }
+              }}
+            />
+            {dmNoteDraft.trim() !== savedDmNote && (
+              <div className="ag-peer-note-foot">
+                <span className="ag-peer-note-count mono">{dmNoteDraft.length}/400</span>
+                <button
+                  type="button"
+                  className="ag-peer-note-save-btn"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    const trimmed = dmNoteDraft.trim()
+                    engine.setPeerNote(thread.peerPubkey, trimmed)
+                    setDmNoteDraft(trimmed)
+                    setDmNoteSavedFlash(true)
+                    onPlaySound?.('click')
+                  }}
+                >
+                  Save
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
 
         {/* Trust Toggle */}
         <section className="ag-sheet-section">

@@ -35,6 +35,7 @@ import {
   ShieldCheck,
   ShieldOff,
   Star,
+  StickyNote,
   User,
   UserPlus,
   Users,
@@ -58,9 +59,7 @@ import {
   buildRadioChannelShareUrl,
   formatRadioChannelLabel,
   isTopicChannel,
-  makeTopicChannelKey,
   parseQuickTuneInput,
-  POPULAR_TOPIC_CHANNELS,
 } from '../lib/radioChannel'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
 import { formatHandle, identiconDataUrl } from '../utils/identicon'
@@ -123,6 +122,7 @@ export interface ConversationListProps {
   onLocateMe: () => void
   onFocusActiveCall?: () => void
   onInspectPeer?: (peer: PeerInfo) => void
+  onEditPeerNote?: (peer: { pubkey: string; nickname: string; displayHandle: string }) => void
   onShowQr?: (target: QrShareTarget) => void
   onOpenScanner?: () => void
   onResolvedShareTarget?: (target: ParsedShareTarget) => void
@@ -153,6 +153,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onLocateMe,
   onFocusActiveCall,
   onInspectPeer,
+  onEditPeerNote,
   onShowQr,
   onOpenScanner,
   onResolvedShareTarget,
@@ -162,7 +163,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 }) => {
   const { openContextMenu } = useContextMenu()
   const [freqDraft, setFreqDraft] = useState('')
-  const [tuneMode, setTuneMode] = useState<'geo' | 'topic'>('geo')
   const [dmDraft, setDmDraft] = useState('')
   const [collapsedServers, setCollapsedServers] = useState<Record<string, boolean>>({})
   const [addingChannelServerId, setAddingChannelServerId] = useState<string | null>(null)
@@ -187,7 +187,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     e.preventDefault()
     const clean = freqDraft.trim()
     if (!clean) return
-    const resolved = parseQuickTuneInput(clean, tuneMode)
+    const resolved = parseQuickTuneInput(clean, 'geo')
     if (!resolved) {
       engine.pushToast(
         'warning',
@@ -365,7 +365,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     }
 
     openContextMenu(e, {
-      header: `${displayLabel}${isTopic ? ' · Topic 23333' : label ? ` · ${label}` : ''}`,
+      header: `${displayLabel}${isTopic ? ' · Topic' : label ? ` · ${label}` : ''}`,
       items,
     })
   }
@@ -383,6 +383,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   ) => {
     const trusted = engine.isExplicitlyTrusted(peer.peerPubkey)
     const blocked = engine.isPeerBlocked(peer.peerPubkey)
+    const existingNote = engine.peerNotes[peer.peerPubkey.toLowerCase()] ?? ''
     const peerLud16 = engine.zaps.getPeerLightningAddress(peer.peerPubkey)
     const npub = encodeNpubSafe(peer.peerPubkey)
     const dmUrl = buildDmShareUrl(peer.peerPubkey, peer.peerNickname)
@@ -398,7 +399,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     if (onOpenAmailCompose) {
       items.push({
         id: `dm-amail-${peer.peerPubkey}`,
-        label: 'Send Amail',
+        label: 'Send Agmail',
         icon: <Mail size={15} />,
         onSelect: () => onOpenAmailCompose(peer.peerPubkey, peer.peerNickname),
       })
@@ -440,12 +441,29 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       )
     }
 
+    if (onEditPeerNote) {
+      items.push({
+        id: `dm-note-${peer.peerPubkey}`,
+        label: existingNote ? 'Edit Note' : 'Add Note',
+        icon: <StickyNote size={15} />,
+        dividerBefore: true,
+        onSelect: () => {
+          onPlaySound?.('click')
+          onEditPeerNote({
+            pubkey: peer.peerPubkey,
+            nickname: peer.peerNickname,
+            displayHandle: peer.peerDisplayHandle,
+          })
+        },
+      })
+    }
+
     if (onInspectPeer) {
       items.push({
         id: `dm-profile-${peer.peerPubkey}`,
         label: 'View Profile',
         icon: <User size={15} />,
-        dividerBefore: true,
+        dividerBefore: !onEditPeerNote,
         onSelect: () => {
           const existing = engine.getPeerByPubkey(peer.peerPubkey)
           if (existing) {
@@ -884,116 +902,45 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         {/* ================= RADIO TAB ================= */}
         {activeTab === 'radio' && (
           <div className="ag-conv-section-stack">
-            {/* Radio Quick-Tune Controls (Geo | Topic Mode + Tune + Pin + GPS + Map) */}
-            <div className="ag-radio-tune-box">
-              <div className="ag-radio-tune-mode-row">
-                <div
-                  className="ag-radio-mode-seg"
-                  role="group"
-                  aria-label="Radio channel mode"
-                >
-                  <button
-                    type="button"
-                    className={`ag-radio-mode-btn ${tuneMode === 'geo' ? 'active' : ''}`}
-                    onClick={() => {
-                      onPlaySound?.('click')
-                      setTuneMode('geo')
-                    }}
-                    aria-pressed={tuneMode === 'geo'}
-                    title="Geohash or city channels (auto-routes non-geohash names to Topic 23333)"
-                  >
-                    <Radio size={12} />
-                    <span>Geo</span>
+            {/* Unified Radio Quick-Tune Row (Geohash, city, or topic + GPS + Map) */}
+            <div className="ag-radio-quickbar">
+              <form className="ag-jump-form" onSubmit={handleQuickTune}>
+                <span className="ag-jump-hash">#</span>
+                <input
+                  type="text"
+                  className="ag-jump-input"
+                  value={freqDraft}
+                  onChange={(e) => setFreqDraft(e.target.value)}
+                  placeholder="Geohash, city, or topic…"
+                  aria-label="Jump to geohash, city, or topic channel"
+                />
+                {freqDraft.trim() && (
+                  <button type="submit" className="ag-jump-go-btn" aria-label="Go">
+                    Go
                   </button>
-                  <button
-                    type="button"
-                    className={`ag-radio-mode-btn ${tuneMode === 'topic' ? 'active' : ''}`}
-                    onClick={() => {
-                      onPlaySound?.('click')
-                      setTuneMode('topic')
-                    }}
-                    aria-pressed={tuneMode === 'topic'}
-                    title="Named Topic Radio channels (Nostr kind 23333)"
-                  >
-                    <Hash size={12} />
-                    <span>Topic</span>
-                  </button>
-                </div>
+                )}
+              </form>
 
-                <div className="ag-radio-mode-tools">
-                  <button
-                    type="button"
-                    className={`ag-quick-tool-btn compact ${engine.location.status === 'locating' ? 'locating' : ''}`}
-                    onClick={onLocateMe}
-                    disabled={engine.location.status === 'locating'}
-                    title="Locate my area with GPS"
-                    aria-label="Locate my area with GPS"
-                  >
-                    <Crosshair size={15} />
-                  </button>
+              <button
+                type="button"
+                className={`ag-quick-tool-btn ${engine.location.status === 'locating' ? 'locating' : ''}`}
+                onClick={onLocateMe}
+                disabled={engine.location.status === 'locating'}
+                title="Locate my area with GPS"
+                aria-label="Locate my area with GPS"
+              >
+                <Crosshair size={15} />
+              </button>
 
-                  <button
-                    type="button"
-                    className="ag-quick-map-pill compact"
-                    onClick={onExpandRadar}
-                    title="Open Full Map"
-                  >
-                    <MapIcon size={13} />
-                    <span>Map</span>
-                  </button>
-                </div>
-              </div>
-
-              <div className="ag-radio-quickbar">
-                <form className="ag-jump-form" onSubmit={handleQuickTune}>
-                  <span className="ag-jump-hash">#</span>
-                  <input
-                    type="text"
-                    className="ag-jump-input"
-                    value={freqDraft}
-                    onChange={(e) => setFreqDraft(e.target.value)}
-                    placeholder={
-                      tuneMode === 'topic'
-                        ? 'bitcoin, nostr, tech…'
-                        : 'Geohash, city, or topic…'
-                    }
-                    aria-label={
-                      tuneMode === 'topic'
-                        ? 'Jump to named topic channel (kind 23333)'
-                        : 'Jump to geohash, city, or topic channel'
-                    }
-                  />
-                  {freqDraft.trim() && (
-                    <button type="submit" className="ag-jump-go-btn" aria-label="Go">
-                      Go
-                    </button>
-                  )}
-                </form>
-              </div>
-
-              {tuneMode === 'topic' && (
-                <div className="ag-topic-quick-chips" aria-label="Popular topic channels">
-                  {POPULAR_TOPIC_CHANNELS.map((topic) => {
-                    const topicKey = makeTopicChannelKey(topic.slug) ?? `topic:${topic.slug}`
-                    const active = isChannelActive(topicKey)
-                    return (
-                      <button
-                        key={topic.slug}
-                        type="button"
-                        className={`ag-topic-quick-chip ${active ? 'active' : ''}`}
-                        onClick={() => {
-                          onPlaySound?.('click')
-                          onTuneChannel(topicKey)
-                        }}
-                        title={`${topic.label} · ${topic.description} (kind 23333)`}
-                      >
-                        <Hash size={11} />
-                        <span>{topic.slug}</span>
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
+              <button
+                type="button"
+                className="ag-quick-map-pill"
+                onClick={onExpandRadar}
+                title="Open Full Map"
+              >
+                <MapIcon size={13} />
+                <span>Map</span>
+              </button>
             </div>
 
             {/* Active Room (if not already listed in Pinned or Active Rooms) */}
@@ -1011,7 +958,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 activeCall?.mode === 'geo' &&
                 (activeCall.geohash ?? '').toLowerCase() === ghKey
               const currentSubtitle = isTopic
-                ? 'Topic Radio · kind 23333'
+                ? 'Topic channel'
                 : engine.presence.isUncertainCount
                   ? 'Geo Radio room'
                   : `${engine.presence.onlineCount} online`
@@ -1121,7 +1068,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       : livePulse && livePulse.messageCount > 0
                         ? `${livePulse.messageCount} recent ${livePulse.messageCount === 1 ? 'message' : 'messages'}`
                         : isTopic
-                          ? 'Pinned topic · kind 23333'
+                          ? 'Pinned topic'
                           : active && !engine.presence.isUncertainCount && engine.presence.onlineCount > 0
                             ? `${engine.presence.onlineCount} online · Pinned`
                             : 'Pinned room'
@@ -1482,11 +1429,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             })
             .filter((t) => {
               if (!filterQuery || isShareableInput) return true
+              const note = (engine.peerNotes[t.peerPubkey.toLowerCase()] ?? '').toLowerCase()
               return (
                 t.peerNickname.toLowerCase().includes(filterQuery) ||
                 t.peerDisplayHandle.toLowerCase().includes(filterQuery) ||
                 t.peerNpub.toLowerCase().includes(filterQuery) ||
-                t.peerPubkey.toLowerCase().includes(filterQuery)
+                t.peerPubkey.toLowerCase().includes(filterQuery) ||
+                note.includes(filterQuery)
               )
             })
 
@@ -1521,11 +1470,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             })
             .filter((friend) => {
               if (!filterQuery || isShareableInput) return true
+              const note = (engine.peerNotes[friend.entry.pubkey.toLowerCase()] ?? '').toLowerCase()
               return (
                 friend.nickname.toLowerCase().includes(filterQuery) ||
                 friend.displayHandle.toLowerCase().includes(filterQuery) ||
                 friend.entry.npub.toLowerCase().includes(filterQuery) ||
-                friend.entry.pubkey.toLowerCase().includes(filterQuery)
+                friend.entry.pubkey.toLowerCase().includes(filterQuery) ||
+                note.includes(filterQuery)
               )
             })
             .sort((a, b) => b.entry.addedAt - a.entry.addedAt)
@@ -1604,6 +1555,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       const blocked = engine.isPeerBlocked(thread.peerPubkey)
                       const visibleUnread = blocked ? 0 : thread.unreadCount
                       const hasUnread = visibleUnread > 0
+                      const peerNote = engine.peerNotes[thread.peerPubkey.toLowerCase()]
                       return (
                         <div
                           key={thread.peerPubkey}
@@ -1653,6 +1605,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                                   </span>
                                 )}
                               </div>
+                              {peerNote && (
+                                <span className="ag-person-note-line truncate" title={peerNote}>
+                                  {peerNote}
+                                </span>
+                              )}
                             </div>
                           </button>
 
@@ -1733,6 +1690,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     <div className="ag-conv-group-label">Trusted Friends</div>
                     {trustedFriends.map(({ entry, nickname, displayHandle }) => {
                       const active = isDmActive(entry.pubkey)
+                      const peerNote = engine.peerNotes[entry.pubkey.toLowerCase()]
                       return (
                         <div
                           key={entry.pubkey}
@@ -1765,8 +1723,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                                 <span className="ag-chat-row-name truncate">{displayHandle}</span>
                               </div>
                               <div className="ag-chat-row-bottom">
-                                <span className="ag-chat-row-preview truncate">
-                                  Trusted · Tap to message
+                                <span
+                                  className={`ag-chat-row-preview truncate ${peerNote ? 'is-note' : ''}`}
+                                  title={peerNote || undefined}
+                                >
+                                  {peerNote || 'Trusted · Tap to message'}
                                 </span>
                               </div>
                             </div>
@@ -2251,13 +2212,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               }}
               title={
                 engine.amail.unreadInboxCount > 0
-                  ? `Amail (${engine.amail.unreadInboxCount} unread)`
-                  : 'Amail'
+                  ? `Agmail (${engine.amail.unreadInboxCount} unread)`
+                  : 'Agmail'
               }
               aria-label={
                 engine.amail.unreadInboxCount > 0
-                  ? `Amail (${engine.amail.unreadInboxCount} unread)`
-                  : 'Amail'
+                  ? `Agmail (${engine.amail.unreadInboxCount} unread)`
+                  : 'Agmail'
               }
               aria-pressed={amailOpen}
             >
@@ -2280,13 +2241,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               }}
               title={
                 engine.wallet.totalBalanceSats > 0
-                  ? `Wallet · ${engine.wallet.totalBalanceSats.toLocaleString()} sats`
-                  : 'Wallet'
+                  ? `Agwallet · ${engine.wallet.totalBalanceSats.toLocaleString()} sats`
+                  : 'Agwallet'
               }
               aria-label={
                 engine.wallet.totalBalanceSats > 0
-                  ? `Wallet · ${engine.wallet.totalBalanceSats.toLocaleString()} sats`
-                  : 'Wallet'
+                  ? `Agwallet · ${engine.wallet.totalBalanceSats.toLocaleString()} sats`
+                  : 'Agwallet'
               }
             >
               <Wallet size={18} aria-hidden="true" />

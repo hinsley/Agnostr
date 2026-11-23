@@ -21,7 +21,7 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     name: 'topic',
     aliases: ['t', 'chan'],
     usage: '/topic <name>',
-    description: 'Join a global kind:23333 topic radio channel (e.g. /topic bitcoin, /topic nostr)',
+    description: 'Join a global topic radio channel (e.g. /topic bitcoin, /topic nostr)',
     category: 'nav',
   },
   {
@@ -63,7 +63,7 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     name: 'drop',
     aliases: [],
     usage: '/drop <note>',
-    description: 'Pin a 24h persistent dead-drop note to this geohash (kind 1 + NIP-40)',
+    description: 'Pin a 24h persistent dead-drop note to this geohash',
     category: 'chat',
   },
   {
@@ -301,7 +301,7 @@ export async function executeSlashCommand(
     case 't':
     case 'chan': {
       if (!args) {
-        ctx.addSystemMessage('Usage: /topic <name> — join a global kind:23333 radio channel (e.g. /topic bitcoin)')
+        ctx.addSystemMessage('Usage: /topic <name> — join a global topic radio channel (e.g. /topic bitcoin)')
         return true
       }
       const ok = ctx.tuneTopicChannel(args)

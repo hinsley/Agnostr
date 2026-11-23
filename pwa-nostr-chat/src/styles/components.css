@@ -406,121 +406,12 @@
   gap: 10px;
 }
 
-/* Radio Quick Jump & Geo | Topic Mode Controls */
-.ag-radio-tune-box {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.ag-radio-tune-mode-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 0 2px;
-}
-
-.ag-radio-mode-seg {
-  display: inline-grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-subtle);
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.ag-radio-mode-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 26px;
-  padding: 0 8px;
-  border-radius: calc(var(--radius-sm) - 2px);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  transition:
-    background-color var(--dur-fast) ease,
-    color var(--dur-fast) ease;
-}
-
-.ag-radio-mode-btn:hover:not(.active) {
-  color: var(--text-primary);
-}
-
-.ag-radio-mode-btn.active {
-  background-color: var(--bg-active);
-  color: var(--text-primary);
-}
-
-.ag-radio-mode-tools {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-}
-
-.ag-quick-tool-btn.compact {
-  width: 30px;
-  height: 30px;
-}
-
-.ag-quick-map-pill.compact {
-  height: 30px;
-  padding: 0 8px;
-  font-size: 12px;
-}
-
+/* Unified Radio Quick-Tune Row (Geohash, city, or topic + GPS + Map) */
 .ag-radio-quickbar {
   display: flex;
   align-items: center;
   gap: 5px;
   padding: 0 2px;
-}
-
-.ag-topic-quick-chips {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
-  padding: 0 2px;
-}
-
-.ag-topic-quick-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: var(--radius-full);
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 500;
-  transition:
-    background-color var(--dur-fast) ease,
-    border-color var(--dur-fast) ease,
-    color var(--dur-fast) ease;
-}
-
-.ag-topic-quick-chip:hover {
-  background-color: var(--accent-secondary-soft);
-  border-color: var(--accent-secondary);
-  color: var(--accent-secondary);
-}
-
-.ag-topic-quick-chip.active {
-  background-color: var(--accent-secondary-soft);
-  border-color: var(--accent-secondary);
-  color: var(--accent-secondary);
-  font-weight: 600;
 }
 
 .ag-jump-form {
@@ -5239,6 +5130,224 @@
   background-color: var(--accent-hover);
 }
 
+/* People Private Note Strip & Compact Borderless Confirm / Note Dialogs */
+.ag-person-note-line {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--text-muted);
+  opacity: 0.9;
+}
+
+.ag-chat-row-preview.is-note {
+  color: var(--text-secondary);
+}
+
+.ag-inline-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9995;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background-color: rgba(7, 8, 12, 0.56);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: ag-fade-in var(--dur-fast) var(--ease-out);
+}
+
+.ag-inline-dialog {
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border-radius: var(--radius-xl);
+  background-color: var(--bg-surface);
+  box-shadow: var(--shadow-lg);
+  animation: ag-scale-in var(--dur-fast) var(--ease-out);
+}
+
+.ag-inline-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ag-inline-dialog-emblem {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ag-inline-dialog-emblem.danger {
+  background-color: var(--status-danger-soft);
+  color: var(--status-danger);
+}
+
+.ag-inline-dialog-title-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ag-inline-dialog-title {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--text-primary);
+  line-height: 1.25;
+}
+
+.ag-inline-dialog-close {
+  width: 30px;
+  height: 30px;
+  margin-right: -4px;
+}
+
+.ag-inline-dialog-body {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.ag-inline-dialog-body strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.ag-inline-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ag-inline-dialog-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-md);
+  font-size: 13.5px;
+  font-weight: 600;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    opacity var(--dur-fast) ease;
+}
+
+.ag-inline-dialog-btn.secondary {
+  background-color: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.ag-inline-dialog-btn.secondary:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-inline-dialog-btn.primary {
+  background-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.ag-inline-dialog-btn.primary:hover {
+  background-color: var(--accent-hover);
+}
+
+.ag-inline-dialog-btn.danger {
+  background-color: var(--status-danger);
+  color: #ffffff;
+}
+
+.ag-inline-dialog-btn.danger:hover {
+  opacity: 0.92;
+}
+
+.ag-note-dialog-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  flex-shrink: 0;
+  background-color: var(--bg-elevated);
+}
+
+.ag-note-dialog-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.2;
+}
+
+.ag-note-modal-textarea {
+  width: 100%;
+  min-height: 82px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: none;
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.45;
+  resize: vertical;
+  outline: none;
+  transition: box-shadow var(--dur-fast) ease;
+}
+
+.ag-note-modal-textarea:focus {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.ag-note-modal-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.ag-note-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ag-note-dialog-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ag-note-dialog-count {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ag-note-dialog-clear {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 4px 6px;
+  border-radius: var(--radius-xs);
+  transition:
+    color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-note-dialog-clear:hover {
+  color: var(--status-danger);
+  background-color: var(--status-danger-soft);
+}
+
 /* Subtle Startup Safety Filter Loading / Ready Floating Popup */
 .ag-cf-status-popup {
   position: fixed;
@@ -5860,24 +5969,17 @@
     height: 42px;
   }
 
-  .ag-radio-mode-btn {
-    height: 32px;
-    font-size: 12.5px;
+  .ag-quick-tool-btn {
+    width: 42px;
   }
 
-  .ag-quick-tool-btn.compact,
-  .ag-quick-map-pill.compact {
-    height: 36px;
+  .ag-note-modal-textarea {
+    font-size: 16px;
+    resize: none;
   }
 
-  .ag-quick-tool-btn.compact {
-    width: 36px;
-  }
-
-  .ag-topic-quick-chip {
-    height: 28px;
-    padding: 0 10px;
-    font-size: 12px;
+  .ag-inline-dialog-btn {
+    height: 40px;
   }
 
   .ag-chat-row {

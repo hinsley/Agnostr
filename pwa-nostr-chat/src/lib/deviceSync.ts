@@ -19,6 +19,7 @@ import type {
   DeviceSyncStatePacket,
   DeviceSyncWirePacket,
   SyncedBlockedRecord,
+  SyncedPeerNoteRecord,
   SyncedRecentMessagesTail,
   SyncedServerRecord,
   SyncedTrustedRecord,
@@ -109,6 +110,7 @@ export function createEmptyCrdtState(): DeviceSyncCrdtState {
     dmClearedAt: {},
     lud16: { value: null, updatedAt: 0 },
     nickname: { value: '', updatedAt: 0 },
+    peerNotes: {},
   }
 }
 
@@ -153,6 +155,7 @@ export interface LocalSyncSnapshot {
   dmClearedAt: Record<string, number>
   lightningAddress: string | null
   nickname: string
+  peerNotes: Record<string, string>
 }
 
 /**
@@ -365,6 +368,41 @@ export function reconcileLocalSnapshotIntoCrdt(
     changed = true
   }
 
+  // 8. Private Peer Notes (LWW-Map with `text: ''` deletion tombstones)
+  const nextPeerNotes: Record<string, SyncedPeerNoteRecord> = { ...(prev.peerNotes ?? {}) }
+  const currentPeerNotesMap = new Map<string, string>()
+  for (const [rawPk, rawText] of Object.entries(snapshot.peerNotes)) {
+    const pk = rawPk.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawText !== 'string') continue
+    const clean = rawText.trim().slice(0, 400)
+    if (clean) {
+      currentPeerNotesMap.set(pk, clean)
+    }
+  }
+
+  for (const [pk, cleanText] of currentPeerNotesMap.entries()) {
+    const existing = nextPeerNotes[pk]
+    if (!existing || existing.text !== cleanText) {
+      nextPeerNotes[pk] = {
+        text: cleanText,
+        updatedAt: Math.max(nowMs, (existing?.updatedAt ?? 0) + 1),
+      }
+      changed = true
+    }
+  }
+
+  if (!isInitialSeed) {
+    for (const [pk, rec] of Object.entries(nextPeerNotes)) {
+      if (rec.text.length > 0 && !currentPeerNotesMap.has(pk)) {
+        nextPeerNotes[pk] = {
+          text: '',
+          updatedAt: Math.max(nowMs, rec.updatedAt + 1),
+        }
+        changed = true
+      }
+    }
+  }
+
   if (!changed) {
     return { crdt: prev, changed: false }
   }
@@ -379,6 +417,7 @@ export function reconcileLocalSnapshotIntoCrdt(
       dmClearedAt: nextDmCleared,
       lud16: nextLud16,
       nickname: nextNickname,
+      peerNotes: nextPeerNotes,
     },
     changed: true,
   }
@@ -392,12 +431,13 @@ export interface CrdtMergeDiff {
   dmClearedChanged: boolean
   lud16Changed: boolean
   nicknameChanged: boolean
+  peerNotesChanged: boolean
   itemsUpdated: number
 }
 
 /**
  * Commutative, idempotent, conflict-free CRDT merge between two same-key devices.
- * Guarantees tombstones (`leftAt`, `removedAt`, `dmClearedAt`) win cleanly without resurrection.
+ * Guarantees tombstones (`leftAt`, `removedAt`, `dmClearedAt`, empty peer note) win cleanly without resurrection.
  */
 export function mergeCrdtStates(
   local: DeviceSyncCrdtState,
@@ -411,6 +451,7 @@ export function mergeCrdtStates(
     dmClearedChanged: false,
     lud16Changed: false,
     nicknameChanged: false,
+    peerNotesChanged: false,
     itemsUpdated: 0,
   }
 
@@ -624,6 +665,39 @@ export function mergeCrdtStates(
     }
   }
 
+  // 8. Merge Private Peer Notes (LWW per pubkey with deterministic tie-break)
+  const localNotes = local.peerNotes ?? {}
+  const remoteNotes = remote.peerNotes ?? {}
+  const mergedPeerNotes: Record<string, SyncedPeerNoteRecord> = {}
+  const noteKeys = new Set([...Object.keys(localNotes), ...Object.keys(remoteNotes)])
+  for (const rawPk of noteKeys) {
+    const pk = rawPk.toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk)) continue
+    const a = localNotes[rawPk]
+    const b = remoteNotes[rawPk]
+    if (a && !b) {
+      mergedPeerNotes[pk] = a
+      continue
+    }
+    if (!a && b) {
+      mergedPeerNotes[pk] = b
+      diff.peerNotesChanged = true
+      diff.itemsUpdated += 1
+      continue
+    }
+    if (!a || !b) continue
+
+    const bWins =
+      b.updatedAt > a.updatedAt ||
+      (b.updatedAt === a.updatedAt && b.text > a.text)
+    const winner = bWins ? b : a
+    mergedPeerNotes[pk] = winner
+    if (winner.text !== a.text || winner.updatedAt !== a.updatedAt) {
+      diff.peerNotesChanged = true
+      diff.itemsUpdated += 1
+    }
+  }
+
   const changed =
     diff.serversChanged ||
     diff.trustedChanged ||
@@ -631,7 +705,8 @@ export function mergeCrdtStates(
     diff.pinnedChanged ||
     diff.dmClearedChanged ||
     diff.lud16Changed ||
-    diff.nicknameChanged
+    diff.nicknameChanged ||
+    diff.peerNotesChanged
 
   return {
     merged: {
@@ -643,6 +718,7 @@ export function mergeCrdtStates(
       dmClearedAt: mergedDmCleared,
       lud16: mergedLud16,
       nickname: mergedNickname,
+      peerNotes: mergedPeerNotes,
     },
     changed,
     diff,
@@ -675,7 +751,25 @@ export function extractActiveBlocked(crdt: DeviceSyncCrdtState): string[] {
     .map((r) => r.pubkey)
 }
 
+export function extractActivePeerNotes(crdt: DeviceSyncCrdtState): Record<string, string> {
+  const out: Record<string, string> = {}
+  const entries = Object.entries(crdt.peerNotes ?? {})
+  entries.sort((a, b) => b[1].updatedAt - a[1].updatedAt)
+  let count = 0
+  for (const [rawPk, rec] of entries) {
+    if (count >= 500) break
+    const pk = rawPk.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || typeof rec?.text !== 'string') continue
+    const clean = rec.text.trim().slice(0, 400)
+    if (!clean) continue
+    out[pk] = clean
+    count += 1
+  }
+  return out
+}
+
 export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
+  const notes = crdt.peerNotes ?? {}
   const canonical = {
     servers: Object.keys(crdt.servers)
       .sort()
@@ -710,6 +804,9 @@ export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
       .map((k) => [k, crdt.dmClearedAt[k]]),
     lud16: [crdt.lud16.updatedAt, crdt.lud16.value ?? ''],
     nickname: [crdt.nickname.updatedAt, crdt.nickname.value],
+    peerNotes: Object.keys(notes)
+      .sort()
+      .map((k) => [k, notes[k].updatedAt, notes[k].text]),
   }
   return sha256ShortHex(JSON.stringify(canonical))
 }
@@ -759,6 +856,7 @@ export function fitCheckpointStateWithinBudget(
     dmClearedAt: crdt.dmClearedAt,
     lud16: crdt.lud16,
     nickname: crdt.nickname,
+    peerNotes: crdt.peerNotes ?? {},
   }
 
   let candidate: DeviceSyncCrdtState = {
@@ -1171,6 +1269,21 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
       }
     : { value: '', updatedAt: 0 }
 
+  const peerNotes: Record<string, SyncedPeerNoteRecord> = {}
+  if (isRecord(raw.peerNotes)) {
+    let count = 0
+    for (const [rawPk, val] of Object.entries(raw.peerNotes)) {
+      if (count >= 500) break
+      const pk = rawPk.trim().toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(pk) || !isRecord(val)) continue
+      const text = typeof val.text === 'string' ? val.text.trim().slice(0, 400) : ''
+      const updatedAt =
+        typeof val.updatedAt === 'number' && Number.isFinite(val.updatedAt) ? val.updatedAt : 0
+      peerNotes[pk] = { text, updatedAt }
+      count += 1
+    }
+  }
+
   let amail: DeviceSyncCrdtState['amail'] = undefined
   if (isRecord(raw.amail) && typeof raw.amail.hash === 'string') {
     amail = {
@@ -1197,6 +1310,7 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     dmClearedAt,
     lud16,
     nickname,
+    peerNotes,
     ...(amail ? { amail } : {}),
     ...(recentMessages ? { recentMessages } : {}),
   }

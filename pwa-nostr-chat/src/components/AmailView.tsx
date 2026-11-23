@@ -1791,14 +1791,14 @@ export function AmailView({
         className="ag-amail-shell"
         role="dialog"
         aria-modal="true"
-        aria-label="Amail"
+        aria-label="Agmail"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top Bar */}
         <header className="ag-amail-topbar">
           <div className="ag-amail-brand">
             <Mail size={16} className="ag-amail-brand-glyph" aria-hidden="true" />
-            <span className="ag-amail-brand-name">Amail</span>
+            <span className="ag-amail-brand-name">Agmail</span>
           </div>
 
           <div className="ag-amail-search-wrap">
@@ -1815,7 +1815,7 @@ export function AmailView({
                 if (selectedMessageId) setSelectedMessageId(null)
               }}
               placeholder="Search…"
-              aria-label="Search Amail messages"
+              aria-label="Search Agmail messages"
             />
             {searchQuery && (
               <button
@@ -1856,7 +1856,7 @@ export function AmailView({
               disabled={amail.isSyncing}
               onClick={() => void handleSyncMesh()}
               title="Sync mesh"
-              aria-label="Sync Amail mesh now"
+              aria-label="Sync Agmail mesh now"
             >
               <RefreshCw size={14} className={amail.isSyncing ? 'ag-spin' : ''} />
             </button>
@@ -1868,7 +1868,7 @@ export function AmailView({
                 onPlaySound?.('click')
                 openFreshComposer()
               }}
-              aria-label="Compose Amail"
+              aria-label="Compose Agmail"
               title="Compose"
             >
               <Plus size={16} />
@@ -1878,7 +1878,7 @@ export function AmailView({
               type="button"
               className="ag-amail-icon-btn"
               onClick={onClose}
-              aria-label="Close Amail"
+              aria-label="Close Agmail"
               title="Close (Esc)"
             >
               <X size={16} />
@@ -1888,7 +1888,7 @@ export function AmailView({
 
         {/* Mobile Scrollable Folder Pills */}
         {!composing && !selectedMessage && (
-          <div className="ag-amail-mobile-pills" role="tablist" aria-label="Amail folders">
+          <div className="ag-amail-mobile-pills" role="tablist" aria-label="Agmail folders">
             {navFolders.map((f) => {
               const Icon = f.icon
               const active = section === f.id
@@ -1946,7 +1946,7 @@ export function AmailView({
 
         {/* Body Layout */}
         <div className="ag-amail-body">
-          <nav className="ag-amail-rail" aria-label="Amail folders">
+          <nav className="ag-amail-rail" aria-label="Agmail folders">
             <button
               type="button"
               className="ag-amail-compose-btn"

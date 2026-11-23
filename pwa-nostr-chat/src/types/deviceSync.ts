@@ -81,6 +81,12 @@ export interface SyncedNicknameState {
   updatedAt: number
 }
 
+/** LWW-Register record for a private per-peer note (`text: ''` acts as a deletion tombstone) */
+export interface SyncedPeerNoteRecord {
+  text: string
+  updatedAt: number
+}
+
 /** Optional Amail sync snapshot bundled when size permits */
 export interface SyncedAmailState {
   updatedAt: number
@@ -112,6 +118,7 @@ export interface DeviceSyncCrdtState {
   dmClearedAt: Record<string, number>
   lud16: SyncedLightningAddressState
   nickname: SyncedNicknameState
+  peerNotes?: Record<string, SyncedPeerNoteRecord>
   amail?: SyncedAmailState | null
   recentMessages?: SyncedRecentMessagesTail
 }

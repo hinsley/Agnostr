@@ -24,6 +24,7 @@ import {
 } from '../lib/identity.ts'
 import type { PresenceTracker } from '../lib/presenceService.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
+import { KeyedFifoQueue } from '../lib/sendQueue.ts'
 import {
   loadDmClearedAt,
   loadDmThreads,
@@ -105,16 +106,27 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   const [dmClearedAt, setDmClearedAt] = useState<Record<string, number>>(() => loadDmClearedAt())
   const dmClearedAtRef = useRef<Record<string, number>>(dmClearedAt)
   const threadsRef = useRef<DmThread[]>(threads)
+  const dmSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
+  const dmRelaysRef = useRef<readonly string[]>(dmRelays)
   const processedWrapIdsRef = useRef<Set<string>>(new Set())
   const dmBacklogSettledRef = useRef<boolean>(false)
   const dmSubSeqRef = useRef<number>(0)
   const activeDmPeerRef = useRef<string | null>(activeDmPeer)
   const blockedRef = useRef<Set<string>>(blockedPubkeys)
   const onIncomingRef = useRef(onIncomingDm)
+  const onErrorRef = useRef(onError)
 
   useLayoutEffect(() => {
     threadsRef.current = threads
   }, [threads])
+
+  useLayoutEffect(() => {
+    dmRelaysRef.current = dmRelays
+  }, [dmRelays])
+
+  useLayoutEffect(() => {
+    onErrorRef.current = onError
+  }, [onError])
 
   useLayoutEffect(() => {
     dmClearedAtRef.current = dmClearedAt
@@ -445,8 +457,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       if (!content || !pool) return false
       const pk = peerPubkey.toLowerCase()
 
-      const existingThread = threads.find((t) => t.peerPubkey === pk)
+      const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
+      const targetRelays = [...dmRelaysRef.current]
+      const wipeGen = identityManager.getWipeGeneration()
       const chosenProtocol: DmProtocol =
         protocolOverride ??
         existingThread?.protocol ??
@@ -469,9 +483,11 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         deliveryStatus: 'sending',
       }
 
-      const nick = existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
+      const nick =
+        existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
       const handle = formatDisplayHandle(nick, pk)
 
+      // Append optimistic message synchronously BEFORE entering FIFO queue so rapid sends appear in exact 1 -> 2 -> 3 order
       setThreads((prev) => {
         const idx = prev.findIndex((t) => t.peerPubkey === pk)
         if (idx !== -1) {
@@ -508,70 +524,89 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         return [created, ...prev]
       })
 
-      try {
-        const { event, protocol } = await createEncryptedDmEvent({
-          content,
-          recipientPubkey: pk,
-          signer,
-          protocol: chosenProtocol,
-          messageId: localMsgId,
-        })
-        processedWrapIdsRef.current.add(event.id)
-        const res = await pool.publish(dmRelays, event)
-        const ok = res.acceptedRelays.length > 0
+      return await dmSendQueueRef.current.enqueue(
+        `dm:${pk}`,
+        async () => {
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          try {
+            const { event, protocol } = await createEncryptedDmEvent({
+              content,
+              recipientPubkey: pk,
+              signer,
+              protocol: chosenProtocol,
+              messageId: localMsgId,
+            })
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            processedWrapIdsRef.current.add(event.id)
+            const res = await pool.publish(targetRelays, event)
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            const ok = res.acceptedRelays.length > 0
 
-        setThreads((prev) =>
-          prev.map((t) => {
-            if (t.peerPubkey !== pk) return t
-            return {
-              ...t,
-              protocol,
-              messages: t.messages.map((m) =>
-                m.id === localMsgId
-                  ? { ...m, protocol, deliveryStatus: ok ? 'sent' : 'failed' }
-                  : m
-              ),
-            }
-          })
-        )
+            setThreads((prev) =>
+              prev.map((t) => {
+                if (t.peerPubkey !== pk) return t
+                return {
+                  ...t,
+                  protocol,
+                  messages: t.messages.map((m) =>
+                    m.id === localMsgId
+                      ? { ...m, protocol, deliveryStatus: ok ? 'sent' : 'failed' }
+                      : m
+                  ),
+                }
+              })
+            )
 
-        if (!ok) {
-          onError?.('DM failed to publish', 'No DM-capable relay accepted the gift wrap.')
-        }
-        return ok
-      } catch (err) {
-        setThreads((prev) =>
-          prev.map((t) => {
-            if (t.peerPubkey !== pk) return t
-            return {
-              ...t,
-              messages: t.messages.map((m) =>
-                m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
-              ),
+            if (!ok) {
+              onErrorRef.current?.(
+                'DM failed to publish',
+                'No DM-capable relay accepted the gift wrap.'
+              )
             }
-          })
-        )
-        onError?.('DM encryption error', err instanceof Error ? err.message : 'Unable to send encrypted DM')
-        return false
-      }
+            return ok
+          } catch (err) {
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            setThreads((prev) =>
+              prev.map((t) => {
+                if (t.peerPubkey !== pk) return t
+                return {
+                  ...t,
+                  messages: t.messages.map((m) =>
+                    m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
+                  ),
+                }
+              })
+            )
+            onErrorRef.current?.(
+              'DM encryption error',
+              err instanceof Error ? err.message : 'Unable to send encrypted DM'
+            )
+            return false
+          }
+        },
+        () => false
+      )
     },
-    [pool, threads, identityManager, activeGeohash, presenceTracker, dmRelays, onError]
+    [pool, identityManager, activeGeohash, presenceTracker]
   )
 
   const sendDirectVoiceMemo = useCallback(
     async (
       peerPubkey: string,
-      voiceMemo: VoiceMemoAttachment,
+      voiceMemoOrLoader: VoiceMemoAttachment | (() => Promise<VoiceMemoAttachment>),
       caption?: string,
       protocolOverride?: DmProtocol
     ): Promise<boolean> => {
       if (!pool) return false
       const pk = peerPubkey.toLowerCase()
       const cleanCaption = caption?.trim() ?? ''
-      const wireContent = encodeDmVoicePayload(voiceMemo, cleanCaption)
+      const initialAttachment =
+        typeof voiceMemoOrLoader === 'function' ? undefined : voiceMemoOrLoader
 
-      const existingThread = threads.find((t) => t.peerPubkey === pk)
+      const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
+      const targetRelays = [...dmRelaysRef.current]
+      const wipeGen = identityManager.getWipeGeneration()
       const chosenProtocol: DmProtocol =
         protocolOverride ??
         existingThread?.protocol ??
@@ -585,16 +620,17 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         id: localMsgId,
         peerPubkey: pk,
         senderPubkey: signer.pubkey,
-        content: cleanCaption,
+        content: initialAttachment ? cleanCaption : cleanCaption || 'Sending voice memo…',
         createdAt: nowSec,
         orderMs: nowMs,
         isOwn: true,
         protocol: chosenProtocol,
-        voiceMemo,
+        voiceMemo: initialAttachment,
         deliveryStatus: 'sending',
       }
 
-      const nick = existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
+      const nick =
+        existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
       const handle = formatDisplayHandle(nick, pk)
 
       setThreads((prev) => {
@@ -633,71 +669,115 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         return [created, ...prev]
       })
 
-      try {
-        const { event, protocol } = await createEncryptedDmEvent({
-          content: wireContent,
-          recipientPubkey: pk,
-          signer,
-          protocol: chosenProtocol,
-          messageId: localMsgId,
-        })
-        processedWrapIdsRef.current.add(event.id)
-        const res = await pool.publish(dmRelays, event)
-        const ok = res.acceptedRelays.length > 0
+      return await dmSendQueueRef.current.enqueue(
+        `dm:${pk}`,
+        async () => {
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          try {
+            const voiceMemo =
+              typeof voiceMemoOrLoader === 'function'
+                ? await voiceMemoOrLoader()
+                : voiceMemoOrLoader
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
 
-        setThreads((prev) =>
-          prev.map((t) => {
-            if (t.peerPubkey !== pk) return t
-            return {
-              ...t,
-              protocol,
-              messages: t.messages.map((m) =>
-                m.id === localMsgId ? { ...m, protocol, deliveryStatus: ok ? 'sent' : 'failed' } : m
-              ),
+            if (!initialAttachment) {
+              setThreads((prev) =>
+                prev.map((t) => {
+                  if (t.peerPubkey !== pk) return t
+                  const nextMsgs = t.messages.map((m) =>
+                    m.id === localMsgId
+                      ? { ...m, content: cleanCaption, voiceMemo }
+                      : m
+                  )
+                  const tail = nextMsgs[nextMsgs.length - 1]
+                  return {
+                    ...t,
+                    messages: nextMsgs,
+                    lastPreview: tail ? formatDmPreview(tail) : t.lastPreview,
+                  }
+                })
+              )
             }
-          })
-        )
 
-        if (!ok) {
-          onError?.('Encrypted voice DM failed', 'No DM-capable relay accepted the gift wrap.')
-        }
-        return ok
-      } catch (err) {
-        setThreads((prev) =>
-          prev.map((t) => {
-            if (t.peerPubkey !== pk) return t
-            return {
-              ...t,
-              messages: t.messages.map((m) =>
-                m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
-              ),
+            const wireContent = encodeDmVoicePayload(voiceMemo, cleanCaption)
+            const { event, protocol } = await createEncryptedDmEvent({
+              content: wireContent,
+              recipientPubkey: pk,
+              signer,
+              protocol: chosenProtocol,
+              messageId: localMsgId,
+            })
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            processedWrapIdsRef.current.add(event.id)
+            const res = await pool.publish(targetRelays, event)
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            const ok = res.acceptedRelays.length > 0
+
+            setThreads((prev) =>
+              prev.map((t) => {
+                if (t.peerPubkey !== pk) return t
+                return {
+                  ...t,
+                  protocol,
+                  messages: t.messages.map((m) =>
+                    m.id === localMsgId
+                      ? { ...m, protocol, voiceMemo, content: cleanCaption, deliveryStatus: ok ? 'sent' : 'failed' }
+                      : m
+                  ),
+                }
+              })
+            )
+
+            if (!ok) {
+              onErrorRef.current?.(
+                'Encrypted voice DM failed',
+                'No DM-capable relay accepted the gift wrap.'
+              )
             }
-          })
-        )
-        onError?.(
-          'Encrypted voice DM error',
-          err instanceof Error ? err.message : 'Unable to send encrypted voice memo'
-        )
-        return false
-      }
+            return ok
+          } catch (err) {
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            setThreads((prev) =>
+              prev.map((t) => {
+                if (t.peerPubkey !== pk) return t
+                return {
+                  ...t,
+                  messages: t.messages.map((m) =>
+                    m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
+                  ),
+                }
+              })
+            )
+            onErrorRef.current?.(
+              'Encrypted voice DM error',
+              err instanceof Error ? err.message : 'Unable to send encrypted voice memo'
+            )
+            return false
+          }
+        },
+        () => false
+      )
     },
-    [pool, threads, identityManager, activeGeohash, presenceTracker, dmRelays, onError]
+    [pool, identityManager, activeGeohash, presenceTracker]
   )
 
   const sendDirectImageAttachment = useCallback(
     async (
       peerPubkey: string,
-      imageAttachment: ImageAttachment,
+      imageOrLoader: ImageAttachment | (() => Promise<ImageAttachment>),
       caption?: string,
       protocolOverride?: DmProtocol
     ): Promise<boolean> => {
       if (!pool) return false
       const pk = peerPubkey.toLowerCase()
       const cleanCaption = caption?.trim() ?? ''
-      const wireContent = encodeDmImagePayload(imageAttachment, cleanCaption)
+      const initialAttachment =
+        typeof imageOrLoader === 'function' ? undefined : imageOrLoader
 
-      const existingThread = threads.find((t) => t.peerPubkey === pk)
+      const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
+      const targetRelays = [...dmRelaysRef.current]
+      const wipeGen = identityManager.getWipeGeneration()
       const chosenProtocol: DmProtocol =
         protocolOverride ??
         existingThread?.protocol ??
@@ -711,16 +791,17 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         id: localMsgId,
         peerPubkey: pk,
         senderPubkey: signer.pubkey,
-        content: cleanCaption,
+        content: initialAttachment ? cleanCaption : cleanCaption || 'Sending image…',
         createdAt: nowSec,
         orderMs: nowMs,
         isOwn: true,
         protocol: chosenProtocol,
-        imageAttachment,
+        imageAttachment: initialAttachment,
         deliveryStatus: 'sending',
       }
 
-      const nick = existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
+      const nick =
+        existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
       const handle = formatDisplayHandle(nick, pk)
 
       setThreads((prev) => {
@@ -759,55 +840,100 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         return [created, ...prev]
       })
 
-      try {
-        const { event, protocol } = await createEncryptedDmEvent({
-          content: wireContent,
-          recipientPubkey: pk,
-          signer,
-          protocol: chosenProtocol,
-          messageId: localMsgId,
-        })
-        processedWrapIdsRef.current.add(event.id)
-        const res = await pool.publish(dmRelays, event)
-        const ok = res.acceptedRelays.length > 0
+      return await dmSendQueueRef.current.enqueue(
+        `dm:${pk}`,
+        async () => {
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          try {
+            const imageAttachment =
+              typeof imageOrLoader === 'function' ? await imageOrLoader() : imageOrLoader
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
 
-        setThreads((prev) =>
-          prev.map((t) => {
-            if (t.peerPubkey !== pk) return t
-            return {
-              ...t,
-              protocol,
-              messages: t.messages.map((m) =>
-                m.id === localMsgId ? { ...m, protocol, deliveryStatus: ok ? 'sent' : 'failed' } : m
-              ),
+            if (!initialAttachment) {
+              setThreads((prev) =>
+                prev.map((t) => {
+                  if (t.peerPubkey !== pk) return t
+                  const nextMsgs = t.messages.map((m) =>
+                    m.id === localMsgId
+                      ? { ...m, content: cleanCaption, imageAttachment }
+                      : m
+                  )
+                  const tail = nextMsgs[nextMsgs.length - 1]
+                  return {
+                    ...t,
+                    messages: nextMsgs,
+                    lastPreview: tail ? formatDmPreview(tail) : t.lastPreview,
+                  }
+                })
+              )
             }
-          })
-        )
 
-        if (!ok) {
-          onError?.('Encrypted image DM failed', 'No DM-capable relay accepted the gift wrap.')
-        }
-        return ok
-      } catch (err) {
-        setThreads((prev) =>
-          prev.map((t) => {
-            if (t.peerPubkey !== pk) return t
-            return {
-              ...t,
-              messages: t.messages.map((m) =>
-                m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
-              ),
+            const wireContent = encodeDmImagePayload(imageAttachment, cleanCaption)
+            const { event, protocol } = await createEncryptedDmEvent({
+              content: wireContent,
+              recipientPubkey: pk,
+              signer,
+              protocol: chosenProtocol,
+              messageId: localMsgId,
+            })
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            processedWrapIdsRef.current.add(event.id)
+            const res = await pool.publish(targetRelays, event)
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            const ok = res.acceptedRelays.length > 0
+
+            setThreads((prev) =>
+              prev.map((t) => {
+                if (t.peerPubkey !== pk) return t
+                return {
+                  ...t,
+                  protocol,
+                  messages: t.messages.map((m) =>
+                    m.id === localMsgId
+                      ? {
+                          ...m,
+                          protocol,
+                          imageAttachment,
+                          content: cleanCaption,
+                          deliveryStatus: ok ? 'sent' : 'failed',
+                        }
+                      : m
+                  ),
+                }
+              })
+            )
+
+            if (!ok) {
+              onErrorRef.current?.(
+                'Encrypted image DM failed',
+                'No DM-capable relay accepted the gift wrap.'
+              )
             }
-          })
-        )
-        onError?.(
-          'Encrypted image DM error',
-          err instanceof Error ? err.message : 'Unable to send encrypted image'
-        )
-        return false
-      }
+            return ok
+          } catch (err) {
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            setThreads((prev) =>
+              prev.map((t) => {
+                if (t.peerPubkey !== pk) return t
+                return {
+                  ...t,
+                  messages: t.messages.map((m) =>
+                    m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
+                  ),
+                }
+              })
+            )
+            onErrorRef.current?.(
+              'Encrypted image DM error',
+              err instanceof Error ? err.message : 'Unable to send encrypted image'
+            )
+            return false
+          }
+        },
+        () => false
+      )
     },
-    [pool, threads, identityManager, activeGeohash, presenceTracker, dmRelays, onError]
+    [pool, identityManager, activeGeohash, presenceTracker]
   )
 
   const clearThread = useCallback((peerPubkey: string) => {
@@ -968,6 +1094,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   )
 
   const clearAllDms = useCallback(() => {
+    dmSendQueueRef.current.clearAll()
     processedWrapIdsRef.current.clear()
     dmClearedAtRef.current = {}
     setDmClearedAt({})

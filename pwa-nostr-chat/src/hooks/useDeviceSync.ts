@@ -39,6 +39,7 @@ import {
   DEVICE_SYNC_ONLINE_TTL_MS,
   DEVICE_SYNC_TAG,
   extractActiveBlocked,
+  extractActivePeerNotes,
   extractActiveServers,
   extractActiveTrusted,
   fitCheckpointStateWithinBudget,
@@ -94,6 +95,7 @@ export interface UseDeviceSyncOptions {
   pinnedChannels: PinnedChannel[]
   dmClearedAt: Record<string, number>
   lightningAddress: string | null
+  peerNotes: Record<string, string>
   dmThreads: DmThread[]
   activeGeohash: string
   activeRadioMessages: GeoMessage[]
@@ -105,6 +107,7 @@ export interface UseDeviceSyncOptions {
   onApplyDmClearedAt: (clearedAt: Record<string, number>) => number
   onApplyLightningAddress: (addr: string | null) => void
   onApplyNickname: (nick: string) => void
+  onApplyPeerNotes: (notes: Record<string, string>) => void
   onMergeDmMessages: (
     peerPubkey: string,
     messages: DmMessage[],
@@ -144,6 +147,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     pinnedChannels,
     dmClearedAt,
     lightningAddress,
+    peerNotes,
     dmThreads,
     activeGeohash,
     activeRadioMessages,
@@ -155,6 +159,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyDmClearedAt,
     onApplyLightningAddress,
     onApplyNickname,
+    onApplyPeerNotes,
     onMergeDmMessages,
     onMergeServerMessages,
     onMergeRadioMessages,
@@ -223,6 +228,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     dmClearedAt,
     lightningAddress,
     nickname,
+    peerNotes,
   })
   const dmThreadsRef = useRef<DmThread[]>(dmThreads)
   const activeGeohashRef = useRef<string>(activeGeohash)
@@ -237,6 +243,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyDmClearedAt,
     onApplyLightningAddress,
     onApplyNickname,
+    onApplyPeerNotes,
     onMergeDmMessages,
     onMergeServerMessages,
     onMergeRadioMessages,
@@ -271,6 +278,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       dmClearedAt,
       lightningAddress,
       nickname,
+      peerNotes,
     }
   }, [
     joinedServers,
@@ -280,6 +288,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     dmClearedAt,
     lightningAddress,
     nickname,
+    peerNotes,
   ])
 
   useLayoutEffect(() => {
@@ -298,6 +307,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       onApplyDmClearedAt,
       onApplyLightningAddress,
       onApplyNickname,
+      onApplyPeerNotes,
       onMergeDmMessages,
       onMergeServerMessages,
       onMergeRadioMessages,
@@ -310,6 +320,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyDmClearedAt,
     onApplyLightningAddress,
     onApplyNickname,
+    onApplyPeerNotes,
     onMergeDmMessages,
     onMergeServerMessages,
     onMergeRadioMessages,
@@ -711,6 +722,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           if (diff.nicknameChanged && merged.nickname.value) {
             callbacksRef.current.onApplyNickname(merged.nickname.value)
           }
+          if (diff.peerNotesChanged) {
+            callbacksRef.current.onApplyPeerNotes(extractActivePeerNotes(merged))
+          }
           itemsApplied += diff.itemsUpdated
         } finally {
           // Release guard on microtask boundary after batched React state updates flush
@@ -1057,6 +1071,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         dmClearedAt,
         lightningAddress,
         nickname,
+        peerNotes,
       },
       Date.now(),
       isInitialSeed
@@ -1087,6 +1102,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     dmClearedAt,
     lightningAddress,
     nickname,
+    peerNotes,
     persistLocalJournal,
     scheduleCheckpointPublish,
     sendStateToPeer,

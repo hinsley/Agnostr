@@ -172,9 +172,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           parsedShare.kind === 'dm'
             ? parsedShare.npub
             : parsedShare.kind === 'cashu'
-              ? 'Open Cashu Wallet to verify & claim this ecash token'
+              ? 'Open Agwallet to verify & claim this ecash token'
               : parsedShare.kind === 'lightning'
-                ? 'Open Cashu Wallet to melt & pay via Lightning'
+                ? 'Open Agwallet to melt & pay via Lightning'
                 : 'Open & join this community invite immediately',
         keywords: query.trim().toLowerCase(),
         badge:
@@ -211,8 +211,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           id: `direct-topic-${topicSlug}`,
           group: 'Jump to Room',
           title: `Open #${topicSlug}`,
-          subtitle: `Join Named Topic Radio #${topicSlug} (kind 23333)`,
-          keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} 23333 radio`,
+          subtitle: `Join Topic Radio #${topicSlug}`,
+          keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} radio`,
           badge: 'TOPIC',
           icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
           run: () => {
@@ -236,14 +236,14 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
               onClose()
             },
           })
-          // Also offer kind: 23333 Topic jump for words that happen to use base32 letters (e.g. tech, rust, news)
+          // Also offer Topic jump for words that happen to use base32 letters (e.g. tech, rust, news)
           if (cleanHash.length >= 2 && topicSlug && topicKey) {
             list.push({
               id: `direct-topic-${topicSlug}`,
               group: 'Jump to Room',
               title: `Open #${topicSlug} (Topic Radio)`,
-              subtitle: `Join kind 23333 named channel #${topicSlug}`,
-              keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} 23333 topic`,
+              subtitle: `Join topic channel #${topicSlug}`,
+              keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} topic`,
               badge: 'TOPIC',
               icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
               run: () => {
@@ -257,8 +257,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             id: `direct-topic-${topicSlug}`,
             group: 'Jump to Room',
             title: `Open #${topicSlug}`,
-            subtitle: `Join Named Topic Radio #${topicSlug} (kind 23333)`,
-            keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} 23333 topic radio`,
+            subtitle: `Join Topic Radio #${topicSlug}`,
+            keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} topic radio`,
             badge: 'TOPIC',
             icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
             run: () => {
@@ -278,14 +278,15 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       const isTrusted = engine.isExplicitlyTrusted(dm.peerPubkey)
       const isBlocked = engine.isPeerBlocked(dm.peerPubkey)
       const visibleUnread = isBlocked ? 0 : dm.unreadCount
+      const peerNote = engine.peerNotes[pk] ?? ''
       list.push({
         id: `person-dm-${pk}`,
         group: 'People',
         title: dm.peerDisplayHandle,
         subtitle: isBlocked
           ? 'Muted user'
-          : dm.lastPreview || (isTrusted ? 'Trusted friend · Encrypted DM' : 'Encrypted DM'),
-        keywords: `people dm friend message ${dm.peerNickname} ${dm.peerDisplayHandle} ${dm.peerNpub}`,
+          : dm.lastPreview || peerNote || (isTrusted ? 'Trusted friend · Encrypted DM' : 'Encrypted DM'),
+        keywords: `people dm friend message ${dm.peerNickname} ${dm.peerDisplayHandle} ${dm.peerNpub} ${peerNote}`,
         badge: isBlocked
           ? 'MUTED'
           : visibleUnread > 0
@@ -310,12 +311,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       const livePeer = engine.getPeerByPubkey(entry.pubkey)
       const nick = entry.label?.trim() || livePeer?.nickname || 'anon'
       const handle = formatHandle(nick, entry.pubkey)
+      const peerNote = engine.peerNotes[pk] ?? ''
       list.push({
         id: `person-friend-${pk}`,
         group: 'People',
         title: handle.full,
-        subtitle: 'Trusted friend · Tap to message',
-        keywords: `people dm friend trusted ${handle.base} ${handle.full} ${entry.npub}`,
+        subtitle: peerNote || 'Trusted friend · Tap to message',
+        keywords: `people dm friend trusted ${handle.base} ${handle.full} ${entry.npub} ${peerNote}`,
         badge: 'FRIEND',
         icon: <ShieldCheck size={15} style={{ color: 'var(--accent)' }} />,
         run: () => {
@@ -376,8 +378,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         id: `pulse-${room.geohash}`,
         group: 'Active Rooms',
         title: `${displayLabel}${!isTopic && room.nearestCity ? ` · ${room.nearestCity}` : ''}`,
-        subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'}${safePreview ? ` · ${safePreview}` : isTopic ? ' · Topic 23333' : ''}`,
-        keywords: `active live room radio ${isTopic ? 'topic 23333' : 'geo'} ${room.geohash} ${displayLabel} ${room.nearestCity ?? ''}`,
+        subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'}${safePreview ? ` · ${safePreview}` : isTopic ? ' · Topic' : ''}`,
+        keywords: `active live room radio ${isTopic ? 'topic' : 'geo'} ${room.geohash} ${displayLabel} ${room.nearestCity ?? ''}`,
         badge: isTopic ? 'TOPIC' : 'LIVE',
         icon: isTopic ? (
           <Hash size={15} style={{ color: 'var(--accent)' }} />
@@ -391,7 +393,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       })
     }
 
-    // Popular Named Topic Channels (kind: 23333)
+    // Popular Named Topic Channels
     for (const topic of POPULAR_TOPIC_CHANNELS) {
       const topicKey = makeTopicChannelKey(topic.slug) ?? `topic:${topic.slug}`
       if (activePulseKeys.has(topicKey)) continue
@@ -399,9 +401,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         id: `topic-popular-${topic.slug}`,
         group: 'Topic Channels',
         title: topic.label,
-        subtitle: `${topic.description} · kind 23333`,
-        keywords: `topic radio 23333 named channel ${topic.slug} ${topic.label} ${topic.description}`,
-        badge: '23333',
+        subtitle: topic.description,
+        keywords: `topic radio named channel ${topic.slug} ${topic.label} ${topic.description}`,
+        badge: 'TOPIC',
         icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
         run: () => {
           onTuneChannel(topicKey)
@@ -794,13 +796,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         ? [
             {
               id: 'act-amail-inbox',
-              group: 'Amail',
-              title: 'Open Amail (Inbox)',
+              group: 'Agmail',
+              title: 'Open Agmail (Inbox)',
               subtitle:
                 engine.amail.unreadInboxCount > 0
                   ? `${engine.amail.unreadInboxCount} unread · ${engine.amail.meshPeers.filter((p) => p.state === 'connected').length} mesh ${engine.amail.meshPeers.filter((p) => p.state === 'connected').length === 1 ? 'peer' : 'peers'} connected`
                   : `E2EE Briar-style store-and-forward mesh mail · ${engine.amail.contacts.length} ${engine.amail.contacts.length === 1 ? 'contact' : 'contacts'}`,
-              keywords: 'open amail inbox email snailmail mail encrypted mesh briar messages',
+              keywords: 'open agmail amail inbox email snailmail mail encrypted mesh briar messages',
               badge:
                 engine.amail.unreadInboxCount > 0
                   ? `${engine.amail.unreadInboxCount} UNREAD`
@@ -813,10 +815,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             },
             {
               id: 'act-amail-compose',
-              group: 'Amail',
-              title: 'Compose Amail',
+              group: 'Agmail',
+              title: 'Compose Agmail',
               subtitle: 'Write an E2EE Markdown + MathJax email relayed across the Agnostr mesh',
-              keywords: 'compose write new send amail email mail markdown mathjax mesh',
+              keywords: 'compose write new send agmail amail email mail markdown mathjax mesh',
               badge: 'E2EE',
               icon: <PenLine size={15} style={{ color: 'var(--accent)' }} />,
               run: () => {
@@ -826,10 +828,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             },
             {
               id: 'act-amail-mesh',
-              group: 'Amail',
-              title: 'Amail Mesh Relay & Storage',
+              group: 'Agmail',
+              title: 'Agmail Mesh Relay & Storage',
               subtitle: `Relay vault ${Math.max(0, Math.round(engine.amail.storageStats.vaultBytes / 1024)).toLocaleString()} KB · ${engine.amail.storageStats.vaultCapsuleCount} sealed ${engine.amail.storageStats.vaultCapsuleCount === 1 ? 'capsule' : 'capsules'} carried`,
-              keywords: 'amail mesh relay storage vault capsules quota inspector telemetry briar',
+              keywords: 'agmail amail mesh relay storage vault capsules quota inspector telemetry briar',
               badge: engine.amail.settings.relayEnabled ? 'RELAY ON' : 'RELAY OFF',
               icon: <Database size={15} style={{ color: 'var(--accent)' }} />,
               run: () => {
@@ -877,10 +879,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         ? [
             {
               id: 'act-wallet-open',
-              group: 'Wallet & Zaps',
-              title: 'Open Cashu Wallet',
+              group: 'Agwallet & Zaps',
+              title: 'Open Agwallet',
               subtitle: `${engine.wallet.totalBalanceSats.toLocaleString()} sats across ${engine.wallet.mints.length} ${engine.wallet.mints.length === 1 ? 'mint' : 'mints'}`,
-              keywords: 'open cashu ecash wallet bitcoin sats lightning mint boltz balance zap',
+              keywords: 'open agwallet cashu ecash wallet bitcoin sats lightning mint boltz balance zap',
               badge: `${engine.wallet.totalBalanceSats.toLocaleString()} sats`,
               icon: <Wallet size={15} style={{ color: 'var(--status-warn)' }} />,
               run: () => {
@@ -890,10 +892,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             },
             {
               id: 'act-wallet-receive',
-              group: 'Wallet & Zaps',
-              title: 'Receive Sats (Cashu / Lightning / On-Chain)',
+              group: 'Agwallet & Zaps',
+              title: 'Receive in Agwallet (Cashu / Lightning / On-Chain)',
               subtitle: 'Claim Cashu token, generate Lightning invoice, or swap On-Chain BTC via Boltz',
-              keywords: 'receive sats deposit cashu ecash token lightning invoice onchain btc bitcoin boltz swap',
+              keywords: 'receive sats deposit agwallet wallet cashu ecash token lightning invoice onchain btc bitcoin boltz swap',
               badge: 'RECEIVE',
               icon: <ArrowDownLeft size={15} style={{ color: 'var(--status-warn)' }} />,
               run: () => {
@@ -903,10 +905,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             },
             {
               id: 'act-wallet-send',
-              group: 'Wallet & Zaps',
-              title: 'Send Sats',
+              group: 'Agwallet & Zaps',
+              title: 'Send from Agwallet',
               subtitle: 'Mint Cashu ecash token, pay Lightning invoice/address, or send On-Chain BTC',
-              keywords: 'send sats pay cashu ecash token lightning invoice address onchain btc bitcoin boltz',
+              keywords: 'send sats pay agwallet wallet cashu ecash token lightning invoice address onchain btc bitcoin boltz',
               badge: 'SEND',
               icon: <ArrowUpRight size={15} style={{ color: 'var(--status-warn)' }} />,
               run: () => {
@@ -922,8 +924,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         title: engine.translator.settings.enabled
           ? 'Exit Double-Column Translator'
           : 'Open Double-Column Translator',
-        subtitle: `On-device LFM3-1.7B · Reading in ${engine.translator.settings.myLanguage}`,
-        keywords: 'translate translator language double column lfm3 liquid bilingual spanish french japanese',
+        subtitle: `On-device ${engine.translator.modelLabel} · Reading in ${engine.translator.settings.myLanguage}`,
+        keywords: 'translate translator language double column m2m100 nllb200 bilingual spanish french japanese',
         badge: engine.translator.settings.enabled ? 'ON' : 'OFF',
         icon: <Languages size={15} />,
         run: () => {
@@ -947,9 +949,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       {
         id: 'act-settings-translator',
         group: 'Settings',
-        title: 'Translator Settings (LFM3-1.7B)',
-        subtitle: `My language: ${engine.translator.settings.myLanguage}${engine.translator.settings.outgoingEnabled ? ` · Outgoing → ${engine.translator.settings.outgoingLanguage}` : ''}`,
-        keywords: 'translator translation settings language lfm3 liquid model cache outgoing',
+        title: 'Translator Settings',
+        subtitle: `${engine.translator.modelLabel} · My language: ${engine.translator.settings.myLanguage}${engine.translator.settings.outgoingEnabled ? ` · Outgoing → ${engine.translator.settings.outgoingLanguage}` : ''}`,
+        keywords: 'translator translation settings language m2m100 nllb200 model cache outgoing',
         icon: <Languages size={15} />,
         run: () => {
           onClose()

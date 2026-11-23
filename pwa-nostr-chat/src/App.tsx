@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { Loader2, Phone, RefreshCw, ShieldAlert, ShieldCheck, Video, WifiOff, X } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import {
+  Loader2,
+  Phone,
+  RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
+  Video,
+  WifiOff,
+  X,
+} from 'lucide-react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
-import { useBackNavigation } from './hooks/useBackNavigation'
+import { useBackHandler, useBackNavigation } from './hooks/useBackNavigation'
 import { useMobileSwipeDrawers } from './hooks/useMobileSwipeDrawers'
 import { useMobileViewport } from './hooks/useMobileViewport'
 import { usePwa } from './hooks/usePwa'
@@ -20,6 +31,7 @@ import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
 import type { ServerMessage, ServerSummary } from './types/servers'
 import type { WalletInitialIntent, ZapTarget } from './types/wallet'
 import { radioAudio, type SoundCue } from './utils/sound'
+import { identiconDataUrl, shortPubkey } from './utils/identicon'
 import ConversationList, { type ListTab } from './components/ConversationList'
 import MobileTabBar from './components/MobileTabBar'
 import ChannelHeader from './components/ChannelHeader'
@@ -113,6 +125,19 @@ export function App() {
     section: AmailInitialSection
     composeTo: AmailComposeTarget | null
   }>({ open: false, section: 'inbox', composeTo: null })
+  const [pendingDeleteDm, setPendingDeleteDm] = useState<{
+    pubkey: string
+    displayName: string
+    isTrusted: boolean
+  } | null>(null)
+  const [noteEditorPeer, setNoteEditorPeer] = useState<{
+    pubkey: string
+    nickname: string
+    displayHandle: string
+  } | null>(null)
+  const [noteDraft, setNoteDraft] = useState('')
+  const noteTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const deleteDmCancelBtnRef = useRef<HTMLButtonElement | null>(null)
   const [serverHubState, setServerHubState] = useState<{ open: boolean; tab: ServerHubTab }>({
     open: false,
     tab: 'create',
@@ -543,6 +568,8 @@ export function App() {
       setWalletState({ open: false, intent: undefined })
       setZapTarget(null)
       setAmailState({ open: false, section: 'inbox', composeTo: null })
+      setPendingDeleteDm(null)
+      setNoteEditorPeer(null)
       setPanicFlash(true)
       const t = window.setTimeout(() => setPanicFlash(false), 700)
       prevMasterPkRef.current = engine.identity.masterPubkey
@@ -639,6 +666,12 @@ export function App() {
         if (engine.pendingTrustRequest) {
           e.stopImmediatePropagation()
           engine.cancelPendingTrust()
+        } else if (pendingDeleteDm) {
+          e.stopImmediatePropagation()
+          setPendingDeleteDm(null)
+        } else if (noteEditorPeer) {
+          e.stopImmediatePropagation()
+          setNoteEditorPeer(null)
         } else if (qrScannerOpen) {
           e.stopImmediatePropagation()
           setQrScannerOpen(false)
@@ -686,6 +719,8 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [
     engine,
+    pendingDeleteDm,
+    noteEditorPeer,
     qrScannerOpen,
     zapTarget,
     walletState.open,
@@ -761,6 +796,8 @@ export function App() {
   const swipeDisabled =
     !isMobileViewport ||
     Boolean(engine.pendingTrustRequest) ||
+    Boolean(pendingDeleteDm) ||
+    Boolean(noteEditorPeer) ||
     amailState.open ||
     walletState.open ||
     Boolean(zapTarget) ||
@@ -831,6 +868,14 @@ export function App() {
   const handleBackNavigation = useCallback((): boolean => {
     if (engine.pendingTrustRequest) {
       engine.cancelPendingTrust()
+      return true
+    }
+    if (pendingDeleteDm) {
+      setPendingDeleteDm(null)
+      return true
+    }
+    if (noteEditorPeer) {
+      setNoteEditorPeer(null)
       return true
     }
     if (qrScannerOpen) {
@@ -905,6 +950,8 @@ export function App() {
     return false
   }, [
     engine,
+    pendingDeleteDm,
+    noteEditorPeer,
     qrScannerOpen,
     zapTarget,
     walletState.open,
@@ -938,8 +985,34 @@ export function App() {
     onExitHint: handleBackExitHint,
   })
 
+  useBackHandler(Boolean(pendingDeleteDm), () => setPendingDeleteDm(null))
+  useBackHandler(Boolean(noteEditorPeer), () => setNoteEditorPeer(null))
+
+  useEffect(() => {
+    if (!noteEditorPeer) return
+    const raf = window.requestAnimationFrame(() => {
+      const el = noteTextareaRef.current
+      if (el) {
+        el.focus()
+        const end = el.value.length
+        el.setSelectionRange(end, end)
+      }
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [noteEditorPeer])
+
+  useEffect(() => {
+    if (!pendingDeleteDm) return
+    const raf = window.requestAnimationFrame(() => {
+      deleteDmCancelBtnRef.current?.focus()
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [pendingDeleteDm])
+
   const hasActiveBackTarget =
     Boolean(engine.pendingTrustRequest) ||
+    Boolean(pendingDeleteDm) ||
+    Boolean(noteEditorPeer) ||
     qrScannerOpen ||
     Boolean(zapTarget) ||
     walletState.open ||
@@ -1133,7 +1206,7 @@ export function App() {
           radioAudio.play('tune')
           engine.pushToast(
             'success',
-            `Ready to Amail ${target.nickname || `${target.npub.slice(0, 12)}…`}`
+            `Ready to Agmail ${target.nickname || `${target.npub.slice(0, 12)}…`}`
           )
           return
         }
@@ -1237,20 +1310,64 @@ export function App() {
   const handleCloseDmThread = useCallback(
     (pubkey: string) => {
       const targetPk = pubkey.toLowerCase()
-      const wasActiveDm =
-        engine.activeView.type === 'dm' &&
-        engine.activeView.peerPubkey.toLowerCase() === targetPk
-      engine.closeDmThread(pubkey)
-      if (wasActiveDm) {
-        setRoomInfoOpen(false)
-        if (isMobileViewport) {
-          setListTab('dms')
-          setMobileScreen('list')
-        }
-      }
+      const thread = engine.dmThreads.find((t) => t.peerPubkey.toLowerCase() === targetPk)
+      const livePeer = engine.getPeerByPubkey(pubkey)
+      const trustedEntry = engine.trustedPubkeys.find((t) => t.pubkey.toLowerCase() === targetPk)
+      const displayName =
+        thread?.peerDisplayHandle ||
+        livePeer?.displayHandle ||
+        trustedEntry?.label?.trim() ||
+        shortPubkey(pubkey, 8, 6)
+      setPendingDeleteDm({
+        pubkey,
+        displayName,
+        isTrusted: engine.isExplicitlyTrusted(pubkey),
+      })
     },
-    [engine, isMobileViewport]
+    [engine]
   )
+
+  const handleConfirmDeleteDm = useCallback(() => {
+    if (!pendingDeleteDm) return
+    const { pubkey } = pendingDeleteDm
+    const targetPk = pubkey.toLowerCase()
+    const wasActiveDm =
+      engine.activeView.type === 'dm' &&
+      engine.activeView.peerPubkey.toLowerCase() === targetPk
+    setPendingDeleteDm(null)
+    radioAudio.play('click')
+    engine.closeDmThread(pubkey)
+    if (wasActiveDm) {
+      setRoomInfoOpen(false)
+      if (isMobileViewport) {
+        setListTab('dms')
+        setMobileScreen('list')
+      }
+    }
+  }, [pendingDeleteDm, engine, isMobileViewport])
+
+  const handleOpenPeerNote = useCallback(
+    (peer: { pubkey: string; nickname: string; displayHandle: string }) => {
+      setNoteDraft(engine.peerNotes[peer.pubkey.toLowerCase()] ?? '')
+      setNoteEditorPeer(peer)
+    },
+    [engine.peerNotes]
+  )
+
+  const handleSavePeerNote = useCallback(() => {
+    if (!noteEditorPeer) return
+    engine.setPeerNote(noteEditorPeer.pubkey, noteDraft)
+    radioAudio.play('click')
+    setNoteEditorPeer(null)
+  }, [noteEditorPeer, noteDraft, engine])
+
+  const handleClearPeerNote = useCallback(() => {
+    if (!noteEditorPeer) return
+    engine.setPeerNote(noteEditorPeer.pubkey, '')
+    setNoteDraft('')
+    radioAudio.play('click')
+    setNoteEditorPeer(null)
+  }, [noteEditorPeer, engine])
 
   const handleMentionPeer = useCallback((handle: string) => {
     const clean = handle.startsWith('@') ? handle : `@${handle}`
@@ -1545,6 +1662,7 @@ export function App() {
               setCallExpanded(true)
             }}
             onInspectPeer={setInspectedPeer}
+            onEditPeerNote={handleOpenPeerNote}
             onShowQr={setQrShareTarget}
             onOpenScanner={handleOpenScanner}
             onResolvedShareTarget={handleResolvedShareTarget}
@@ -1993,6 +2111,159 @@ export function App() {
         onConfirm={engine.confirmPendingTrust}
         onCancel={engine.cancelPendingTrust}
       />
+
+      {/* Universal Delete Private Chat Confirmation Modal */}
+      {pendingDeleteDm &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            className="ag-inline-dialog-backdrop"
+            onClick={() => setPendingDeleteDm(null)}
+          >
+            <div
+              className="ag-inline-dialog"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="ag-delete-dm-title"
+              aria-describedby="ag-delete-dm-desc"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="ag-inline-dialog-head">
+                <div className="ag-inline-dialog-emblem danger" aria-hidden="true">
+                  <Trash2 size={18} />
+                </div>
+                <div className="ag-inline-dialog-title-wrap">
+                  <h2 id="ag-delete-dm-title" className="ag-inline-dialog-title">
+                    Delete private chat?
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  className="ag-circle-btn ag-inline-dialog-close"
+                  onClick={() => setPendingDeleteDm(null)}
+                  aria-label="Cancel"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <p id="ag-delete-dm-desc" className="ag-inline-dialog-body">
+                Remove your conversation with <strong>{pendingDeleteDm.displayName}</strong> from
+                this device?
+                {pendingDeleteDm.isTrusted ? ' They will remain in Trusted Friends.' : ''}
+              </p>
+
+              <div className="ag-inline-dialog-actions">
+                <button
+                  ref={deleteDmCancelBtnRef}
+                  type="button"
+                  className="ag-inline-dialog-btn secondary"
+                  onClick={() => setPendingDeleteDm(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="ag-inline-dialog-btn danger"
+                  onClick={handleConfirmDeleteDm}
+                >
+                  Delete Chat
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* Sleek Borderless People Private Note Editor Modal */}
+      {noteEditorPeer &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            className="ag-inline-dialog-backdrop"
+            onClick={() => setNoteEditorPeer(null)}
+          >
+            <div
+              className="ag-inline-dialog ag-note-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="ag-peer-note-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="ag-inline-dialog-head">
+                <img
+                  src={identiconDataUrl(noteEditorPeer.pubkey)}
+                  alt=""
+                  className="ag-note-dialog-avatar"
+                />
+                <div className="ag-inline-dialog-title-wrap">
+                  <h2 id="ag-peer-note-title" className="ag-inline-dialog-title truncate">
+                    {noteEditorPeer.displayHandle}
+                  </h2>
+                  <span className="ag-note-dialog-sub">Private note</span>
+                </div>
+                <button
+                  type="button"
+                  className="ag-circle-btn ag-inline-dialog-close"
+                  onClick={() => setNoteEditorPeer(null)}
+                  aria-label="Close"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <textarea
+                ref={noteTextareaRef}
+                rows={3}
+                maxLength={400}
+                className="ag-note-modal-textarea"
+                placeholder="Private note…"
+                aria-label={`Private note for ${noteEditorPeer.displayHandle}`}
+                value={noteDraft}
+                onChange={(e) => setNoteDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                    e.preventDefault()
+                    handleSavePeerNote()
+                  }
+                }}
+              />
+
+              <div className="ag-note-dialog-footer">
+                <div className="ag-note-dialog-left">
+                  <span className="ag-note-dialog-count tabular">{noteDraft.length}/400</span>
+                  {(noteDraft.trim().length > 0 ||
+                    Boolean(engine.peerNotes[noteEditorPeer.pubkey.toLowerCase()])) && (
+                    <button
+                      type="button"
+                      className="ag-note-dialog-clear"
+                      onClick={handleClearPeerNote}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <div className="ag-inline-dialog-actions">
+                  <button
+                    type="button"
+                    className="ag-inline-dialog-btn secondary"
+                    onClick={() => setNoteEditorPeer(null)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="ag-inline-dialog-btn primary"
+                    onClick={handleSavePeerNote}
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
 
       {/* Subtle On-Device Safety Filter Loading / Ready Floating Popup */}
       {cfPopupState && (

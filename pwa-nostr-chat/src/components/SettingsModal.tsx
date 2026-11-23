@@ -56,8 +56,8 @@ import type { NotificationFilterMode } from '../types/notifications.ts'
 import {
   SUPPORTED_TRANSLATION_LANGUAGES,
   TRANSLATION_LANGUAGE_OPTIONS,
-  TRANSLATOR_MODEL_LABEL,
-  TRANSLATOR_MODEL_SIZE_HINT,
+  TRANSLATOR_MODELS,
+  type TranslatorModelKey,
 } from '../types/translator.ts'
 import type { PwaState } from '../hooks/usePwa.ts'
 import {
@@ -222,7 +222,7 @@ const NAV_ITEMS: readonly {
   { id: 'notifications', label: 'Notifications', subtitle: 'Push alerts & call ringing' },
   { id: 'privacy', label: 'Privacy & Trust', subtitle: 'Trusted peers & blocks' },
   { id: 'content-filter', label: 'Content Filter', subtitle: 'On-device image & video safety' },
-  { id: 'translator', label: 'Translator', subtitle: 'On-device LFM3-1.7B' },
+  { id: 'translator', label: 'Translator', subtitle: 'On-device neural translation' },
   { id: 'appearance', label: 'Appearance', subtitle: 'Theme & sound effects' },
   { id: 'calls', label: 'Calls & Recording', subtitle: 'Quality, captions & TURN' },
   { id: 'network', label: 'Network & App', subtitle: 'Relays, Blossom & PWA' },
@@ -307,7 +307,7 @@ export function SettingsModal({
   const cfFileInputRef = useRef<HTMLInputElement | null>(null)
   const keepProtectionBtnRef = useRef<HTMLButtonElement | null>(null)
 
-  // Translator (Liquid LFM3-1.7B) drafts
+  // Translator drafts
   const [trClearingCache, setTrClearingCache] = useState(false)
   const [trFeedback, setTrFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [customMyLangMode, setCustomMyLangMode] = useState(
@@ -790,7 +790,7 @@ export function SettingsModal({
     onPlaySound?.('click')
     try {
       await engine.translator.clearModelCache()
-      setTrFeedback({ ok: true, msg: `Cleared ${TRANSLATOR_MODEL_LABEL} model cache` })
+      setTrFeedback({ ok: true, msg: 'Cleared translator model cache' })
     } catch (err) {
       setTrFeedback({
         ok: false,
@@ -919,7 +919,7 @@ export function SettingsModal({
               <Wallet size={15} />
             </span>
             <span className="ag-set-wallet-shortcut-copy">
-              <span className="ag-set-wallet-shortcut-title">Open Cashu Wallet</span>
+              <span className="ag-set-wallet-shortcut-title">Open Agwallet</span>
               <span className="ag-set-wallet-shortcut-sub">
                 Ecash tokens, Lightning &amp; on-chain swaps
               </span>
@@ -1038,8 +1038,8 @@ export function SettingsModal({
                 <span>Silent Background Sync</span>
               </span>
               <span className="ag-set-toggle-desc">
-                NIP-44 self-encrypted sync of servers, trusted/blocked peers, pins, Amail &amp;
-                missing messages across devices using this key.
+                NIP-44 self-encrypted sync of servers, trusted/blocked peers, notes, pins, Agmail
+                &amp; missing messages across devices using this key.
               </span>
             </div>
             <input
@@ -2446,9 +2446,12 @@ export function SettingsModal({
         ? '__custom__'
         : trs.outgoingLanguage
 
+    const activeModelMeta = TRANSLATOR_MODELS[trs.model] ?? TRANSLATOR_MODELS.m2m100
+    const modelOptions: readonly TranslatorModelKey[] = ['m2m100', 'nllb200']
+
     return (
       <div className="ag-set-pane-stack">
-        {/* Liquid LFM3-1.7B Model Card */}
+        {/* Translator Model Card */}
         <div className="ag-set-ai-card">
           <div className="ag-set-ai-head">
             <div className="ag-set-ai-title-wrap">
@@ -2456,7 +2459,7 @@ export function SettingsModal({
                 <Languages size={15} />
               </span>
               <div className="ag-set-ai-title-copy">
-                <span className="ag-set-ai-title">Liquid {TRANSLATOR_MODEL_LABEL}</span>
+                <span className="ag-set-ai-title">{tr.modelLabel}</span>
                 <span className="ag-set-ai-sub mono truncate">{tr.modelId}</span>
               </div>
             </div>
@@ -2483,8 +2486,7 @@ export function SettingsModal({
           )}
 
           <p className="ag-set-helper">
-            100% local neural translation ({TRANSLATOR_MODEL_SIZE_HINT}) — messages never leave your
-            device.
+            100% local neural translation ({tr.modelSizeHint}) — messages never leave your device.
           </p>
 
           <div className="ag-set-ai-actions">
@@ -2497,7 +2499,7 @@ export function SettingsModal({
                 onPlaySound?.('click')
                 void tr.preloadModel().then((ok) => {
                   if (ok) {
-                    setTrFeedback({ ok: true, msg: `${TRANSLATOR_MODEL_LABEL} is ready locally` })
+                    setTrFeedback({ ok: true, msg: `${tr.modelLabel} is ready locally` })
                   }
                 })
               }}
@@ -2553,6 +2555,45 @@ export function SettingsModal({
               {trFeedback.msg}
             </p>
           )}
+        </div>
+
+        {/* Translation Model Selector */}
+        <div className="ag-set-scope-item">
+          <div className="ag-set-label-row">
+            <span className="ag-set-scope-title">Translation Model</span>
+            <span className="ag-set-scope-default">Default: M2M-100</span>
+          </div>
+          <div
+            className="ag-segmented"
+            role="radiogroup"
+            aria-label="Translation model"
+          >
+            {modelOptions.map((key) => {
+              const opt = TRANSLATOR_MODELS[key]
+              const active = trs.model === key
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  role="radio"
+                  disabled={isDownloading}
+                  aria-checked={active}
+                  className={active ? 'active' : ''}
+                  onClick={() => {
+                    if (active) return
+                    setTrFeedback(null)
+                    tr.updateSettings({ model: key })
+                    onPlaySound?.('click')
+                  }}
+                >
+                  {key === 'm2m100'
+                    ? `${opt.shortLabel} · ~603 MB`
+                    : `${opt.shortLabel} · ~853 MB`}
+                </button>
+              )
+            })}
+          </div>
+          <p className="ag-set-helper">{activeModelMeta.description}</p>
         </div>
 
         {/* Double-Column Translator Mode Toggle */}

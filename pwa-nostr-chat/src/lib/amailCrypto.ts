@@ -129,17 +129,17 @@ async function encryptNip44(
   material: SigningKeyMaterial
 ): Promise<string> {
   if (utf8ByteLength(plaintext) > MAX_INNER_PLAINTEXT_BYTES) {
-    throw new Error('Amail message exceeds the maximum 56 KB encrypted payload size.')
+    throw new Error('Agmail message exceeds the maximum 56 KB encrypted payload size.')
   }
   const peerPk = recipientPubkey.toLowerCase()
   if (material.mode === 'extension') {
     if (!window.nostr?.nip44?.encrypt) {
-      throw new Error('Your NIP-07 extension does not support NIP-44 encryption required for Amail.')
+      throw new Error('Your NIP-07 extension does not support NIP-44 encryption required for Agmail.')
     }
     return await window.nostr.nip44.encrypt(peerPk, plaintext)
   }
   if (!material.secretKey) {
-    throw new Error('No signing key available to encrypt Amail payload.')
+    throw new Error('No signing key available to encrypt Agmail payload.')
   }
   const convKey = nip44.v2.utils.getConversationKey(material.secretKey, peerPk)
   return nip44.v2.encrypt(plaintext, convKey)
@@ -158,7 +158,7 @@ async function decryptNip44(
     return await window.nostr.nip44.decrypt(peerPk, ciphertext)
   }
   if (!material.secretKey) {
-    throw new Error('No signing key available to decrypt Amail payload.')
+    throw new Error('No signing key available to decrypt Agmail payload.')
   }
   const convKey = nip44.v2.utils.getConversationKey(material.secretKey, peerPk)
   return nip44.v2.decrypt(ciphertext, convKey)

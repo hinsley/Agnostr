@@ -537,7 +537,7 @@ function renderInline(
               key={k}
               type="button"
               className="ag-geo-chip"
-              title={`Join Topic Radio #${slug} (kind 23333)`}
+              title={`Join #${slug}`}
               onClick={(e) => {
                 e.stopPropagation()
                 opts.onTuneGeohash?.(topicKey)
