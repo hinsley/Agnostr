@@ -7,6 +7,7 @@ import {
   Captions,
   Circle,
   Crosshair,
+  Database,
   Download,
   Globe,
   Hash,
@@ -15,11 +16,13 @@ import {
   Languages,
   Link2,
   Lock,
+  Mail,
   Map as MapIcon,
   MessageCircle,
   Mic,
   MicOff,
   Palette,
+  PenLine,
   Phone,
   PhoneOff,
   Plus,
@@ -90,6 +93,7 @@ export interface CommandPaletteProps {
   onLocateMe: () => void
   onOpenRoomInfo: () => void
   onOpenSettings: (tab?: SettingsTab) => void
+  onOpenAmail?: (section?: 'inbox' | 'compose' | 'contacts' | 'mesh') => void
   onOpenWallet?: (intent?: WalletInitialIntent) => void
   onToggleSound: () => void
   onRunCommand: (cmdLine: string) => void
@@ -113,6 +117,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onLocateMe,
   onOpenRoomInfo,
   onOpenSettings,
+  onOpenAmail,
   onOpenWallet,
   onToggleSound,
   onRunCommand,
@@ -785,6 +790,89 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           engine.notifications.testRingtone()
         },
       },
+      ...(onOpenAmail
+        ? [
+            {
+              id: 'act-amail-inbox',
+              group: 'Amail',
+              title: 'Open Amail (Inbox)',
+              subtitle:
+                engine.amail.unreadInboxCount > 0
+                  ? `${engine.amail.unreadInboxCount} unread · ${engine.amail.meshPeers.filter((p) => p.state === 'connected').length} mesh ${engine.amail.meshPeers.filter((p) => p.state === 'connected').length === 1 ? 'peer' : 'peers'} connected`
+                  : `E2EE Briar-style store-and-forward mesh mail · ${engine.amail.contacts.length} ${engine.amail.contacts.length === 1 ? 'contact' : 'contacts'}`,
+              keywords: 'open amail inbox email snailmail mail encrypted mesh briar messages',
+              badge:
+                engine.amail.unreadInboxCount > 0
+                  ? `${engine.amail.unreadInboxCount} UNREAD`
+                  : 'MESH',
+              icon: <Mail size={15} style={{ color: 'var(--accent)' }} />,
+              run: () => {
+                onClose()
+                onOpenAmail('inbox')
+              },
+            },
+            {
+              id: 'act-amail-compose',
+              group: 'Amail',
+              title: 'Compose Amail',
+              subtitle: 'Write an E2EE Markdown + MathJax email relayed across the Agnostr mesh',
+              keywords: 'compose write new send amail email mail markdown mathjax mesh',
+              badge: 'E2EE',
+              icon: <PenLine size={15} style={{ color: 'var(--accent)' }} />,
+              run: () => {
+                onClose()
+                onOpenAmail('compose')
+              },
+            },
+            {
+              id: 'act-amail-mesh',
+              group: 'Amail',
+              title: 'Amail Mesh Relay & Storage',
+              subtitle: `Relay vault ${Math.max(0, Math.round(engine.amail.storageStats.vaultBytes / 1024)).toLocaleString()} KB · ${engine.amail.storageStats.vaultCapsuleCount} sealed ${engine.amail.storageStats.vaultCapsuleCount === 1 ? 'capsule' : 'capsules'} carried`,
+              keywords: 'amail mesh relay storage vault capsules quota inspector telemetry briar',
+              badge: engine.amail.settings.relayEnabled ? 'RELAY ON' : 'RELAY OFF',
+              icon: <Database size={15} style={{ color: 'var(--accent)' }} />,
+              run: () => {
+                onClose()
+                onOpenAmail('mesh')
+              },
+            },
+          ]
+        : []),
+      {
+        id: 'act-device-sync-now',
+        group: 'Actions',
+        title: 'Sync Linked Devices Now',
+        subtitle:
+          engine.deviceSync.onlineSiblingCount > 0
+            ? `${engine.deviceSync.onlineSiblingCount} sibling ${engine.deviceSync.onlineSiblingCount === 1 ? 'device' : 'devices'} online on this key · NIP-44 self-encrypted sync`
+            : engine.deviceSync.enabled
+              ? `Silent multi-device background sync active (${engine.deviceSync.deviceLabel})`
+              : 'Multi-device sync is paused — enable & run an encrypted sync checkpoint now',
+        keywords: 'sync linked devices multi device multi-device background crdt servers messages nip44',
+        badge:
+          engine.deviceSync.onlineSiblingCount > 0
+            ? `${engine.deviceSync.onlineSiblingCount} ONLINE`
+            : engine.deviceSync.enabled
+              ? 'SYNC'
+              : 'OFF',
+        icon: <RefreshCw size={15} style={{ color: 'var(--accent)' }} />,
+        run: () => {
+          onClose()
+          if (!engine.deviceSync.enabled) {
+            engine.deviceSync.setEnabled(true)
+          }
+          void engine.deviceSync.syncNow().then(() => {
+            engine.pushToast(
+              'info',
+              'Linked devices sync triggered',
+              engine.deviceSync.onlineSiblingCount > 0
+                ? `Exchanging encrypted updates with ${engine.deviceSync.onlineSiblingCount} online sibling ${engine.deviceSync.onlineSiblingCount === 1 ? 'device' : 'devices'}.`
+                : 'Published encrypted checkpoint for other devices using your key.'
+            )
+          })
+        },
+      },
       ...(onOpenWallet
         ? [
             {
@@ -1083,6 +1171,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     onLocateMe,
     onOpenRoomInfo,
     onOpenSettings,
+    onOpenAmail,
     onOpenWallet,
     onToggleSound,
     onExport,

@@ -197,6 +197,8 @@ export interface UseServersOptions {
 export interface UseServersResult {
   engine: ServersEngine
   activeServerRelays: string[]
+  applySyncedJoinedServers: (incomingServers: ServerSummary[]) => void
+  mergeSyncedServerMessages: (serverId: string, channelId: string, incoming: ServerMessage[]) => number
   resetAllServers: () => void
 }
 
@@ -2573,6 +2575,117 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     [mutateVirtualServer, pool, identityManager]
   )
 
+  const applySyncedJoinedServers = useCallback(
+    (incomingServers: ServerSummary[]) => {
+      const prevMap = new Map<string, ServerSummary>()
+      for (const s of joinedServersRef.current) {
+        prevMap.set(s.id, s)
+      }
+      const nextIds = new Set(incomingServers.map((s) => s.id))
+
+      // Clean up cached messages & unread items for servers left on another device
+      for (const prevServer of joinedServersRef.current) {
+        if (!nextIds.has(prevServer.id)) {
+          for (const ch of prevServer.channels) {
+            clearServerChannelMessagesStorage(prevServer.id, ch.id)
+            serverUnreadItemsRef.current.delete(makeServerChanKey(prevServer.id, ch.id))
+          }
+        }
+      }
+
+      const merged = incomingServers.map((incoming) => {
+        const existing = prevMap.get(incoming.id)
+        if (!existing) {
+          return {
+            ...incoming,
+            unreadCount: 0,
+            mentionCount: 0,
+          }
+        }
+        const existingChanMap = new Map(existing.channels.map((c) => [c.id, c]))
+        const channels = incoming.channels.map((ch) => {
+          const prevCh = existingChanMap.get(ch.id)
+          return {
+            ...ch,
+            unreadCount: prevCh?.unreadCount ?? 0,
+            mentionCount: prevCh?.mentionCount ?? 0,
+          }
+        })
+        const lastActive = channels.some((c) => c.id === existing.lastActiveChannelId)
+          ? existing.lastActiveChannelId
+          : channels[0]?.id ?? incoming.lastActiveChannelId
+        return {
+          ...incoming,
+          channels,
+          lastActiveChannelId: lastActive,
+          unreadCount: existing.unreadCount,
+          mentionCount: existing.mentionCount,
+        }
+      })
+
+      joinedServersRef.current = merged
+      setJoinedServers(merged)
+      saveJoinedServers(merged)
+
+      if (
+        activeViewRef.current.type === 'server' &&
+        !nextIds.has(activeViewRef.current.serverId)
+      ) {
+        setActiveView({ type: 'channel', geohash: activeGeohash })
+      }
+    },
+    [activeGeohash, setActiveView]
+  )
+
+  const mergeSyncedServerMessages = useCallback(
+    (serverId: string, channelId: string, incoming: ServerMessage[]): number => {
+      if (!serverId || !channelId || incoming.length === 0) return 0
+      const targetServer = joinedServersRef.current.find((s) => s.id === serverId)
+      if (!targetServer) return 0
+      const bannedSet = new Set(targetServer.bannedPubkeys.map((p) => p.toLowerCase()))
+
+      const validIncoming: ServerMessage[] = []
+      for (const raw of incoming) {
+        if (
+          !raw ||
+          raw.isSystem ||
+          typeof raw.id !== 'string' ||
+          !raw.id ||
+          raw.serverId !== serverId ||
+          raw.channelId !== channelId ||
+          typeof raw.createdAt !== 'number'
+        ) {
+          continue
+        }
+        const pk = (raw.pubkey || '').toLowerCase()
+        if (!/^[0-9a-f]{64}$/.test(pk)) continue
+        if (blockedSetRef.current.has(pk) || bannedSet.has(pk)) continue
+        validIncoming.push({
+          ...raw,
+          pubkey: pk,
+          isOwn: ownPubkeysRef.current.has(pk),
+        })
+      }
+      if (validIncoming.length === 0) return 0
+
+      let addedCount = 0
+      updateServerChannelMessages(
+        serverId,
+        channelId,
+        (prev) => {
+          const seen = new Set(prev.map((m) => m.id))
+          const toAdd = validIncoming.filter((m) => !seen.has(m.id))
+          if (toAdd.length === 0) return null
+          addedCount = toAdd.length
+          return backfillServerReplies([...prev, ...toAdd].sort((a, b) => a.createdAt - b.createdAt))
+        },
+        { persist: true, allowBackgroundPersist: true }
+      )
+      return addedCount
+    },
+    [updateServerChannelMessages]
+  )
+
   const resetAllServers = useCallback(() => {
     exploreUnsubRef.current?.()
     exploreUnsubRef.current = null
@@ -2647,7 +2760,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       joinNip29Group,
       sendInviteViaDm,
       leaveServer,
-      sendMessage: (rawText) => sendMessage(rawText),
+      sendMessage,
       sendVoiceMemo,
       sendImageAttachment,
       sendReaction,
@@ -2710,5 +2823,11 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     ]
   )
 
-  return { engine, activeServerRelays, resetAllServers }
+  return {
+    engine,
+    activeServerRelays,
+    applySyncedJoinedServers,
+    mergeSyncedServerMessages,
+    resetAllServers,
+  }
 }

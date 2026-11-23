@@ -9,6 +9,11 @@ import {
   type ContentFilterVerdict,
 } from '../types/contentFilter.ts'
 import type {
+  DeviceSyncCrdtState,
+  LinkedDeviceInfo,
+  PersistedDeviceSyncState,
+} from '../types/deviceSync.ts'
+import type {
   NotificationFilterMode,
   NotificationSettings,
 } from '../types/notifications.ts'
@@ -69,6 +74,8 @@ const KEYS = {
   dmThreads: `${PREFIX}dm_threads`,
   dmClearedAt: `${PREFIX}dm_cleared_at`,
   deviceSeed: `${PREFIX}device_seed`,
+  deviceId: `${PREFIX}device_id`,
+  deviceSyncState: `${PREFIX}device_sync_state`,
   signMode: `${PREFIX}sign_mode`,
   localSecret: `${PREFIX}local_secret`,
   geoDirectory: `${PREFIX}geo_directory`,
@@ -873,6 +880,163 @@ export function saveFilterVerdicts(
 
 export function clearFilterVerdictsStorage(): void {
   safeRemove(KEYS.filterVerdicts)
+}
+
+function generateRandomDeviceId(): string {
+  try {
+    const bytes = new Uint8Array(12)
+    crypto.getRandomValues(bytes)
+    let hex = ''
+    for (let i = 0; i < bytes.length; i += 1) {
+      hex += bytes[i].toString(16).padStart(2, '0')
+    }
+    return `dev_${hex}`
+  } catch {
+    return `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`
+  }
+}
+
+export function loadOrCreateDeviceId(): string {
+  const existing = safeGet(KEYS.deviceId)?.trim()
+  if (existing && /^[a-zA-Z0-9_-]{8,64}$/.test(existing)) {
+    return existing
+  }
+  const fresh = generateRandomDeviceId()
+  safeSet(KEYS.deviceId, fresh)
+  return fresh
+}
+
+export function resetDeviceId(): string {
+  const fresh = generateRandomDeviceId()
+  safeSet(KEYS.deviceId, fresh)
+  return fresh
+}
+
+export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
+  const parsed = safeJsonParse<Partial<PersistedDeviceSyncState> | null>(
+    safeGet(KEYS.deviceSyncState),
+    null
+  )
+  if (!parsed || typeof parsed !== 'object' || !parsed.crdt || typeof parsed.crdt !== 'object') {
+    return null
+  }
+  const rawCrdt = parsed.crdt as Partial<DeviceSyncCrdtState>
+  const crdt: DeviceSyncCrdtState = {
+    v: 1,
+    servers:
+      rawCrdt.servers && typeof rawCrdt.servers === 'object' && !Array.isArray(rawCrdt.servers)
+        ? rawCrdt.servers
+        : {},
+    trusted:
+      rawCrdt.trusted && typeof rawCrdt.trusted === 'object' && !Array.isArray(rawCrdt.trusted)
+        ? rawCrdt.trusted
+        : {},
+    blocked:
+      rawCrdt.blocked && typeof rawCrdt.blocked === 'object' && !Array.isArray(rawCrdt.blocked)
+        ? rawCrdt.blocked
+        : {},
+    pinned:
+      rawCrdt.pinned &&
+      typeof rawCrdt.pinned === 'object' &&
+      Array.isArray(rawCrdt.pinned.items)
+        ? {
+            updatedAt:
+              typeof rawCrdt.pinned.updatedAt === 'number' && Number.isFinite(rawCrdt.pinned.updatedAt)
+                ? rawCrdt.pinned.updatedAt
+                : 0,
+            items: rawCrdt.pinned.items,
+          }
+        : { updatedAt: 0, items: [] },
+    dmClearedAt:
+      rawCrdt.dmClearedAt &&
+      typeof rawCrdt.dmClearedAt === 'object' &&
+      !Array.isArray(rawCrdt.dmClearedAt)
+        ? rawCrdt.dmClearedAt
+        : {},
+    lud16:
+      rawCrdt.lud16 && typeof rawCrdt.lud16 === 'object'
+        ? {
+            value: typeof rawCrdt.lud16.value === 'string' ? rawCrdt.lud16.value : null,
+            updatedAt:
+              typeof rawCrdt.lud16.updatedAt === 'number' && Number.isFinite(rawCrdt.lud16.updatedAt)
+                ? rawCrdt.lud16.updatedAt
+                : 0,
+          }
+        : { value: null, updatedAt: 0 },
+    nickname:
+      rawCrdt.nickname && typeof rawCrdt.nickname === 'object'
+        ? {
+            value: typeof rawCrdt.nickname.value === 'string' ? rawCrdt.nickname.value : '',
+            updatedAt:
+              typeof rawCrdt.nickname.updatedAt === 'number' &&
+              Number.isFinite(rawCrdt.nickname.updatedAt)
+                ? rawCrdt.nickname.updatedAt
+                : 0,
+          }
+        : { value: '', updatedAt: 0 },
+  }
+
+  const linkedDevices: LinkedDeviceInfo[] = Array.isArray(parsed.linkedDevices)
+    ? parsed.linkedDevices
+        .filter(
+          (d): d is LinkedDeviceInfo =>
+            Boolean(d) &&
+            typeof d.deviceId === 'string' &&
+            typeof d.label === 'string' &&
+            typeof d.lastSeenAt === 'number'
+        )
+        .slice(0, 16)
+        .map((d) => ({
+          deviceId: d.deviceId,
+          label: d.label.slice(0, 48),
+          nickname: typeof d.nickname === 'string' ? d.nickname.slice(0, 32) : '',
+          lastSeenAt: d.lastSeenAt,
+          online: false,
+        }))
+    : []
+
+  return {
+    enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : true,
+    ownerPubkey:
+      typeof parsed.ownerPubkey === 'string' && /^[0-9a-f]{64}$/i.test(parsed.ownerPubkey)
+        ? parsed.ownerPubkey.toLowerCase()
+        : null,
+    stateRevision:
+      typeof parsed.stateRevision === 'number' && Number.isFinite(parsed.stateRevision)
+        ? Math.max(0, Math.floor(parsed.stateRevision))
+        : 0,
+    lastSyncedAt:
+      typeof parsed.lastSyncedAt === 'number' && Number.isFinite(parsed.lastSyncedAt)
+        ? parsed.lastSyncedAt
+        : null,
+    crdt,
+    linkedDevices,
+  }
+}
+
+export function saveDeviceSyncState(state: PersistedDeviceSyncState): void {
+  const sanitized: PersistedDeviceSyncState = {
+    enabled: state.enabled,
+    ownerPubkey: state.ownerPubkey,
+    stateRevision: state.stateRevision,
+    lastSyncedAt: state.lastSyncedAt,
+    crdt: {
+      v: 1,
+      servers: state.crdt.servers,
+      trusted: state.crdt.trusted,
+      blocked: state.crdt.blocked,
+      pinned: state.crdt.pinned,
+      dmClearedAt: state.crdt.dmClearedAt,
+      lud16: state.crdt.lud16,
+      nickname: state.crdt.nickname,
+    },
+    linkedDevices: state.linkedDevices.slice(0, 16),
+  }
+  safeSet(KEYS.deviceSyncState, JSON.stringify(sanitized))
+}
+
+export function clearDeviceSyncState(): void {
+  safeRemove(KEYS.deviceSyncState)
 }
 
 export function panicWipeStorage(): void {

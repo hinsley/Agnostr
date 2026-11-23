@@ -102,13 +102,23 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   } = opts
 
   const [threads, setThreads] = useState<DmThread[]>(() => loadDmThreads())
-  const dmClearedAtRef = useRef<Record<string, number>>(loadDmClearedAt())
+  const [dmClearedAt, setDmClearedAt] = useState<Record<string, number>>(() => loadDmClearedAt())
+  const dmClearedAtRef = useRef<Record<string, number>>(dmClearedAt)
+  const threadsRef = useRef<DmThread[]>(threads)
   const processedWrapIdsRef = useRef<Set<string>>(new Set())
   const dmBacklogSettledRef = useRef<boolean>(false)
   const dmSubSeqRef = useRef<number>(0)
   const activeDmPeerRef = useRef<string | null>(activeDmPeer)
   const blockedRef = useRef<Set<string>>(blockedPubkeys)
   const onIncomingRef = useRef(onIncomingDm)
+
+  useLayoutEffect(() => {
+    threadsRef.current = threads
+  }, [threads])
+
+  useLayoutEffect(() => {
+    dmClearedAtRef.current = dmClearedAt
+  }, [dmClearedAt])
 
   useLayoutEffect(() => {
     activeDmPeerRef.current = activeDmPeer
@@ -815,6 +825,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       [pk]: Math.floor(Date.now() / 1000),
     }
     dmClearedAtRef.current = nextClearedAt
+    setDmClearedAt(nextClearedAt)
     saveDmClearedAt(nextClearedAt)
     setThreads((prev) => {
       const next = prev.filter((t) => t.peerPubkey !== pk)
@@ -823,9 +834,143 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     })
   }, [])
 
+  const mergeSyncedDmClearedAt = useCallback((remoteClearedAt: Record<string, number>): number => {
+    const nextMap: Record<string, number> = { ...dmClearedAtRef.current }
+    let changedCount = 0
+    for (const [rawPk, rawTs] of Object.entries(remoteClearedAt)) {
+      const pk = rawPk.toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawTs !== 'number' || !Number.isFinite(rawTs) || rawTs <= 0) {
+        continue
+      }
+      const ts = Math.floor(rawTs)
+      if ((nextMap[pk] ?? 0) < ts) {
+        nextMap[pk] = ts
+        changedCount += 1
+      }
+    }
+    if (changedCount === 0) return 0
+    dmClearedAtRef.current = nextMap
+    setDmClearedAt(nextMap)
+    saveDmClearedAt(nextMap)
+    setThreads((prev) => {
+      let mutated = false
+      const next: DmThread[] = []
+      for (const thread of prev) {
+        const cutoff = nextMap[thread.peerPubkey.toLowerCase()] ?? 0
+        if (cutoff <= 0) {
+          next.push(thread)
+          continue
+        }
+        const surviving = thread.messages.filter((m) => m.createdAt > cutoff)
+        if (surviving.length === thread.messages.length) {
+          next.push(thread)
+          continue
+        }
+        mutated = true
+        if (surviving.length > 0) {
+          const tail = surviving[surviving.length - 1]
+          next.push({
+            ...thread,
+            messages: surviving,
+            lastMessageAt: tail.createdAt,
+            lastPreview: formatDmPreview(tail),
+          })
+        }
+      }
+      if (mutated) {
+        saveDmThreads(next)
+        return next
+      }
+      return prev
+    })
+    return changedCount
+  }, [])
+
+  const mergeSyncedDmMessages = useCallback(
+    (
+      peerPubkey: string,
+      incoming: DmMessage[],
+      peerMeta?: { peerNickname?: string; protocol?: DmProtocol }
+    ): number => {
+      const pk = peerPubkey.trim().toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(pk) || incoming.length === 0) return 0
+      if (blockedRef.current.has(pk)) return 0
+
+      const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const cutoffSec = dmClearedAtRef.current[pk] ?? 0
+      const validIncoming: DmMessage[] = []
+      for (const raw of incoming) {
+        if (!raw || typeof raw.id !== 'string' || !raw.id || typeof raw.createdAt !== 'number') {
+          continue
+        }
+        if (cutoffSec > 0 && raw.createdAt <= cutoffSec) continue
+        const senderPk = (raw.senderPubkey || '').toLowerCase()
+        if (!/^[0-9a-f]{64}$/.test(senderPk)) continue
+        if (blockedRef.current.has(senderPk)) continue
+        const isOwn = senderPk === masterPk || Boolean(raw.isOwn)
+        validIncoming.push({
+          ...raw,
+          peerPubkey: pk,
+          senderPubkey: senderPk,
+          isOwn,
+          protocol: raw.protocol === 'nip17' ? 'nip17' : 'bitchat',
+        })
+      }
+      if (validIncoming.length === 0) return 0
+
+      const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+      const existingIds = new Set(existingThread?.messages.map((m) => m.id) ?? [])
+      const uniqueNew = validIncoming.filter((m) => !existingIds.has(m.id))
+      if (uniqueNew.length === 0) return 0
+
+      setThreads((prev) => {
+        const idx = prev.findIndex((t) => t.peerPubkey === pk)
+        if (idx !== -1) {
+          const existing = prev[idx]
+          const seen = new Set(existing.messages.map((m) => m.id))
+          const toAdd = validIncoming.filter((m) => !seen.has(m.id))
+          if (toAdd.length === 0) return prev
+          const merged = [...existing.messages, ...toAdd].sort(compareDmMessages).slice(-150)
+          const tail = merged[merged.length - 1]
+          const updated: DmThread = {
+            ...existing,
+            messages: merged,
+            lastMessageAt: tail ? tail.createdAt : existing.lastMessageAt,
+            lastPreview: tail ? formatDmPreview(tail) : existing.lastPreview,
+          }
+          const copy = [...prev]
+          copy[idx] = updated
+          copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+          return copy
+        }
+        const sorted = [...validIncoming].sort(compareDmMessages).slice(-150)
+        const tail = sorted[sorted.length - 1]
+        const nick =
+          peerMeta?.peerNickname?.trim() ||
+          presenceTracker.getNickname(pk) ||
+          `anon${pk.slice(-4)}`
+        const created: DmThread = {
+          peerPubkey: pk,
+          peerNpub: encodeNpubSafe(pk),
+          peerNickname: nick,
+          peerDisplayHandle: formatDisplayHandle(nick, pk),
+          protocol: peerMeta?.protocol ?? tail?.protocol ?? 'bitchat',
+          messages: sorted,
+          unreadCount: 0,
+          lastMessageAt: tail ? tail.createdAt : Math.floor(Date.now() / 1000),
+          lastPreview: tail ? formatDmPreview(tail) : '',
+        }
+        return [created, ...prev].sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+      })
+      return uniqueNew.length
+    },
+    [identityManager, presenceTracker]
+  )
+
   const clearAllDms = useCallback(() => {
     processedWrapIdsRef.current.clear()
     dmClearedAtRef.current = {}
+    setDmClearedAt({})
     setThreads([])
   }, [])
 
@@ -846,6 +991,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
   return {
     dmThreads: sanitizedThreads,
+    dmClearedAt,
     totalDmUnread,
     ensureThread,
     sendDirectMessage,
@@ -853,6 +999,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     sendDirectImageAttachment,
     clearThread,
     closeThread,
+    mergeSyncedDmClearedAt,
+    mergeSyncedDmMessages,
     clearAllDms,
   }
 }

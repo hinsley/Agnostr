@@ -219,38 +219,51 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.45rem;
+  gap: 4px;
   height: var(--header-h);
   min-height: var(--header-h);
-  padding: 0 10px 0 14px;
+  padding: 0 7px 0 9px;
   flex-shrink: 0;
 }
 
 .ag-conv-brand {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: 5px;
   min-width: 0;
 }
 
 .ag-conv-logo {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
   flex-shrink: 0;
 }
 
 .ag-conv-title {
-  font-size: 15.5px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--text-primary);
+  white-space: nowrap;
 }
 
 .ag-conv-header-actions {
   display: flex;
   align-items: center;
-  gap: 0.15rem;
+  gap: 2px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.ag-conv-header-actions .ag-circle-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.ag-conv-header-actions .ag-circle-btn svg {
+  width: 15px;
+  height: 15px;
 }
 
 /* Compact Search / Jump Trigger */
@@ -4907,18 +4920,67 @@
    12b. Cashu Wallet Trigger, Lightning Zaps, Content Filter Text Shield &
         Double-Column Translator Mode (LFM3-1.7B)
    -------------------------------------------------------------------------- */
+.ag-amail-header-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-amail-header-btn:hover,
+.ag-amail-header-btn.active {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.ag-amail-header-icon {
+  flex-shrink: 0;
+}
+
+.ag-amail-header-label {
+  min-width: 0;
+}
+
+.ag-amail-header-badge {
+  position: absolute;
+  top: -5px;
+  right: -4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  font-size: 9.5px;
+  line-height: 15px;
+  box-shadow: 0 0 0 1.5px var(--bg-surface);
+  pointer-events: none;
+}
+
 .ag-wallet-header-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 30px;
-  max-width: 112px;
-  padding: 0 9px;
+  gap: 3px;
+  height: 28px;
+  max-width: 66px;
+  padding: 0 6px;
   border-radius: var(--radius-full);
   background-color: var(--status-warn-soft);
   border: 1px solid rgba(245, 158, 11, 0.34);
   color: var(--status-warn);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;
@@ -5533,10 +5595,51 @@
     padding: 0 7px;
   }
 
+  .ag-conv-header {
+    padding: 0 10px 0 14px;
+    gap: 8px;
+  }
+
+  .ag-conv-brand {
+    gap: 8px;
+  }
+
+  .ag-conv-logo {
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+  }
+
+  .ag-conv-title {
+    font-size: 15.5px;
+  }
+
+  .ag-conv-header-actions {
+    gap: 6px;
+  }
+
+  .ag-conv-header-actions .ag-circle-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .ag-conv-header-actions .ag-circle-btn svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .ag-amail-header-btn {
+    height: 34px;
+    padding: 0 10px;
+    gap: 5px;
+    font-size: 12.5px;
+  }
+
   .ag-wallet-header-btn {
     height: 34px;
     max-width: 118px;
     padding: 0 10px;
+    gap: 5px;
     font-size: 12.5px;
   }
 

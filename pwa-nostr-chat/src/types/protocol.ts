@@ -1,5 +1,7 @@
+import type { AmailEngine } from './amail.ts'
 import type { CallEngine } from './calls.ts'
 import type { ContentFilterEngine } from './contentFilter.ts'
+import type { DeviceSyncEngine } from './deviceSync.ts'
 import type { NotificationEngine } from './notifications.ts'
 import type { ServersEngine } from './servers.ts'
 import type { TranscriptionEngine } from './transcription.ts'
@@ -516,6 +518,12 @@ export interface AgnostrEngine {
 
   // Nymchat & NIP-57 Lightning Address Discovery + Zaps
   zaps: ZapEngine
+
+  // Silent Multi-Device Same-Key Background Sync (NIP-44 self-encrypted CRDT + delta messages)
+  deviceSync: DeviceSyncEngine
+
+  // Amail — E2EE Briar-inspired Store-and-Forward Meshnet Snailmail
+  amail: AmailEngine
 
   // Push notifications, live incoming DM call ringing & Web Push bridge
   notifications: NotificationEngine

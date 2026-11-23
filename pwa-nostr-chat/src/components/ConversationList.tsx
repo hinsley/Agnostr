@@ -18,6 +18,7 @@ import {
   Loader2,
   Lock,
   LogOut,
+  Mail,
   Map as MapIcon,
   MessageCircle,
   Phone,
@@ -113,6 +114,9 @@ export interface ConversationListProps {
   onOpenCommandPalette: () => void
   onExpandRadar: () => void
   onOpenSettings: (tab?: SettingsTab) => void
+  amailOpen?: boolean
+  onOpenAmail?: (section?: 'inbox' | 'compose' | 'contacts' | 'mesh') => void
+  onOpenAmailCompose?: (pubkey: string, nickname?: string) => void
   onOpenWallet?: (intent?: WalletInitialIntent) => void
   onOpenZap?: (target: ZapTarget) => void
   onLocateMe: () => void
@@ -140,6 +144,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onOpenCommandPalette,
   onExpandRadar,
   onOpenSettings,
+  amailOpen = false,
+  onOpenAmail,
+  onOpenAmailCompose,
   onOpenWallet,
   onOpenZap,
   onLocateMe,
@@ -386,6 +393,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         onSelect: () => onOpenDm(peer.peerPubkey, peer.peerNickname),
       },
     ]
+
+    if (onOpenAmailCompose) {
+      items.push({
+        id: `dm-amail-${peer.peerPubkey}`,
+        label: 'Send Amail',
+        icon: <Mail size={15} />,
+        onSelect: () => onOpenAmailCompose(peer.peerPubkey, peer.peerNickname),
+      })
+    }
 
     if (peerLud16 && onOpenZap) {
       items.push({
@@ -731,6 +747,37 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
 
         <div className="ag-conv-header-actions">
+          {/* Compact 1-Tap Amail Encrypted Mesh Mail Button (Desktop & Mobile) */}
+          {onOpenAmail && (
+            <button
+              type="button"
+              className={`ag-amail-header-btn ${amailOpen ? 'active' : ''}`}
+              onClick={() => {
+                onPlaySound?.('click')
+                onOpenAmail('inbox')
+              }}
+              title={
+                engine.amail.unreadInboxCount > 0
+                  ? `Open Amail (${engine.amail.unreadInboxCount} unread)`
+                  : 'Open Amail — Encrypted Mesh Mail'
+              }
+              aria-label={
+                engine.amail.unreadInboxCount > 0
+                  ? `Open Amail (${engine.amail.unreadInboxCount} unread)`
+                  : 'Open Amail'
+              }
+              aria-pressed={amailOpen}
+            >
+              <Mail size={13} className="ag-amail-header-icon" aria-hidden="true" />
+              <span className="ag-amail-header-label">Amail</span>
+              {engine.amail.unreadInboxCount > 0 && (
+                <span className="ag-ping-badge ag-amail-header-badge tabular">
+                  {formatBadgeCount(engine.amail.unreadInboxCount)}
+                </span>
+              )}
+            </button>
+          )}
+
           {/* Compact 1-Tap Cashu Ecash Wallet Button (Desktop & Mobile) */}
           {onOpenWallet && (
             <button

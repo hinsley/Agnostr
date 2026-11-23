@@ -43,6 +43,10 @@ import QrScannerModal from './components/QrScannerModal'
 import TrustConfirmModal from './components/TrustConfirmModal'
 import WalletModal from './components/WalletModal'
 import ZapModal from './components/ZapModal'
+import AmailView, {
+  type AmailComposeTarget,
+  type AmailInitialSection,
+} from './components/AmailView'
 import { ContextMenuProvider } from './components/ContextMenu'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
@@ -104,6 +108,11 @@ export function App() {
     intent?: WalletInitialIntent
   }>({ open: false, intent: undefined })
   const [zapTarget, setZapTarget] = useState<ZapTarget | null>(null)
+  const [amailState, setAmailState] = useState<{
+    open: boolean
+    section: AmailInitialSection
+    composeTo: AmailComposeTarget | null
+  }>({ open: false, section: 'inbox', composeTo: null })
   const [serverHubState, setServerHubState] = useState<{ open: boolean; tab: ServerHubTab }>({
     open: false,
     tab: 'create',
@@ -129,10 +138,20 @@ export function App() {
   const activeChannel = engine.servers.activeChannel
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
 
-  // Total unread count across DMs, Servers, and Geo Radio rooms for PWA App Badge
+  // Total unread count across DMs, Servers, Geo Radio rooms, and Amail for PWA App Badge
   const totalUnreadBadge = useMemo(() => {
-    return engine.totalDmUnread + engine.servers.totalServerUnread + engine.totalGeoUnread
-  }, [engine.totalDmUnread, engine.servers.totalServerUnread, engine.totalGeoUnread])
+    return (
+      engine.totalDmUnread +
+      engine.servers.totalServerUnread +
+      engine.totalGeoUnread +
+      engine.amail.unreadInboxCount
+    )
+  }, [
+    engine.totalDmUnread,
+    engine.servers.totalServerUnread,
+    engine.totalGeoUnread,
+    engine.amail.unreadInboxCount,
+  ])
 
   const pwa = usePwa(totalUnreadBadge)
 
@@ -169,6 +188,7 @@ export function App() {
 
   const handleReturnToActiveCall = useCallback(() => {
     if (!activeCall) return
+    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRoomInfoOpen(false)
@@ -198,6 +218,7 @@ export function App() {
     // Navigate to target room/DM/server once per pending notification action
     if (navigatedNotifTsRef.current !== receivedAt) {
       navigatedNotifTsRef.current = receivedAt
+      setAmailState({ open: false, section: 'inbox', composeTo: null })
       setRoomInfoOpen(false)
       setCmdkOpen(false)
       setRadarExpanded(false)
@@ -454,6 +475,7 @@ export function App() {
       setQrScannerOpen(false)
       setWalletState({ open: false, intent: undefined })
       setZapTarget(null)
+      setAmailState({ open: false, section: 'inbox', composeTo: null })
       setPanicFlash(true)
       const t = window.setTimeout(() => setPanicFlash(false), 700)
       prevMasterPkRef.current = engine.identity.masterPubkey
@@ -542,24 +564,35 @@ export function App() {
       }
       if (mod && e.key === ',') {
         e.preventDefault()
+        setAmailState({ open: false, section: 'inbox', composeTo: null })
         setSettingsState((prev) => ({ open: !prev.open, tab: undefined }))
         return
       }
       if (e.key === 'Escape') {
         if (engine.pendingTrustRequest) {
+          e.stopImmediatePropagation()
           engine.cancelPendingTrust()
         } else if (qrScannerOpen) {
+          e.stopImmediatePropagation()
           setQrScannerOpen(false)
         } else if (zapTarget) {
+          e.stopImmediatePropagation()
           setZapTarget(null)
         } else if (walletState.open) {
+          e.stopImmediatePropagation()
           setWalletState({ open: false, intent: undefined })
         } else if (qrShareTarget) {
+          e.stopImmediatePropagation()
           setQrShareTarget(null)
         } else if (cmdkOpen) {
+          e.stopImmediatePropagation()
           setCmdkOpen(false)
         } else if (lightboxImage) {
+          e.stopImmediatePropagation()
           setLightboxImage(null)
+        } else if (amailState.open) {
+          // Let AmailView's own Escape listener step back (To dropdown -> Compose -> Reader -> Close)
+          return
         } else if (settingsState.open) {
           setSettingsState((prev) => ({ ...prev, open: false }))
         } else if (serverSettingsState.serverId) {
@@ -592,6 +625,7 @@ export function App() {
     qrShareTarget,
     cmdkOpen,
     lightboxImage,
+    amailState.open,
     settingsState.open,
     serverSettingsState.serverId,
     serverHubState.open,
@@ -608,7 +642,32 @@ export function App() {
     radioAudio.play(cue)
   }, [])
 
+  const closeAmail = useCallback(() => {
+    setAmailState({ open: false, section: 'inbox', composeTo: null })
+  }, [])
+
+  const handleOpenAmail = useCallback((section: AmailInitialSection = 'inbox') => {
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setRoomInfoOpen(false)
+    setWalletState({ open: false, intent: undefined })
+    setZapTarget(null)
+    setInspectedPeer(null)
+    setAmailState({ open: true, section, composeTo: null })
+  }, [])
+
+  const handleOpenAmailCompose = useCallback((pubkey: string, nickname?: string) => {
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setRoomInfoOpen(false)
+    setWalletState({ open: false, intent: undefined })
+    setZapTarget(null)
+    setInspectedPeer(null)
+    setAmailState({ open: true, section: 'compose', composeTo: { pubkey, nickname } })
+  }, [])
+
   const handleOpenSettings = useCallback((tab?: SettingsTab) => {
+    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setRoomInfoOpen(false)
     setSettingsState({ open: true, tab })
@@ -635,6 +694,7 @@ export function App() {
   const swipeDisabled =
     !isMobileViewport ||
     Boolean(engine.pendingTrustRequest) ||
+    amailState.open ||
     walletState.open ||
     Boolean(zapTarget) ||
     settingsState.open ||
@@ -673,6 +733,7 @@ export function App() {
   }, [engine.activeView.type])
 
   const handleMobileSelectTab = useCallback((tab: ListTab) => {
+    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRoomInfoOpen(false)
@@ -681,6 +742,7 @@ export function App() {
   }, [])
 
   const handleMobileTabMap = useCallback(() => {
+    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRoomInfoOpen(false)
     setRadarExpanded((open) => !open)
@@ -688,6 +750,7 @@ export function App() {
   }, [])
 
   const handleMobileTabSettings = useCallback(() => {
+    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setRoomInfoOpen(false)
     setSettingsState((prev) =>
@@ -747,6 +810,10 @@ export function App() {
       setRadarExpanded(false)
       return true
     }
+    if (amailState.open) {
+      closeAmail()
+      return true
+    }
     if (settingsState.open) {
       setSettingsState((prev) => ({ ...prev, open: false }))
       return true
@@ -783,6 +850,8 @@ export function App() {
     closeServerHub,
     installModalOpen,
     radarExpanded,
+    amailState.open,
+    closeAmail,
     settingsState.open,
     activeCall,
     callExpanded,
@@ -815,6 +884,7 @@ export function App() {
     serverHubState.open ||
     installModalOpen ||
     radarExpanded ||
+    amailState.open ||
     settingsState.open ||
     Boolean(activeCall && callExpanded) ||
     roomInfoOpen ||
@@ -842,6 +912,7 @@ export function App() {
       const ok = engine.tuneGeohash(resolved?.key ?? channelInput)
       if (ok) {
         radioAudio.play('tune')
+        setAmailState({ open: false, section: 'inbox', composeTo: null })
         setListTab('radio')
         setMobileScreen('chat')
         setRoomInfoOpen(false)
@@ -856,6 +927,7 @@ export function App() {
     (serverId: string, channelId: string) => {
       engine.servers.selectChannel(serverId, channelId)
       radioAudio.play('tune')
+      setAmailState({ open: false, section: 'inbox', composeTo: null })
       setListTab('servers')
       setMobileScreen('chat')
       setRoomInfoOpen(false)
@@ -892,6 +964,7 @@ export function App() {
   const handleOpenWallet = useCallback((intent?: WalletInitialIntent) => {
     setZapTarget(null)
     setInspectedPeer(null)
+    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRoomInfoOpen(false)
@@ -900,6 +973,7 @@ export function App() {
 
   const handleOpenZap = useCallback((target: ZapTarget) => {
     setWalletState({ open: false, intent: undefined })
+    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setZapTarget(target)
   }, [])
 
@@ -982,6 +1056,21 @@ export function App() {
           )
           return
         }
+        if (amailState.open) {
+          void engine.amail.addContact(target.pubkey, target.nickname)
+          setAmailState({
+            open: true,
+            section: 'compose',
+            composeTo: { pubkey: target.pubkey, nickname: target.nickname },
+          })
+          radioAudio.play('tune')
+          engine.pushToast(
+            'success',
+            `Ready to Amail ${target.nickname || `${target.npub.slice(0, 12)}…`}`
+          )
+          return
+        }
+        setAmailState({ open: false, section: 'inbox', composeTo: null })
         setWalletState({ open: false, intent: undefined })
         setZapTarget(null)
         setRadarExpanded(false)
@@ -1008,6 +1097,7 @@ export function App() {
         )
         return
       }
+      setAmailState({ open: false, section: 'inbox', composeTo: null })
       setWalletState({ open: false, intent: undefined })
       setZapTarget(null)
       setRadarExpanded(false)
@@ -1020,7 +1110,7 @@ export function App() {
         }
       })
     },
-    [engine, handleJoinedServer, handleOpenWallet]
+    [amailState.open, engine, handleJoinedServer, handleOpenWallet]
   )
 
   // Listen on mount + hashchange for `#dm=npub1...(&name=...)` deep links
@@ -1046,6 +1136,7 @@ export function App() {
     const onRadioHash = () => {
       const key = parseRadioChannelHash(window.location.hash)
       if (!key) return
+      setAmailState({ open: false, section: 'inbox', composeTo: null })
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setRoomInfoOpen(false)
@@ -1067,6 +1158,7 @@ export function App() {
     (pubkey: string, nickname?: string) => {
       engine.openDmThread(pubkey, nickname)
       radioAudio.play('click')
+      setAmailState({ open: false, section: 'inbox', composeTo: null })
       setInspectedPeer(null)
       setRoomInfoOpen(false)
       setListTab('dms')
@@ -1179,6 +1271,7 @@ export function App() {
   )
 
   const handleExpandRadar = useCallback(() => {
+    setAmailState({ open: false, section: 'inbox', composeTo: null })
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRadarExpanded(true)
     setRoomInfoOpen(false)
@@ -1374,6 +1467,9 @@ export function App() {
             onOpenCommandPalette={() => setCmdkOpen(true)}
             onExpandRadar={handleExpandRadar}
             onOpenSettings={handleOpenSettings}
+            amailOpen={amailState.open}
+            onOpenAmail={handleOpenAmail}
+            onOpenAmailCompose={handleOpenAmailCompose}
             onOpenWallet={handleOpenWallet}
             onOpenZap={handleOpenZap}
             onLocateMe={() => void handleLocateMe()}
@@ -1587,7 +1683,7 @@ export function App() {
           onPlaySound={playSound}
         />
 
-        {/* Mobile In-Shell Map & Settings Tabs (Sit above Always-Present Bottom Tab Bar) */}
+        {/* Mobile In-Shell Map, Amail & Settings Overlays (Sit above Always-Present Bottom Tab Bar) */}
         {isMobileViewport && (
           <ExpandedRadarModal
             open={radarExpanded}
@@ -1595,6 +1691,18 @@ export function App() {
             engine={engine}
             onClose={() => setRadarExpanded(false)}
             onTuneChannel={handleTuneChannel}
+            onPlaySound={playSound}
+          />
+        )}
+        {isMobileViewport && (
+          <AmailView
+            open={amailState.open}
+            inShell={true}
+            onClose={closeAmail}
+            engine={engine}
+            initialSection={amailState.section}
+            initialComposeTo={amailState.composeTo}
+            onOpenScanner={handleOpenScanner}
             onPlaySound={playSound}
           />
         )}
@@ -1629,6 +1737,20 @@ export function App() {
         onOpenMap={handleMobileTabMap}
         onOpenSettings={handleMobileTabSettings}
       />
+
+      {/* Desktop Full-Pane Gmail-Style Amail Client */}
+      {!isMobileViewport && (
+        <AmailView
+          open={amailState.open}
+          inShell={false}
+          onClose={closeAmail}
+          engine={engine}
+          initialSection={amailState.section}
+          initialComposeTo={amailState.composeTo}
+          onOpenScanner={handleOpenScanner}
+          onPlaySound={playSound}
+        />
+      )}
 
       {/* Desktop Unified Calm Settings Modal (Profile · Privacy & Trust · Appearance · Calls · Network) */}
       {!isMobileViewport && (
@@ -1715,6 +1837,7 @@ export function App() {
         onLocateMe={() => void handleLocateMe()}
         onOpenRoomInfo={() => handleRightDrawerOpenChange(true)}
         onOpenSettings={handleOpenSettings}
+        onOpenAmail={handleOpenAmail}
         onOpenWallet={handleOpenWallet}
         onToggleSound={handleToggleSound}
         onRunCommand={handleRunCommand}

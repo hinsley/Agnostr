@@ -135,10 +135,13 @@ import {
   saveTrustedPubkeys,
 } from '../lib/storage.ts'
 import { buildNip42AuthTemplate } from '../lib/nip29.ts'
+import { CALL_SIGNALING_RELAYS } from '../lib/callSignaling.ts'
 import { revokeVoicePreviewUrl } from '../lib/voiceRecorder.ts'
+import { useAmail } from './useAmail.ts'
 import { useCallEngine } from './useCallEngine.ts'
 import { useCashuWallet } from './useCashuWallet.ts'
 import { useContentFilter } from './useContentFilter.ts'
+import { useDeviceSync } from './useDeviceSync.ts'
 import { useDirectMessages } from './useDirectMessages.ts'
 import { useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
@@ -1353,6 +1356,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   const activeDmPeer = activeView.type === 'dm' ? activeView.peerPubkey : null
   const {
     dmThreads,
+    dmClearedAt,
     totalDmUnread,
     ensureThread,
     sendDirectMessage,
@@ -1360,6 +1364,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     sendDirectImageAttachment,
     clearThread,
     closeThread: closeDmThreadRaw,
+    mergeSyncedDmClearedAt,
+    mergeSyncedDmMessages,
     clearAllDms,
   } = useDirectMessages({
     pool,
@@ -1424,6 +1430,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   const {
     engine: serversEngine,
     activeServerRelays,
+    applySyncedJoinedServers,
+    mergeSyncedServerMessages,
     resetAllServers,
   } = useServers({
     pool,
@@ -1511,6 +1519,210 @@ export function useAgnostrEngine(): AgnostrEngine {
     getPeerNickname: getCallPeerNickname,
     pushToast,
   })
+
+  // Amail — E2EE Briar-Inspired Store-and-Forward Meshnet Snailmail
+  const notifyAmailChangedRef = useRef<() => void>(() => {})
+  const handleAmailLocalChange = useCallback(() => {
+    notifyAmailChangedRef.current()
+  }, [])
+
+  const amailEngine = useAmail({
+    relayPool: pool,
+    identityManager,
+    masterPubkey: identity.masterPubkey,
+    activeNickname: identity.nickname,
+    trustedPubkeys,
+    blockedPubkeys,
+    turnConfig: callsEngine.turnConfig,
+    onLocalChange: handleAmailLocalChange,
+    pushToast,
+  })
+
+  // Silent Multi-Device Same-Key Background Sync (NIP-44 self-encrypted CRDT + delta messages)
+  const getDeviceSyncRelayUrls = useCallback(
+    () =>
+      Array.from(
+        new Set([
+          ...CALL_SIGNALING_RELAYS,
+          ...CORE_DM_RELAYS,
+          ...relaySelectionRef.current.dmRelays,
+          ...relaySelectionRef.current.channelRelays,
+        ])
+      ),
+    []
+  )
+
+  const handleApplySyncedTrusted = useCallback(
+    (nextTrusted: TrustedPeerEntry[]) => {
+      trustedSetRef.current = new Set(nextTrusted.map((t) => t.pubkey.toLowerCase()))
+      setTrustedPubkeys(nextTrusted)
+      saveTrustedPubkeys(nextTrusted)
+      recomputeGeoUnreads()
+      refreshPeers(activeGeohashRef.current)
+    },
+    [recomputeGeoUnreads, refreshPeers]
+  )
+
+  const handleApplySyncedBlocked = useCallback(
+    (nextBlocked: string[]) => {
+      const prevSet = blockedSetRef.current
+      const normalized = Array.from(new Set(nextBlocked.map((p) => p.toLowerCase())))
+      const nextSet = new Set(normalized)
+      blockedSetRef.current = nextSet
+      setBlockedPubkeys(normalized)
+      saveBlockedPubkeys(normalized)
+
+      const newlyBlocked = normalized.filter((pk) => !prevSet.has(pk))
+      if (newlyBlocked.length > 0) {
+        const newlySet = new Set(newlyBlocked)
+        setChannelMessagesState((curr) => {
+          const filtered = curr.items.filter(
+            (m) => m.isSystem || !newlySet.has(m.pubkey.toLowerCase())
+          )
+          if (filtered.length === curr.items.length) return curr
+          saveChannelMessages(curr.channelKey, filtered)
+          return { channelKey: curr.channelKey, items: filtered }
+        })
+        setLocationNotesState((curr) => {
+          const filtered = curr.items.filter((n) => !newlySet.has(n.pubkey.toLowerCase()))
+          if (filtered.length === curr.items.length) return curr
+          return { channelKey: curr.channelKey, items: filtered }
+        })
+        for (const pk of newlyBlocked) {
+          voiceCacheRef.current?.revokeForSender(pk)
+          contentFilterEngine.revokeForSender(pk)
+        }
+      }
+      recomputeGeoUnreads()
+      refreshPeers(activeGeohashRef.current)
+    },
+    [contentFilterEngine, recomputeGeoUnreads, refreshPeers]
+  )
+
+  const handleApplySyncedPinned = useCallback((nextPinned: PinnedChannel[]) => {
+    const hydrated = nextPinned.map((p) => ({
+      ...p,
+      unreadCount: geoUnreadCountsRef.current[p.geohash] ?? 0,
+      mentionCount: geoMentionCountsRef.current[p.geohash] ?? 0,
+    }))
+    setPinnedChannels(hydrated)
+    savePinnedChannels(hydrated)
+  }, [])
+
+  const zapsLightningAddressRef = useRef<string | null>(zapsEngine.lightningAddress)
+  const zapsSetLightningAddressRef = useRef(zapsEngine.setLightningAddress)
+  useLayoutEffect(() => {
+    zapsLightningAddressRef.current = zapsEngine.lightningAddress
+    zapsSetLightningAddressRef.current = zapsEngine.setLightningAddress
+  }, [zapsEngine.lightningAddress, zapsEngine.setLightningAddress])
+
+  const handleApplySyncedLightningAddress = useCallback((addr: string | null) => {
+    const normalized = addr?.trim() || null
+    if (normalized === (zapsLightningAddressRef.current?.trim() || null)) return
+    void zapsSetLightningAddressRef.current(normalized)
+  }, [])
+
+  const handleApplySyncedNickname = useCallback(
+    (nick: string) => {
+      const clean = nick.trim().slice(0, 32)
+      if (!clean || clean === identityManager.getNickname()) return
+      identityManager.setNickname(clean)
+      saveNickname(identityManager.getNickname())
+      setIdentityVersion((v) => v + 1)
+    },
+    [identityManager]
+  )
+
+  const handleMergeSyncedRadioMessages = useCallback(
+    (channelKey: string, incoming: GeoMessage[]): number => {
+      const gh = normalizeRadioChannelKey(channelKey)
+      if (!gh || incoming.length === 0) return 0
+
+      const validIncoming: GeoMessage[] = []
+      for (const raw of incoming) {
+        if (!raw || raw.isSystem || typeof raw.id !== 'string' || !raw.id) continue
+        const msgKey = normalizeRadioChannelKey(raw.geohash)
+        if (msgKey !== gh) continue
+        const pk = (raw.pubkey || '').toLowerCase()
+        if (!/^[0-9a-f]{64}$/.test(pk)) continue
+        if (blockedSetRef.current.has(pk)) continue
+        validIncoming.push({
+          ...raw,
+          geohash: gh,
+          pubkey: pk,
+          isOwn: ownPubkeysRef.current.has(pk),
+        })
+      }
+      if (validIncoming.length === 0) return 0
+
+      let addedCount = 0
+      updateChannelMessages(
+        gh,
+        (prev) => {
+          const seen = new Set(prev.map((m) => m.id))
+          const toAdd = validIncoming.filter((m) => !seen.has(m.id))
+          if (toAdd.length === 0) return null
+          addedCount = toAdd.length
+          return backfillReplyReferences(
+            [...prev, ...toAdd].sort((a, b) => a.createdAt - b.createdAt)
+          )
+        },
+        { persist: true, allowBackgroundPersist: true }
+      )
+      return addedCount
+    },
+    [updateChannelMessages]
+  )
+
+  const {
+    deviceSync: deviceSyncEngine,
+    registerAmailSyncProvider,
+    notifyAmailChanged,
+  } = useDeviceSync({
+    relayPool: pool,
+    identityManager,
+    identityVersion,
+    masterPubkey: identity.masterPubkey,
+    nickname: identity.nickname,
+    getSyncRelayUrls: getDeviceSyncRelayUrls,
+    joinedServers: serversEngine.joinedServers,
+    trustedPubkeys,
+    blockedPubkeys,
+    pinnedChannels,
+    dmClearedAt,
+    lightningAddress: zapsEngine.lightningAddress,
+    dmThreads,
+    activeGeohash,
+    activeRadioMessages: messages,
+    activeServerMessages: serversEngine.messages,
+    onApplyServers: applySyncedJoinedServers,
+    onApplyTrusted: handleApplySyncedTrusted,
+    onApplyBlocked: handleApplySyncedBlocked,
+    onApplyPinned: handleApplySyncedPinned,
+    onApplyDmClearedAt: mergeSyncedDmClearedAt,
+    onApplyLightningAddress: handleApplySyncedLightningAddress,
+    onApplyNickname: handleApplySyncedNickname,
+    onMergeDmMessages: mergeSyncedDmMessages,
+    onMergeServerMessages: mergeSyncedServerMessages,
+    onMergeRadioMessages: handleMergeSyncedRadioMessages,
+  })
+
+  useLayoutEffect(() => {
+    notifyAmailChangedRef.current = notifyAmailChanged
+  }, [notifyAmailChanged])
+
+  const exportAmailSyncState = amailEngine.exportSyncState
+  const mergeAmailSyncState = amailEngine.mergeSyncState
+  useEffect(() => {
+    registerAmailSyncProvider({
+      exportSyncState: exportAmailSyncState,
+      mergeSyncState: (remote) =>
+        mergeAmailSyncState(remote as Parameters<typeof mergeAmailSyncState>[0]),
+    })
+    return () => {
+      registerAmailSyncProvider(null)
+    }
+  }, [registerAmailSyncProvider, exportAmailSyncState, mergeAmailSyncState])
 
   // Keep active geohash + DM + pulse + active server/NIP-29 + call signaling relays synced in RelayPool
   useLayoutEffect(() => {
@@ -2900,6 +3112,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     translatorEngine.resetAll()
     walletEngine.resetAll()
     zapsEngine.resetAll()
+    deviceSyncEngine.resetAll()
+    void amailEngine.resetAll()
     resetAllCalls()
     pool.closeAll()
     voiceCacheRef.current?.revokeAll()
@@ -2947,7 +3161,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     pushToast(
       'warning',
       'Panic Wipe Complete',
-      'All local keys, caches, wallet proofs, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.'
+      'All local keys, caches, Amail vault, wallet proofs, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.'
     )
   }, [
     pool,
@@ -2962,6 +3176,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     translatorEngine,
     walletEngine,
     zapsEngine,
+    deviceSyncEngine,
+    amailEngine,
     resetLocation,
     identityManager,
     clearToasts,
@@ -3233,6 +3449,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     translator: translatorEngine,
     wallet: walletEngine,
     zaps: zapsEngine,
+    deviceSync: deviceSyncEngine,
+    amail: amailEngine,
     notifications: notificationsEngine,
 
     commands: SLASH_COMMANDS,

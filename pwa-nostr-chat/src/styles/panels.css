@@ -6092,6 +6092,124 @@
   cursor: pointer;
 }
 
+/* Multi-Device Background Sync Card (Settings -> Profile) */
+.ag-set-sync-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.84rem 0.9rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-set-sync-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  cursor: pointer;
+}
+
+.ag-set-sync-this-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.44rem 0.6rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+}
+
+.ag-set-sync-key {
+  color: var(--text-muted);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.ag-set-sync-val {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.ag-set-sync-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.36rem;
+}
+
+.ag-set-sync-subhead {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.ag-set-sync-empty {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.ag-set-sync-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.ag-set-sync-device-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.36rem 0.55rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  font-size: 12px;
+}
+
+.ag-set-sync-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background-color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-set-sync-dot.online {
+  background-color: var(--status-ok);
+}
+
+.ag-set-sync-device-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.ag-set-sync-device-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ag-set-sync-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding-top: 0.52rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ag-set-sync-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 @media (max-width: 867px) {
   .ag-set-rule-textarea,
   .ag-select {

@@ -1218,7 +1218,7 @@ function WalletModalInner({
                   {zaps.lightningAddress && <span className="ag-wallet-pill accent">Active</span>}
                 </div>
                 <p className="ag-wallet-card-meta" style={{ margin: 0 }}>
-                  Published to your Nostr profile (`kind: 0`) and attached to messages so peers can
+                  Published to your Nostr profile (kind 0) and attached to messages so peers can
                   zap you directly.
                 </p>
                 <div className="ag-wallet-input-row">
@@ -1404,7 +1404,7 @@ function WalletModalInner({
                   <div className="ag-wallet-field">
                     <div className="ag-wallet-label-row">
                       <label className="ag-wallet-label" htmlFor="ag-cashu-receive-token">
-                        Paste Cashu Token (`cashuA...` / `cashuB...`)
+                        Paste Cashu Token (cashuA… / cashuB…)
                       </label>
                       <div style={{ display: 'flex', gap: '0.35rem' }}>
                         <button

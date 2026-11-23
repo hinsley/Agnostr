@@ -189,6 +189,19 @@ const NAV_ITEMS: readonly {
 
 const PANIC_HOLD_MS = 1500
 
+function formatSyncAge(ts: number | null): string {
+  if (!ts) return 'Never'
+  const ms = ts < 1e12 ? ts * 1000 : ts
+  const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000))
+  if (diffSec < 15) return 'Just now'
+  if (diffSec < 60) return `${diffSec}s ago`
+  const mins = Math.floor(diffSec / 60)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
+}
+
 function stripScheme(url: string): string {
   return url.replace(/^(wss?|https?):\/\//i, '').replace(/\/+$/, '')
 }
@@ -953,6 +966,98 @@ export function SettingsModal({
           </p>
         )}
       </form>
+
+      {/* Multi-Device Background Sync */}
+      <div className="ag-set-group">
+        <div className="ag-set-label-row">
+          <span className="ag-set-label">Multi-Device Sync</span>
+          <span
+            className={`ag-badge ${
+              engine.deviceSync.onlineSiblingCount > 0 ? 'ag-badge-accent' : 'ag-badge-muted'
+            }`}
+          >
+            {engine.deviceSync.onlineSiblingCount > 0
+              ? `${engine.deviceSync.onlineSiblingCount} linked online`
+              : 'Solo device'}
+          </span>
+        </div>
+
+        <div className="ag-set-sync-card">
+          <label className="ag-set-sync-toggle-row">
+            <div className="ag-set-toggle-copy">
+              <span className="ag-set-toggle-title">
+                <Smartphone size={15} />
+                <span>Silent Background Sync</span>
+              </span>
+              <span className="ag-set-toggle-desc">
+                NIP-44 self-encrypted sync of servers, trusted/blocked peers, pins, Amail &amp;
+                missing messages across devices using this key.
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              className="ag-switch"
+              checked={engine.deviceSync.enabled}
+              onChange={() => {
+                engine.deviceSync.setEnabled(!engine.deviceSync.enabled)
+                onPlaySound?.('click')
+              }}
+            />
+          </label>
+
+          <div className="ag-set-sync-this-row">
+            <span className="ag-set-sync-key">This Device</span>
+            <span className="ag-set-sync-val truncate">{engine.deviceSync.deviceLabel}</span>
+          </div>
+
+          <div className="ag-set-sync-devices">
+            <span className="ag-set-sync-subhead">
+              Linked Devices ({engine.deviceSync.linkedDevices.length})
+            </span>
+            {engine.deviceSync.linkedDevices.length === 0 ? (
+              <p className="ag-set-sync-empty">
+                No other devices detected on this key yet.
+              </p>
+            ) : (
+              <div className="ag-set-sync-device-list" role="list">
+                {engine.deviceSync.linkedDevices.map((dev) => (
+                  <div key={dev.deviceId} role="listitem" className="ag-set-sync-device-row">
+                    <span
+                      className={`ag-set-sync-dot ${dev.online ? 'online' : ''}`}
+                      aria-hidden="true"
+                    />
+                    <span className="ag-set-sync-device-label truncate">{dev.label}</span>
+                    <span className="ag-set-sync-device-meta mono">
+                      {dev.online ? 'Online' : formatSyncAge(dev.lastSeenAt)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="ag-set-sync-footer">
+            <span className="ag-set-sync-meta mono">
+              Last synced: {formatSyncAge(engine.deviceSync.lastSyncedAt)}
+              {engine.deviceSync.syncedItemsCount > 0
+                ? ` · ${engine.deviceSync.syncedItemsCount} items`
+                : ''}
+            </span>
+            <button
+              type="button"
+              className="ag-btn ag-btn-secondary ag-btn-xs"
+              disabled={!engine.deviceSync.enabled || engine.deviceSync.isSyncing}
+              onClick={() => {
+                onPlaySound?.('click')
+                void engine.deviceSync.syncNow()
+              }}
+            >
+              <RefreshCw size={12} className={engine.deviceSync.isSyncing ? 'ag-spin' : ''} />
+              <span>{engine.deviceSync.isSyncing ? 'Syncing…' : 'Sync Now'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
 
       {/* Public & Secret Keys */}
       <div className="ag-set-group">
