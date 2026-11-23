@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { ZapTarget } from '../types/wallet.ts'
+import { formatClientDisplayName } from '../lib/bitchatProtocol.ts'
 import { formatHandle, identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
 
 export interface PeerInspectorModalProps {
@@ -87,6 +88,15 @@ export function PeerInspectorModal({
   const peerLud16 = engine.zaps.getPeerLightningAddress(livePeer.pubkey)
   const handle = formatHandle(livePeer.nickname, livePeer.pubkey)
   const handleColor = pubkeyToColor(livePeer.pubkey)
+  const resolvedClient = formatClientDisplayName(
+    livePeer.clientName ?? peer.clientName,
+    Boolean(livePeer.isAgnostrClient || peer.isAgnostrClient)
+  )
+  const clientDisplayText = resolvedClient
+    ? resolvedClient
+    : livePeer.isSelf && !livePeer.isAgnostrClient
+      ? 'Agnostr (not broadcast)'
+      : 'Unknown'
 
   const handleCopy = async (kind: 'npub' | 'hex' | 'lud16', value: string) => {
     try {
@@ -173,7 +183,7 @@ export function PeerInspectorModal({
               <img
                 src={identiconDataUrl(livePeer.pubkey)}
                 alt=""
-                className="ag-peer-modal-avatar"
+                className={`ag-peer-modal-avatar ${livePeer.isAgnostrClient ? 'ag-avatar-agnostr' : ''}`}
                 width={52}
                 height={52}
               />
@@ -240,6 +250,16 @@ export function PeerInspectorModal({
           <div className="ag-kpi-cell">
             <span className="ag-kpi-label">CHANNELS</span>
             <span className="ag-kpi-value mono">{livePeer.channels.length}</span>
+          </div>
+        </div>
+
+        {/* Client Info (Plain Text) */}
+        <div className="ag-peer-modal-section">
+          <div className="ag-key-row ag-peer-client-row">
+            <div className="ag-key-meta">
+              <span className="ag-key-label">CLIENT</span>
+              <span className="ag-key-value">{clientDisplayText}</span>
+            </div>
           </div>
         </div>
 

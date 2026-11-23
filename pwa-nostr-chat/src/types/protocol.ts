@@ -190,6 +190,7 @@ export interface GeoMessage {
   isTeleported: boolean
   isMeshBridge: boolean
   bridgeClient?: string
+  clientName?: string
   isAgnostrClient?: boolean
   powBits: number
   replyTo?: ReplyReference
@@ -211,6 +212,7 @@ export interface PeerInfo {
   isSelf: boolean
   isTeleported: boolean
   isMeshBridge: boolean
+  clientName?: string
   isAgnostrClient?: boolean
   isBlocked: boolean
   isTrusted?: boolean

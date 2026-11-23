@@ -733,7 +733,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
               <img
                 src={identiconDataUrl(message.pubkey)}
                 alt=""
-                className="ag-stream-avatar"
+                className={`ag-stream-avatar ${message.isAgnostrClient ? 'ag-avatar-agnostr' : ''}`}
                 loading="lazy"
               />
             </button>
@@ -773,19 +773,6 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                   aria-label="Trusted peer"
                 >
                   <ShieldCheck size={13} />
-                </span>
-              )}
-
-              {!isDmMode && message.isAgnostrClient && (
-                <span
-                  className="ag-client-badge"
-                  title="Using Agnostr"
-                  aria-label="Using Agnostr"
-                >
-                  <span className="ag-client-badge-mark" aria-hidden="true">
-                    A
-                  </span>
-                  <span className="ag-client-badge-text">Agnostr</span>
                 </span>
               )}
 

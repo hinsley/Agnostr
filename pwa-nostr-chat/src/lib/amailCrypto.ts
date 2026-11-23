@@ -18,6 +18,11 @@ export const KIND_AMAIL_ACK_SIG = 25059
 const MAX_INNER_PLAINTEXT_BYTES = 56_000
 const utf8Encoder = new TextEncoder()
 
+export interface AmailInnerRecipient {
+  pubkey: string
+  name?: string
+}
+
 export interface AmailInnerMailPayload {
   v: 1
   type: 'mail'
@@ -25,11 +30,70 @@ export interface AmailInnerMailPayload {
   threadId: string
   inReplyTo?: string
   fromName: string
+  /** Public To header list (NEVER contains BCC recipients) */
+  to?: AmailInnerRecipient[]
+  /** Public CC header list (NEVER contains BCC recipients) */
+  cc?: AmailInnerRecipient[]
   subject: string
   body: string
   sentAt: number
   requestReadReceipt: boolean
   ttlSec: number
+}
+
+const MAX_INNER_RECIPIENTS = 50
+const MAX_INNER_RECIPIENT_NAME_LEN = 48
+
+function sanitizeInnerRecipients(raw: unknown): AmailInnerRecipient[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const seen = new Set<string>()
+  const clean: AmailInnerRecipient[] = []
+  for (const item of raw) {
+    if (clean.length >= MAX_INNER_RECIPIENTS) break
+    if (!item || typeof item !== 'object') continue
+    const rec = item as { pubkey?: unknown; name?: unknown }
+    if (typeof rec.pubkey !== 'string') continue
+    const pk = rec.pubkey.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || seen.has(pk)) continue
+    seen.add(pk)
+    const trimmedName =
+      typeof rec.name === 'string'
+        ? rec.name.trim().slice(0, MAX_INNER_RECIPIENT_NAME_LEN)
+        : ''
+    clean.push(trimmedName ? { pubkey: pk, name: trimmedName } : { pubkey: pk })
+  }
+  return clean
+}
+
+function sanitizePayloadForWire(payload: AmailInnerPayload): AmailInnerPayload {
+  if (payload.type === 'mail') {
+    const cleanTo = sanitizeInnerRecipients(payload.to)
+    const cleanCc = sanitizeInnerRecipients(payload.cc)
+    // Strictly allow-list wire fields so BCC recipients can NEVER leak into any sealed capsule
+    return {
+      v: 1,
+      type: 'mail',
+      id: payload.id,
+      threadId: payload.threadId,
+      ...(typeof payload.inReplyTo === 'string' ? { inReplyTo: payload.inReplyTo } : {}),
+      fromName: payload.fromName,
+      ...(cleanTo !== undefined ? { to: cleanTo } : {}),
+      ...(cleanCc && cleanCc.length > 0 ? { cc: cleanCc } : {}),
+      subject: payload.subject,
+      body: payload.body,
+      sentAt: payload.sentAt,
+      requestReadReceipt: Boolean(payload.requestReadReceipt),
+      ttlSec: payload.ttlSec,
+    }
+  }
+  return {
+    v: 1,
+    type: 'read_receipt',
+    mailId: payload.mailId,
+    threadId: payload.threadId,
+    readAt: payload.readAt,
+    ...(typeof payload.readerName === 'string' ? { readerName: payload.readerName } : {}),
+  }
 }
 
 export interface AmailInnerReadReceiptPayload {
@@ -186,8 +250,9 @@ export async function sealAmailCapsule(params: {
   const clampedMaxHops = Math.max(1, Math.min(12, Math.floor(params.maxHops)))
   const expiresAt = createdAt + clampedTtl
 
+  const wirePayload = sanitizePayloadForWire(params.payload)
   const sealedPayload = await encryptNip44(
-    JSON.stringify(params.payload),
+    JSON.stringify(wirePayload),
     recipientPk,
     material
   )
@@ -317,6 +382,8 @@ export async function unsealAmailCapsule(
       ) {
         return null
       }
+      const to = sanitizeInnerRecipients(parsed.to)
+      const cc = sanitizeInnerRecipients(parsed.cc)
       return {
         v: 1,
         type: 'mail',
@@ -324,6 +391,8 @@ export async function unsealAmailCapsule(
         threadId: parsed.threadId,
         inReplyTo: typeof parsed.inReplyTo === 'string' ? parsed.inReplyTo : undefined,
         fromName: typeof parsed.fromName === 'string' ? parsed.fromName : '',
+        ...(to !== undefined ? { to } : {}),
+        ...(cc && cc.length > 0 ? { cc } : {}),
         subject: parsed.subject,
         body: parsed.body,
         sentAt: parsed.sentAt,

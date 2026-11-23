@@ -4,12 +4,16 @@ import type { ToastLevel, TrustedPeerEntry } from '../types/protocol.ts'
 import {
   DEFAULT_AMAIL_RELAY_SETTINGS,
   type AmailAckTombstone,
+  type AmailBuiltinFolder,
   type AmailContact,
+  type AmailCustomFolder,
   type AmailDraftInput,
   type AmailEngine,
   type AmailFolder,
+  type AmailFolderSortMode,
   type AmailMeshPeer,
   type AmailMessage,
+  type AmailRecipient,
   type AmailRelayCapsuleMeta,
   type AmailRelaySettings,
   type AmailSealedCapsule,
@@ -74,6 +78,61 @@ function resolveContactPubkeyInput(raw: string): { pubkey: string; nicknameHint?
   return null
 }
 
+const BUILTIN_FOLDERS: ReadonlySet<string> = new Set([
+  'inbox',
+  'starred',
+  'sent',
+  'drafts',
+  'archive',
+  'trash',
+])
+
+const MAX_RECIPIENTS_PER_MAIL = 50
+
+function isBuiltinFolder(folder: string): folder is AmailBuiltinFolder {
+  return BUILTIN_FOLDERS.has(folder)
+}
+
+function sanitizeFolderName(raw: string): string {
+  return raw.replace(/\s+/g, ' ').trim().slice(0, 40)
+}
+
+function makeCustomFolderId(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24)
+  const rand = new Uint8Array(4)
+  crypto.getRandomValues(rand)
+  let hex = ''
+  for (let i = 0; i < rand.length; i++) {
+    hex += rand[i].toString(16).padStart(2, '0')
+  }
+  return `folder:${slug || 'list'}-${hex}`
+}
+
+function isRecipientOfMessage(msg: AmailMessage, pubkey: string): boolean {
+  const pk = pubkey.toLowerCase()
+  if (msg.toPubkey && msg.toPubkey.toLowerCase() === pk) return true
+  if (msg.toRecipients?.some((r) => r.pubkey.toLowerCase() === pk)) return true
+  if (msg.ccRecipients?.some((r) => r.pubkey.toLowerCase() === pk)) return true
+  if (msg.bccRecipients?.some((r) => r.pubkey.toLowerCase() === pk)) return true
+  return false
+}
+
+function mergeUniqueStrings(a?: string[], b?: string[]): string[] | undefined {
+  if (!a?.length && !b?.length) return undefined
+  const set = new Set<string>()
+  if (a) {
+    for (const s of a) if (s) set.add(s)
+  }
+  if (b) {
+    for (const s of b) if (s) set.add(s)
+  }
+  return set.size > 0 ? Array.from(set) : undefined
+}
+
 const DELIVERY_RANK: Record<AmailMessage['deliveryStatus'], number> = {
   draft: 0,
   queued: 1,
@@ -131,6 +190,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
   const [messages, setMessages] = useState<AmailMessage[]>([])
   const [storedContacts, setStoredContacts] = useState<AmailContact[]>([])
+  const [customFolders, setCustomFolders] = useState<AmailCustomFolder[]>([])
+  const [folderSortMode, setFolderSortMode] = useState<AmailFolderSortMode>('manual')
   const [relayCapsules, setRelayCapsules] = useState<AmailRelayCapsuleMeta[]>([])
   const [tombstonesCount, setTombstonesCount] = useState<number>(0)
   const [meshPeers, setMeshPeers] = useState<AmailMeshPeer[]>([])
@@ -159,6 +220,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
     setMessages(adjustedMessages)
     setStoredContacts(snap.contacts)
+    setCustomFolders(snap.customFolders)
+    setFolderSortMode(snap.folderSortMode)
     setRelayCapsules(snap.relayCapsules)
     setTombstonesCount(snap.tombstonesCount)
     setSettings(snap.settings)
@@ -205,6 +268,79 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
     return formatShortPubkey(pk)
   }, [])
 
+  const toRecipientRecord = useCallback(
+    (pubkey: string, nicknameHint?: string): AmailRecipient => {
+      const pk = pubkey.toLowerCase()
+      const myPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const nickname =
+        pk === myPk
+          ? activeNicknameRef.current?.trim() || 'You'
+          : resolveDisplayName(pk, nicknameHint)
+      return {
+        pubkey: pk,
+        npub: encodeNpubSafe(pk),
+        nickname,
+      }
+    },
+    [identityManager, resolveDisplayName]
+  )
+
+  const resolveRecipientGroups = useCallback(
+    (input: {
+      toPubkey?: string
+      toPubkeys?: string[]
+      ccPubkeys?: string[]
+      bccPubkeys?: string[]
+    }): {
+      to: AmailRecipient[]
+      cc: AmailRecipient[]
+      bcc: AmailRecipient[]
+      all: AmailRecipient[]
+      invalidInputs: string[]
+    } => {
+      const seen = new Set<string>()
+      const invalidInputs: string[] = []
+
+      const resolveList = (rawList: string[]): AmailRecipient[] => {
+        const out: AmailRecipient[] = []
+        for (const raw of rawList) {
+          const trimmed = raw.trim()
+          if (!trimmed) continue
+          const resolved = resolveContactPubkeyInput(trimmed)
+          if (!resolved) {
+            invalidInputs.push(trimmed)
+            continue
+          }
+          if (seen.has(resolved.pubkey)) continue
+          seen.add(resolved.pubkey)
+          out.push(toRecipientRecord(resolved.pubkey, resolved.nicknameHint))
+        }
+        return out
+      }
+
+      const rawTo: string[] = []
+      if (Array.isArray(input.toPubkeys)) {
+        rawTo.push(...input.toPubkeys)
+      }
+      if (input.toPubkey?.trim()) {
+        rawTo.push(input.toPubkey)
+      }
+
+      // Priority: To > CC > BCC so no recipient receives duplicate capsules
+      const to = resolveList(rawTo)
+      const cc = resolveList(Array.isArray(input.ccPubkeys) ? input.ccPubkeys : [])
+      const bcc = resolveList(Array.isArray(input.bccPubkeys) ? input.bccPubkeys : [])
+      return {
+        to,
+        cc,
+        bcc,
+        all: [...to, ...cc, ...bcc],
+        invalidInputs,
+      }
+    },
+    [toRecipientRecord]
+  )
+
   const handleCapsuleForSelf = useCallback(
     async (capsule: AmailSealedCapsule) => {
       const storage = storageRef.current
@@ -240,6 +376,20 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         }
         const myPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
         const fromName = resolveDisplayName(senderPk, inner.fromName)
+        const hasRecipientHeaders = inner.to !== undefined || inner.cc !== undefined
+        const toRecipients: AmailRecipient[] | undefined =
+          inner.to && inner.to.length > 0
+            ? inner.to.map((r) => toRecipientRecord(r.pubkey, r.name))
+            : undefined
+        const ccRecipients: AmailRecipient[] | undefined =
+          inner.cc && inner.cc.length > 0
+            ? inner.cc.map((r) => toRecipientRecord(r.pubkey, r.name))
+            : undefined
+        const inTo = (inner.to ?? []).some((r) => r.pubkey === myPk)
+        const inCc = (inner.cc ?? []).some((r) => r.pubkey === myPk)
+        const isBccRecipient = hasRecipientHeaders && !inTo && !inCc
+        const primaryTo = toRecipients?.[0]
+
         const incoming: AmailMessage = {
           id: inner.id,
           threadId: inner.threadId || inner.id,
@@ -249,9 +399,12 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           fromPubkey: senderPk,
           fromNpub: encodeNpubSafe(senderPk),
           fromName,
-          toPubkey: myPk,
-          toNpub: encodeNpubSafe(myPk),
-          toName: activeNicknameRef.current,
+          toPubkey: primaryTo?.pubkey ?? myPk,
+          toNpub: primaryTo?.npub ?? encodeNpubSafe(myPk),
+          toName: primaryTo?.nickname ?? activeNicknameRef.current,
+          ...(toRecipients ? { toRecipients } : {}),
+          ...(ccRecipients ? { ccRecipients } : {}),
+          ...(isBccRecipient ? { isBccRecipient: true } : {}),
           subject: inner.subject || '(no subject)',
           body: inner.body,
           sentAt: inner.sentAt,
@@ -288,12 +441,16 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
       if (inner.type === 'read_receipt') {
         const target = storage.getMessage(inner.mailId)
-        if (target && target.direction === 'out' && target.toPubkey.toLowerCase() === senderPk) {
+        if (target && target.direction === 'out' && isRecipientOfMessage(target, senderPk)) {
+          const nextReadPubkeys = mergeUniqueStrings(target.readPubkeys, [senderPk])
+          const nextDeliveredPubkeys = mergeUniqueStrings(target.deliveredPubkeys, [senderPk])
           const updated: AmailMessage = {
             ...target,
             deliveryStatus: 'read',
             deliveredAt: target.deliveredAt ?? inner.readAt,
             readAt: target.readAt ?? inner.readAt,
+            ...(nextDeliveredPubkeys ? { deliveredPubkeys: nextDeliveredPubkeys } : {}),
+            ...(nextReadPubkeys ? { readPubkeys: nextReadPubkeys } : {}),
             updatedAt: Date.now(),
           }
           await storage.putMessage(updated)
@@ -302,7 +459,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         }
       }
     },
-    [identityManager, refreshFromStorage, resolveDisplayName]
+    [identityManager, refreshFromStorage, resolveDisplayName, toRecipientRecord]
   )
 
   const handleAckObserved = useCallback(
@@ -310,20 +467,27 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       const storage = storageRef.current
       if (!storage) return
       const all = storage.getAllMessages()
+      const ackPk = ack.pubkey.toLowerCase()
       let changed = false
       for (const msg of all) {
-        if (
-          msg.direction === 'out' &&
-          msg.capsuleId === ack.capsuleId &&
-          DELIVERY_RANK[msg.deliveryStatus] < DELIVERY_RANK.delivered
-        ) {
-          await storage.putMessage({
-            ...msg,
-            deliveryStatus: 'delivered',
-            deliveredAt: msg.deliveredAt ?? ack.ackedAt,
-            updatedAt: Date.now(),
-          })
-          changed = true
+        const matchesCapsule =
+          msg.capsuleId === ack.capsuleId ||
+          Boolean(msg.capsuleIds?.includes(ack.capsuleId))
+        if (msg.direction === 'out' && matchesCapsule) {
+          const prevDelivered = msg.deliveredPubkeys ?? []
+          const hasAckPk = prevDelivered.includes(ackPk)
+          const needsStatusAdvance =
+            DELIVERY_RANK[msg.deliveryStatus] < DELIVERY_RANK.delivered
+          if (needsStatusAdvance || !hasAckPk) {
+            await storage.putMessage({
+              ...msg,
+              deliveryStatus: needsStatusAdvance ? 'delivered' : msg.deliveryStatus,
+              deliveredAt: msg.deliveredAt ?? ack.ackedAt,
+              deliveredPubkeys: hasAckPk ? prevDelivered : [...prevDelivered, ackPk],
+              updatedAt: Date.now(),
+            })
+            changed = true
+          }
         }
       }
       if (changed) {
@@ -340,10 +504,12 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       if (!storage) return
       const all = storage.getAllMessages()
       for (const msg of all) {
-        if (msg.direction === 'out' && msg.capsuleId === capsuleId) {
+        const matchesCapsule =
+          msg.capsuleId === capsuleId || Boolean(msg.capsuleIds?.includes(capsuleId))
+        if (msg.direction === 'out' && matchesCapsule) {
           const nextStatus =
             msg.deliveryStatus === 'queued' ? 'relayed' : msg.deliveryStatus
-          if (msg.relayedPeerCount !== peerCount || msg.deliveryStatus !== nextStatus) {
+          if (msg.relayedPeerCount < peerCount || msg.deliveryStatus !== nextStatus) {
             void storage
               .putMessage({
                 ...msg,
@@ -428,14 +594,49 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       if (!storage) return null
       await storage.init()
 
-      const resolved = resolveContactPubkeyInput(input.toPubkey)
-      if (!resolved) {
-        pushToastRef.current?.('error', 'Invalid Agmail recipient', 'Provide a valid npub or hex pubkey.')
+      const groups = resolveRecipientGroups({
+        toPubkey: input.toPubkey,
+        toPubkeys: input.toPubkeys,
+        ccPubkeys: input.ccPubkeys,
+        bccPubkeys: input.bccPubkeys,
+      })
+
+      if (groups.invalidInputs.length > 0) {
+        pushToastRef.current?.(
+          'error',
+          'Invalid Agmail recipient',
+          `Could not resolve: ${groups.invalidInputs[0].slice(0, 32)}`
+        )
         return null
       }
 
-      const toPk = resolved.pubkey
+      if (groups.all.length === 0) {
+        pushToastRef.current?.(
+          'error',
+          'Invalid Agmail recipient',
+          'Provide at least one valid npub or hex pubkey.'
+        )
+        return null
+      }
+
+      if (groups.all.length > MAX_RECIPIENTS_PER_MAIL) {
+        pushToastRef.current?.(
+          'error',
+          'Too many recipients',
+          `Agmail supports up to ${MAX_RECIPIENTS_PER_MAIL} recipients per message.`
+        )
+        return null
+      }
+
       const myPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const primary = groups.to[0] ?? groups.cc[0] ?? groups.bcc[0]
+      const includesSelf = groups.all.some((r) => r.pubkey === myPk)
+      const selfIsOnlyInBcc =
+        groups.bcc.some((r) => r.pubkey === myPk) &&
+        !groups.to.some((r) => r.pubkey === myPk) &&
+        !groups.cc.some((r) => r.pubkey === myPk)
+      const remoteRecipients = groups.all.filter((r) => r.pubkey !== myPk)
+
       const curSettings = storage.getSettings()
       const ttlSec = Math.max(
         3600,
@@ -448,6 +649,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       const body = input.body.trim()
       const requestReadReceipt = input.requestReadReceipt ?? true
 
+      // STRICT E2EE BCC PRIVACY: only `to` and `cc` are placed inside the wire payload;
+      // `bcc` is NEVER serialized into any sealed capsule!
       const innerPayload: AmailInnerMailPayload = {
         v: 1,
         type: 'mail',
@@ -455,6 +658,10 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         threadId,
         inReplyTo: input.inReplyTo,
         fromName: activeNicknameRef.current,
+        to: groups.to.map((r) => ({ pubkey: r.pubkey, name: r.nickname })),
+        ...(groups.cc.length > 0
+          ? { cc: groups.cc.map((r) => ({ pubkey: r.pubkey, name: r.nickname })) }
+          : {}),
         subject,
         body,
         sentAt,
@@ -463,16 +670,63 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       }
 
       try {
-        const capsule = await sealAmailCapsule({
-          payload: innerPayload,
-          recipientPubkey: toPk,
-          identityManager,
-          ttlSec,
-          maxHops: curSettings.maxHops,
-        })
+        // Seal one distinct NIP-44 capsule per remote recipient before persisting locally
+        const sealedCapsules: AmailSealedCapsule[] = []
+        for (const recipient of remoteRecipients) {
+          const capsule = await sealAmailCapsule({
+            payload: innerPayload,
+            recipientPubkey: recipient.pubkey,
+            identityManager,
+            ttlSec,
+            maxHops: curSettings.maxHops,
+          })
+          sealedCapsules.push(capsule)
+        }
 
-        // Store outbound sealed capsule in relayVault so couriers can pick it up via anti-entropy
-        await storage.putRelayCapsule(capsule, { ownPubkey: myPk })
+        // Store outbound sealed capsules in relayVault so couriers can pick them up via anti-entropy
+        for (const capsule of sealedCapsules) {
+          await storage.putRelayCapsule(capsule, { ownPubkey: myPk })
+        }
+
+        const capsuleIds = sealedCapsules.map((c) => c.capsuleId)
+        const expiresAt = sealedCapsules[0]?.expiresAt ?? sentAt + ttlSec
+        const nowMs = Date.now()
+        const isSelfOnly = remoteRecipients.length === 0 && includesSelf
+
+        // Self-Mail: immediately materialize local Inbox copy without sending a network capsule to self
+        if (includesSelf) {
+          const selfInboxMsg: AmailMessage = {
+            id: `${mailId}:self`,
+            threadId,
+            inReplyTo: input.inReplyTo,
+            folder: 'inbox',
+            direction: 'in',
+            fromPubkey: myPk,
+            fromNpub: encodeNpubSafe(myPk),
+            fromName: activeNicknameRef.current,
+            toPubkey: primary.pubkey,
+            toNpub: primary.npub,
+            toName: primary.nickname,
+            ...(groups.to.length > 0 ? { toRecipients: groups.to } : {}),
+            ...(groups.cc.length > 0 ? { ccRecipients: groups.cc } : {}),
+            ...(selfIsOnlyInBcc ? { isBccRecipient: true } : {}),
+            subject,
+            body,
+            sentAt,
+            receivedAt: sentAt,
+            deliveredAt: sentAt,
+            isRead: false,
+            isStarred: false,
+            requestReadReceipt,
+            deliveryStatus: 'delivered',
+            relayHopCount: 0,
+            relayedPeerCount: 0,
+            ttlSec,
+            expiresAt,
+            updatedAt: nowMs,
+          }
+          await storage.putMessage(selfInboxMsg)
+        }
 
         const sentMsg: AmailMessage = {
           id: mailId,
@@ -483,22 +737,28 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           fromPubkey: myPk,
           fromNpub: encodeNpubSafe(myPk),
           fromName: activeNicknameRef.current,
-          toPubkey: toPk,
-          toNpub: encodeNpubSafe(toPk),
-          toName: resolveDisplayName(toPk, resolved.nicknameHint),
+          toPubkey: primary.pubkey,
+          toNpub: primary.npub,
+          toName: primary.nickname,
+          ...(groups.to.length > 0 ? { toRecipients: groups.to } : {}),
+          ...(groups.cc.length > 0 ? { ccRecipients: groups.cc } : {}),
+          ...(groups.bcc.length > 0 ? { bccRecipients: groups.bcc } : {}),
           subject,
           body,
           sentAt,
+          ...(isSelfOnly ? { deliveredAt: sentAt } : {}),
           isRead: true,
           isStarred: false,
           requestReadReceipt,
-          deliveryStatus: 'queued',
+          deliveryStatus: isSelfOnly ? 'delivered' : 'queued',
           relayHopCount: 0,
           relayedPeerCount: 0,
-          capsuleId: capsule.capsuleId,
+          ...(capsuleIds[0] ? { capsuleId: capsuleIds[0] } : {}),
+          ...(capsuleIds.length > 0 ? { capsuleIds } : {}),
+          ...(includesSelf ? { deliveredPubkeys: [myPk] } : {}),
           ttlSec,
-          expiresAt: capsule.expiresAt,
-          updatedAt: Date.now(),
+          expiresAt,
+          updatedAt: nowMs,
         }
 
         await storage.putMessage(sentMsg)
@@ -508,23 +768,36 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           await storage.deleteMessage(input.draftId, true)
         }
 
-        // Dispatch immediately into WebRTC DataChannel mesh + Layer 2 ephemeral hop
-        const relayed = (await meshRef.current?.publishLocalCapsule(capsule)) ?? 0
-        if (relayed > 0) {
+        if (isSelfOnly) {
+          refreshFromStorage()
+          onLocalChangeRef.current?.()
+          pushToastRef.current?.('success', 'Agmail delivered to your Inbox')
+          return sentMsg
+        }
+
+        // Dispatch every remote capsule into WebRTC DataChannel mesh + Layer 2 ephemeral hop
+        let maxRelayed = 0
+        for (const capsule of sealedCapsules) {
+          const relayed = (await meshRef.current?.publishLocalCapsule(capsule)) ?? 0
+          if (relayed > maxRelayed) maxRelayed = relayed
+        }
+
+        if (maxRelayed > 0) {
           const updated: AmailMessage = {
             ...sentMsg,
             deliveryStatus: 'relayed',
-            relayedPeerCount: relayed,
+            relayedPeerCount: maxRelayed,
             updatedAt: Date.now(),
           }
           await storage.putMessage(updated)
           refreshFromStorage()
           onLocalChangeRef.current?.()
-          pushToastRef.current?.(
-            'success',
-            'Agmail sealed & dispatched',
-            `Relayed to ${relayed} mesh courier${relayed === 1 ? '' : 's'}`
-          )
+          const recipientCount = groups.all.length
+          const detail =
+            recipientCount > 1
+              ? `Dispatched to ${recipientCount} recipients via ${maxRelayed} mesh courier${maxRelayed === 1 ? '' : 's'}`
+              : `Relayed to ${maxRelayed} mesh courier${maxRelayed === 1 ? '' : 's'}`
+          pushToastRef.current?.('success', 'Agmail sealed & dispatched', detail)
           return updated
         }
 
@@ -533,7 +806,9 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         pushToastRef.current?.(
           'success',
           'Agmail queued in mesh vault',
-          'Will relay automatically when couriers connect'
+          includesSelf
+            ? 'Delivered to your Inbox; remote recipients queued for couriers'
+            : 'Will relay automatically when couriers connect'
         )
         return sentMsg
       } catch (err) {
@@ -542,7 +817,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         return null
       }
     },
-    [identityManager, refreshFromStorage, resolveDisplayName]
+    [identityManager, refreshFromStorage, resolveRecipientGroups]
   )
 
   const saveDraft = useCallback(
@@ -552,9 +827,15 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
       const myPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
       const curSettings = storage.getSettings()
-      const resolved = draft.toPubkey ? resolveContactPubkeyInput(draft.toPubkey) : null
-      const toPk = resolved?.pubkey ?? ''
+      const groups = resolveRecipientGroups({
+        toPubkey: draft.toPubkey,
+        toPubkeys: draft.toPubkeys,
+        ccPubkeys: draft.ccPubkeys,
+        bccPubkeys: draft.bccPubkeys,
+      })
+      const primary = groups.to[0] ?? groups.cc[0] ?? groups.bcc[0]
       const id = draft.id || makeAmailId('draft')
+      const existing = storage.getMessage(id)
       const nowSec = Math.floor(Date.now() / 1000)
       const ttlSec = draft.ttlSec ?? curSettings.defaultTtlSec
 
@@ -567,14 +848,17 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         fromPubkey: myPk,
         fromNpub: encodeNpubSafe(myPk),
         fromName: activeNicknameRef.current,
-        toPubkey: toPk,
-        toNpub: toPk ? encodeNpubSafe(toPk) : '',
-        toName: toPk ? resolveDisplayName(toPk, resolved?.nicknameHint) : '',
+        toPubkey: primary?.pubkey ?? '',
+        toNpub: primary?.npub ?? '',
+        toName: primary?.nickname ?? '',
+        ...(groups.to.length > 0 ? { toRecipients: groups.to } : {}),
+        ...(groups.cc.length > 0 ? { ccRecipients: groups.cc } : {}),
+        ...(groups.bcc.length > 0 ? { bccRecipients: groups.bcc } : {}),
         subject: draft.subject,
         body: draft.body,
         sentAt: nowSec,
         isRead: true,
-        isStarred: false,
+        isStarred: existing?.isStarred ?? false,
         requestReadReceipt: draft.requestReadReceipt ?? true,
         deliveryStatus: 'draft',
         relayHopCount: 0,
@@ -589,7 +873,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       onLocalChangeRef.current?.()
       return entry
     },
-    [identityManager, refreshFromStorage, resolveDisplayName]
+    [identityManager, refreshFromStorage, resolveRecipientGroups]
   )
 
   const deleteDraft = useCallback(
@@ -612,16 +896,17 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       const existing = storage.getMessage(id)
       if (!existing) return
 
+      const myPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const isSelfMail = existing.fromPubkey.toLowerCase() === myPk
       const curSettings = storage.getSettings()
       let readAt = existing.readAt
-      const shouldEmitReadReceipt =
+      const shouldRecordRead =
         isRead &&
         existing.direction === 'in' &&
-        existing.requestReadReceipt &&
-        curSettings.sendReadReceipts &&
-        !existing.readAt
+        !existing.readAt &&
+        (isSelfMail || (existing.requestReadReceipt && curSettings.sendReadReceipts))
 
-      if (shouldEmitReadReceipt) {
+      if (shouldRecordRead) {
         readAt = Math.floor(Date.now() / 1000)
       }
 
@@ -632,10 +917,35 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         updatedAt: Date.now(),
       }
       await storage.putMessage(updated)
+
+      // Self-Mail: skip sealing a network read-receipt capsule and locally mark companion Sent copy read
+      if (isSelfMail && shouldRecordRead && readAt) {
+        const sentId = existing.id.replace(/:self$/, '')
+        if (sentId !== existing.id) {
+          const sentCopy = storage.getMessage(sentId)
+          if (sentCopy && sentCopy.direction === 'out') {
+            const nextDeliveredPubkeys = mergeUniqueStrings(sentCopy.deliveredPubkeys, [myPk])
+            const nextReadPubkeys = mergeUniqueStrings(sentCopy.readPubkeys, [myPk])
+            await storage.putMessage({
+              ...sentCopy,
+              deliveryStatus: 'read',
+              deliveredAt: sentCopy.deliveredAt ?? readAt,
+              readAt: sentCopy.readAt ?? readAt,
+              ...(nextDeliveredPubkeys ? { deliveredPubkeys: nextDeliveredPubkeys } : {}),
+              ...(nextReadPubkeys ? { readPubkeys: nextReadPubkeys } : {}),
+              updatedAt: Date.now(),
+            })
+          }
+        }
+        refreshFromStorage()
+        onLocalChangeRef.current?.()
+        return
+      }
+
       refreshFromStorage()
       onLocalChangeRef.current?.()
 
-      if (shouldEmitReadReceipt && readAt) {
+      if (!isSelfMail && shouldRecordRead && readAt) {
         try {
           const receiptPayload: AmailInnerReadReceiptPayload = {
             v: 1,
@@ -645,7 +955,6 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
             readAt,
             readerName: activeNicknameRef.current,
           }
-          const myPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
           const capsule = await sealAmailCapsule({
             payload: receiptPayload,
             recipientPubkey: existing.fromPubkey,
@@ -696,14 +1005,63 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           updatedAt: Date.now(),
         })
       } else {
+        if (existing.folder === folder) return
+        let nextPreviousFolder: AmailFolder | undefined
+        if (folder === 'trash' || folder === 'archive') {
+          nextPreviousFolder =
+            existing.folder !== 'trash' && existing.folder !== 'archive'
+              ? existing.folder
+              : existing.previousFolder
+        } else {
+          nextPreviousFolder = undefined
+        }
         await storage.putMessage({
           ...existing,
           folder,
+          previousFolder: nextPreviousFolder,
           updatedAt: Date.now(),
         })
       }
       refreshFromStorage()
       onLocalChangeRef.current?.()
+    },
+    [refreshFromStorage]
+  )
+
+  const restoreMessage = useCallback(
+    async (id: string): Promise<AmailFolder | null> => {
+      const storage = storageRef.current
+      if (!storage) return null
+      await storage.init()
+      const existing = storage.getMessage(id)
+      if (!existing) return null
+
+      const prev = existing.previousFolder
+      const isPrevValid =
+        typeof prev === 'string' &&
+        prev.length > 0 &&
+        prev !== 'trash' &&
+        prev !== 'archive' &&
+        prev !== 'starred' &&
+        (isBuiltinFolder(prev) || Boolean(storage.getCustomFolder(prev)))
+
+      const targetFolder: AmailFolder = isPrevValid
+        ? prev
+        : existing.deliveryStatus === 'draft'
+          ? 'drafts'
+          : existing.direction === 'out'
+            ? 'sent'
+            : 'inbox'
+
+      await storage.putMessage({
+        ...existing,
+        folder: targetFolder,
+        previousFolder: undefined,
+        updatedAt: Date.now(),
+      })
+      refreshFromStorage()
+      onLocalChangeRef.current?.()
+      return targetFolder
     },
     [refreshFromStorage]
   )
@@ -714,6 +1072,184 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       if (!storage) return
       await storage.init()
       await storage.deleteMessage(id, true)
+      refreshFromStorage()
+      onLocalChangeRef.current?.()
+    },
+    [refreshFromStorage]
+  )
+
+  /* ------------------------------------------------------------------------
+     Custom Folders CRUD, Sorting & Reordering
+     ------------------------------------------------------------------------ */
+
+  const createFolder = useCallback(
+    async (name: string): Promise<AmailCustomFolder | null> => {
+      const storage = storageRef.current
+      if (!storage) return null
+      await storage.init()
+
+      const clean = sanitizeFolderName(name)
+      if (!clean) {
+        pushToastRef.current?.('error', 'Invalid folder name', 'Enter a folder name.')
+        return null
+      }
+      if (isBuiltinFolder(clean.toLowerCase())) {
+        pushToastRef.current?.(
+          'error',
+          'Reserved folder name',
+          `"${clean}" is a built-in Agmail folder.`
+        )
+        return null
+      }
+
+      const existingFolders = storage.getAllCustomFolders()
+      if (existingFolders.some((f) => f.name.toLowerCase() === clean.toLowerCase())) {
+        pushToastRef.current?.('error', 'Folder already exists', `A folder named "${clean}" already exists.`)
+        return null
+      }
+
+      const maxOrder = existingFolders.reduce((acc, f) => Math.max(acc, f.order), -1)
+      const now = Date.now()
+      const folder: AmailCustomFolder = {
+        id: makeCustomFolderId(clean),
+        name: clean,
+        order: maxOrder + 1,
+        createdAt: now,
+        updatedAt: now,
+      }
+      await storage.putCustomFolder(folder)
+      refreshFromStorage()
+      onLocalChangeRef.current?.()
+      return folder
+    },
+    [refreshFromStorage]
+  )
+
+  const renameFolder = useCallback(
+    async (folderId: string, name: string): Promise<boolean> => {
+      const storage = storageRef.current
+      if (!storage) return false
+      await storage.init()
+
+      const existing = storage.getCustomFolder(folderId)
+      if (!existing) return false
+
+      const clean = sanitizeFolderName(name)
+      if (!clean) {
+        pushToastRef.current?.('error', 'Invalid folder name', 'Enter a folder name.')
+        return false
+      }
+      if (isBuiltinFolder(clean.toLowerCase())) {
+        pushToastRef.current?.(
+          'error',
+          'Reserved folder name',
+          `"${clean}" is a built-in Agmail folder.`
+        )
+        return false
+      }
+
+      const existingFolders = storage.getAllCustomFolders()
+      if (
+        existingFolders.some(
+          (f) => f.id !== folderId && f.name.toLowerCase() === clean.toLowerCase()
+        )
+      ) {
+        pushToastRef.current?.('error', 'Folder already exists', `A folder named "${clean}" already exists.`)
+        return false
+      }
+
+      if (existing.name === clean) return true
+
+      await storage.putCustomFolder({
+        ...existing,
+        name: clean,
+        updatedAt: Date.now(),
+      })
+      refreshFromStorage()
+      onLocalChangeRef.current?.()
+      return true
+    },
+    [refreshFromStorage]
+  )
+
+  const deleteFolder = useCallback(
+    async (folderId: string): Promise<void> => {
+      const storage = storageRef.current
+      if (!storage) return
+      await storage.init()
+
+      const now = Date.now()
+      for (const m of storage.getAllMessages()) {
+        if (m.folder === folderId || m.previousFolder === folderId) {
+          const fallbackFolder: AmailFolder =
+            m.deliveryStatus === 'draft'
+              ? 'drafts'
+              : m.direction === 'out'
+                ? 'sent'
+                : 'inbox'
+          await storage.putMessage({
+            ...m,
+            folder: m.folder === folderId ? fallbackFolder : m.folder,
+            previousFolder: m.previousFolder === folderId ? undefined : m.previousFolder,
+            updatedAt: now,
+          })
+        }
+      }
+
+      await storage.deleteCustomFolder(folderId, true)
+      refreshFromStorage()
+      onLocalChangeRef.current?.()
+    },
+    [refreshFromStorage]
+  )
+
+  const reorderFolders = useCallback(
+    async (orderedIds: string[]): Promise<void> => {
+      const storage = storageRef.current
+      if (!storage) return
+      await storage.init()
+
+      const current = storage.getAllCustomFolders()
+      if (current.length === 0) return
+
+      const byId = new Map(current.map((f) => [f.id, f]))
+      const seen = new Set<string>()
+      const ordered: AmailCustomFolder[] = []
+
+      for (const id of orderedIds) {
+        const found = byId.get(id)
+        if (found && !seen.has(id)) {
+          seen.add(id)
+          ordered.push(found)
+        }
+      }
+      for (const f of current) {
+        if (!seen.has(f.id)) {
+          ordered.push(f)
+        }
+      }
+
+      const now = Date.now()
+      const updated = ordered.map((f, idx) => ({
+        ...f,
+        order: idx,
+        updatedAt: f.order !== idx ? now : f.updatedAt,
+      }))
+
+      await storage.setFolderSortMode('manual')
+      await storage.putCustomFolders(updated)
+      refreshFromStorage()
+      onLocalChangeRef.current?.()
+    },
+    [refreshFromStorage]
+  )
+
+  const sortFolders = useCallback(
+    async (mode: AmailFolderSortMode): Promise<void> => {
+      const storage = storageRef.current
+      if (!storage) return
+      await storage.init()
+      await storage.setFolderSortMode(mode)
       refreshFromStorage()
       onLocalChangeRef.current?.()
     },
@@ -844,6 +1380,9 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         deletedMessageIds: {},
         contacts: [],
         removedContactPubkeys: {},
+        customFolders: [],
+        deletedFolderIds: {},
+        folderSortMode: 'manual',
       }
     }
     const snap = storage.getSnapshot()
@@ -854,6 +1393,9 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       deletedMessageIds: snap.deletedMessageIds,
       contacts: snap.contacts,
       removedContactPubkeys: snap.removedContactPubkeys,
+      customFolders: snap.customFolders,
+      deletedFolderIds: snap.deletedFolderIds,
+      folderSortMode: snap.folderSortMode,
       settings: snap.settings,
     }
   }, [])
@@ -874,7 +1416,15 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         ...localSnap.removedContactPubkeys,
         ...(remote.removedContactPubkeys ?? {}),
       }
-      await storage.mergeSyncTombstones(mergedDeleted, mergedRemovedContacts)
+      const mergedDeletedFolders = {
+        ...localSnap.deletedFolderIds,
+        ...(remote.deletedFolderIds ?? {}),
+      }
+      await storage.mergeSyncTombstones(
+        mergedDeleted,
+        mergedRemovedContacts,
+        mergedDeletedFolders
+      )
 
       // Merge messages with LWW + monotonic deliveryStatus progression + delete tombstones
       for (const rm of remote.messages ?? []) {
@@ -898,6 +1448,29 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           DELIVERY_RANK[rm.deliveryStatus] > DELIVERY_RANK[local.deliveryStatus]
             ? rm.deliveryStatus
             : local.deliveryStatus
+        const mergedCapsuleIds = mergeUniqueStrings(local.capsuleIds, rm.capsuleIds)
+        const mergedDeliveredPubkeys = mergeUniqueStrings(
+          local.deliveredPubkeys,
+          rm.deliveredPubkeys
+        )
+        const mergedReadPubkeys = mergeUniqueStrings(local.readPubkeys, rm.readPubkeys)
+        const mergedToRecipients =
+          (remoteNewer ? rm.toRecipients : local.toRecipients) ??
+          local.toRecipients ??
+          rm.toRecipients
+        const mergedCcRecipients =
+          (remoteNewer ? rm.ccRecipients : local.ccRecipients) ??
+          local.ccRecipients ??
+          rm.ccRecipients
+        const mergedBccRecipients =
+          (remoteNewer ? rm.bccRecipients : local.bccRecipients) ??
+          local.bccRecipients ??
+          rm.bccRecipients
+        const mergedIsBcc =
+          (remoteNewer ? rm.isBccRecipient : local.isBccRecipient) ??
+          local.isBccRecipient ??
+          rm.isBccRecipient
+
         const merged: AmailMessage = {
           ...(remoteNewer ? rm : local),
           deliveryStatus: bestStatus,
@@ -905,6 +1478,13 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           readAt: local.readAt ?? rm.readAt,
           isRead: remoteNewer ? rm.isRead : local.isRead || rm.isRead,
           relayedPeerCount: Math.max(local.relayedPeerCount, rm.relayedPeerCount),
+          ...(mergedToRecipients ? { toRecipients: mergedToRecipients } : {}),
+          ...(mergedCcRecipients ? { ccRecipients: mergedCcRecipients } : {}),
+          ...(mergedBccRecipients ? { bccRecipients: mergedBccRecipients } : {}),
+          ...(mergedIsBcc !== undefined ? { isBccRecipient: mergedIsBcc } : {}),
+          ...(mergedCapsuleIds ? { capsuleIds: mergedCapsuleIds } : {}),
+          ...(mergedDeliveredPubkeys ? { deliveredPubkeys: mergedDeliveredPubkeys } : {}),
+          ...(mergedReadPubkeys ? { readPubkeys: mergedReadPubkeys } : {}),
           updatedAt: Math.max(local.updatedAt ?? 0, rm.updatedAt ?? 0),
         }
         if (JSON.stringify(merged) !== JSON.stringify(local)) {
@@ -951,6 +1531,78 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         }
       }
 
+      // Merge custom folders with LWW + delete tombstones
+      for (const rf of remote.customFolders ?? []) {
+        if (
+          !rf ||
+          typeof rf.id !== 'string' ||
+          !rf.id.startsWith('folder:') ||
+          typeof rf.name !== 'string'
+        ) {
+          continue
+        }
+        const cleanName = sanitizeFolderName(rf.name)
+        if (!cleanName) continue
+        const deletedAt = mergedDeletedFolders[rf.id] ?? 0
+        const rfTs = rf.updatedAt ?? rf.createdAt ?? 0
+        if (deletedAt > rfTs) {
+          if (storage.getCustomFolder(rf.id)) {
+            await storage.deleteCustomFolder(rf.id, false)
+            changed = true
+          }
+          continue
+        }
+        const local = storage.getCustomFolder(rf.id)
+        if (!local || rfTs > (local.updatedAt ?? local.createdAt ?? 0)) {
+          await storage.putCustomFolder({
+            id: rf.id,
+            name: cleanName,
+            order: typeof rf.order === 'number' && Number.isFinite(rf.order) ? rf.order : 0,
+            createdAt: typeof rf.createdAt === 'number' ? rf.createdAt : Date.now(),
+            updatedAt: rfTs || Date.now(),
+          })
+          changed = true
+        }
+      }
+
+      // Apply remote folder deletions locally and relocate any orphaned messages
+      for (const [delFolderId, delTs] of Object.entries(remote.deletedFolderIds ?? {})) {
+        const local = storage.getCustomFolder(delFolderId)
+        if (local && delTs > (local.updatedAt ?? local.createdAt ?? 0)) {
+          await storage.deleteCustomFolder(delFolderId, false)
+          changed = true
+          const now = Date.now()
+          for (const m of storage.getAllMessages()) {
+            if (m.folder === delFolderId || m.previousFolder === delFolderId) {
+              const fallbackFolder: AmailFolder =
+                m.deliveryStatus === 'draft'
+                  ? 'drafts'
+                  : m.direction === 'out'
+                    ? 'sent'
+                    : 'inbox'
+              await storage.putMessage({
+                ...m,
+                folder: m.folder === delFolderId ? fallbackFolder : m.folder,
+                previousFolder:
+                  m.previousFolder === delFolderId ? undefined : m.previousFolder,
+                updatedAt: now,
+              })
+            }
+          }
+        }
+      }
+
+      if (
+        remote.folderSortMode &&
+        (remote.folderSortMode === 'manual' ||
+          remote.folderSortMode === 'az' ||
+          remote.folderSortMode === 'za') &&
+        remote.folderSortMode !== storage.getFolderSortMode()
+      ) {
+        await storage.setFolderSortMode(remote.folderSortMode)
+        changed = true
+      }
+
       if (changed) {
         refreshFromStorage()
       }
@@ -969,6 +1621,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
     }
     setMessages([])
     setStoredContacts([])
+    setCustomFolders([])
+    setFolderSortMode('manual')
     setRelayCapsules([])
     setTombstonesCount(0)
     setMeshPeers([])
@@ -986,6 +1640,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
     () => ({
       messages,
       contacts,
+      customFolders,
+      folderSortMode,
       unreadInboxCount,
       relayCapsules,
       tombstonesCount,
@@ -1000,7 +1656,13 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       markRead,
       toggleStar,
       moveToFolder,
+      restoreMessage,
       deletePermanently,
+      createFolder,
+      renameFolder,
+      deleteFolder,
+      reorderFolders,
+      sortFolders,
       addContact,
       updateContact,
       removeContact,
@@ -1014,6 +1676,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
     [
       messages,
       contacts,
+      customFolders,
+      folderSortMode,
       unreadInboxCount,
       relayCapsules,
       tombstonesCount,
@@ -1028,7 +1692,13 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       markRead,
       toggleStar,
       moveToFolder,
+      restoreMessage,
       deletePermanently,
+      createFolder,
+      renameFolder,
+      deleteFolder,
+      reorderFolders,
+      sortFolders,
       addContact,
       updateContact,
       removeContact,

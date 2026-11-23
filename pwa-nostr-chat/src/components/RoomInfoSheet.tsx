@@ -34,6 +34,7 @@ import type { SoundCue } from '../utils/sound.ts'
 import type { ServerSettingsTab } from './ServerSettingsModal.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
+import { formatClientDisplayName } from '../lib/bitchatProtocol.ts'
 import { encodeGeohash } from '../lib/geohash.ts'
 import {
   buildRadioChannelShareUrl,
@@ -637,7 +638,7 @@ export function RoomInfoSheet({
                           alt=""
                           width={36}
                           height={36}
-                          className="ag-sheet-avatar"
+                          className={`ag-sheet-avatar ${peer.isAgnostrClient ? 'ag-avatar-agnostr' : ''}`}
                         />
                         {peer.isOnline && <span className="ag-sheet-online-dot" />}
                       </span>
@@ -649,18 +650,6 @@ export function RoomInfoSheet({
                           >
                             {peer.displayHandle}
                           </span>
-                          {peer.isAgnostrClient && (
-                            <span
-                              className="ag-client-badge"
-                              title="Using Agnostr"
-                              aria-label="Using Agnostr"
-                            >
-                              <span className="ag-client-badge-mark" aria-hidden="true">
-                                A
-                              </span>
-                              <span className="ag-client-badge-text">Agnostr</span>
-                            </span>
-                          )}
                         </span>
                         <span className="ag-sheet-person-sub">
                           {peer.isSelf ? 'You' : peer.isOnline ? 'Online' : 'Recently active'}
@@ -796,6 +785,10 @@ export function RoomInfoSheet({
     const trusted = engine.isExplicitlyTrusted(thread.peerPubkey)
     const blocked = engine.isPeerBlocked(thread.peerPubkey)
     const peerLud16 = engine.zaps.getPeerLightningAddress(thread.peerPubkey)
+    const dmPeerInfo = engine.getPeerByPubkey(thread.peerPubkey)
+    const dmIsAgnostr = Boolean(dmPeerInfo?.isAgnostrClient)
+    const dmClientLabel =
+      formatClientDisplayName(dmPeerInfo?.clientName, dmPeerInfo?.isAgnostrClient) ?? 'Unknown'
 
     const handleStartCall = async (media: 'audio' | 'video') => {
       onPlaySound?.('click')
@@ -825,7 +818,7 @@ export function RoomInfoSheet({
             alt=""
             width={72}
             height={72}
-            className="ag-sheet-hero-avatar"
+            className={`ag-sheet-hero-avatar ${dmIsAgnostr ? 'ag-avatar-agnostr' : ''}`}
           />
           <h2
             className="ag-sheet-hero-title truncate"
@@ -836,6 +829,10 @@ export function RoomInfoSheet({
           <p className="ag-sheet-hero-sub dm">
             <Lock size={12} />
             <span>End-to-end encrypted</span>
+          </p>
+          <p className="ag-sheet-client-line">
+            <span className="ag-sheet-client-label">Client:</span>{' '}
+            <span className="ag-sheet-client-value">{dmClientLabel}</span>
           </p>
 
           <button

@@ -1,33 +1,47 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
+  type FocusEvent as ReactFocusEvent,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   AlertCircle,
   Archive,
   ArrowLeft,
+  ArrowUpDown,
   Check,
   CheckCheck,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Copy,
   FileText,
+  Folder,
+  FolderInput,
+  FolderPlus,
   Forward,
   HardDrive,
   Inbox,
   Lock,
   Mail,
   MailOpen,
+  Pencil,
   PenSquare,
   Plus,
   QrCode,
   Radio,
   RefreshCw,
   Reply,
+  ReplyAll,
+  RotateCcw,
   Search,
   Send,
   ShieldCheck,
@@ -39,10 +53,14 @@ import {
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol.ts'
 import type {
+  AmailBuiltinFolder,
   AmailContact,
+  AmailCustomFolder,
   AmailDeliveryStatus,
   AmailFolder,
+  AmailFolderSortMode,
   AmailMessage,
+  AmailRecipient,
 } from '../types/amail.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { encodeNpubSafe } from '../lib/identity.ts'
@@ -72,6 +90,66 @@ export interface AmailViewProps {
 }
 
 type AmailNavSection = AmailFolder | 'contacts' | 'mesh'
+type RecipientField = 'to' | 'cc' | 'bcc'
+
+interface AmailTooltipState {
+  text: string
+  anchorTop: number
+  anchorBottom: number
+  anchorCenterX: number
+}
+
+interface FolderPickerState {
+  messageId: string
+  currentFolder: AmailFolder
+  anchorTop: number
+  anchorBottom: number
+  anchorLeft: number
+  anchorRight: number
+  closeReaderOnMove: boolean
+}
+
+interface AutocompleteCandidate {
+  pubkey: string
+  npub: string
+  nickname: string
+  displayLabel: string
+  subLabel: string
+  isSelf?: boolean
+  isTrustedPeer?: boolean
+}
+
+interface ComposerInitOpts {
+  to?: AmailComposeTarget | null
+  toList?: AmailRecipient[]
+  ccList?: AmailRecipient[]
+  bccList?: AmailRecipient[]
+  subject?: string
+  body?: string
+  draftId?: string
+  threadId?: string
+  inReplyTo?: string
+  requestReadReceipt?: boolean
+  ttlSec?: number
+}
+
+const BUILTIN_FOLDER_LABELS: Record<AmailBuiltinFolder, string> = {
+  inbox: 'Inbox',
+  starred: 'Starred',
+  sent: 'Sent',
+  drafts: 'Drafts',
+  archive: 'Archive',
+  trash: 'Trash',
+}
+
+const BUILTIN_FOLDER_SET = new Set<string>([
+  'inbox',
+  'starred',
+  'sent',
+  'drafts',
+  'archive',
+  'trash',
+])
 
 const VAULT_SIZE_OPTIONS: readonly { bytes: number; label: string }[] = [
   { bytes: 5 * 1024 * 1024, label: '5 MB' },
@@ -153,12 +231,32 @@ function resolvePubkeyInput(raw: string): { pubkey: string; npub: string; nickna
   const parsed = parseShareTarget(trimmed)
   if (parsed?.kind === 'dm') {
     return {
-      pubkey: parsed.pubkey,
+      pubkey: parsed.pubkey.toLowerCase(),
       npub: parsed.npub,
       nickname: parsed.nickname,
     }
   }
   return null
+}
+
+function baseMailId(id: string): string {
+  return id.endsWith(':self') ? id.slice(0, -5) : id
+}
+
+function getMessageToList(msg: AmailMessage): AmailRecipient[] {
+  if (msg.toRecipients && msg.toRecipients.length > 0) {
+    return msg.toRecipients
+  }
+  if (msg.toPubkey) {
+    return [
+      {
+        pubkey: msg.toPubkey.toLowerCase(),
+        npub: msg.toNpub || encodeNpubSafe(msg.toPubkey),
+        nickname: msg.toName || shortPubkey(msg.toPubkey, 6, 4),
+      },
+    ]
+  }
+  return []
 }
 
 function formatDeliveryMeta(msg: AmailMessage): {
@@ -209,25 +307,25 @@ function renderStatusIcon(status: AmailDeliveryStatus) {
   switch (status) {
     case 'read':
       return (
-        <span className="ag-amail-receipt read" title="Read">
+        <span className="ag-amail-receipt read" aria-label="Read">
           <CheckCheck size={13} />
         </span>
       )
     case 'delivered':
       return (
-        <span className="ag-amail-receipt delivered" title="Delivered">
+        <span className="ag-amail-receipt delivered" aria-label="Delivered">
           <Check size={13} />
         </span>
       )
     case 'relayed':
       return (
-        <span className="ag-amail-receipt relayed" title="Relayed">
+        <span className="ag-amail-receipt relayed" aria-label="Relayed">
           <Radio size={12} />
         </span>
       )
     case 'expired':
       return (
-        <span className="ag-amail-receipt expired" title="Expired">
+        <span className="ag-amail-receipt expired" aria-label="Expired">
           <AlertCircle size={12} />
         </span>
       )
@@ -236,11 +334,17 @@ function renderStatusIcon(status: AmailDeliveryStatus) {
     case 'queued':
     default:
       return (
-        <span className="ag-amail-receipt queued" title="Queued">
+        <span className="ag-amail-receipt queued" aria-label="Queued">
           <Clock size={12} />
         </span>
       )
   }
+}
+
+function getSortModeShortLabel(mode: AmailFolderSortMode): string {
+  if (mode === 'az') return 'A–Z'
+  if (mode === 'za') return 'Z–A'
+  return 'Manual'
 }
 
 export function AmailView({
@@ -256,23 +360,58 @@ export function AmailView({
   const { amail } = engine
   const { openContextMenu } = useContextMenu()
 
+  const myPubkey = engine.identity.masterPubkey.toLowerCase()
+  const myNpub = engine.identity.masterNpub || encodeNpubSafe(myPubkey)
+  const myNickname = engine.identity.nickname?.trim() || 'Me'
+
   const [section, setSection] = useState<AmailNavSection>('inbox')
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [copiedId, setCopiedId] = useState<string | null>(null)
 
-  // Compose state
+  // Portal tooltip state (unclipped, viewport-clamped, zero OS title overlap)
+  const [tooltip, setTooltip] = useState<AmailTooltipState | null>(null)
+  const [tooltipCoords, setTooltipCoords] = useState<{
+    left: number
+    top: number
+    placement: 'above' | 'below'
+  } | null>(null)
+  const tooltipRef = useRef<HTMLDivElement | null>(null)
+
+  // Portal Move-to-Folder popover state
+  const [folderPicker, setFolderPicker] = useState<FolderPickerState | null>(null)
+  const [folderPickerCoords, setFolderPickerCoords] = useState<{
+    left: number
+    top: number
+  } | null>(null)
+  const folderPickerRef = useRef<HTMLDivElement | null>(null)
+
+  // Custom folder CRUD / reorder state
+  const [creatingFolder, setCreatingFolder] = useState(false)
+  const [newFolderName, setNewFolderName] = useState('')
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null)
+  const [renameFolderDraft, setRenameFolderDraft] = useState('')
+  const [armedDeleteFolderId, setArmedDeleteFolderId] = useState<string | null>(null)
+  const [draggingFolderId, setDraggingFolderId] = useState<string | null>(null)
+  const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
+  const newFolderInputRef = useRef<HTMLInputElement | null>(null)
+  const renameFolderInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Multi-recipient compose state (To / CC / BCC)
   const [composing, setComposing] = useState(false)
   const [composeDraftId, setComposeDraftId] = useState<string | undefined>(undefined)
   const [composeThreadId, setComposeThreadId] = useState<string | undefined>(undefined)
   const [composeInReplyTo, setComposeInReplyTo] = useState<string | undefined>(undefined)
+  const [toRecipients, setToRecipients] = useState<AmailRecipient[]>([])
+  const [ccRecipients, setCcRecipients] = useState<AmailRecipient[]>([])
+  const [bccRecipients, setBccRecipients] = useState<AmailRecipient[]>([])
   const [toInput, setToInput] = useState('')
-  const [selectedRecipient, setSelectedRecipient] = useState<{
-    pubkey: string
-    npub: string
-    nickname: string
-  } | null>(null)
-  const [toDropdownOpen, setToDropdownOpen] = useState(false)
+  const [ccInput, setCcInput] = useState('')
+  const [bccInput, setBccInput] = useState('')
+  const [showCc, setShowCc] = useState(false)
+  const [showBcc, setShowBcc] = useState(false)
+  const [activeRecipientField, setActiveRecipientField] = useState<RecipientField | null>(null)
+  const [acHighlightIdx, setAcHighlightIdx] = useState(0)
   const [subjectDraft, setSubjectDraft] = useState('')
   const [bodyDraft, setBodyDraft] = useState('')
   const [composeTab, setComposeTab] = useState<'write' | 'preview'>('write')
@@ -291,22 +430,176 @@ export function AmailView({
   const [confirmPurgeVault, setConfirmPurgeVault] = useState(false)
   const [meshFeedback, setMeshFeedback] = useState<string | null>(null)
 
-  const toWrapRef = useRef<HTMLDivElement | null>(null)
-  const openFreshComposerRef = useRef<
-    | ((opts?: {
-        to?: { pubkey: string; nickname?: string } | null
-        subject?: string
-        body?: string
-        draftId?: string
-        threadId?: string
-        inReplyTo?: string
-        requestReadReceipt?: boolean
-        ttlSec?: number
-      }) => void)
-    | null
-  >(null)
+  const recipLinesWrapRef = useRef<HTMLDivElement | null>(null)
+  const openFreshComposerRef = useRef<((opts?: ComposerInitOpts) => void) | null>(null)
 
-  // Merge Amail contacts + Trusted Peers for autocomplete & contacts directory
+  const hideTooltip = useCallback(() => {
+    setTooltip(null)
+    setTooltipCoords(null)
+  }, [])
+
+  const showTooltip = useCallback(
+    (e: ReactMouseEvent<HTMLElement> | ReactFocusEvent<HTMLElement>, text: string) => {
+      if (!text) return
+      const rect = e.currentTarget.getBoundingClientRect()
+      const anchorCenterX = rect.left + rect.width / 2
+      const placement: 'above' | 'below' = rect.top < 46 ? 'below' : 'above'
+      const approxW = Math.min(260, Math.max(64, text.length * 6.8 + 20))
+      const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+      const clampedLeft = Math.max(10, Math.min(vw - approxW - 10, anchorCenterX - approxW / 2))
+      setTooltipCoords({
+        left: clampedLeft,
+        top: placement === 'below' ? rect.bottom + 8 : rect.top - 8,
+        placement,
+      })
+      setTooltip({
+        text,
+        anchorTop: rect.top,
+        anchorBottom: rect.bottom,
+        anchorCenterX,
+      })
+    },
+    [],
+  )
+
+  const tipProps = useCallback(
+    (text: string) => ({
+      onMouseEnter: (e: ReactMouseEvent<HTMLElement>) => showTooltip(e, text),
+      onMouseLeave: hideTooltip,
+      onFocus: (e: ReactFocusEvent<HTMLElement>) => showTooltip(e, text),
+      onBlur: hideTooltip,
+      onPointerDown: hideTooltip,
+    }),
+    [showTooltip, hideTooltip],
+  )
+
+  // Precise post-paint viewport clamp for portal tooltip
+  useLayoutEffect(() => {
+    if (!tooltip || !tooltipRef.current) return
+    const box = tooltipRef.current.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    let placement: 'above' | 'below' = tooltip.anchorTop - box.height - 10 < 10 ? 'below' : 'above'
+    let top = placement === 'below' ? tooltip.anchorBottom + 8 : tooltip.anchorTop - 8
+    if (placement === 'below' && top + box.height > vh - 10) {
+      placement = 'above'
+      top = Math.max(10 + box.height, tooltip.anchorTop - 8)
+    }
+    const left = Math.max(10, Math.min(vw - box.width - 10, tooltip.anchorCenterX - box.width / 2))
+    setTooltipCoords({ left, top, placement })
+  }, [tooltip])
+
+  // Hide tooltip immediately on any scroll or key press
+  useEffect(() => {
+    if (!tooltip) return
+    const dismiss = () => {
+      setTooltip(null)
+      setTooltipCoords(null)
+    }
+    window.addEventListener('scroll', dismiss, true)
+    window.addEventListener('keydown', dismiss, true)
+    window.addEventListener('resize', dismiss)
+    return () => {
+      window.removeEventListener('scroll', dismiss, true)
+      window.removeEventListener('keydown', dismiss, true)
+      window.removeEventListener('resize', dismiss)
+    }
+  }, [tooltip])
+
+  // Clear transient overlays when view changes
+  useEffect(() => {
+    hideTooltip()
+    setFolderPicker(null)
+  }, [open, section, selectedMessageId, composing, hideTooltip])
+
+  // Precise viewport clamp for Move-to-Folder popover
+  useLayoutEffect(() => {
+    if (!folderPicker) {
+      setFolderPickerCoords(null)
+      return
+    }
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const box = folderPickerRef.current?.getBoundingClientRect()
+    const w = box?.width || 206
+    const h = box?.height || 220
+    let left = folderPicker.anchorRight - w
+    if (left < 10) left = Math.min(vw - w - 10, Math.max(10, folderPicker.anchorLeft))
+    left = Math.max(10, Math.min(vw - w - 10, left))
+    let top = folderPicker.anchorBottom + 6
+    if (top + h > vh - 10) {
+      top = Math.max(10, folderPicker.anchorTop - h - 6)
+    }
+    setFolderPickerCoords({ left, top })
+  }, [folderPicker])
+
+  // Close Move-to-Folder popover on outside pointerdown or scroll
+  useEffect(() => {
+    if (!folderPicker) return
+    const onPointerDown = (e: PointerEvent) => {
+      if (folderPickerRef.current && !folderPickerRef.current.contains(e.target as Node)) {
+        setFolderPicker(null)
+      }
+    }
+    const onScroll = (e: Event) => {
+      if (folderPickerRef.current && folderPickerRef.current.contains(e.target as Node)) return
+      setFolderPicker(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('scroll', onScroll, true)
+    }
+  }, [folderPicker])
+
+  // Focus inline folder inputs cleanly when opened
+  useEffect(() => {
+    if (!creatingFolder) return
+    const raf = window.requestAnimationFrame(() => newFolderInputRef.current?.focus())
+    return () => window.cancelAnimationFrame(raf)
+  }, [creatingFolder])
+
+  useEffect(() => {
+    if (!renamingFolderId) return
+    const raf = window.requestAnimationFrame(() => {
+      renameFolderInputRef.current?.focus()
+      renameFolderInputRef.current?.select()
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [renamingFolderId])
+
+  // Auto-disarm folder delete confirmation after 3.2s
+  useEffect(() => {
+    if (!armedDeleteFolderId) return
+    const t = window.setTimeout(() => setArmedDeleteFolderId(null), 3200)
+    return () => window.clearTimeout(t)
+  }, [armedDeleteFolderId])
+
+  // Sort custom folders consistently with amail.folderSortMode
+  const displayedCustomFolders = useMemo<AmailCustomFolder[]>(() => {
+    const list = [...amail.customFolders]
+    if (amail.folderSortMode === 'az') {
+      list.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    } else if (amail.folderSortMode === 'za') {
+      list.sort((a, b) => b.name.localeCompare(a.name, undefined, { sensitivity: 'base' }))
+    } else {
+      list.sort((a, b) => a.order - b.order || a.createdAt - b.createdAt)
+    }
+    return list
+  }, [amail.customFolders, amail.folderSortMode])
+
+  // If currently viewing a custom folder that was deleted (e.g. via sync), fall back cleanly to Inbox
+  useEffect(() => {
+    if (section === 'contacts' || section === 'mesh' || BUILTIN_FOLDER_SET.has(section)) return
+    const exists = amail.customFolders.some((f) => f.id === section)
+    if (!exists) {
+      setSection('inbox')
+      setSelectedMessageId(null)
+    }
+  }, [section, amail.customFolders])
+
+  // Merge Agmail contacts + Trusted Peers for autocomplete & contacts directory
   const mergedContacts = useMemo<AmailContact[]>(() => {
     const byPubkey = new Map<string, AmailContact>()
     for (const c of amail.contacts) {
@@ -332,41 +625,84 @@ export function AmailView({
     return [...byPubkey.values()].sort((a, b) => a.nickname.localeCompare(b.nickname))
   }, [amail.contacts, engine.trustedPubkeys])
 
+  const resolveRecipientInfo = useCallback(
+    (pubkey: string, nicknameHint?: string): AmailRecipient => {
+      const pk = pubkey.toLowerCase()
+      if (pk === myPubkey) {
+        return { pubkey: pk, npub: myNpub, nickname: 'You (Self)' }
+      }
+      const known = mergedContacts.find((c) => c.pubkey.toLowerCase() === pk)
+      return {
+        pubkey: pk,
+        npub: known?.npub || encodeNpubSafe(pk),
+        nickname: nicknameHint?.trim() || known?.nickname || shortPubkey(pk, 8, 6),
+      }
+    },
+    [mergedContacts, myPubkey, myNpub],
+  )
+
   const openFreshComposer = useCallback(
-    (opts?: {
-      to?: { pubkey: string; nickname?: string } | null
-      subject?: string
-      body?: string
-      draftId?: string
-      threadId?: string
-      inReplyTo?: string
-      requestReadReceipt?: boolean
-      ttlSec?: number
-    }) => {
+    (opts?: ComposerInitOpts) => {
       setComposeDraftId(opts?.draftId)
       setComposeThreadId(opts?.threadId)
       setComposeInReplyTo(opts?.inReplyTo)
-      if (opts?.to?.pubkey) {
+
+      const nextTo: AmailRecipient[] = []
+      const seenTo = new Set<string>()
+      if (opts?.toList && opts.toList.length > 0) {
+        for (const r of opts.toList) {
+          const pk = r.pubkey.toLowerCase()
+          if (!pk || seenTo.has(pk)) continue
+          seenTo.add(pk)
+          nextTo.push(resolveRecipientInfo(pk, r.nickname))
+        }
+      } else if (opts?.to?.pubkey) {
         const pk = opts.to.pubkey.toLowerCase()
-        const known = mergedContacts.find((c) => c.pubkey.toLowerCase() === pk)
-        const nick = opts.to.nickname?.trim() || known?.nickname || shortPubkey(pk, 8, 6)
-        const npub = known?.npub || encodeNpubSafe(pk)
-        setSelectedRecipient({ pubkey: pk, npub, nickname: nick })
-        setToInput('')
-      } else {
-        setSelectedRecipient(null)
-        setToInput('')
+        seenTo.add(pk)
+        nextTo.push(resolveRecipientInfo(pk, opts.to.nickname))
       }
+
+      const nextCc: AmailRecipient[] = []
+      const seenCc = new Set<string>()
+      if (opts?.ccList && opts.ccList.length > 0) {
+        for (const r of opts.ccList) {
+          const pk = r.pubkey.toLowerCase()
+          if (!pk || seenTo.has(pk) || seenCc.has(pk)) continue
+          seenCc.add(pk)
+          nextCc.push(resolveRecipientInfo(pk, r.nickname))
+        }
+      }
+
+      const nextBcc: AmailRecipient[] = []
+      const seenBcc = new Set<string>()
+      if (opts?.bccList && opts.bccList.length > 0) {
+        for (const r of opts.bccList) {
+          const pk = r.pubkey.toLowerCase()
+          if (!pk || seenTo.has(pk) || seenCc.has(pk) || seenBcc.has(pk)) continue
+          seenBcc.add(pk)
+          nextBcc.push(resolveRecipientInfo(pk, r.nickname))
+        }
+      }
+
+      setToRecipients(nextTo)
+      setCcRecipients(nextCc)
+      setBccRecipients(nextBcc)
+      setToInput('')
+      setCcInput('')
+      setBccInput('')
+      setShowCc(nextCc.length > 0)
+      setShowBcc(nextBcc.length > 0)
+      setActiveRecipientField(null)
+      setAcHighlightIdx(0)
       setSubjectDraft(opts?.subject ?? '')
       setBodyDraft(opts?.body ?? '')
       setComposeTab('write')
       setRequestReceipt(opts?.requestReadReceipt ?? true)
       setComposeTtlSec(opts?.ttlSec ?? amail.settings.defaultTtlSec)
       setComposeError(null)
-      setToDropdownOpen(false)
       setComposing(true)
     },
-    [mergedContacts, amail.settings.defaultTtlSec],
+    [resolveRecipientInfo, amail.settings.defaultTtlSec],
   )
 
   openFreshComposerRef.current = openFreshComposer
@@ -374,13 +710,17 @@ export function AmailView({
   const initialComposePubkey = initialComposeTo?.pubkey ?? null
   const initialComposeNickname = initialComposeTo?.nickname
 
-  // Sync only when Amail opens or navigation intent props genuinely change
+  // Sync only when Agmail opens or navigation intent props genuinely change
   useEffect(() => {
     if (!open) return
     setSearchQuery('')
     setSelectedMessageId(null)
     setConfirmPurgeVault(false)
     setMeshFeedback(null)
+    setCreatingFolder(false)
+    setRenamingFolderId(null)
+    setArmedDeleteFolderId(null)
+    setFolderPicker(null)
 
     if (initialComposePubkey) {
       setSection('inbox')
@@ -405,7 +745,7 @@ export function AmailView({
     }
   }, [open, initialSection, initialComposePubkey, initialComposeNickname])
 
-  // Android / PWA Back button LIFO: Composer -> Reader -> Non-Inbox Section -> Close
+  // Android / PWA Back button LIFO: Popover -> Composer -> Reader -> Non-Inbox Section -> Close
   useBackHandler(open, onClose)
   useBackHandler(open && section !== 'inbox' && !selectedMessageId && !composing, () =>
     setSection('inbox'),
@@ -414,6 +754,7 @@ export function AmailView({
     setSelectedMessageId(null),
   )
   useBackHandler(open && composing, () => setComposing(false))
+  useBackHandler(open && Boolean(folderPicker), () => setFolderPicker(null))
 
   // Escape step-back
   useEffect(() => {
@@ -421,8 +762,15 @@ export function AmailView({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       e.preventDefault()
-      if (toDropdownOpen) {
-        setToDropdownOpen(false)
+      if (folderPicker) {
+        setFolderPicker(null)
+      } else if (renamingFolderId) {
+        setRenamingFolderId(null)
+      } else if (creatingFolder) {
+        setCreatingFolder(false)
+        setNewFolderName('')
+      } else if (activeRecipientField) {
+        setActiveRecipientField(null)
       } else if (composing) {
         setComposing(false)
       } else if (selectedMessageId) {
@@ -433,28 +781,47 @@ export function AmailView({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, toDropdownOpen, composing, selectedMessageId, onClose])
+  }, [
+    open,
+    folderPicker,
+    renamingFolderId,
+    creatingFolder,
+    activeRecipientField,
+    composing,
+    selectedMessageId,
+    onClose,
+  ])
 
-  // Close To: autocomplete dropdown on outside click
+  // Close recipient autocomplete dropdown on outside click or focus moving outside recipient lines
   useEffect(() => {
-    if (!toDropdownOpen) return
-    const onPointerDown = (e: PointerEvent) => {
-      if (toWrapRef.current && !toWrapRef.current.contains(e.target as Node)) {
-        setToDropdownOpen(false)
+    if (!activeRecipientField) return
+    const dismissIfOutside = (target: EventTarget | null) => {
+      if (recipLinesWrapRef.current && !recipLinesWrapRef.current.contains(target as Node)) {
+        setActiveRecipientField(null)
       }
     }
+    const onPointerDown = (e: PointerEvent) => dismissIfOutside(e.target)
+    const onFocusIn = (e: FocusEvent) => dismissIfOutside(e.target)
     document.addEventListener('pointerdown', onPointerDown)
-    return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [toDropdownOpen])
+    document.addEventListener('focusin', onFocusIn)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('focusin', onFocusIn)
+    }
+  }, [activeRecipientField])
 
   const folderCounts = useMemo(() => {
     let starred = 0
     let drafts = 0
+    const customCounts: Record<string, number> = {}
     for (const m of amail.messages) {
       if (m.isStarred && m.folder !== 'trash') starred += 1
       if (m.folder === 'drafts') drafts += 1
+      if (!BUILTIN_FOLDER_SET.has(m.folder)) {
+        customCounts[m.folder] = (customCounts[m.folder] ?? 0) + 1
+      }
     }
-    return { starred, drafts }
+    return { starred, drafts, customCounts }
   }, [amail.messages])
 
   const visibleMessages = useMemo(() => {
@@ -468,13 +835,24 @@ export function AmailView({
           return false
         }
         if (!q) return true
+        const recipMatch = [
+          ...(m.toRecipients ?? []),
+          ...(m.ccRecipients ?? []),
+          ...(m.bccRecipients ?? []),
+        ].some(
+          (r) =>
+            r.nickname.toLowerCase().includes(q) ||
+            r.npub.toLowerCase().includes(q) ||
+            r.pubkey.toLowerCase().includes(q),
+        )
         return (
           m.subject.toLowerCase().includes(q) ||
           m.body.toLowerCase().includes(q) ||
           m.fromName.toLowerCase().includes(q) ||
           m.toName.toLowerCase().includes(q) ||
           m.fromNpub.toLowerCase().includes(q) ||
-          m.toNpub.toLowerCase().includes(q)
+          m.toNpub.toLowerCase().includes(q) ||
+          recipMatch
         )
       })
       .sort((a, b) => b.sentAt - a.sentAt)
@@ -488,11 +866,12 @@ export function AmailView({
     [amail.messages, selectedMessageId],
   )
 
+  // Deduplicate self-mail sibling pairs (`id` vs `${id}:self`) so self-mail never renders twice in Reader
   const threadMessages = useMemo(() => {
     if (!selectedMessage) return []
     const tid = selectedMessage.threadId
     if (!tid) return [selectedMessage]
-    const siblings = amail.messages
+    const rawSiblings = amail.messages
       .filter(
         (m) =>
           m.threadId === tid &&
@@ -500,21 +879,89 @@ export function AmailView({
           (m.folder !== 'trash' || m.id === selectedMessage.id),
       )
       .sort((a, b) => a.sentAt - b.sentAt)
-    return siblings.length > 0 ? siblings : [selectedMessage]
+
+    const byBaseId = new Map<string, AmailMessage>()
+    const preferOut = selectedMessage.direction === 'out' && selectedMessage.folder === 'sent'
+    for (const m of rawSiblings) {
+      const bId = baseMailId(m.id)
+      const prev = byBaseId.get(bId)
+      if (!prev) {
+        byBaseId.set(bId, m)
+        continue
+      }
+      if (m.id === selectedMessage.id) {
+        byBaseId.set(bId, m)
+      } else if (prev.id !== selectedMessage.id) {
+        if (preferOut && m.direction === 'out') {
+          byBaseId.set(bId, m)
+        } else if (!preferOut && m.direction === 'in') {
+          byBaseId.set(bId, m)
+        }
+      }
+    }
+
+    const deduped = [...byBaseId.values()].sort((a, b) => a.sentAt - b.sentAt)
+    return deduped.length > 0 ? deduped : [selectedMessage]
   }, [amail.messages, selectedMessage])
 
-  const autocompleteMatches = useMemo(() => {
-    const q = toInput.trim().toLowerCase()
-    if (!q) return mergedContacts.slice(0, 8)
-    return mergedContacts
-      .filter(
-        (c) =>
-          c.nickname.toLowerCase().includes(q) ||
-          c.npub.toLowerCase().includes(q) ||
-          c.pubkey.toLowerCase().includes(q),
-      )
-      .slice(0, 8)
-  }, [mergedContacts, toInput])
+  // Build autocomplete matches for active recipient field (including top `Me (Yourself)` entry)
+  const getAutocompleteForField = useCallback(
+    (field: RecipientField, rawQuery: string): AutocompleteCandidate[] => {
+      const q = rawQuery.trim().toLowerCase()
+      const fieldChips =
+        field === 'to' ? toRecipients : field === 'cc' ? ccRecipients : bccRecipients
+      const existingSet = new Set(fieldChips.map((r) => r.pubkey.toLowerCase()))
+
+      const results: AutocompleteCandidate[] = []
+
+      // Top `Me (Yourself)` entry so self-mail is 1 click
+      const selfMatches =
+        !q ||
+        'me'.includes(q) ||
+        'self'.includes(q) ||
+        'yourself'.includes(q) ||
+        'you'.includes(q) ||
+        myNickname.toLowerCase().includes(q) ||
+        myNpub.toLowerCase().includes(q) ||
+        myPubkey.includes(q)
+
+      if (selfMatches && !existingSet.has(myPubkey)) {
+        results.push({
+          pubkey: myPubkey,
+          npub: myNpub,
+          nickname: 'You (Self)',
+          displayLabel: 'Me (Yourself)',
+          subLabel: `${myNickname} · ${shortPubkey(myNpub, 8, 5)}`,
+          isSelf: true,
+        })
+      }
+
+      for (const c of mergedContacts) {
+        const pk = c.pubkey.toLowerCase()
+        if (pk === myPubkey || existingSet.has(pk)) continue
+        if (
+          q &&
+          !c.nickname.toLowerCase().includes(q) &&
+          !c.npub.toLowerCase().includes(q) &&
+          !pk.includes(q)
+        ) {
+          continue
+        }
+        results.push({
+          pubkey: pk,
+          npub: c.npub,
+          nickname: c.nickname,
+          displayLabel: c.nickname,
+          subLabel: shortPubkey(c.npub, 10, 6),
+          isTrustedPeer: c.isTrustedPeer,
+        })
+        if (results.length >= 9) break
+      }
+
+      return results
+    },
+    [toRecipients, ccRecipients, bccRecipients, mergedContacts, myNickname, myNpub, myPubkey],
+  )
 
   if (!open) return null
 
@@ -525,6 +972,51 @@ export function AmailView({
       (amail.storageStats.vaultBytes / Math.max(1, amail.storageStats.vaultLimitBytes)) * 100,
     ),
   )
+
+  const getFolderDisplayName = (folderId: AmailFolder): string => {
+    if (folderId in BUILTIN_FOLDER_LABELS) {
+      return BUILTIN_FOLDER_LABELS[folderId as AmailBuiltinFolder]
+    }
+    return amail.customFolders.find((f) => f.id === folderId)?.name ?? 'Folder'
+  }
+
+  const formatRecipientName = (r: AmailRecipient): string =>
+    r.pubkey.toLowerCase() === myPubkey ? 'You' : r.nickname || shortPubkey(r.pubkey, 6, 4)
+
+  const formatRowCounterparty = (msg: AmailMessage): { label: string; colorPubkey: string } => {
+    if (msg.direction === 'out') {
+      const toList = getMessageToList(msg)
+      const allRecips = [
+        ...toList,
+        ...(msg.ccRecipients ?? []),
+        ...(msg.bccRecipients ?? []),
+      ]
+      if (allRecips.length === 0) {
+        return {
+          label: `To: ${msg.toName || shortPubkey(msg.toPubkey, 6, 4)}`,
+          colorPubkey: msg.toPubkey,
+        }
+      }
+      const first = allRecips[0]
+      const firstIsSelf = first.pubkey.toLowerCase() === myPubkey
+      if (allRecips.length === 1) {
+        return {
+          label: firstIsSelf ? 'To: You (Self)' : `To: ${first.nickname || shortPubkey(first.pubkey, 6, 4)}`,
+          colorPubkey: first.pubkey,
+        }
+      }
+      const baseName = firstIsSelf ? 'You' : first.nickname || shortPubkey(first.pubkey, 6, 4)
+      return {
+        label: `To: ${baseName} +${allRecips.length - 1}`,
+        colorPubkey: first.pubkey,
+      }
+    }
+    const fromIsSelf = msg.fromPubkey.toLowerCase() === myPubkey
+    return {
+      label: fromIsSelf ? 'Me (Self)' : msg.fromName || shortPubkey(msg.fromPubkey, 6, 4),
+      colorPubkey: msg.fromPubkey,
+    }
+  }
 
   const copyValue = async (key: string, value: string, toastTitle: string) => {
     try {
@@ -540,9 +1032,13 @@ export function AmailView({
 
   const handleOpenMessage = (msg: AmailMessage) => {
     onPlaySound?.('click')
+    hideTooltip()
     if (msg.folder === 'drafts') {
+      const toList = getMessageToList(msg)
       openFreshComposer({
-        to: msg.toPubkey ? { pubkey: msg.toPubkey, nickname: msg.toName } : null,
+        toList,
+        ccList: msg.ccRecipients ?? [],
+        bccList: msg.bccRecipients ?? [],
         subject: msg.subject,
         body: msg.body,
         draftId: msg.id,
@@ -559,15 +1055,79 @@ export function AmailView({
     }
   }
 
+  const canReplyAll = (msg: AmailMessage): boolean => {
+    const toList = getMessageToList(msg)
+    const ccList = msg.ccRecipients ?? []
+    if (ccList.length > 0) return true
+    const distinct = new Set<string>()
+    for (const r of toList) distinct.add(r.pubkey.toLowerCase())
+    if (msg.direction === 'in' && msg.fromPubkey) {
+      distinct.add(msg.fromPubkey.toLowerCase())
+    }
+    return distinct.size > 1
+  }
+
   const handleReply = (msg: AmailMessage) => {
     onPlaySound?.('click')
+    hideTooltip()
     const replyPubkey = msg.direction === 'in' ? msg.fromPubkey : msg.toPubkey
     const replyName = msg.direction === 'in' ? msg.fromName : msg.toName
     const nextSubject = /^re:/i.test(msg.subject.trim())
       ? msg.subject.trim()
       : `Re: ${msg.subject.trim() || '(no subject)'}`
     openFreshComposer({
-      to: { pubkey: replyPubkey, nickname: replyName },
+      to: replyPubkey ? { pubkey: replyPubkey, nickname: replyName } : null,
+      subject: nextSubject,
+      body: '',
+      threadId: msg.threadId,
+      inReplyTo: msg.id,
+    })
+  }
+
+  const handleReplyAll = (msg: AmailMessage) => {
+    onPlaySound?.('click')
+    hideTooltip()
+    const toCandidates: AmailRecipient[] = []
+    const ccCandidates: AmailRecipient[] = []
+    const seenTo = new Set<string>()
+    const seenCc = new Set<string>()
+
+    const addTo = (r: AmailRecipient) => {
+      const pk = r.pubkey.toLowerCase()
+      if (!pk || pk === myPubkey || seenTo.has(pk)) return
+      seenTo.add(pk)
+      toCandidates.push(resolveRecipientInfo(pk, r.nickname))
+    }
+
+    if (msg.direction === 'in' && msg.fromPubkey) {
+      addTo({
+        pubkey: msg.fromPubkey,
+        npub: msg.fromNpub,
+        nickname: msg.fromName,
+      })
+    }
+    for (const r of getMessageToList(msg)) {
+      addTo(r)
+    }
+    for (const r of msg.ccRecipients ?? []) {
+      const pk = r.pubkey.toLowerCase()
+      if (!pk || pk === myPubkey || seenTo.has(pk) || seenCc.has(pk)) continue
+      seenCc.add(pk)
+      ccCandidates.push(resolveRecipientInfo(pk, r.nickname))
+    }
+
+    // Solo self-mail fallback: keep self in To
+    if (toCandidates.length === 0 && ccCandidates.length === 0) {
+      toCandidates.push(resolveRecipientInfo(myPubkey, 'You (Self)'))
+    }
+
+    const nextSubject = /^re:/i.test(msg.subject.trim())
+      ? msg.subject.trim()
+      : `Re: ${msg.subject.trim() || '(no subject)'}`
+
+    openFreshComposer({
+      toList: toCandidates,
+      ccList: ccCandidates,
       subject: nextSubject,
       body: '',
       threadId: msg.threadId,
@@ -577,18 +1137,82 @@ export function AmailView({
 
   const handleForward = (msg: AmailMessage) => {
     onPlaySound?.('click')
+    hideTooltip()
     const nextSubject = /^fwd:/i.test(msg.subject.trim())
       ? msg.subject.trim()
       : `Fwd: ${msg.subject.trim() || '(no subject)'}`
-    const quoted = `\n\n---\n**Forwarded from ${msg.fromName}** (${formatFullDateTime(msg.sentAt)})\n\n${msg.body}`
+    const toNames = getMessageToList(msg)
+      .map((r) => formatRecipientName(r))
+      .join(', ')
+    const ccNames = (msg.ccRecipients ?? []).map((r) => formatRecipientName(r)).join(', ')
+    const headerLines = [
+      '**Forwarded message**',
+      `**From:** ${msg.fromName}`,
+      `**Date:** ${formatFullDateTime(msg.sentAt)}`,
+      toNames ? `**To:** ${toNames}` : null,
+      ccNames ? `**CC:** ${ccNames}` : null,
+    ].filter(Boolean)
+    const quoted = `\n\n---\n${headerLines.join('\n')}\n\n${msg.body}`
     openFreshComposer({
-      to: null,
+      toList: [],
       subject: nextSubject,
       body: quoted,
     })
   }
 
+  const handleRestoreMessage = async (msg: AmailMessage, closeReader = false) => {
+    onPlaySound?.('click')
+    hideTooltip()
+    const restoredTo = await amail.restoreMessage(msg.id)
+    if (restoredTo) {
+      engine.pushToast('success', `Restored to ${getFolderDisplayName(restoredTo)}`)
+    }
+    if (closeReader || selectedMessageId === msg.id) {
+      setSelectedMessageId(null)
+    }
+  }
+
+  const handleMoveToFolder = async (
+    messageId: string,
+    targetFolder: AmailFolder,
+    closeReader = false,
+  ) => {
+    onPlaySound?.('click')
+    hideTooltip()
+    setFolderPicker(null)
+    await amail.moveToFolder(messageId, targetFolder)
+    engine.pushToast('info', `Moved to ${getFolderDisplayName(targetFolder)}`)
+    if (closeReader || (selectedMessageId === messageId && targetFolder !== section)) {
+      setSelectedMessageId(null)
+    }
+  }
+
+  const openFolderPickerAt = (
+    e: ReactMouseEvent<HTMLElement>,
+    msg: AmailMessage,
+    closeReaderOnMove: boolean,
+  ) => {
+    e.stopPropagation()
+    hideTooltip()
+    onPlaySound?.('click')
+    if (folderPicker && folderPicker.messageId === msg.id) {
+      setFolderPicker(null)
+      return
+    }
+    const rect = e.currentTarget.getBoundingClientRect()
+    setFolderPicker({
+      messageId: msg.id,
+      currentFolder: msg.folder,
+      anchorTop: rect.top,
+      anchorBottom: rect.bottom,
+      anchorLeft: rect.left,
+      anchorRight: rect.right,
+      closeReaderOnMove,
+    })
+  }
+
   const openMessageContextMenu = (e: ReactMouseEvent, msg: AmailMessage) => {
+    hideTooltip()
     const items: ContextMenuItem[] = [
       {
         id: 'open',
@@ -599,17 +1223,32 @@ export function AmailView({
     ]
 
     if (msg.folder !== 'drafts') {
+      items.push({
+        id: 'reply',
+        label: 'Reply',
+        icon: <Reply size={14} />,
+        onSelect: () => handleReply(msg),
+      })
+      if (canReplyAll(msg)) {
+        items.push({
+          id: 'reply-all',
+          label: 'Reply All',
+          icon: <ReplyAll size={14} />,
+          onSelect: () => handleReplyAll(msg),
+        })
+      }
       items.push(
         {
-          id: 'reply',
-          label: 'Reply',
-          icon: <Reply size={14} />,
-          onSelect: () => handleReply(msg),
+          id: 'forward',
+          label: 'Forward',
+          icon: <Forward size={14} />,
+          onSelect: () => handleForward(msg),
         },
         {
           id: 'toggle-read',
           label: msg.isRead ? 'Mark as Unread' : 'Mark as Read',
           icon: msg.isRead ? <Mail size={14} /> : <MailOpen size={14} />,
+          dividerBefore: true,
           onSelect: () => {
             onPlaySound?.('click')
             void amail.markRead(msg.id, !msg.isRead)
@@ -624,19 +1263,44 @@ export function AmailView({
             void amail.toggleStar(msg.id)
           },
         },
-        {
+      )
+
+      if (msg.folder === 'trash' || msg.folder === 'archive') {
+        items.push({
+          id: 'restore',
+          label: 'Restore',
+          icon: <RotateCcw size={14} />,
+          dividerBefore: true,
+          onSelect: () => void handleRestoreMessage(msg),
+        })
+      } else {
+        items.push({
           id: 'archive',
-          label: msg.folder === 'archive' ? 'Move to Inbox' : 'Archive',
+          label: 'Archive',
           icon: <Archive size={14} />,
           dividerBefore: true,
-          onSelect: () => {
-            onPlaySound?.('click')
-            const targetFolder: AmailFolder = msg.folder === 'archive' ? 'inbox' : 'archive'
-            void amail.moveToFolder(msg.id, targetFolder)
-            if (selectedMessageId === msg.id) setSelectedMessageId(null)
-          },
-        },
-      )
+          onSelect: () => void handleMoveToFolder(msg.id, 'archive'),
+        })
+      }
+
+      if (msg.folder !== 'inbox') {
+        items.push({
+          id: 'move-inbox',
+          label: 'Move to Inbox',
+          icon: <Inbox size={14} />,
+          onSelect: () => void handleMoveToFolder(msg.id, 'inbox'),
+        })
+      }
+
+      for (const folder of displayedCustomFolders) {
+        if (folder.id === msg.folder) continue
+        items.push({
+          id: `move-${folder.id}`,
+          label: `Move to ${folder.name}`,
+          icon: <Folder size={14} />,
+          onSelect: () => void handleMoveToFolder(msg.id, folder.id),
+        })
+      }
     }
 
     items.push({
@@ -645,7 +1309,7 @@ export function AmailView({
         msg.folder === 'trash' || msg.folder === 'drafts' ? 'Delete Permanently' : 'Move to Trash',
       icon: <Trash2 size={14} />,
       danger: true,
-      dividerBefore: msg.folder === 'drafts',
+      dividerBefore: true,
       onSelect: () => {
         onPlaySound?.('click')
         if (msg.folder === 'drafts') {
@@ -665,28 +1329,252 @@ export function AmailView({
     })
   }
 
-  const resolveRecipientForCompose = (): {
-    pubkey: string
-    npub: string
-    nickname: string
-  } | null => {
-    if (selectedRecipient) return selectedRecipient
-    const parsed = resolvePubkeyInput(toInput)
-    if (!parsed) return null
-    const known = mergedContacts.find((c) => c.pubkey.toLowerCase() === parsed.pubkey.toLowerCase())
-    return {
-      pubkey: parsed.pubkey,
-      npub: parsed.npub,
-      nickname: parsed.nickname || known?.nickname || shortPubkey(parsed.pubkey, 8, 6),
+  // Custom Folder CRUD handlers
+  const handleCreateFolderSubmit = async (e?: FormEvent) => {
+    e?.preventDefault()
+    const trimmed = newFolderName.trim()
+    if (!trimmed) return
+    const created = await amail.createFolder(trimmed)
+    if (created) {
+      onPlaySound?.('click')
+      setNewFolderName('')
+      setCreatingFolder(false)
+      engine.pushToast('success', `Created folder "${created.name}"`)
     }
+  }
+
+  const handleCommitRenameFolder = async (folderId: string) => {
+    const trimmed = renameFolderDraft.trim()
+    setRenamingFolderId(null)
+    if (!trimmed) return
+    const current = amail.customFolders.find((f) => f.id === folderId)
+    if (!current || current.name === trimmed) return
+    const ok = await amail.renameFolder(folderId, trimmed)
+    if (ok) {
+      onPlaySound?.('click')
+    }
+  }
+
+  const handleCycleFolderSort = () => {
+    onPlaySound?.('click')
+    hideTooltip()
+    const next: AmailFolderSortMode =
+      amail.folderSortMode === 'az'
+        ? 'za'
+        : amail.folderSortMode === 'za'
+          ? 'manual'
+          : 'az'
+    void amail.sortFolders(next)
+  }
+
+  const handleMoveFolderStep = (folderId: string, delta: -1 | 1) => {
+    const ids = displayedCustomFolders.map((f) => f.id)
+    const idx = ids.indexOf(folderId)
+    const nextIdx = idx + delta
+    if (idx < 0 || nextIdx < 0 || nextIdx >= ids.length) return
+    onPlaySound?.('click')
+    hideTooltip()
+    const reordered = [...ids]
+    const [moved] = reordered.splice(idx, 1)
+    reordered.splice(nextIdx, 0, moved)
+    void amail.reorderFolders(reordered)
+  }
+
+  const handleDeleteFolderClick = async (folderId: string, immediate = false) => {
+    if (!immediate && armedDeleteFolderId !== folderId) {
+      onPlaySound?.('click')
+      setArmedDeleteFolderId(folderId)
+      return
+    }
+    const target = amail.customFolders.find((f) => f.id === folderId)
+    setArmedDeleteFolderId(null)
+    onPlaySound?.('click')
+    hideTooltip()
+    await amail.deleteFolder(folderId)
+    if (section === folderId) {
+      setSection('inbox')
+      setSelectedMessageId(null)
+    }
+    if (target) {
+      engine.pushToast('info', `Deleted folder "${target.name}"`)
+    }
+  }
+
+  const openFolderContextMenu = (e: ReactMouseEvent, folder: AmailCustomFolder, index: number) => {
+    hideTooltip()
+    const items: ContextMenuItem[] = [
+      {
+        id: 'rename-folder',
+        label: 'Rename',
+        icon: <Pencil size={14} />,
+        onSelect: () => {
+          setRenamingFolderId(folder.id)
+          setRenameFolderDraft(folder.name)
+        },
+      },
+      {
+        id: 'move-up',
+        label: 'Move Up',
+        icon: <ChevronUp size={14} />,
+        disabled: index === 0,
+        onSelect: () => handleMoveFolderStep(folder.id, -1),
+      },
+      {
+        id: 'move-down',
+        label: 'Move Down',
+        icon: <ChevronDown size={14} />,
+        disabled: index >= displayedCustomFolders.length - 1,
+        onSelect: () => handleMoveFolderStep(folder.id, 1),
+      },
+      {
+        id: 'delete-folder',
+        label: 'Delete Folder',
+        icon: <Trash2 size={14} />,
+        danger: true,
+        dividerBefore: true,
+        onSelect: () => void handleDeleteFolderClick(folder.id, true),
+      },
+    ]
+    openContextMenu(e, { header: folder.name, items })
+  }
+
+  const handleFolderDrop = (e: ReactDragEvent, targetId: string) => {
+    e.preventDefault()
+    const sourceId = draggingFolderId || e.dataTransfer.getData('text/plain')
+    setDraggingFolderId(null)
+    setDragOverFolderId(null)
+    if (!sourceId || sourceId === targetId) return
+    const ids = displayedCustomFolders.map((f) => f.id)
+    const fromIdx = ids.indexOf(sourceId)
+    const toIdx = ids.indexOf(targetId)
+    if (fromIdx < 0 || toIdx < 0) return
+    const reordered = [...ids]
+    const [moved] = reordered.splice(fromIdx, 1)
+    reordered.splice(toIdx, 0, moved)
+    onPlaySound?.('click')
+    void amail.reorderFolders(reordered)
+  }
+
+  // Multi-recipient Compose helpers
+  const addRecipientChip = (field: RecipientField, recipient: AmailRecipient) => {
+    const pk = recipient.pubkey.toLowerCase()
+    const normalized = resolveRecipientInfo(pk, recipient.nickname)
+
+    // Remove from all 3 fields first to prevent duplicates across To / CC / BCC
+    setToRecipients((prev) => {
+      const filtered = prev.filter((r) => r.pubkey.toLowerCase() !== pk)
+      return field === 'to' ? [...filtered, normalized] : filtered
+    })
+    setCcRecipients((prev) => {
+      const filtered = prev.filter((r) => r.pubkey.toLowerCase() !== pk)
+      return field === 'cc' ? [...filtered, normalized] : filtered
+    })
+    setBccRecipients((prev) => {
+      const filtered = prev.filter((r) => r.pubkey.toLowerCase() !== pk)
+      return field === 'bcc' ? [...filtered, normalized] : filtered
+    })
+
+    if (field === 'to') setToInput('')
+    else if (field === 'cc') setCcInput('')
+    else setBccInput('')
+    setAcHighlightIdx(0)
+    setComposeError(null)
+  }
+
+  const removeRecipientChip = (field: RecipientField, pubkey: string) => {
+    const pk = pubkey.toLowerCase()
+    if (field === 'to') {
+      setToRecipients((prev) => prev.filter((r) => r.pubkey.toLowerCase() !== pk))
+    } else if (field === 'cc') {
+      setCcRecipients((prev) => prev.filter((r) => r.pubkey.toLowerCase() !== pk))
+    } else {
+      setBccRecipients((prev) => prev.filter((r) => r.pubkey.toLowerCase() !== pk))
+    }
+  }
+
+  const tryCommitFieldInput = (
+    field: RecipientField,
+    rawText: string,
+    allowAutocomplete: boolean,
+  ): boolean => {
+    const trimmed = rawText.trim().replace(/,+$/, '').trim()
+    if (!trimmed) return false
+    const parsed = resolvePubkeyInput(trimmed)
+    if (parsed) {
+      addRecipientChip(field, resolveRecipientInfo(parsed.pubkey, parsed.nickname))
+      return true
+    }
+    if (allowAutocomplete) {
+      const matches = getAutocompleteForField(field, trimmed)
+      const pick = matches[acHighlightIdx] ?? matches[0]
+      if (pick) {
+        addRecipientChip(field, {
+          pubkey: pick.pubkey,
+          npub: pick.npub,
+          nickname: pick.nickname,
+        })
+        return true
+      }
+    }
+    return false
+  }
+
+  const collectFinalRecipients = (): {
+    to: AmailRecipient[]
+    cc: AmailRecipient[]
+    bcc: AmailRecipient[]
+    invalidInputs: string[]
+  } => {
+    const to = [...toRecipients]
+    const cc = [...ccRecipients]
+    const bcc = [...bccRecipients]
+    const invalidInputs: string[] = []
+    const seen = new Set<string>([
+      ...to.map((r) => r.pubkey.toLowerCase()),
+      ...cc.map((r) => r.pubkey.toLowerCase()),
+      ...bcc.map((r) => r.pubkey.toLowerCase()),
+    ])
+
+    const absorb = (raw: string, bucket: AmailRecipient[]) => {
+      const cleaned = raw.trim()
+      if (!cleaned) return
+      const parts = cleaned
+        .split(/[\s,;]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+      for (const part of parts) {
+        const parsed = resolvePubkeyInput(part)
+        if (!parsed) {
+          invalidInputs.push(part)
+          continue
+        }
+        const pk = parsed.pubkey.toLowerCase()
+        if (seen.has(pk)) continue
+        seen.add(pk)
+        bucket.push(resolveRecipientInfo(pk, parsed.nickname))
+      }
+    }
+
+    absorb(toInput, to)
+    absorb(ccInput, cc)
+    absorb(bccInput, bcc)
+
+    return { to, cc, bcc, invalidInputs }
   }
 
   const handleSendMail = async (e: FormEvent) => {
     e.preventDefault()
     if (sendingMail) return
-    const recipient = resolveRecipientForCompose()
-    if (!recipient) {
-      setComposeError('Choose a contact or paste a valid npub or hex pubkey.')
+    const { to, cc, bcc, invalidInputs } = collectFinalRecipients()
+    if (invalidInputs.length > 0) {
+      setComposeError(
+        `Unrecognized recipient "${invalidInputs[0]}". Pick a contact or paste a valid npub / hex key.`,
+      )
+      return
+    }
+    const allCount = to.length + cc.length + bcc.length
+    if (allCount === 0) {
+      setComposeError('Add at least one recipient in To, CC, or BCC.')
       return
     }
     if (!subjectDraft.trim() && !bodyDraft.trim()) {
@@ -694,11 +1582,15 @@ export function AmailView({
       return
     }
 
+    const primary = to[0] ?? cc[0] ?? bcc[0]
     setComposeError(null)
     setSendingMail(true)
     try {
       const sent = await amail.sendMail({
-        toPubkey: recipient.pubkey,
+        toPubkey: primary?.pubkey,
+        toPubkeys: to.map((r) => r.pubkey),
+        ccPubkeys: cc.map((r) => r.pubkey),
+        bccPubkeys: bcc.map((r) => r.pubkey),
         subject: subjectDraft.trim() || '(no subject)',
         body: bodyDraft,
         inReplyTo: composeInReplyTo,
@@ -719,10 +1611,14 @@ export function AmailView({
   }
 
   const handleSaveDraft = async () => {
-    const recipient = resolveRecipientForCompose()
+    const { to, cc, bcc } = collectFinalRecipients()
+    const primary = to[0] ?? cc[0] ?? bcc[0]
     const saved = await amail.saveDraft({
       id: composeDraftId,
-      toPubkey: recipient?.pubkey,
+      toPubkey: primary?.pubkey,
+      toPubkeys: to.map((r) => r.pubkey),
+      ccPubkeys: cc.map((r) => r.pubkey),
+      bccPubkeys: bcc.map((r) => r.pubkey),
       subject: subjectDraft.trim(),
       body: bodyDraft,
       inReplyTo: composeInReplyTo,
@@ -740,6 +1636,7 @@ export function AmailView({
 
   const handleDiscardCompose = () => {
     onPlaySound?.('click')
+    hideTooltip()
     if (composeDraftId) {
       void amail.deleteDraft(composeDraftId)
     }
@@ -795,12 +1692,13 @@ export function AmailView({
 
   const handleSyncMesh = async () => {
     onPlaySound?.('click')
+    hideTooltip()
     setMeshFeedback(null)
     await amail.syncMeshNow()
   }
 
   const navFolders: readonly {
-    id: AmailFolder
+    id: AmailBuiltinFolder
     label: string
     icon: typeof Inbox
     count?: number
@@ -813,6 +1711,14 @@ export function AmailView({
     { id: 'trash', label: 'Trash', icon: Trash2 },
   ]
 
+  const activeCustomFolder =
+    section !== 'contacts' && section !== 'mesh' && !BUILTIN_FOLDER_SET.has(section)
+      ? (displayedCustomFolders.find((f) => f.id === section) ?? null)
+      : null
+  const activeCustomFolderIndex = activeCustomFolder
+    ? displayedCustomFolders.findIndex((f) => f.id === activeCustomFolder.id)
+    : -1
+
   const renderMailList = () => (
     <div className="ag-amail-list-pane">
       {visibleMessages.length === 0 ? (
@@ -823,7 +1729,9 @@ export function AmailView({
               ? 'No matches'
               : section === 'inbox'
                 ? 'Inbox is empty'
-                : 'No messages'}
+                : activeCustomFolder
+                  ? `No messages in ${activeCustomFolder.name}`
+                  : 'No messages'}
           </p>
           {section === 'inbox' && !searchQuery.trim() && (
             <button
@@ -840,21 +1748,27 @@ export function AmailView({
           )}
         </div>
       ) : (
-        <div className="ag-amail-rows" role="list" aria-label={`${section} messages`}>
+        <div className="ag-amail-rows" role="list" aria-label={`${getFolderDisplayName(section as AmailFolder)} messages`}>
           {visibleMessages.map((msg) => {
             const isUnread = !msg.isRead && msg.direction === 'in'
-            const counterpartyName =
-              msg.direction === 'out'
-                ? `To: ${msg.toName || shortPubkey(msg.toPubkey, 6, 4)}`
-                : msg.fromName || shortPubkey(msg.fromPubkey, 6, 4)
-            const counterpartyPubkey = msg.direction === 'out' ? msg.toPubkey : msg.fromPubkey
+            const { label: counterpartyName, colorPubkey } = formatRowCounterparty(msg)
             const snippet = buildBodySnippet(msg.body)
+            const isRestorable = msg.folder === 'trash' || msg.folder === 'archive'
+            const restoreTip =
+              msg.folder === 'trash' ? 'Restore from Trash' : 'Restore from Archive'
+            const deleteTip =
+              msg.folder === 'trash'
+                ? 'Delete permanently'
+                : msg.folder === 'drafts'
+                  ? 'Discard draft'
+                  : 'Move to Trash'
+            const isPickerOpenForRow = folderPicker?.messageId === msg.id
 
             return (
               <div
                 key={msg.id}
                 role="listitem"
-                className={`ag-amail-row ${isUnread ? 'unread' : ''}`}
+                className={`ag-amail-row ${isUnread ? 'unread' : ''} ${isPickerOpenForRow ? 'menu-open' : ''}`}
                 onClick={() => handleOpenMessage(msg)}
                 onContextMenu={(e) => openMessageContextMenu(e, msg)}
               >
@@ -866,8 +1780,8 @@ export function AmailView({
                     onPlaySound?.('click')
                     void amail.toggleStar(msg.id)
                   }}
-                  title={msg.isStarred ? 'Unstar' : 'Star'}
-                  aria-label={msg.isStarred ? 'Unstar message' : 'Star message'}
+                  aria-label={msg.isStarred ? 'Remove star' : 'Star this message'}
+                  {...tipProps(msg.isStarred ? 'Remove star' : 'Star this message')}
                 >
                   <Star size={14} fill={msg.isStarred ? 'currentColor' : 'none'} />
                 </button>
@@ -878,7 +1792,7 @@ export function AmailView({
                     <span
                       className="ag-amail-row-sender truncate"
                       style={{
-                        color: counterpartyPubkey ? pubkeyToColor(counterpartyPubkey) : undefined,
+                        color: colorPubkey ? pubkeyToColor(colorPubkey) : undefined,
                       }}
                     >
                       {counterpartyName}
@@ -897,7 +1811,10 @@ export function AmailView({
                   {msg.direction === 'out' && renderStatusIcon(msg.deliveryStatus)}
                   <span className="ag-amail-row-time mono">{formatMailTimestamp(msg.sentAt)}</span>
 
-                  <div className="ag-amail-row-hover-actions" onClick={(e) => e.stopPropagation()}>
+                  <div
+                    className={`ag-amail-row-hover-actions ${isRestorable ? 'has-restore' : ''}`}
+                    onClick={(e) => e.stopPropagation()}
+                  >
                     {msg.folder !== 'drafts' && (
                       <>
                         <button
@@ -907,26 +1824,42 @@ export function AmailView({
                             onPlaySound?.('click')
                             void amail.markRead(msg.id, !msg.isRead)
                           }}
-                          title={msg.isRead ? 'Mark unread' : 'Mark read'}
-                          aria-label={msg.isRead ? 'Mark unread' : 'Mark read'}
+                          aria-label={msg.isRead ? 'Mark as unread' : 'Mark as read'}
+                          {...tipProps(msg.isRead ? 'Mark as unread' : 'Mark as read')}
                         >
                           {msg.isRead ? <Mail size={13} /> : <MailOpen size={13} />}
                         </button>
                         <button
                           type="button"
-                          className="ag-amail-icon-btn"
-                          onClick={() => {
-                            onPlaySound?.('click')
-                            void amail.moveToFolder(
-                              msg.id,
-                              msg.folder === 'archive' ? 'inbox' : 'archive',
-                            )
-                          }}
-                          title={msg.folder === 'archive' ? 'Move to Inbox' : 'Archive'}
-                          aria-label={msg.folder === 'archive' ? 'Move to Inbox' : 'Archive'}
+                          className={`ag-amail-icon-btn ${isPickerOpenForRow ? 'active' : ''}`}
+                          onClick={(e) => openFolderPickerAt(e, msg, false)}
+                          aria-label="Move to a folder"
+                          aria-expanded={isPickerOpenForRow}
+                          {...tipProps('Move to a folder')}
                         >
-                          <Archive size={13} />
+                          <FolderInput size={13} />
                         </button>
+                        {isRestorable ? (
+                          <button
+                            type="button"
+                            className="ag-amail-icon-btn restore"
+                            onClick={() => void handleRestoreMessage(msg)}
+                            aria-label={restoreTip}
+                            {...tipProps(restoreTip)}
+                          >
+                            <RotateCcw size={13} />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="ag-amail-icon-btn"
+                            onClick={() => void handleMoveToFolder(msg.id, 'archive')}
+                            aria-label="Archive — move out of Inbox without deleting"
+                            {...tipProps('Archive — move out of Inbox without deleting')}
+                          >
+                            <Archive size={13} />
+                          </button>
+                        )}
                       </>
                     )}
                     <button
@@ -934,6 +1867,7 @@ export function AmailView({
                       className="ag-amail-icon-btn danger"
                       onClick={() => {
                         onPlaySound?.('click')
+                        hideTooltip()
                         if (msg.folder === 'drafts') {
                           void amail.deleteDraft(msg.id)
                         } else if (msg.folder === 'trash') {
@@ -942,12 +1876,8 @@ export function AmailView({
                           void amail.moveToFolder(msg.id, 'trash')
                         }
                       }}
-                      title={
-                        msg.folder === 'trash' || msg.folder === 'drafts'
-                          ? 'Delete permanently'
-                          : 'Move to Trash'
-                      }
-                      aria-label="Delete message"
+                      aria-label={deleteTip}
+                      {...tipProps(deleteTip)}
                     >
                       <Trash2 size={13} />
                     </button>
@@ -963,6 +1893,12 @@ export function AmailView({
 
   const renderReader = (msg: AmailMessage) => {
     const statusMeta = formatDeliveryMeta(msg)
+    const isRestorable = msg.folder === 'trash' || msg.folder === 'archive'
+    const restoreTip = msg.folder === 'trash' ? 'Restore from Trash' : 'Restore from Archive'
+    const deleteTip = msg.folder === 'trash' ? 'Delete permanently' : 'Move to Trash'
+    const showReplyAll = canReplyAll(msg)
+    const isPickerOpen = folderPicker?.messageId === msg.id
+
     return (
       <div className="ag-amail-reader">
         <div className="ag-amail-reader-toolbar">
@@ -979,18 +1915,46 @@ export function AmailView({
           </button>
 
           <div className="ag-amail-reader-actions">
+            {isRestorable && (
+              <button
+                type="button"
+                className="ag-amail-tonal-btn accent"
+                onClick={() => void handleRestoreMessage(msg, true)}
+                aria-label={restoreTip}
+                {...tipProps(restoreTip)}
+              >
+                <RotateCcw size={13} />
+                <span>Restore</span>
+              </button>
+            )}
             <button
               type="button"
               className="ag-amail-tonal-btn"
               onClick={() => handleReply(msg)}
+              aria-label="Reply to sender"
+              {...tipProps('Reply to sender')}
             >
               <Reply size={13} />
               <span>Reply</span>
             </button>
+            {showReplyAll && (
+              <button
+                type="button"
+                className="ag-amail-tonal-btn"
+                onClick={() => handleReplyAll(msg)}
+                aria-label="Reply to all recipients"
+                {...tipProps('Reply to all recipients')}
+              >
+                <ReplyAll size={13} />
+                <span>Reply All</span>
+              </button>
+            )}
             <button
               type="button"
               className="ag-amail-tonal-btn"
               onClick={() => handleForward(msg)}
+              aria-label="Forward this message"
+              {...tipProps('Forward this message')}
             >
               <Forward size={13} />
               <span>Forward</span>
@@ -1002,29 +1966,38 @@ export function AmailView({
                 onPlaySound?.('click')
                 void amail.toggleStar(msg.id)
               }}
-              title={msg.isStarred ? 'Unstar' : 'Star'}
-              aria-label={msg.isStarred ? 'Unstar message' : 'Star message'}
+              aria-label={msg.isStarred ? 'Remove star' : 'Star this message'}
+              {...tipProps(msg.isStarred ? 'Remove star' : 'Star this message')}
             >
               <Star size={14} fill={msg.isStarred ? 'currentColor' : 'none'} />
             </button>
             <button
               type="button"
-              className="ag-amail-icon-btn"
-              onClick={() => {
-                onPlaySound?.('click')
-                void amail.moveToFolder(msg.id, msg.folder === 'archive' ? 'inbox' : 'archive')
-                setSelectedMessageId(null)
-              }}
-              title={msg.folder === 'archive' ? 'Move to Inbox' : 'Archive'}
-              aria-label={msg.folder === 'archive' ? 'Move to Inbox' : 'Archive'}
+              className={`ag-amail-icon-btn ${isPickerOpen ? 'active' : ''}`}
+              onClick={(e) => openFolderPickerAt(e, msg, true)}
+              aria-label="Move to a folder"
+              aria-expanded={isPickerOpen}
+              {...tipProps('Move to a folder')}
             >
-              <Archive size={14} />
+              <FolderInput size={14} />
             </button>
+            {!isRestorable && (
+              <button
+                type="button"
+                className="ag-amail-icon-btn"
+                onClick={() => void handleMoveToFolder(msg.id, 'archive', true)}
+                aria-label="Archive — move out of Inbox without deleting"
+                {...tipProps('Archive — move out of Inbox without deleting')}
+              >
+                <Archive size={14} />
+              </button>
+            )}
             <button
               type="button"
               className="ag-amail-icon-btn danger"
               onClick={() => {
                 onPlaySound?.('click')
+                hideTooltip()
                 if (msg.folder === 'trash') {
                   void amail.deletePermanently(msg.id)
                 } else {
@@ -1032,8 +2005,8 @@ export function AmailView({
                 }
                 setSelectedMessageId(null)
               }}
-              title={msg.folder === 'trash' ? 'Delete permanently' : 'Move to Trash'}
-              aria-label="Delete message"
+              aria-label={deleteTip}
+              {...tipProps(deleteTip)}
             >
               <Trash2 size={14} />
             </button>
@@ -1048,6 +2021,12 @@ export function AmailView({
                 {msg.deliveryStatus === 'read' ? <CheckCheck size={12} /> : <Lock size={11} />}
                 <span>{statusMeta.label}</span>
               </span>
+              {!BUILTIN_FOLDER_SET.has(msg.folder) && (
+                <span className="ag-amail-folder-tag">
+                  <Folder size={11} />
+                  <span>{getFolderDisplayName(msg.folder)}</span>
+                </span>
+              )}
               {threadMessages.length > 1 && (
                 <span className="ag-amail-thread-count mono">
                   · {threadMessages.length} messages
@@ -1059,6 +2038,11 @@ export function AmailView({
           <div className="ag-amail-thread-stack">
             {threadMessages.map((item) => {
               const itemMeta = formatDeliveryMeta(item)
+              const toList = getMessageToList(item)
+              const ccList = item.ccRecipients ?? []
+              const bccList = item.direction === 'out' ? (item.bccRecipients ?? []) : []
+              const fromIsSelf = item.fromPubkey.toLowerCase() === myPubkey
+
               return (
                 <article key={item.id} className="ag-amail-message-block">
                   <header className="ag-amail-msg-meta">
@@ -1076,7 +2060,7 @@ export function AmailView({
                             className="ag-amail-msg-from truncate"
                             style={{ color: pubkeyToColor(item.fromPubkey) }}
                           >
-                            {item.fromName}
+                            {fromIsSelf ? `${item.fromName} (You)` : item.fromName}
                           </span>
                           <button
                             type="button"
@@ -1084,7 +2068,8 @@ export function AmailView({
                             onClick={() =>
                               void copyValue(`from-${item.id}`, item.fromNpub, 'Copied sender npub')
                             }
-                            title={`Copy ${item.fromNpub}`}
+                            aria-label="Copy sender npub"
+                            {...tipProps(`Copy ${shortPubkey(item.fromNpub, 10, 6)}`)}
                           >
                             <span>{shortPubkey(item.fromNpub, 8, 5)}</span>
                             {copiedId === `from-${item.id}` ? (
@@ -1094,19 +2079,103 @@ export function AmailView({
                             )}
                           </button>
                         </div>
-                        <div className="ag-amail-msg-to-row">
-                          <span>To {item.toName}</span>
-                          <button
-                            type="button"
-                            className="ag-amail-npub-link subtle mono"
-                            onClick={() =>
-                              void copyValue(`to-${item.id}`, item.toNpub, 'Copied recipient npub')
-                            }
-                            title={`Copy ${item.toNpub}`}
-                          >
-                            <span>{shortPubkey(item.toNpub, 7, 4)}</span>
-                          </button>
-                        </div>
+
+                        {toList.length > 0 && (
+                          <div className="ag-amail-msg-recip-row">
+                            <span className="ag-amail-msg-recip-label">To</span>
+                            <div className="ag-amail-msg-recip-list">
+                              {toList.map((r, idx) => (
+                                <button
+                                  key={`${item.id}-to-${r.pubkey}`}
+                                  type="button"
+                                  className="ag-amail-msg-recip-btn"
+                                  onClick={() =>
+                                    void copyValue(
+                                      `to-${item.id}-${r.pubkey}`,
+                                      r.npub,
+                                      'Copied recipient npub',
+                                    )
+                                  }
+                                  aria-label={`Copy npub for ${formatRecipientName(r)}`}
+                                  {...tipProps(`Copy ${shortPubkey(r.npub, 10, 6)}`)}
+                                >
+                                  <span>
+                                    {formatRecipientName(r)}
+                                    {idx < toList.length - 1 ? ',' : ''}
+                                  </span>
+                                </button>
+                              ))}
+                              {item.direction === 'in' && item.isBccRecipient && (
+                                <span className="ag-amail-bcc-tag">BCC</span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {toList.length === 0 && item.direction === 'in' && item.isBccRecipient && (
+                          <div className="ag-amail-msg-recip-row">
+                            <span className="ag-amail-bcc-tag">BCC</span>
+                            <span className="ag-amail-msg-recip-label">Sent to you via BCC</span>
+                          </div>
+                        )}
+
+                        {ccList.length > 0 && (
+                          <div className="ag-amail-msg-recip-row">
+                            <span className="ag-amail-msg-recip-label">CC</span>
+                            <div className="ag-amail-msg-recip-list">
+                              {ccList.map((r, idx) => (
+                                <button
+                                  key={`${item.id}-cc-${r.pubkey}`}
+                                  type="button"
+                                  className="ag-amail-msg-recip-btn"
+                                  onClick={() =>
+                                    void copyValue(
+                                      `cc-${item.id}-${r.pubkey}`,
+                                      r.npub,
+                                      'Copied CC npub',
+                                    )
+                                  }
+                                  aria-label={`Copy npub for ${formatRecipientName(r)}`}
+                                  {...tipProps(`Copy ${shortPubkey(r.npub, 10, 6)}`)}
+                                >
+                                  <span>
+                                    {formatRecipientName(r)}
+                                    {idx < ccList.length - 1 ? ',' : ''}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {bccList.length > 0 && (
+                          <div className="ag-amail-msg-recip-row">
+                            <span className="ag-amail-msg-recip-label">BCC</span>
+                            <div className="ag-amail-msg-recip-list">
+                              {bccList.map((r, idx) => (
+                                <button
+                                  key={`${item.id}-bcc-${r.pubkey}`}
+                                  type="button"
+                                  className="ag-amail-msg-recip-btn"
+                                  onClick={() =>
+                                    void copyValue(
+                                      `bcc-${item.id}-${r.pubkey}`,
+                                      r.npub,
+                                      'Copied BCC npub',
+                                    )
+                                  }
+                                  aria-label={`Copy npub for ${formatRecipientName(r)}`}
+                                  {...tipProps(`Copy ${shortPubkey(r.npub, 10, 6)}`)}
+                                >
+                                  <span>
+                                    {formatRecipientName(r)}
+                                    {idx < bccList.length - 1 ? ',' : ''}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1140,6 +2209,230 @@ export function AmailView({
     )
   }
 
+  const renderRecipientLine = (field: RecipientField) => {
+    const label = field === 'to' ? 'To' : field === 'cc' ? 'CC' : 'BCC'
+    const inputId =
+      field === 'to'
+        ? 'ag-amail-to-input'
+        : field === 'cc'
+          ? 'ag-amail-cc-input'
+          : 'ag-amail-bcc-input'
+    const chips =
+      field === 'to' ? toRecipients : field === 'cc' ? ccRecipients : bccRecipients
+    const inputVal = field === 'to' ? toInput : field === 'cc' ? ccInput : bccInput
+    const setInputVal =
+      field === 'to' ? setToInput : field === 'cc' ? setCcInput : setBccInput
+    const isDropdownOpen = activeRecipientField === field
+    const matches = isDropdownOpen ? getAutocompleteForField(field, inputVal) : []
+
+    const handleFieldKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'ArrowDown' && matches.length > 0) {
+        e.preventDefault()
+        setAcHighlightIdx((i) => (i + 1) % matches.length)
+        return
+      }
+      if (e.key === 'ArrowUp' && matches.length > 0) {
+        e.preventDefault()
+        setAcHighlightIdx((i) => (i - 1 + matches.length) % matches.length)
+        return
+      }
+      if (e.key === 'Enter' || e.key === ',') {
+        if (inputVal.trim() || matches.length > 0) {
+          e.preventDefault()
+          const committed = tryCommitFieldInput(field, inputVal, true)
+          if (committed) {
+            setAcHighlightIdx(0)
+          }
+        }
+        return
+      }
+      if (e.key === 'Tab' && inputVal.trim()) {
+        if (tryCommitFieldInput(field, inputVal, true)) {
+          e.preventDefault()
+          setAcHighlightIdx(0)
+        }
+        return
+      }
+      if (e.key === 'Backspace' && !inputVal && chips.length > 0) {
+        e.preventDefault()
+        const last = chips[chips.length - 1]
+        if (last) removeRecipientChip(field, last.pubkey)
+      }
+    }
+
+    return (
+      <div className="ag-amail-compose-line" key={field}>
+        <label className="ag-amail-line-label" htmlFor={inputId}>
+          {label}
+        </label>
+        <div className="ag-amail-to-box">
+          <div className="ag-amail-chip-field">
+            {chips.map((r) => {
+              const isSelf = r.pubkey.toLowerCase() === myPubkey
+              return (
+                <span key={`${field}-${r.pubkey}`} className="ag-amail-recip-chip">
+                  <img
+                    src={identiconDataUrl(r.pubkey)}
+                    alt=""
+                    width={16}
+                    height={16}
+                    className="ag-amail-recip-avatar"
+                  />
+                  <span className="truncate">{isSelf ? 'You (Self)' : r.nickname}</span>
+                  <button
+                    type="button"
+                    className="ag-amail-recip-clear"
+                    onClick={() => removeRecipientChip(field, r.pubkey)}
+                    aria-label={`Remove ${r.nickname}`}
+                  >
+                    <X size={11} />
+                  </button>
+                </span>
+              )
+            })}
+            <input
+              id={inputId}
+              type="text"
+              className="ag-amail-line-input ag-amail-chip-input"
+              value={inputVal}
+              onFocus={() => {
+                setActiveRecipientField(field)
+                setAcHighlightIdx(0)
+              }}
+              onBlur={(e) => {
+                const next = e.relatedTarget as Node | null
+                if (!next || !recipLinesWrapRef.current?.contains(next)) {
+                  setActiveRecipientField((prev) => (prev === field ? null : prev))
+                }
+              }}
+              onChange={(e) => {
+                const val = e.target.value
+                setInputVal(val)
+                setActiveRecipientField(field)
+                setAcHighlightIdx(0)
+                if (composeError) setComposeError(null)
+                const trimmed = val.trim()
+                const direct = resolvePubkeyInput(trimmed)
+                if (
+                  direct &&
+                  (trimmed.startsWith('npub1') ||
+                    trimmed.includes('#dm=') ||
+                    /^[0-9a-f]{64}$/i.test(trimmed))
+                ) {
+                  addRecipientChip(field, resolveRecipientInfo(direct.pubkey, direct.nickname))
+                }
+              }}
+              onKeyDown={handleFieldKeyDown}
+              placeholder={
+                chips.length === 0
+                  ? field === 'to'
+                    ? 'Name, Me, or npub…'
+                    : `Add ${label} recipient…`
+                  : 'Add another…'
+              }
+              autoComplete="off"
+            />
+          </div>
+
+          {isDropdownOpen && matches.length > 0 && (
+            <div className="ag-amail-autocomplete" role="listbox" aria-label={`${label} contacts`}>
+              {matches.map((c, idx) => (
+                <button
+                  key={`${field}-ac-${c.pubkey}`}
+                  type="button"
+                  role="option"
+                  aria-selected={idx === acHighlightIdx}
+                  className={`ag-amail-ac-item ${idx === acHighlightIdx ? 'highlighted' : ''}`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => setAcHighlightIdx(idx)}
+                  onClick={() => {
+                    addRecipientChip(field, {
+                      pubkey: c.pubkey,
+                      npub: c.npub,
+                      nickname: c.nickname,
+                    })
+                    setActiveRecipientField(null)
+                  }}
+                >
+                  <img
+                    src={identiconDataUrl(c.pubkey)}
+                    alt=""
+                    width={24}
+                    height={24}
+                    className="ag-amail-avatar-sm"
+                  />
+                  <span className="ag-amail-ac-copy">
+                    <span
+                      className="ag-amail-ac-name truncate"
+                      style={{ color: pubkeyToColor(c.pubkey) }}
+                    >
+                      {c.displayLabel}
+                    </span>
+                    <span className="ag-amail-ac-npub mono truncate">{c.subLabel}</span>
+                  </span>
+                  {c.isSelf ? (
+                    <span className="ag-amail-self-tag">You</span>
+                  ) : c.isTrustedPeer ? (
+                    <span className="ag-amail-trusted-tag">
+                      <ShieldCheck size={11} />
+                      <span>Trusted</span>
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {field === 'to' && (
+          <div className="ag-amail-cc-bcc-toggles">
+            {!showCc && (
+              <button
+                type="button"
+                className="ag-amail-field-toggle"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  setShowCc(true)
+                  setActiveRecipientField(null)
+                }}
+              >
+                Cc
+              </button>
+            )}
+            {!showBcc && (
+              <button
+                type="button"
+                className="ag-amail-field-toggle"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  setShowBcc(true)
+                  setActiveRecipientField(null)
+                }}
+              >
+                Bcc
+              </button>
+            )}
+            {onOpenScanner && (
+              <button
+                type="button"
+                className="ag-amail-icon-btn"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  hideTooltip()
+                  onOpenScanner()
+                }}
+                aria-label="Scan recipient QR code"
+                {...tipProps('Scan recipient QR code')}
+              >
+                <QrCode size={15} />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const renderCompose = () => (
     <form className="ag-amail-compose" onSubmit={(e) => void handleSendMail(e)}>
       <div className="ag-amail-compose-head">
@@ -1169,8 +2462,8 @@ export function AmailView({
             type="button"
             className="ag-amail-icon-btn danger"
             onClick={handleDiscardCompose}
-            title="Discard draft"
             aria-label="Discard draft"
+            {...tipProps('Discard draft')}
           >
             <Trash2 size={14} />
           </button>
@@ -1178,137 +2471,16 @@ export function AmailView({
       </div>
 
       <div className="ag-amail-compose-scroll">
-        {/* Hairline To: row */}
-        <div className="ag-amail-compose-line" ref={toWrapRef}>
-          <label className="ag-amail-line-label" htmlFor="ag-amail-to-input">
-            To
-          </label>
-          <div className="ag-amail-to-box">
-            {selectedRecipient ? (
-              <span className="ag-amail-recip-chip">
-                <img
-                  src={identiconDataUrl(selectedRecipient.pubkey)}
-                  alt=""
-                  width={18}
-                  height={18}
-                  className="ag-amail-recip-avatar"
-                />
-                <span className="truncate">{selectedRecipient.nickname}</span>
-                <span className="ag-amail-recip-npub mono">
-                  {shortPubkey(selectedRecipient.npub, 6, 4)}
-                </span>
-                <button
-                  type="button"
-                  className="ag-amail-recip-clear"
-                  onClick={() => {
-                    setSelectedRecipient(null)
-                    setToInput('')
-                  }}
-                  aria-label="Clear recipient"
-                >
-                  <X size={12} />
-                </button>
-              </span>
-            ) : (
-              <div className="ag-amail-to-input-row">
-                <input
-                  id="ag-amail-to-input"
-                  type="text"
-                  className="ag-amail-line-input"
-                  value={toInput}
-                  onFocus={() => setToDropdownOpen(true)}
-                  onChange={(e) => {
-                    const val = e.target.value
-                    setToInput(val)
-                    setToDropdownOpen(true)
-                    if (composeError) setComposeError(null)
-                    const direct = resolvePubkeyInput(val)
-                    if (
-                      direct &&
-                      (val.startsWith('npub1') || val.includes('#dm=') || val.length === 64)
-                    ) {
-                      const known = mergedContacts.find(
-                        (c) => c.pubkey.toLowerCase() === direct.pubkey.toLowerCase(),
-                      )
-                      setSelectedRecipient({
-                        pubkey: direct.pubkey,
-                        npub: direct.npub,
-                        nickname:
-                          direct.nickname || known?.nickname || shortPubkey(direct.pubkey, 8, 6),
-                      })
-                      setToInput('')
-                      setToDropdownOpen(false)
-                    }
-                  }}
-                  placeholder="Name or npub…"
-                  autoComplete="off"
-                />
-                {onOpenScanner && (
-                  <button
-                    type="button"
-                    className="ag-amail-icon-btn"
-                    onClick={() => {
-                      onPlaySound?.('click')
-                      onOpenScanner()
-                    }}
-                    title="Scan QR code"
-                    aria-label="Scan recipient QR code"
-                  >
-                    <QrCode size={15} />
-                  </button>
-                )}
-              </div>
-            )}
-
-            {!selectedRecipient && toDropdownOpen && autocompleteMatches.length > 0 && (
-              <div className="ag-amail-autocomplete" role="listbox" aria-label="Contacts">
-                {autocompleteMatches.map((c) => (
-                  <button
-                    key={c.pubkey}
-                    type="button"
-                    role="option"
-                    className="ag-amail-ac-item"
-                    onClick={() => {
-                      setSelectedRecipient({
-                        pubkey: c.pubkey,
-                        npub: c.npub,
-                        nickname: c.nickname,
-                      })
-                      setToInput('')
-                      setToDropdownOpen(false)
-                      setComposeError(null)
-                    }}
-                  >
-                    <img
-                      src={identiconDataUrl(c.pubkey)}
-                      alt=""
-                      width={24}
-                      height={24}
-                      className="ag-amail-avatar-sm"
-                    />
-                    <span className="ag-amail-ac-copy">
-                      <span
-                        className="ag-amail-ac-name truncate"
-                        style={{ color: pubkeyToColor(c.pubkey) }}
-                      >
-                        {c.nickname}
-                      </span>
-                      <span className="ag-amail-ac-npub mono truncate">
-                        {shortPubkey(c.npub, 10, 6)}
-                      </span>
-                    </span>
-                    {c.isTrustedPeer && (
-                      <span className="ag-amail-trusted-tag">
-                        <ShieldCheck size={11} />
-                        <span>Trusted</span>
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+        {/* Multi-recipient To / CC / BCC lines */}
+        <div ref={recipLinesWrapRef}>
+          {renderRecipientLine('to')}
+          {showCc && renderRecipientLine('cc')}
+          {showBcc && renderRecipientLine('bcc')}
         </div>
+
+        {bccRecipients.length > 0 && (
+          <p className="ag-amail-bcc-note">BCC recipients stay hidden from everyone else.</p>
+        )}
 
         {/* Hairline Subject row */}
         <div className="ag-amail-compose-line">
@@ -1448,10 +2620,11 @@ export function AmailView({
               className="ag-amail-icon-btn"
               onClick={() => {
                 onPlaySound?.('click')
+                hideTooltip()
                 onOpenScanner()
               }}
-              title="Scan QR code"
               aria-label="Scan QR code"
+              {...tipProps('Scan QR code')}
             >
               <QrCode size={15} />
             </button>
@@ -1550,8 +2723,8 @@ export function AmailView({
                     type="button"
                     className="ag-amail-icon-btn"
                     onClick={() => void copyValue(`c-${c.pubkey}`, c.npub, 'Copied npub')}
-                    title="Copy npub"
                     aria-label={`Copy npub for ${c.nickname}`}
+                    {...tipProps('Copy npub')}
                   >
                     {copiedId === `c-${c.pubkey}` ? <Check size={13} /> : <Copy size={13} />}
                   </button>
@@ -1561,10 +2734,11 @@ export function AmailView({
                       className="ag-amail-icon-btn danger"
                       onClick={() => {
                         onPlaySound?.('click')
+                        hideTooltip()
                         void amail.removeContact(c.pubkey)
                       }}
-                      title="Remove contact"
                       aria-label={`Remove ${c.nickname}`}
+                      {...tipProps('Remove contact')}
                     >
                       <Trash2 size={13} />
                     </button>
@@ -1760,7 +2934,7 @@ export function AmailView({
               </div>
               {amail.relayCapsules.map((cap) => (
                 <div key={cap.capsuleId} className="ag-amail-capsule-row mono" role="row">
-                  <span role="cell" className="truncate" title={cap.capsuleId}>
+                  <span role="cell" className="truncate">
                     {cap.capsuleId.slice(0, 12)}…
                   </span>
                   <span role="cell">{formatBytes(cap.sizeBytes)}</span>
@@ -1835,11 +3009,13 @@ export function AmailView({
               className={`ag-amail-mesh-pill ${connectedCouriers > 0 ? 'live' : ''}`}
               onClick={() => {
                 onPlaySound?.('click')
+                hideTooltip()
                 setComposing(false)
                 setSelectedMessageId(null)
                 setSection('mesh')
               }}
-              title="Mesh & Storage"
+              aria-label="Mesh relay & storage status"
+              {...tipProps('Mesh relay & storage status')}
             >
               <span
                 className={`ag-amail-mesh-dot ${connectedCouriers > 0 ? 'live' : ''}`}
@@ -1855,8 +3031,8 @@ export function AmailView({
               className="ag-amail-icon-btn"
               disabled={amail.isSyncing}
               onClick={() => void handleSyncMesh()}
-              title="Sync mesh"
               aria-label="Sync Agmail mesh now"
+              {...tipProps('Sync Agmail mesh now')}
             >
               <RefreshCw size={14} className={amail.isSyncing ? 'ag-spin' : ''} />
             </button>
@@ -1866,10 +3042,11 @@ export function AmailView({
               className="ag-amail-mobile-compose-btn"
               onClick={() => {
                 onPlaySound?.('click')
+                hideTooltip()
                 openFreshComposer()
               }}
-              aria-label="Compose Agmail"
-              title="Compose"
+              aria-label="Compose new Agmail"
+              {...tipProps('Compose new Agmail')}
             >
               <Plus size={16} />
             </button>
@@ -1877,9 +3054,12 @@ export function AmailView({
             <button
               type="button"
               className="ag-amail-icon-btn"
-              onClick={onClose}
+              onClick={() => {
+                hideTooltip()
+                onClose()
+              }}
               aria-label="Close Agmail"
-              title="Close (Esc)"
+              {...tipProps('Close Agmail')}
             >
               <X size={16} />
             </button>
@@ -1888,60 +3068,227 @@ export function AmailView({
 
         {/* Mobile Scrollable Folder Pills */}
         {!composing && !selectedMessage && (
-          <div className="ag-amail-mobile-pills" role="tablist" aria-label="Agmail folders">
-            {navFolders.map((f) => {
-              const Icon = f.icon
-              const active = section === f.id
-              return (
-                <button
-                  key={f.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  className={`ag-amail-pill-tab ${active ? 'active' : ''}`}
-                  onClick={() => {
-                    onPlaySound?.('click')
-                    setSection(f.id)
-                    setSelectedMessageId(null)
-                  }}
-                >
-                  <Icon size={13} />
-                  <span>{f.label}</span>
-                  {f.count !== undefined && f.count > 0 && (
-                    <span className="ag-amail-pill-count mono">{f.count}</span>
-                  )}
-                </button>
-              )
-            })}
-            <button
-              type="button"
-              role="tab"
-              aria-selected={section === 'contacts'}
-              className={`ag-amail-pill-tab ${section === 'contacts' ? 'active' : ''}`}
-              onClick={() => {
-                onPlaySound?.('click')
-                setSection('contacts')
-                setSelectedMessageId(null)
-              }}
-            >
-              <Users size={13} />
-              <span>Contacts</span>
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={section === 'mesh'}
-              className={`ag-amail-pill-tab ${section === 'mesh' ? 'active' : ''}`}
-              onClick={() => {
-                onPlaySound?.('click')
-                setSection('mesh')
-                setSelectedMessageId(null)
-              }}
-            >
-              <HardDrive size={13} />
-              <span>Mesh</span>
-            </button>
-          </div>
+          <>
+            <div className="ag-amail-mobile-pills" role="tablist" aria-label="Agmail folders">
+              {navFolders.map((f) => {
+                const Icon = f.icon
+                const active = section === f.id
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    className={`ag-amail-pill-tab ${active ? 'active' : ''}`}
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      setSection(f.id)
+                      setSelectedMessageId(null)
+                    }}
+                  >
+                    <Icon size={13} />
+                    <span>{f.label}</span>
+                    {f.count !== undefined && f.count > 0 && (
+                      <span className="ag-amail-pill-count mono">{f.count}</span>
+                    )}
+                  </button>
+                )
+              })}
+
+              {displayedCustomFolders.map((folder) => {
+                const active = section === folder.id
+                const count = folderCounts.customCounts[folder.id] ?? 0
+                return (
+                  <button
+                    key={folder.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    className={`ag-amail-pill-tab ${active ? 'active' : ''}`}
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      setSection(folder.id)
+                      setSelectedMessageId(null)
+                    }}
+                  >
+                    <Folder size={13} />
+                    <span>{folder.name}</span>
+                    {count > 0 && <span className="ag-amail-pill-count mono">{count}</span>}
+                  </button>
+                )
+              })}
+
+              <button
+                type="button"
+                className={`ag-amail-pill-tab subtle ${creatingFolder ? 'active' : ''}`}
+                onClick={() => {
+                  onPlaySound?.('click')
+                  setCreatingFolder((v) => !v)
+                  setNewFolderName('')
+                }}
+                aria-label="Create new folder"
+              >
+                <FolderPlus size={13} />
+                <span>Folder</span>
+              </button>
+
+              <button
+                type="button"
+                role="tab"
+                aria-selected={section === 'contacts'}
+                className={`ag-amail-pill-tab ${section === 'contacts' ? 'active' : ''}`}
+                onClick={() => {
+                  onPlaySound?.('click')
+                  setSection('contacts')
+                  setSelectedMessageId(null)
+                }}
+              >
+                <Users size={13} />
+                <span>Contacts</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={section === 'mesh'}
+                className={`ag-amail-pill-tab ${section === 'mesh' ? 'active' : ''}`}
+                onClick={() => {
+                  onPlaySound?.('click')
+                  setSection('mesh')
+                  setSelectedMessageId(null)
+                }}
+              >
+                <HardDrive size={13} />
+                <span>Mesh</span>
+              </button>
+            </div>
+
+            {/* Mobile Inline Create / Manage Custom Folder Strip */}
+            {(creatingFolder || activeCustomFolder) && (
+              <div className="ag-amail-mobile-folder-bar">
+                {creatingFolder ? (
+                  <form
+                    className="ag-amail-mobile-folder-form"
+                    onSubmit={(e) => void handleCreateFolderSubmit(e)}
+                  >
+                    <input
+                      type="text"
+                      maxLength={32}
+                      className="ag-amail-soft-input compact"
+                      value={newFolderName}
+                      onChange={(e) => setNewFolderName(e.target.value)}
+                      placeholder="New folder name…"
+                      aria-label="New folder name"
+                    />
+                    <button
+                      type="submit"
+                      className="ag-amail-tonal-btn accent"
+                      disabled={!newFolderName.trim()}
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-amail-icon-btn"
+                      onClick={() => {
+                        setCreatingFolder(false)
+                        setNewFolderName('')
+                      }}
+                      aria-label="Cancel creating folder"
+                    >
+                      <X size={14} />
+                    </button>
+                  </form>
+                ) : activeCustomFolder ? (
+                  renamingFolderId === activeCustomFolder.id ? (
+                    <form
+                      className="ag-amail-mobile-folder-form"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        void handleCommitRenameFolder(activeCustomFolder.id)
+                      }}
+                    >
+                      <input
+                        type="text"
+                        maxLength={32}
+                        className="ag-amail-soft-input compact"
+                        value={renameFolderDraft}
+                        onChange={(e) => setRenameFolderDraft(e.target.value)}
+                        aria-label="Rename folder"
+                      />
+                      <button
+                        type="submit"
+                        className="ag-amail-tonal-btn accent"
+                        disabled={!renameFolderDraft.trim()}
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-amail-icon-btn"
+                        onClick={() => setRenamingFolderId(null)}
+                        aria-label="Cancel rename"
+                      >
+                        <X size={14} />
+                      </button>
+                    </form>
+                  ) : (
+                    <div className="ag-amail-mobile-folder-manage">
+                      <span className="ag-amail-mobile-folder-name truncate">
+                        <Folder size={13} />
+                        <span className="truncate">{activeCustomFolder.name}</span>
+                      </span>
+                      <div className="ag-amail-mobile-folder-btns">
+                        <button
+                          type="button"
+                          className="ag-amail-tonal-btn compact"
+                          onClick={() => {
+                            setRenamingFolderId(activeCustomFolder.id)
+                            setRenameFolderDraft(activeCustomFolder.name)
+                          }}
+                        >
+                          Rename
+                        </button>
+                        <button
+                          type="button"
+                          className="ag-amail-tonal-btn compact"
+                          onClick={handleCycleFolderSort}
+                        >
+                          {getSortModeShortLabel(amail.folderSortMode)}
+                        </button>
+                        <button
+                          type="button"
+                          className="ag-amail-icon-btn"
+                          disabled={activeCustomFolderIndex <= 0}
+                          onClick={() => handleMoveFolderStep(activeCustomFolder.id, -1)}
+                          aria-label="Move folder up"
+                        >
+                          <ChevronUp size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className="ag-amail-icon-btn"
+                          disabled={activeCustomFolderIndex >= displayedCustomFolders.length - 1}
+                          onClick={() => handleMoveFolderStep(activeCustomFolder.id, 1)}
+                          aria-label="Move folder down"
+                        >
+                          <ChevronDown size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className={`ag-amail-tonal-btn compact danger ${
+                            armedDeleteFolderId === activeCustomFolder.id ? 'armed' : ''
+                          }`}
+                          onClick={() => void handleDeleteFolderClick(activeCustomFolder.id)}
+                        >
+                          {armedDeleteFolderId === activeCustomFolder.id ? 'Confirm' : 'Delete'}
+                        </button>
+                      </div>
+                    </div>
+                  )
+                ) : null}
+              </div>
+            )}
+          </>
         )}
 
         {/* Body Layout */}
@@ -1952,8 +3299,11 @@ export function AmailView({
               className="ag-amail-compose-btn"
               onClick={() => {
                 onPlaySound?.('click')
+                hideTooltip()
                 openFreshComposer()
               }}
+              aria-label="Compose new Agmail"
+              {...tipProps('Compose new Agmail')}
             >
               <PenSquare size={15} />
               <span>Compose</span>
@@ -1988,6 +3338,201 @@ export function AmailView({
                       </span>
                     )}
                   </button>
+                )
+              })}
+
+              <div className="ag-amail-nav-divider" />
+
+              {/* Custom Folders Section */}
+              <div className="ag-amail-folders-head">
+                <span className="ag-amail-folders-title">Folders</span>
+                <div className="ag-amail-folders-head-actions">
+                  <button
+                    type="button"
+                    className="ag-amail-folder-sort-btn"
+                    onClick={handleCycleFolderSort}
+                    aria-label="Sort folders (A–Z / Z–A / Manual)"
+                    {...tipProps('Sort folders (A–Z / Z–A / Manual)')}
+                  >
+                    <ArrowUpDown size={11} />
+                    <span>{getSortModeShortLabel(amail.folderSortMode)}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="ag-amail-folder-head-btn"
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      hideTooltip()
+                      setCreatingFolder((v) => !v)
+                      setNewFolderName('')
+                    }}
+                    aria-label="Create new folder"
+                    {...tipProps('Create new folder')}
+                  >
+                    <Plus size={13} />
+                  </button>
+                </div>
+              </div>
+
+              {creatingFolder && (
+                <form
+                  className="ag-amail-folder-inline-form"
+                  onSubmit={(e) => void handleCreateFolderSubmit(e)}
+                >
+                  <input
+                    ref={newFolderInputRef}
+                    type="text"
+                    maxLength={32}
+                    className="ag-amail-folder-inline-input"
+                    value={newFolderName}
+                    onChange={(e) => setNewFolderName(e.target.value)}
+                    placeholder="Folder name…"
+                    aria-label="New folder name"
+                  />
+                  <button
+                    type="submit"
+                    className="ag-amail-folder-head-btn accent"
+                    disabled={!newFolderName.trim()}
+                    aria-label="Save new folder"
+                  >
+                    <Check size={12} />
+                  </button>
+                  <button
+                    type="button"
+                    className="ag-amail-folder-head-btn"
+                    onClick={() => {
+                      setCreatingFolder(false)
+                      setNewFolderName('')
+                    }}
+                    aria-label="Cancel new folder"
+                  >
+                    <X size={12} />
+                  </button>
+                </form>
+              )}
+
+              {displayedCustomFolders.map((folder, index) => {
+                const active = !composing && section === folder.id
+                const count = folderCounts.customCounts[folder.id] ?? 0
+                const isRenaming = renamingFolderId === folder.id
+                const isArmedDelete = armedDeleteFolderId === folder.id
+                const isDragging = draggingFolderId === folder.id
+                const isDragOver = dragOverFolderId === folder.id
+
+                if (isRenaming) {
+                  return (
+                    <form
+                      key={folder.id}
+                      className="ag-amail-folder-inline-form"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        void handleCommitRenameFolder(folder.id)
+                      }}
+                    >
+                      <input
+                        ref={renameFolderInputRef}
+                        type="text"
+                        maxLength={32}
+                        className="ag-amail-folder-inline-input"
+                        value={renameFolderDraft}
+                        onChange={(e) => setRenameFolderDraft(e.target.value)}
+                        onBlur={() => void handleCommitRenameFolder(folder.id)}
+                        aria-label="Rename folder"
+                      />
+                    </form>
+                  )
+                }
+
+                return (
+                  <div
+                    key={folder.id}
+                    draggable
+                    onDragStart={(e) => {
+                      setDraggingFolderId(folder.id)
+                      e.dataTransfer.effectAllowed = 'move'
+                      e.dataTransfer.setData('text/plain', folder.id)
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault()
+                      if (dragOverFolderId !== folder.id) setDragOverFolderId(folder.id)
+                    }}
+                    onDragLeave={() => {
+                      if (dragOverFolderId === folder.id) setDragOverFolderId(null)
+                    }}
+                    onDrop={(e) => handleFolderDrop(e, folder.id)}
+                    onDragEnd={() => {
+                      setDraggingFolderId(null)
+                      setDragOverFolderId(null)
+                    }}
+                    onContextMenu={(e) => openFolderContextMenu(e, folder, index)}
+                    className={`ag-amail-custom-folder-row ${active ? 'active' : ''} ${
+                      isDragging ? 'dragging' : ''
+                    } ${isDragOver ? 'drag-over' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="ag-amail-custom-folder-main"
+                      aria-current={active ? 'page' : undefined}
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setComposing(false)
+                        setSection(folder.id)
+                        setSelectedMessageId(null)
+                      }}
+                    >
+                      <Folder size={14} />
+                      <span className="ag-amail-nav-label truncate">{folder.name}</span>
+                      {count > 0 && <span className="ag-amail-nav-badge mono">{count}</span>}
+                    </button>
+                    <div
+                      className={`ag-amail-folder-row-actions ${isArmedDelete ? 'visible' : ''}`}
+                    >
+                      <button
+                        type="button"
+                        className="ag-amail-folder-mini-btn"
+                        disabled={index === 0}
+                        onClick={() => handleMoveFolderStep(folder.id, -1)}
+                        aria-label="Move folder up"
+                        {...tipProps('Move folder up')}
+                      >
+                        <ChevronUp size={11} />
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-amail-folder-mini-btn"
+                        disabled={index >= displayedCustomFolders.length - 1}
+                        onClick={() => handleMoveFolderStep(folder.id, 1)}
+                        aria-label="Move folder down"
+                        {...tipProps('Move folder down')}
+                      >
+                        <ChevronDown size={11} />
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-amail-folder-mini-btn"
+                        onClick={() => {
+                          hideTooltip()
+                          setRenamingFolderId(folder.id)
+                          setRenameFolderDraft(folder.name)
+                        }}
+                        aria-label="Rename folder"
+                        {...tipProps('Rename folder')}
+                      >
+                        <Pencil size={11} />
+                      </button>
+                      <button
+                        type="button"
+                        className={`ag-amail-folder-mini-btn danger ${isArmedDelete ? 'armed' : ''}`}
+                        onClick={() => void handleDeleteFolderClick(folder.id)}
+                        aria-label={isArmedDelete ? 'Confirm delete folder' : 'Delete folder'}
+                        {...tipProps(
+                          isArmedDelete ? 'Click again to delete folder' : 'Delete folder',
+                        )}
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  </div>
                 )
               })}
 
@@ -2044,6 +3589,105 @@ export function AmailView({
           </main>
         </div>
       </div>
+
+      {/* Portal: Move-to-Folder Popover */}
+      {folderPicker &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={folderPickerRef}
+            className="ag-amail-folder-popover"
+            role="menu"
+            aria-label="Move to folder"
+            style={
+              folderPickerCoords
+                ? { left: `${folderPickerCoords.left}px`, top: `${folderPickerCoords.top}px` }
+                : { left: '-9999px', top: '-9999px' }
+            }
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="ag-amail-popover-head">Move to folder</div>
+            {(
+              [
+                { id: 'inbox' as const, label: 'Inbox', icon: Inbox },
+                { id: 'archive' as const, label: 'Archive', icon: Archive },
+                { id: 'trash' as const, label: 'Trash', icon: Trash2 },
+              ] as const
+            ).map((item) => {
+              const Icon = item.icon
+              const isCurrent = folderPicker.currentFolder === item.id
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="menuitem"
+                  className={`ag-amail-popover-item ${isCurrent ? 'current' : ''} ${
+                    item.id === 'trash' ? 'danger' : ''
+                  }`}
+                  onClick={() =>
+                    void handleMoveToFolder(
+                      folderPicker.messageId,
+                      item.id,
+                      folderPicker.closeReaderOnMove,
+                    )
+                  }
+                >
+                  <Icon size={13} />
+                  <span className="ag-amail-popover-label truncate">{item.label}</span>
+                  {isCurrent && <Check size={13} className="ag-amail-popover-check" />}
+                </button>
+              )
+            })}
+
+            {displayedCustomFolders.length > 0 && (
+              <>
+                <div className="ag-amail-popover-divider" />
+                {displayedCustomFolders.map((folder) => {
+                  const isCurrent = folderPicker.currentFolder === folder.id
+                  return (
+                    <button
+                      key={folder.id}
+                      type="button"
+                      role="menuitem"
+                      className={`ag-amail-popover-item ${isCurrent ? 'current' : ''}`}
+                      onClick={() =>
+                        void handleMoveToFolder(
+                          folderPicker.messageId,
+                          folder.id,
+                          folderPicker.closeReaderOnMove,
+                        )
+                      }
+                    >
+                      <Folder size={13} />
+                      <span className="ag-amail-popover-label truncate">{folder.name}</span>
+                      {isCurrent && <Check size={13} className="ag-amail-popover-check" />}
+                    </button>
+                  )
+                })}
+              </>
+            )}
+          </div>,
+          document.body,
+        )}
+
+      {/* Portal: Unclipped Custom Mouseover Tooltip */}
+      {tooltip &&
+        tooltipCoords &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={tooltipRef}
+            role="tooltip"
+            className={`ag-amail-tooltip ${tooltipCoords.placement === 'below' ? 'is-below' : 'is-above'}`}
+            style={{
+              left: `${tooltipCoords.left}px`,
+              top: `${tooltipCoords.top}px`,
+            }}
+          >
+            {tooltip.text}
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }

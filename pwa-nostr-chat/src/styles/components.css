@@ -176,40 +176,16 @@
   flex-shrink: 0;
 }
 
-/* Subtle Tonal Electric-Blue Agnostr Client Micro-Badge (Geo Radio) */
-.ag-client-badge {
-  display: inline-flex;
-  align-items: center;
-  align-self: center;
-  gap: 3px;
-  height: 16px;
-  padding: 0 5px 0 3px;
-  border-radius: var(--radius-xs);
-  background-color: var(--accent-soft);
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  line-height: 1;
-  white-space: nowrap;
-  flex-shrink: 0;
-  user-select: none;
+/* Crisp Blue Border Around Agnostr Users' Profile Pictures */
+img.ag-avatar-agnostr,
+.ag-avatar-agnostr {
+  box-sizing: border-box;
+  border: 2px solid #3B82F6;
 }
 
-.ag-client-badge-mark {
-  width: 11px;
-  height: 11px;
-  border-radius: 3px;
-  background-color: var(--accent);
-  color: var(--text-inverse);
-  font-size: 8.5px;
-  font-weight: 800;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-  flex-shrink: 0;
+[data-theme='daylight'] img.ag-avatar-agnostr,
+[data-theme='daylight'] .ag-avatar-agnostr {
+  border-color: #2563EB;
 }
 
 /* --------------------------------------------------------------------------

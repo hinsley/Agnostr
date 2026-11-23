@@ -479,6 +479,19 @@ export function isAgnostrClientTag(tags: string[][]): boolean {
   return parseClientTag(tags)?.toLowerCase() === AGNOSTR_CLIENT_TAG
 }
 
+export function formatClientDisplayName(
+  raw?: string | null,
+  isAgnostr?: boolean
+): string | null {
+  const clean = raw?.trim()
+  if (!clean) return isAgnostr ? 'Agnostr' : null
+  if (clean.toLowerCase() === AGNOSTR_CLIENT_TAG) return 'Agnostr'
+  if (clean === clean.toLowerCase()) {
+    return `${clean.charAt(0).toUpperCase()}${clean.slice(1)}`
+  }
+  return clean
+}
+
 export function buildGeohashChatTemplate(opts: {
   content: string
   geohash: string
@@ -697,6 +710,7 @@ export function parseGeohashChatEvent(
     isTeleported,
     isMeshBridge,
     bridgeClient: clientTag,
+    clientName: clientTag,
     isAgnostrClient,
     powBits: getValidatedPowBits(event.id, event.tags),
     replyTo,
@@ -766,6 +780,7 @@ export function parseNamedRadioChatEvent(
     isTeleported: false,
     isMeshBridge,
     bridgeClient: clientTag,
+    clientName: clientTag,
     isAgnostrClient,
     powBits: getValidatedPowBits(event.id, event.tags),
     replyTo,

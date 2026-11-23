@@ -1851,11 +1851,12 @@ export function SettingsModal({
         <div className="ag-set-toggle-copy">
           <span className="ag-set-toggle-title">
             <Radio size={16} />
-            <span>Broadcast Agnostr client badge</span>
+            <span>Broadcast Agnostr client</span>
           </span>
           <span className="ag-set-toggle-desc">
             Includes a standard NIP-89 client tag on Geo Radio messages and presence so other
-            Agnostr users see a badge on your name. Turn off for a wider Bitchat anonymity set.
+            Agnostr users see a blue border on your profile picture and Agnostr listed in your
+            profile. Turn off for a wider Bitchat anonymity set.
           </span>
         </div>
         <input

@@ -13,6 +13,7 @@ interface PeerRecord {
   lastSeenAt: number
   isTeleported: boolean
   isMeshBridge: boolean
+  clientName?: string
   isAgnostrClient: boolean
   messageCount: number
   channels: Set<string>
@@ -22,6 +23,7 @@ export class PresenceTracker {
   private byChannel = new Map<string, Map<string, PeerRecord>>()
   private globalNicknames = new Map<string, string>()
   private globalChannels = new Map<string, Set<string>>()
+  private globalClients = new Map<string, string>()
   private agnostrPeers = new Set<string>()
 
   recordActivity(opts: {
@@ -31,6 +33,7 @@ export class PresenceTracker {
     nickname?: string | null
     isTeleported?: boolean
     isMeshBridge?: boolean
+    clientName?: string | null
     isAgnostrClient?: boolean
     isMessage?: boolean
   }): void {
@@ -46,7 +49,11 @@ export class PresenceTracker {
     if (cleanNick) {
       this.globalNicknames.set(pk, cleanNick)
     }
-    if (opts.isAgnostrClient) {
+    const cleanClient = opts.clientName?.trim() || (opts.isAgnostrClient ? 'agnostr' : undefined)
+    if (cleanClient) {
+      this.globalClients.set(pk, cleanClient)
+    }
+    if (opts.isAgnostrClient || cleanClient?.toLowerCase() === 'agnostr') {
       this.agnostrPeers.add(pk)
     }
 
@@ -57,13 +64,20 @@ export class PresenceTracker {
     }
     peerChannels.add(gh)
 
-    const knownAgnostr = Boolean(opts.isAgnostrClient || this.agnostrPeers.has(pk))
+    const knownAgnostr = Boolean(
+      opts.isAgnostrClient ||
+        cleanClient?.toLowerCase() === 'agnostr' ||
+        this.agnostrPeers.has(pk)
+    )
+    const knownClient =
+      cleanClient || this.globalClients.get(pk) || (knownAgnostr ? 'agnostr' : undefined)
     const existing = channelMap.get(pk)
     if (existing) {
       existing.lastSeenAt = Math.max(existing.lastSeenAt, opts.seenAtSec)
       if (cleanNick) existing.nickname = cleanNick
       if (opts.isTeleported) existing.isTeleported = true
       if (opts.isMeshBridge) existing.isMeshBridge = true
+      if (knownClient) existing.clientName = knownClient
       if (knownAgnostr) existing.isAgnostrClient = true
       if (opts.isMessage) existing.messageCount += 1
       existing.channels.add(gh)
@@ -74,6 +88,7 @@ export class PresenceTracker {
         lastSeenAt: opts.seenAtSec,
         isTeleported: Boolean(opts.isTeleported),
         isMeshBridge: Boolean(opts.isMeshBridge),
+        clientName: knownClient,
         isAgnostrClient: knownAgnostr,
         messageCount: opts.isMessage ? 1 : 0,
         channels: new Set([gh]),
@@ -85,16 +100,26 @@ export class PresenceTracker {
     return this.agnostrPeers.has(pubkey.toLowerCase())
   }
 
+  getKnownClient(pubkey: string): string | undefined {
+    const pk = pubkey.toLowerCase()
+    return this.globalClients.get(pk) ?? (this.agnostrPeers.has(pk) ? 'agnostr' : undefined)
+  }
+
   setSelfAgnostrFlag(pubkey: string, enabled: boolean): void {
     const pk = pubkey.toLowerCase()
     if (enabled) {
       this.agnostrPeers.add(pk)
+      this.globalClients.set(pk, 'agnostr')
     } else {
       this.agnostrPeers.delete(pk)
+      this.globalClients.delete(pk)
     }
     for (const channelMap of this.byChannel.values()) {
       const rec = channelMap.get(pk)
-      if (rec) rec.isAgnostrClient = enabled
+      if (rec) {
+        rec.isAgnostrClient = enabled
+        rec.clientName = enabled ? 'agnostr' : undefined
+      }
     }
   }
 
@@ -116,6 +141,9 @@ export class PresenceTracker {
     for (const rec of channelMap.values()) {
       const isOnline = nowSec - rec.lastSeenAt <= ONLINE_WINDOW_SEC
       const nick = this.globalNicknames.get(rec.pubkey) || rec.nickname
+      const isAgnostr = rec.isAgnostrClient || this.agnostrPeers.has(rec.pubkey)
+      const clientName =
+        rec.clientName || this.globalClients.get(rec.pubkey) || (isAgnostr ? 'agnostr' : undefined)
       list.push({
         pubkey: rec.pubkey,
         npub: encodeNpubSafe(rec.pubkey),
@@ -126,7 +154,8 @@ export class PresenceTracker {
         isSelf: ownPubkeys.has(rec.pubkey),
         isTeleported: rec.isTeleported,
         isMeshBridge: rec.isMeshBridge,
-        isAgnostrClient: rec.isAgnostrClient || this.agnostrPeers.has(rec.pubkey),
+        clientName,
+        isAgnostrClient: isAgnostr,
         isBlocked: blockedPubkeys.has(rec.pubkey),
         messageCount: rec.messageCount,
         channels: Array.from(this.globalChannels.get(rec.pubkey) ?? rec.channels),
@@ -161,6 +190,9 @@ export class PresenceTracker {
       }
     }
     const nick = this.globalNicknames.get(pk) || latest?.nickname || `anon${pk.slice(-4)}`
+    const isAgnostr = Boolean(latest?.isAgnostrClient || this.agnostrPeers.has(pk))
+    const clientName =
+      latest?.clientName || this.globalClients.get(pk) || (isAgnostr ? 'agnostr' : undefined)
     return {
       pubkey: pk,
       npub: encodeNpubSafe(pk),
@@ -171,7 +203,8 @@ export class PresenceTracker {
       isSelf: ownPubkeys.has(pk),
       isTeleported: latest?.isTeleported ?? false,
       isMeshBridge: latest?.isMeshBridge ?? false,
-      isAgnostrClient: Boolean(latest?.isAgnostrClient || this.agnostrPeers.has(pk)),
+      clientName,
+      isAgnostrClient: isAgnostr,
       isBlocked: blockedPubkeys.has(pk),
       messageCount: totalMessages,
       channels: Array.from(this.globalChannels.get(pk) ?? []),
@@ -212,6 +245,7 @@ export class PresenceTracker {
     this.byChannel.clear()
     this.globalNicknames.clear()
     this.globalChannels.clear()
+    this.globalClients.clear()
     this.agnostrPeers.clear()
   }
 }

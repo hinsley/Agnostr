@@ -2,6 +2,8 @@ import {
   DEFAULT_AMAIL_RELAY_SETTINGS,
   type AmailAckTombstone,
   type AmailContact,
+  type AmailCustomFolder,
+  type AmailFolderSortMode,
   type AmailMessage,
   type AmailRelayCapsuleMeta,
   type AmailRelaySettings,
@@ -30,17 +32,26 @@ interface PersistedCounters {
 interface PersistedSyncTombstones {
   deletedMessageIds: Record<string, number>
   removedContactPubkeys: Record<string, number>
+  deletedFolderIds: Record<string, number>
 }
 
 export interface AmailStorageSnapshot {
   messages: AmailMessage[]
   contacts: AmailContact[]
+  customFolders: AmailCustomFolder[]
+  folderSortMode: AmailFolderSortMode
   relayCapsules: AmailRelayCapsuleMeta[]
   tombstonesCount: number
   settings: AmailRelaySettings
   stats: AmailStorageStats
   deletedMessageIds: Record<string, number>
   removedContactPubkeys: Record<string, number>
+  deletedFolderIds: Record<string, number>
+}
+
+function normalizeFolderSortMode(raw: unknown): AmailFolderSortMode {
+  if (raw === 'az' || raw === 'za' || raw === 'manual') return raw
+  return 'manual'
 }
 
 function toCapsuleMeta(c: AmailSealedCapsule): AmailRelayCapsuleMeta {
@@ -103,6 +114,8 @@ export class AmailStorage {
   // In-memory write-through mirror (guarantees fast sync queries & graceful fallback)
   private mailMap = new Map<string, AmailMessage>()
   private contactMap = new Map<string, AmailContact>()
+  private customFolderMap = new Map<string, AmailCustomFolder>()
+  private folderSortMode: AmailFolderSortMode = 'manual'
   private vaultMap = new Map<string, AmailSealedCapsule>()
   private tombstoneMap = new Map<string, AmailAckTombstone>()
   private settings: AmailRelaySettings = { ...DEFAULT_AMAIL_RELAY_SETTINGS }
@@ -114,6 +127,7 @@ export class AmailStorage {
   private syncTombstones: PersistedSyncTombstones = {
     deletedMessageIds: {},
     removedContactPubkeys: {},
+    deletedFolderIds: {},
   }
   private initialized = false
 
@@ -121,28 +135,47 @@ export class AmailStorage {
     if (this.initialized) return
     const db = await this.openDb()
     if (db) {
-      const [mails, contacts, capsules, tombstones, settingsRec, countersRec, syncTombRec] =
-        await Promise.all([
-          this.idbGetAll<AmailMessage>(db, STORES.mail),
-          this.idbGetAll<AmailContact>(db, STORES.contacts),
-          this.idbGetAll<AmailSealedCapsule>(db, STORES.relayVault),
-          this.idbGetAll<AmailAckTombstone>(db, STORES.tombstones),
-          this.idbGet<{ key: string; value: Partial<AmailRelaySettings> }>(
-            db,
-            STORES.meta,
-            'settings'
-          ),
-          this.idbGet<{ key: string; value: Partial<PersistedCounters> }>(
-            db,
-            STORES.meta,
-            'counters'
-          ),
-          this.idbGet<{ key: string; value: Partial<PersistedSyncTombstones> }>(
-            db,
-            STORES.meta,
-            'syncTombstones'
-          ),
-        ])
+      const [
+        mails,
+        contacts,
+        capsules,
+        tombstones,
+        settingsRec,
+        countersRec,
+        syncTombRec,
+        customFoldersRec,
+        folderSortModeRec,
+      ] = await Promise.all([
+        this.idbGetAll<AmailMessage>(db, STORES.mail),
+        this.idbGetAll<AmailContact>(db, STORES.contacts),
+        this.idbGetAll<AmailSealedCapsule>(db, STORES.relayVault),
+        this.idbGetAll<AmailAckTombstone>(db, STORES.tombstones),
+        this.idbGet<{ key: string; value: Partial<AmailRelaySettings> }>(
+          db,
+          STORES.meta,
+          'settings'
+        ),
+        this.idbGet<{ key: string; value: Partial<PersistedCounters> }>(
+          db,
+          STORES.meta,
+          'counters'
+        ),
+        this.idbGet<{ key: string; value: Partial<PersistedSyncTombstones> }>(
+          db,
+          STORES.meta,
+          'syncTombstones'
+        ),
+        this.idbGet<{ key: string; value: AmailCustomFolder[] }>(
+          db,
+          STORES.meta,
+          'customFolders'
+        ),
+        this.idbGet<{ key: string; value: AmailFolderSortMode }>(
+          db,
+          STORES.meta,
+          'folderSortMode'
+        ),
+      ])
 
       this.mailMap.clear()
       for (const m of mails) {
@@ -152,6 +185,15 @@ export class AmailStorage {
       for (const c of contacts) {
         if (c && c.pubkey) this.contactMap.set(c.pubkey.toLowerCase(), c)
       }
+      this.customFolderMap.clear()
+      if (Array.isArray(customFoldersRec?.value)) {
+        for (const f of customFoldersRec.value) {
+          if (f && typeof f.id === 'string' && f.id.startsWith('folder:') && typeof f.name === 'string') {
+            this.customFolderMap.set(f.id, f)
+          }
+        }
+      }
+      this.folderSortMode = normalizeFolderSortMode(folderSortModeRec?.value)
       this.vaultMap.clear()
       for (const cap of capsules) {
         if (cap && cap.capsuleId) this.vaultMap.set(cap.capsuleId, cap)
@@ -169,6 +211,7 @@ export class AmailStorage {
       this.syncTombstones = {
         deletedMessageIds: { ...(syncTombRec?.value?.deletedMessageIds ?? {}) },
         removedContactPubkeys: { ...(syncTombRec?.value?.removedContactPubkeys ?? {}) },
+        deletedFolderIds: { ...(syncTombRec?.value?.deletedFolderIds ?? {}) },
       }
     }
     this.initialized = true
@@ -326,6 +369,38 @@ export class AmailStorage {
     return this.contactMap.get(pubkey.toLowerCase())
   }
 
+  getFolderSortMode(): AmailFolderSortMode {
+    return this.folderSortMode
+  }
+
+  getCustomFolder(id: string): AmailCustomFolder | undefined {
+    return this.customFolderMap.get(id)
+  }
+
+  getAllCustomFolders(): AmailCustomFolder[] {
+    const list = Array.from(this.customFolderMap.values())
+    if (this.folderSortMode === 'az') {
+      return list.sort(
+        (a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) ||
+          a.createdAt - b.createdAt
+      )
+    }
+    if (this.folderSortMode === 'za') {
+      return list.sort(
+        (a, b) =>
+          b.name.localeCompare(a.name, undefined, { sensitivity: 'base' }) ||
+          a.createdAt - b.createdAt
+      )
+    }
+    return list.sort(
+      (a, b) =>
+        a.order - b.order ||
+        a.createdAt - b.createdAt ||
+        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    )
+  }
+
   getAllVaultCapsules(): AmailSealedCapsule[] {
     return Array.from(this.vaultMap.values()).sort((a, b) => b.storedAt - a.storedAt)
   }
@@ -373,12 +448,15 @@ export class AmailStorage {
     return {
       messages: this.getAllMessages(),
       contacts: this.getAllContacts(),
+      customFolders: this.getAllCustomFolders(),
+      folderSortMode: this.getFolderSortMode(),
       relayCapsules: this.getAllVaultCapsules().map(toCapsuleMeta),
       tombstonesCount: this.tombstoneMap.size,
       settings: this.getSettings(),
       stats: this.computeStats(),
       deletedMessageIds: { ...this.syncTombstones.deletedMessageIds },
       removedContactPubkeys: { ...this.syncTombstones.removedContactPubkeys },
+      deletedFolderIds: { ...this.syncTombstones.deletedFolderIds },
     }
   }
 
@@ -425,9 +503,68 @@ export class AmailStorage {
     }
   }
 
+  /* ------------------------------------------------------------------------
+     Custom Folders Persistence (stored in STORES.meta without schema bump)
+     ------------------------------------------------------------------------ */
+
+  async putCustomFolder(folder: AmailCustomFolder): Promise<void> {
+    this.customFolderMap.set(folder.id, folder)
+    if (this.syncTombstones.deletedFolderIds[folder.id]) {
+      delete this.syncTombstones.deletedFolderIds[folder.id]
+      await this.persistSyncTombstones()
+    }
+    await this.persistCustomFolders()
+  }
+
+  async putCustomFolders(folders: AmailCustomFolder[]): Promise<void> {
+    let clearedTombstone = false
+    for (const folder of folders) {
+      this.customFolderMap.set(folder.id, folder)
+      if (this.syncTombstones.deletedFolderIds[folder.id]) {
+        delete this.syncTombstones.deletedFolderIds[folder.id]
+        clearedTombstone = true
+      }
+    }
+    if (clearedTombstone) {
+      await this.persistSyncTombstones()
+    }
+    await this.persistCustomFolders()
+  }
+
+  async deleteCustomFolder(id: string, recordTombstone = true): Promise<void> {
+    this.customFolderMap.delete(id)
+    await this.persistCustomFolders()
+    if (recordTombstone) {
+      this.syncTombstones.deletedFolderIds[id] = Date.now()
+      await this.persistSyncTombstones()
+    }
+  }
+
+  async setFolderSortMode(mode: AmailFolderSortMode): Promise<void> {
+    const normalized = normalizeFolderSortMode(mode)
+    this.folderSortMode = normalized
+    await this.idbPut(STORES.meta, { key: 'folderSortMode', value: normalized })
+  }
+
+  async mergeDeletedFolderTombstones(
+    deletedFolderIds: Record<string, number>
+  ): Promise<void> {
+    let changed = false
+    for (const [id, ts] of Object.entries(deletedFolderIds)) {
+      if (typeof ts === 'number' && ts > (this.syncTombstones.deletedFolderIds[id] ?? 0)) {
+        this.syncTombstones.deletedFolderIds[id] = ts
+        changed = true
+      }
+    }
+    if (changed) {
+      await this.persistSyncTombstones()
+    }
+  }
+
   async mergeSyncTombstones(
     deletedMessageIds: Record<string, number>,
-    removedContactPubkeys: Record<string, number>
+    removedContactPubkeys: Record<string, number>,
+    deletedFolderIds?: Record<string, number>
   ): Promise<void> {
     let changed = false
     for (const [id, ts] of Object.entries(deletedMessageIds)) {
@@ -443,9 +580,24 @@ export class AmailStorage {
         changed = true
       }
     }
+    if (deletedFolderIds) {
+      for (const [id, ts] of Object.entries(deletedFolderIds)) {
+        if (typeof ts === 'number' && ts > (this.syncTombstones.deletedFolderIds[id] ?? 0)) {
+          this.syncTombstones.deletedFolderIds[id] = ts
+          changed = true
+        }
+      }
+    }
     if (changed) {
       await this.persistSyncTombstones()
     }
+  }
+
+  private async persistCustomFolders(): Promise<void> {
+    await this.idbPut(STORES.meta, {
+      key: 'customFolders',
+      value: Array.from(this.customFolderMap.values()),
+    })
   }
 
   private async persistCounters(): Promise<void> {
@@ -463,6 +615,7 @@ export class AmailStorage {
     this.syncTombstones = {
       deletedMessageIds: trim(this.syncTombstones.deletedMessageIds),
       removedContactPubkeys: trim(this.syncTombstones.removedContactPubkeys),
+      deletedFolderIds: trim(this.syncTombstones.deletedFolderIds),
     }
     await this.idbPut(STORES.meta, { key: 'syncTombstones', value: this.syncTombstones })
   }
@@ -628,6 +781,8 @@ export class AmailStorage {
   async wipeDatabase(): Promise<void> {
     this.mailMap.clear()
     this.contactMap.clear()
+    this.customFolderMap.clear()
+    this.folderSortMode = 'manual'
     this.vaultMap.clear()
     this.tombstoneMap.clear()
     this.settings = { ...DEFAULT_AMAIL_RELAY_SETTINGS }
@@ -639,6 +794,7 @@ export class AmailStorage {
     this.syncTombstones = {
       deletedMessageIds: {},
       removedContactPubkeys: {},
+      deletedFolderIds: {},
     }
 
     if (this.dbHandle) {

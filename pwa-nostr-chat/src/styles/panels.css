@@ -2674,6 +2674,35 @@
   margin-bottom: 0.12rem;
 }
 
+.ag-peer-modal-avatar.ag-avatar-agnostr,
+.ag-sheet-avatar.ag-avatar-agnostr,
+.ag-sheet-hero-avatar.ag-avatar-agnostr {
+  box-sizing: border-box;
+  border: 2px solid #3B82F6;
+}
+
+[data-theme='daylight'] .ag-peer-modal-avatar.ag-avatar-agnostr,
+[data-theme='daylight'] .ag-sheet-avatar.ag-avatar-agnostr,
+[data-theme='daylight'] .ag-sheet-hero-avatar.ag-avatar-agnostr {
+  border-color: #2563EB;
+}
+
+.ag-sheet-client-line {
+  margin: 0.1rem 0 0;
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.ag-sheet-client-label {
+  color: var(--text-muted);
+}
+
+.ag-sheet-client-value {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
 .ag-sheet-hero-title {
   margin: 0;
   font-size: var(--text-lg);
@@ -2988,10 +3017,6 @@
 
 .ag-sheet-person-name-row .ag-sheet-person-name {
   flex: 0 1 auto;
-}
-
-.ag-sheet-person-name-row .ag-client-badge {
-  flex-shrink: 0;
 }
 
 .ag-sheet-person-sub {

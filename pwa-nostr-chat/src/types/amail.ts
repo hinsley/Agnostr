@@ -2,7 +2,23 @@
    Amail — E2EE Briar-Inspired Store-and-Forward Meshnet Snailmail Types
    ========================================================================== */
 
-export type AmailFolder = 'inbox' | 'starred' | 'sent' | 'drafts' | 'archive' | 'trash'
+export type AmailBuiltinFolder = 'inbox' | 'starred' | 'sent' | 'drafts' | 'archive' | 'trash'
+export type AmailFolder = AmailBuiltinFolder | (string & {})
+export type AmailFolderSortMode = 'manual' | 'az' | 'za'
+
+export interface AmailRecipient {
+  pubkey: string
+  npub: string
+  nickname: string
+}
+
+export interface AmailCustomFolder {
+  id: string // format: `folder:${slugOrId}`
+  name: string
+  order: number
+  createdAt: number // unix ms
+  updatedAt: number // unix ms
+}
 
 export type AmailDeliveryStatus =
   | 'draft'
@@ -19,6 +35,8 @@ export interface AmailMessage {
   threadId: string
   inReplyTo?: string
   folder: AmailFolder
+  /** Saved when moving into 'trash' or 'archive' so restoreMessage returns it cleanly */
+  previousFolder?: AmailFolder
   direction: 'in' | 'out'
   fromPubkey: string
   fromNpub: string
@@ -26,6 +44,12 @@ export interface AmailMessage {
   toPubkey: string
   toNpub: string
   toName: string
+  toRecipients?: AmailRecipient[]
+  ccRecipients?: AmailRecipient[]
+  /** ONLY stored on sender's local outgoing record — NEVER included in any wire capsule */
+  bccRecipients?: AmailRecipient[]
+  /** True on incoming mail when our pubkey was not listed in To or CC */
+  isBccRecipient?: boolean
   subject: string
   body: string
   /** Unix seconds when composed/sent */
@@ -43,6 +67,9 @@ export interface AmailMessage {
   relayHopCount: number
   relayedPeerCount: number
   capsuleId?: string
+  capsuleIds?: string[]
+  deliveredPubkeys?: string[]
+  readPubkeys?: string[]
   ttlSec: number
   /** Unix seconds when mesh relay propagation expires */
   expiresAt: number
@@ -155,7 +182,10 @@ export interface AmailMeshPeer {
 }
 
 export interface AmailSendInput {
-  toPubkey: string
+  toPubkey?: string
+  toPubkeys?: string[]
+  ccPubkeys?: string[]
+  bccPubkeys?: string[]
   subject: string
   body: string
   inReplyTo?: string
@@ -168,6 +198,9 @@ export interface AmailSendInput {
 export interface AmailDraftInput {
   id?: string
   toPubkey?: string
+  toPubkeys?: string[]
+  ccPubkeys?: string[]
+  bccPubkeys?: string[]
   subject: string
   body: string
   inReplyTo?: string
@@ -183,12 +216,17 @@ export interface AmailSyncSnapshot {
   deletedMessageIds: Record<string, number>
   contacts: AmailContact[]
   removedContactPubkeys: Record<string, number>
+  customFolders?: AmailCustomFolder[]
+  deletedFolderIds?: Record<string, number>
+  folderSortMode?: AmailFolderSortMode
   settings?: Partial<AmailRelaySettings>
 }
 
 export interface AmailEngine {
   messages: AmailMessage[]
   contacts: AmailContact[]
+  customFolders: AmailCustomFolder[]
+  folderSortMode: AmailFolderSortMode
   unreadInboxCount: number
   relayCapsules: AmailRelayCapsuleMeta[]
   tombstonesCount: number
@@ -204,7 +242,14 @@ export interface AmailEngine {
   markRead: (id: string, isRead: boolean) => Promise<void>
   toggleStar: (id: string) => Promise<void>
   moveToFolder: (id: string, folder: AmailFolder) => Promise<void>
+  restoreMessage: (id: string) => Promise<AmailFolder | null>
   deletePermanently: (id: string) => Promise<void>
+
+  createFolder: (name: string) => Promise<AmailCustomFolder | null>
+  renameFolder: (folderId: string, name: string) => Promise<boolean>
+  deleteFolder: (folderId: string) => Promise<void>
+  reorderFolders: (orderedIds: string[]) => Promise<void>
+  sortFolders: (mode: AmailFolderSortMode) => Promise<void>
 
   addContact: (
     pubkeyOrNpubOrDmLink: string,

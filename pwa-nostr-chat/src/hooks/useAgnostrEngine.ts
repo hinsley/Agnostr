@@ -32,6 +32,7 @@ import {
 import { revokeImagePreviewUrl } from '../lib/imageProcessor.ts'
 import {
   buildGeohashChatTemplate,
+  AGNOSTR_CLIENT_TAG,
   buildLocationNoteTemplate,
   buildNamedRadioChatTemplate,
   buildPresenceTemplate,
@@ -51,6 +52,7 @@ import {
   KIND_LOCATION_NOTE,
   KIND_NAMED_RADIO_CHAT,
   mineNip13NonceTag,
+  parseClientTag,
   parseGeohashChatEvent,
   parseLocationNoteEvent,
   parseNamedRadioChatEvent,
@@ -756,6 +758,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       seenAtSec: Math.floor(Date.now() / 1000),
       nickname: identity.nickname,
       isTeleported: location.isTeleported,
+      clientName: settings.broadcastClientTag ? AGNOSTR_CLIENT_TAG : undefined,
       isAgnostrClient: settings.broadcastClientTag,
     })
     refreshPeers(activeGeohash)
@@ -798,6 +801,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         nickname: m.nickname,
         isTeleported: m.isTeleported,
         isMeshBridge: m.isMeshBridge,
+        clientName: m.clientName ?? m.bridgeClient,
         isAgnostrClient: m.isAgnostrClient,
         isMessage: true,
       })
@@ -903,20 +907,29 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (!isTopic && ev.kind === KIND_GEOHASH_PRESENCE) {
             const evGh = extractGeohashTag(ev.tags)
             if (evGh !== gh) return
+            const evClient = parseClientTag(ev.tags)
             const isAgnostr = isAgnostrClientTag(ev.tags)
             presenceTracker.recordActivity({
               geohash: gh,
               pubkey: pk,
               seenAtSec: isHistoryReplay ? ev.created_at : Math.floor(Date.now() / 1000),
+              clientName: evClient,
               isAgnostrClient: isAgnostr,
             })
-            if (isAgnostr) {
+            if (isAgnostr || evClient) {
               updateChannelMessages(gh, (prev) => {
                 let changed = false
                 const next = prev.map((m) => {
-                  if (m.pubkey.toLowerCase() === pk && !m.isAgnostrClient) {
+                  if (m.pubkey.toLowerCase() !== pk) return m
+                  const needsAgnostr = isAgnostr && !m.isAgnostrClient
+                  const needsClient = Boolean(evClient && m.clientName !== evClient)
+                  if (needsAgnostr || needsClient) {
                     changed = true
-                    return { ...m, isAgnostrClient: true }
+                    return {
+                      ...m,
+                      ...(needsAgnostr ? { isAgnostrClient: true } : {}),
+                      ...(evClient ? { clientName: evClient } : {}),
+                    }
                   }
                   return m
                 })
@@ -950,6 +963,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                     seenAtSec: isHistoryReplay ? ev.created_at : Math.floor(Date.now() / 1000),
                     nickname: getTagValue(ev.tags, 'n'),
                     isTeleported: hasTagPair(ev.tags, 't', 'teleport'),
+                    clientName: parseClientTag(ev.tags),
                     isAgnostrClient: isAgnostrClientTag(ev.tags),
                   })
                   refreshPeers(gh)
@@ -959,8 +973,11 @@ export function useAgnostrEngine(): AgnostrEngine {
             }
 
             zapsIngestEventTagsRef.current(pk, ev.tags)
+            const knownClient =
+              parsed.clientName || (!parsed.isOwn ? presenceTracker.getKnownClient(pk) : undefined)
             const knownAgnostr = Boolean(
               parsed.isAgnostrClient ||
+                knownClient?.toLowerCase() === AGNOSTR_CLIENT_TAG ||
                 (!parsed.isOwn && presenceTracker.isKnownAgnostrPeer(pk))
             )
             presenceTracker.recordActivity({
@@ -970,6 +987,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               nickname: parsed.nickname,
               isTeleported: parsed.isTeleported,
               isMeshBridge: parsed.isMeshBridge,
+              clientName: knownClient,
               isAgnostrClient: knownAgnostr,
               isMessage: true,
             })
@@ -979,9 +997,14 @@ export function useAgnostrEngine(): AgnostrEngine {
               if (prev.some((m) => m.id === parsed.id)) return null
 
               // Resolve incoming replyTo against latest prev state
-              let hydrated: GeoMessage = knownAgnostr
-                ? { ...parsed, isAgnostrClient: true }
-                : parsed
+              let hydrated: GeoMessage =
+                knownAgnostr || (knownClient && parsed.clientName !== knownClient)
+                  ? {
+                      ...parsed,
+                      isAgnostrClient: knownAgnostr || parsed.isAgnostrClient,
+                      clientName: knownClient ?? parsed.clientName,
+                    }
+                  : parsed
               if (hydrated.replyTo && (!hydrated.replyTo.preview || !hydrated.replyTo.nickname)) {
                 const parent = prev.find((m) => m.id === hydrated.replyTo!.id)
                 if (parent) {
@@ -1007,7 +1030,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               }
 
               // Backfill any earlier-arrived replies referencing this newly arrived parent
-              // and propagate newly discovered Agnostr client flag to earlier messages from this peer
+              // and propagate newly discovered client metadata to earlier messages from this peer
               const backfilledPrev = prev.map((m) => {
                 let updated = m
                 if (m.replyTo?.id === hydrated.id && (!m.replyTo.preview || !m.replyTo.nickname)) {
@@ -1021,8 +1044,16 @@ export function useAgnostrEngine(): AgnostrEngine {
                     },
                   }
                 }
-                if (knownAgnostr && !hydrated.isOwn && updated.pubkey.toLowerCase() === pk && !updated.isAgnostrClient) {
-                  updated = { ...updated, isAgnostrClient: true }
+                if (!hydrated.isOwn && updated.pubkey.toLowerCase() === pk) {
+                  const needsAgnostr = knownAgnostr && !updated.isAgnostrClient
+                  const needsClient = Boolean(knownClient && updated.clientName !== knownClient)
+                  if (needsAgnostr || needsClient) {
+                    updated = {
+                      ...updated,
+                      ...(needsAgnostr ? { isAgnostrClient: true } : {}),
+                      ...(knownClient ? { clientName: knownClient } : {}),
+                    }
+                  }
                 }
                 return updated
               })
@@ -2009,6 +2040,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         isOwn: true,
         isTeleported: !isTopic && isTeleported,
         isMeshBridge: false,
+        clientName: broadcastClientTag ? AGNOSTR_CLIENT_TAG : undefined,
         isAgnostrClient: broadcastClientTag,
         powBits: 0,
         replyTo:
@@ -2703,6 +2735,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         isOwn: true,
         isTeleported: !isTopic && isTeleported,
         isMeshBridge: false,
+        clientName: broadcastClientTag ? AGNOSTR_CLIENT_TAG : undefined,
         isAgnostrClient: broadcastClientTag,
         powBits: 0,
         replyTo:
@@ -3134,6 +3167,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         isOwn: true,
         isTeleported: !isTopic && isTeleported,
         isMeshBridge: false,
+        clientName: broadcastClientTag ? AGNOSTR_CLIENT_TAG : undefined,
         isAgnostrClient: broadcastClientTag,
         powBits: 0,
         replyTo:
