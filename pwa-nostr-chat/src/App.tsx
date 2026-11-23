@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { RefreshCw, WifiOff, X } from 'lucide-react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
+import { useMobileSwipeDrawers } from './hooks/useMobileSwipeDrawers'
 import { useMobileViewport } from './hooks/useMobileViewport'
 import { usePwa } from './hooks/usePwa'
 import { doesContentMentionUser } from './lib/bitchatProtocol'
@@ -51,8 +52,20 @@ export function App() {
 
   const [listTab, setListTab] = useState<ListTab>('radio')
   const [mobileScreen, setMobileScreen] = useState<'list' | 'chat'>('chat')
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth <= 867 : false
+  )
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const mql = window.matchMedia('(max-width: 867px)')
+    const sync = () => setIsMobileViewport(mql.matches)
+    sync()
+    mql.addEventListener('change', sync)
+    return () => mql.removeEventListener('change', sync)
+  }, [])
   const [settingsState, setSettingsState] = useState<{ open: boolean; tab?: SettingsTab }>({
     open: false,
     tab: undefined,
@@ -443,7 +456,10 @@ export function App() {
       }
       if (mod && e.key.toLowerCase() === 'i') {
         e.preventDefault()
-        setRoomInfoOpen((v) => !v)
+        setRoomInfoOpen((v) => {
+          if (!v) setMobileScreen('chat')
+          return !v
+        })
         return
       }
       if (mod && e.key === ',') {
@@ -503,10 +519,56 @@ export function App() {
     setSettingsState({ open: true, tab })
   }, [])
 
+  const handleLeftDrawerOpenChange = useCallback((open: boolean) => {
+    if (open) {
+      setRoomInfoOpen(false)
+      setMobileScreen('list')
+    } else {
+      setMobileScreen('chat')
+    }
+  }, [])
+
+  const handleRightDrawerOpenChange = useCallback((open: boolean) => {
+    if (open) {
+      setMobileScreen('chat')
+      setRoomInfoOpen(true)
+    } else {
+      setRoomInfoOpen(false)
+    }
+  }, [])
+
+  const swipeDisabled =
+    !isMobileViewport ||
+    settingsState.open ||
+    radarExpanded ||
+    serverHubState.open ||
+    Boolean(serverSettingsState.serverId) ||
+    Boolean(inspectedPeer) ||
+    Boolean(lightboxImage) ||
+    cmdkOpen ||
+    installModalOpen ||
+    Boolean(engine.calls.incomingCall) ||
+    Boolean(activeCall && callExpanded)
+
+  const {
+    bindRef: shellBodyRef,
+    leftProgress,
+    rightProgress,
+    isSwipingLeft,
+    isSwipingRight,
+  } = useMobileSwipeDrawers({
+    leftOpen: mobileScreen === 'list',
+    rightOpen: roomInfoOpen,
+    disabled: swipeDisabled,
+    onLeftOpenChange: handleLeftDrawerOpenChange,
+    onRightOpenChange: handleRightDrawerOpenChange,
+  })
+
   const handleMobileBack = useCallback(() => {
     if (engine.activeView.type === 'dm') setListTab('dms')
     else if (engine.activeView.type === 'server') setListTab('servers')
     else setListTab('radio')
+    setRoomInfoOpen(false)
     setMobileScreen('list')
   }, [engine.activeView.type])
 
@@ -836,31 +898,50 @@ export function App() {
     <div
       className={`ag-app ag-shell ${panicFlash ? 'ag-panic-active' : ''}`}
       data-mobile-screen={mobileScreen}
+      data-right-drawer={roomInfoOpen ? 'open' : 'closed'}
     >
-      <div className="ag-shell-body">
-        {/* Left Pane (Desktop 320px) / Full-Screen Home List (Mobile <868px) */}
-        <ConversationList
-          engine={engine}
-          activeTab={listTab}
-          collapsed={sidebarCollapsed}
-          onTabChange={setListTab}
-          onTuneChannel={handleTuneChannel}
-          onOpenDm={handleOpenDm}
-          onSelectServerChannel={handleSelectServerChannel}
-          onOpenServerHub={handleOpenServerHub}
-          onOpenServerSettings={handleOpenServerSettings}
-          onOpenCommandPalette={() => setCmdkOpen(true)}
-          onExpandRadar={handleExpandRadar}
-          onOpenSettings={handleOpenSettings}
-          onLocateMe={() => void handleLocateMe()}
-          onFocusActiveCall={() => {
-            setMobileScreen('chat')
-            setCallExpanded(true)
-          }}
-          pwa={pwa}
-          onOpenInstall={handleOpenInstall}
-          onPlaySound={playSound}
+      <div
+        ref={shellBodyRef}
+        className={`ag-shell-body ${isSwipingLeft ? 'is-swiping-left' : ''} ${isSwipingRight ? 'is-swiping-right' : ''}`}
+        style={{ '--ag-left-drawer-p': String(leftProgress) } as CSSProperties}
+      >
+        {/* Dimmed Interactive Scrim behind Mobile Left Slide-Over Sidebar */}
+        <div
+          className={`ag-drawer-scrim ${mobileScreen === 'list' ? 'active' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+          onClick={() => setMobileScreen('chat')}
+          aria-hidden="true"
         />
+
+        {/* Left Pane (Desktop 280px) / Interactive Slide-Over Sidebar Drawer (Mobile <868px) */}
+        <div
+          className={`ag-conv-col ${mobileScreen === 'list' ? 'open' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+          aria-hidden={
+            isMobileViewport && mobileScreen === 'chat' && !isSwipingLeft ? true : undefined
+          }
+        >
+          <ConversationList
+            engine={engine}
+            activeTab={listTab}
+            collapsed={sidebarCollapsed}
+            onTabChange={setListTab}
+            onTuneChannel={handleTuneChannel}
+            onOpenDm={handleOpenDm}
+            onSelectServerChannel={handleSelectServerChannel}
+            onOpenServerHub={handleOpenServerHub}
+            onOpenServerSettings={handleOpenServerSettings}
+            onOpenCommandPalette={() => setCmdkOpen(true)}
+            onExpandRadar={handleExpandRadar}
+            onOpenSettings={handleOpenSettings}
+            onLocateMe={() => void handleLocateMe()}
+            onFocusActiveCall={() => {
+              setMobileScreen('chat')
+              setCallExpanded(true)
+            }}
+            pwa={pwa}
+            onOpenInstall={handleOpenInstall}
+            onPlaySound={playSound}
+          />
+        </div>
 
         {/* Main Chat Stage */}
         <main
@@ -874,7 +955,7 @@ export function App() {
           hasOtherUnread={totalUnreadBadge > 0}
           onMobileBack={handleMobileBack}
           onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
-          onOpenRoomInfo={() => setRoomInfoOpen(true)}
+          onOpenRoomInfo={() => handleRightDrawerOpenChange(true)}
           onOpenTrustedSettings={() => handleOpenSettings('privacy')}
           onToggleSearch={() => {
             setSearchOpen((v) => {
@@ -980,6 +1061,24 @@ export function App() {
           onSent={(isEncrypted) => radioAudio.play(isEncrypted ? 'dm' : 'send')}
         />
         </main>
+
+        {/* Clean Chat / Room / Server Info Slide-Over Sheet (In-Shell Drawer on Mobile) */}
+        <RoomInfoSheet
+          open={roomInfoOpen}
+          swipeProgress={isMobileViewport ? rightProgress : undefined}
+          isSwiping={isSwipingRight}
+          inShell={isMobileViewport}
+          engine={engine}
+          onClose={() => setRoomInfoOpen(false)}
+          onInspectPeer={setInspectedPeer}
+          onStartDm={handleOpenDm}
+          onTuneChannel={handleTuneChannel}
+          onExpandRadar={handleExpandRadar}
+          onOpenServerSettings={handleOpenServerSettings}
+          onExportTranscript={handleExport}
+          onLeftServer={handleLeftServer}
+          onPlaySound={playSound}
+        />
       </div>
 
       {/* Always-Present Native Mobile Bottom Tab Bar (< 868px, Flex Flow) */}
@@ -990,21 +1089,6 @@ export function App() {
         onSelectTab={handleMobileSelectTab}
         onOpenMap={handleExpandRadar}
         onOpenSettings={() => handleOpenSettings()}
-      />
-
-      {/* Clean Chat / Room / Server Info Slide-Over Sheet */}
-      <RoomInfoSheet
-        open={roomInfoOpen}
-        engine={engine}
-        onClose={() => setRoomInfoOpen(false)}
-        onInspectPeer={setInspectedPeer}
-        onStartDm={handleOpenDm}
-        onTuneChannel={handleTuneChannel}
-        onExpandRadar={handleExpandRadar}
-        onOpenServerSettings={handleOpenServerSettings}
-        onExportTranscript={handleExport}
-        onLeftServer={handleLeftServer}
-        onPlaySound={playSound}
       />
 
       {/* Unified Calm Settings Modal (Profile · Privacy & Trust · Appearance · Calls · Network) */}
@@ -1075,7 +1159,7 @@ export function App() {
         onOpenServerHub={handleOpenServerHub}
         onExpandRadar={handleExpandRadar}
         onLocateMe={() => void handleLocateMe()}
-        onOpenRoomInfo={() => setRoomInfoOpen(true)}
+        onOpenRoomInfo={() => handleRightDrawerOpenChange(true)}
         onOpenSettings={handleOpenSettings}
         onToggleSound={handleToggleSound}
         onRunCommand={handleRunCommand}

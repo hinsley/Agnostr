@@ -1209,7 +1209,7 @@
     justify-content: space-around;
     flex: 0 0 auto;
     position: relative;
-    z-index: var(--z-sticky);
+    z-index: 28;
     width: 100%;
     min-height: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px));
     padding: 4px 4px max(5px, env(safe-area-inset-bottom, 0px));

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties } from 'react'
 import {
   ArrowLeft,
   Ban,
@@ -42,6 +42,12 @@ export interface RoomInfoSheetProps {
   onExportTranscript: (format: 'md' | 'json') => void
   onLeftServer: () => void
   onPlaySound?: (cue: SoundCue) => void
+  /** 0..1 open progress when swiping on mobile (defaults to open ? 1 : 0). */
+  swipeProgress?: number
+  /** True while finger is actively dragging so CSS disables transition for 1:1 60fps tracking. */
+  isSwiping?: boolean
+  /** When true on mobile, renders anchored inside .ag-shell-body above the always-present bottom navbar. */
+  inShell?: boolean
 }
 
 function getMonogram(name: string): string {
@@ -63,6 +69,9 @@ export function RoomInfoSheet({
   onExportTranscript,
   onLeftServer,
   onPlaySound,
+  swipeProgress,
+  isSwiping = false,
+  inShell = false,
 }: RoomInfoSheetProps) {
   const [copiedId, setCopiedId] = useState<'npub' | 'invite' | null>(null)
   const [confirmLeave, setConfirmLeave] = useState(false)
@@ -88,7 +97,15 @@ export function RoomInfoSheet({
     })
   }, [engine.peers])
 
-  if (!open) return null
+  const isVisible =
+    open || (swipeProgress !== undefined && swipeProgress > 0) || Boolean(isSwiping)
+
+  if (!isVisible) return null
+
+  const effectiveProgress = Math.max(
+    0,
+    Math.min(1, swipeProgress !== undefined ? swipeProgress : open ? 1 : 0),
+  )
 
   const { activeView, activeGeohash, cell, presence, location, servers, calls } = engine
 
@@ -767,12 +784,48 @@ export function RoomInfoSheet({
     )
   }
 
+  const backdropStyle = {
+    '--ag-right-drawer-p': String(effectiveProgress),
+  } as CSSProperties
+
+  const backdropClass = [
+    'ag-sheet-backdrop',
+    inShell ? 'in-shell' : '',
+    isSwiping ? 'is-swiping' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  const sheetClass = [
+    'ag-info-sheet',
+    inShell ? 'in-shell' : '',
+    isSwiping ? 'is-swiping' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
   return (
-    <div className="ag-sheet-backdrop" onClick={onClose} role="presentation">
+    <div
+      className={backdropClass}
+      style={backdropStyle}
+      data-open={open ? 'true' : 'false'}
+      onClick={onClose}
+      role="presentation"
+    >
+      {inShell && (
+        <div
+          className="ag-sheet-scrim"
+          aria-hidden="true"
+          onClick={(e) => {
+            e.stopPropagation()
+            onClose()
+          }}
+        />
+      )}
       <aside
-        className="ag-info-sheet"
+        className={sheetClass}
         role="dialog"
-        aria-modal="true"
+        aria-modal={!inShell || open}
         aria-label={sheetTitle}
         onClick={(e) => e.stopPropagation()}
       >

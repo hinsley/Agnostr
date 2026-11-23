@@ -51,8 +51,17 @@ body,
   position: relative;
 }
 
+/* Desktop defaults for mobile swipe drawer containers */
+.ag-drawer-scrim {
+  display: none;
+}
+
+.ag-conv-col {
+  display: contents;
+}
+
 /* --------------------------------------------------------------------------
-   Left Pane: Unified Conversation List (280px Desktop, Full-Screen Mobile List)
+   Left Pane: Unified Conversation List (280px Desktop, Slide-Over Mobile Drawer)
    -------------------------------------------------------------------------- */
 .ag-conv-pane {
   width: var(--sidebar-w);
@@ -229,34 +238,94 @@ body,
     width: 100%;
     display: flex;
     flex-direction: column;
+    position: relative;
     overflow: hidden;
+    touch-action: pan-y;
+  }
+
+  /* Interactive dimmed backdrop behind mobile Left Slide-Over Sidebar */
+  .ag-drawer-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 23;
+    background-color: var(--bg-overlay);
+    opacity: var(--ag-left-drawer-p, 0);
+    pointer-events: none;
+    transition: opacity 240ms cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: opacity;
+  }
+
+  .ag-drawer-scrim.active {
+    pointer-events: auto;
+  }
+
+  .ag-drawer-scrim.is-swiping {
+    transition: none;
+  }
+
+  /* Mobile Left Slide-Over Sidebar Drawer (inside .ag-shell-body above .ag-main & below .ag-mobile-tabbar) */
+  .ag-conv-col {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(86vw, 336px);
+    max-width: 86vw;
+    z-index: 24;
+    transform: translate3d(calc((var(--ag-left-drawer-p, 0) - 1) * 100%), 0, 0);
+    transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
+    pointer-events: none;
+  }
+
+  .ag-conv-col.open {
+    pointer-events: auto;
+  }
+
+  .ag-conv-col.is-swiping {
+    transition: none;
+    pointer-events: auto;
   }
 
   .ag-conv-pane,
   .ag-conv-pane.collapsed {
     width: 100%;
-    height: auto;
+    height: 100%;
     flex: 1 1 auto;
     min-height: 0;
-    border-right: none;
+    border-right: 1px solid transparent;
     opacity: 1;
-    pointer-events: auto;
+    pointer-events: inherit;
     transition: none;
   }
 
+  .ag-conv-col.open .ag-conv-pane,
+  .ag-conv-col.is-swiping .ag-conv-pane {
+    border-right-color: var(--border-default);
+    box-shadow: var(--shadow-lg);
+  }
+
+  /* Keep Chat always mounted underneath slide-over drawers for 60fps swipe reveal */
   .ag-main {
-    height: auto;
+    width: 100%;
+    height: 100%;
     flex: 1 1 auto;
     min-height: 0;
   }
 
-  /* Native 2-screen switching inside .ag-shell-body while MobileTabBar stays ALWAYS present below */
-  .ag-app[data-mobile-screen='chat'] .ag-conv-pane {
-    display: none;
+  /* Contain in-stream floating elements below slide-over drawers while keeping expanded CallStage free */
+  .ag-stream-wrap {
+    z-index: 1;
   }
 
-  .ag-app[data-mobile-screen='list'] .ag-main {
-    display: none;
+  @media (prefers-reduced-motion: reduce) {
+    .ag-conv-col,
+    .ag-drawer-scrim {
+      transition: none;
+    }
   }
 
   .ag-header-top {
