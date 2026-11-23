@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
+  CONTENT_FILTER_CACHE_NAME,
   CONTENT_FILTER_MODEL_ID,
   CONTENT_FILTER_MODEL_LABEL,
   DEFAULT_CONTENT_FILTER_SETTINGS,
@@ -13,11 +14,10 @@ import {
 } from '../types/contentFilter.ts'
 import type { ImageAttachment, ToastLevel } from '../types/protocol.ts'
 import { downloadAndVerifyMediaBlob } from '../lib/blossom.ts'
-import {
-  CONTENT_FILTER_CACHE_NAME,
-  type ContentFilterRulesPayload,
-  type ContentFilterWorkerInMessage,
-  type ContentFilterWorkerOutMessage,
+import type {
+  ContentFilterRulesPayload,
+  ContentFilterWorkerInMessage,
+  ContentFilterWorkerOutMessage,
 } from '../lib/contentFilter.worker.ts'
 import {
   clearFilterVerdictsStorage,
@@ -279,7 +279,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
           setRuntimeDevice(msg.runtimeDevice)
         }
         if (msg.status === 'error') {
-          setModelError(msg.error ?? 'Failed to load Liquid d1-2B.')
+          setModelError(msg.error ?? `Failed to load ${CONTENT_FILTER_MODEL_LABEL}.`)
         } else if (msg.status === 'ready' || msg.status === 'idle') {
           setModelError(null)
         }
@@ -346,6 +346,38 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       pending.reject(new Error('Content filter worker reset.'))
     }
     inflightScreenRef.current.clear()
+  }, [])
+
+  // Silently reclaim any legacy 1.7 GB d1-2B weights cached by older builds
+  useEffect(() => {
+    if (typeof caches === 'undefined') return
+    let cancelled = false
+    void (async () => {
+      try {
+        const hasCache = await caches.has(CONTENT_FILTER_CACHE_NAME)
+        if (!hasCache || cancelled) return
+        const cache = await caches.open(CONTENT_FILTER_CACHE_NAME)
+        const keys = await cache.keys()
+        for (const req of keys) {
+          if (cancelled) return
+          const u = req.url
+          if (
+            u.includes('LiquidAI/d1-2B-ONNX') ||
+            u.includes('LiquidAI%2Fd1-2B-ONNX') ||
+            u.includes('decoder_q4f16.onnx') ||
+            u.includes('decoder_q4.onnx') ||
+            u.includes('vision_encoder_q8.onnx')
+          ) {
+            await cache.delete(req)
+          }
+        }
+      } catch {
+        // Ignore storage errors on restricted mobile browsers
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
@@ -440,7 +472,8 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       }
       return false
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to download Liquid d1-2B.'
+      const message =
+        err instanceof Error ? err.message : `Unable to download ${CONTENT_FILTER_MODEL_LABEL}.`
       pushToastRef.current?.('error', 'Content Filter download failed', message)
       return false
     }
@@ -481,7 +514,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     pushToastRef.current?.(
       'info',
       'Content Filter cache cleared',
-      'Cached Liquid d1-2B weights and screening verdicts removed.'
+      'Cached safety filter models and screening verdicts removed.'
     )
   }, [clearVerdictCache, postWorkerRequest, terminateWorker])
 
@@ -686,7 +719,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
             return existing
           }
 
-          // 3. Run Liquid AI d1-2B screening in Web Worker BEFORE any objectUrl is created!
+          // 3. Run on-device safety screening in Web Worker BEFORE any objectUrl is created!
           const requestId = `cf-att-${++reqSeqRef.current}`
           const res = await postWorkerRequest({
             type: 'screen',

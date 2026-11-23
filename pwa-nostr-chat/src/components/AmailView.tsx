@@ -15,7 +15,6 @@ import {
   CheckCheck,
   Clock,
   Copy,
-  Database,
   FileText,
   Forward,
   HardDrive,
@@ -162,7 +161,7 @@ function resolvePubkeyInput(raw: string): { pubkey: string; npub: string; nickna
   return null
 }
 
-function formatDeliveryPill(msg: AmailMessage): {
+function formatDeliveryMeta(msg: AmailMessage): {
   label: string
   tone: 'muted' | 'accent' | 'danger'
 } {
@@ -170,10 +169,10 @@ function formatDeliveryPill(msg: AmailMessage): {
     if (msg.relayHopCount > 0) {
       return {
         label: `Encrypted · ${msg.relayHopCount} ${msg.relayHopCount === 1 ? 'hop' : 'hops'}`,
-        tone: 'accent',
+        tone: 'muted',
       }
     }
-    return { label: 'E2EE Mesh Delivery', tone: 'accent' }
+    return { label: 'Encrypted', tone: 'muted' }
   }
   switch (msg.deliveryStatus) {
     case 'read':
@@ -192,17 +191,17 @@ function formatDeliveryPill(msg: AmailMessage): {
       return {
         label:
           msg.relayedPeerCount > 0
-            ? `Relayed via ${msg.relayedPeerCount} mesh ${msg.relayedPeerCount === 1 ? 'peer' : 'peers'}`
-            : 'Relayed into mesh',
+            ? `Relayed · ${msg.relayedPeerCount} ${msg.relayedPeerCount === 1 ? 'peer' : 'peers'}`
+            : 'Relayed',
         tone: 'muted',
       }
     case 'expired':
-      return { label: 'Mesh TTL expired', tone: 'danger' }
+      return { label: 'Expired', tone: 'danger' }
     case 'draft':
       return { label: 'Draft', tone: 'muted' }
     case 'queued':
     default:
-      return { label: 'Queued for mesh couriers', tone: 'muted' }
+      return { label: 'Queued', tone: 'muted' }
   }
 }
 
@@ -210,34 +209,34 @@ function renderStatusIcon(status: AmailDeliveryStatus) {
   switch (status) {
     case 'read':
       return (
-        <span className="ag-amail-receipt read" title="Read by recipient">
+        <span className="ag-amail-receipt read" title="Read">
           <CheckCheck size={13} />
         </span>
       )
     case 'delivered':
       return (
-        <span className="ag-amail-receipt delivered" title="Delivered (ACK received)">
+        <span className="ag-amail-receipt delivered" title="Delivered">
           <Check size={13} />
         </span>
       )
     case 'relayed':
       return (
-        <span className="ag-amail-receipt relayed" title="Relayed to mesh couriers">
+        <span className="ag-amail-receipt relayed" title="Relayed">
           <Radio size={12} />
         </span>
       )
     case 'expired':
       return (
-        <span className="ag-amail-receipt expired" title="Mesh TTL expired before delivery">
+        <span className="ag-amail-receipt expired" title="Expired">
           <AlertCircle size={12} />
         </span>
       )
     case 'draft':
-      return <span className="ag-amail-draft-pill">Draft</span>
+      return <span className="ag-amail-draft-tag">Draft</span>
     case 'queued':
     default:
       return (
-        <span className="ag-amail-receipt queued" title="Queued in local mesh outbox">
+        <span className="ag-amail-receipt queued" title="Queued">
           <Clock size={12} />
         </span>
       )
@@ -494,7 +493,12 @@ export function AmailView({
     const tid = selectedMessage.threadId
     if (!tid) return [selectedMessage]
     const siblings = amail.messages
-      .filter((m) => m.threadId === tid && m.folder !== 'drafts' && (m.folder !== 'trash' || m.id === selectedMessage.id))
+      .filter(
+        (m) =>
+          m.threadId === tid &&
+          m.folder !== 'drafts' &&
+          (m.folder !== 'trash' || m.id === selectedMessage.id),
+      )
       .sort((a, b) => a.sentAt - b.sentAt)
     return siblings.length > 0 ? siblings : [selectedMessage]
   }, [amail.messages, selectedMessage])
@@ -637,7 +641,8 @@ export function AmailView({
 
     items.push({
       id: 'delete',
-      label: msg.folder === 'trash' || msg.folder === 'drafts' ? 'Delete Permanently' : 'Move to Trash',
+      label:
+        msg.folder === 'trash' || msg.folder === 'drafts' ? 'Delete Permanently' : 'Move to Trash',
       icon: <Trash2 size={14} />,
       danger: true,
       dividerBefore: msg.folder === 'drafts',
@@ -660,7 +665,11 @@ export function AmailView({
     })
   }
 
-  const resolveRecipientForCompose = (): { pubkey: string; npub: string; nickname: string } | null => {
+  const resolveRecipientForCompose = (): {
+    pubkey: string
+    npub: string
+    nickname: string
+  } | null => {
     if (selectedRecipient) return selectedRecipient
     const parsed = resolvePubkeyInput(toInput)
     if (!parsed) return null
@@ -677,11 +686,11 @@ export function AmailView({
     if (sendingMail) return
     const recipient = resolveRecipientForCompose()
     if (!recipient) {
-      setComposeError('Select a contact or paste a valid npub1…, 64-char hex pubkey, or #dm= link.')
+      setComposeError('Choose a contact or paste a valid npub or hex pubkey.')
       return
     }
     if (!subjectDraft.trim() && !bodyDraft.trim()) {
-      setComposeError('Add a subject or message body before sending.')
+      setComposeError('Add a subject or message before sending.')
       return
     }
 
@@ -723,7 +732,7 @@ export function AmailView({
     })
     setComposeDraftId(saved.id)
     onPlaySound?.('click')
-    engine.pushToast('info', 'Saved Amail draft')
+    engine.pushToast('info', 'Saved draft')
     setSelectedMessageId(null)
     setComposing(false)
     setSection('drafts')
@@ -753,11 +762,11 @@ export function AmailView({
       setContactKeyDraft('')
       setContactNickDraft('')
       setContactNoteDraft('')
-      setContactFeedback({ ok: true, msg: `Saved contact ${added.nickname}` })
+      setContactFeedback({ ok: true, msg: `Added ${added.nickname}` })
     } else {
       setContactFeedback({
         ok: false,
-        msg: 'Enter a valid npub1…, 64-char hex pubkey, or Agnostr #dm= link.',
+        msg: 'Enter a valid npub1… or hex pubkey.',
       })
     }
   }
@@ -771,7 +780,7 @@ export function AmailView({
     setConfirmPurgeVault(false)
     onPlaySound?.('click')
     await amail.purgeRelayVault()
-    setMeshFeedback('Purged all third-party relay capsules from local vault.')
+    setMeshFeedback('Relay vault cleared.')
   }
 
   const handlePruneExpired = async () => {
@@ -780,7 +789,7 @@ export function AmailView({
     setMeshFeedback(
       removed > 0
         ? `Pruned ${removed} expired ${removed === 1 ? 'capsule' : 'capsules'}.`
-        : 'No expired capsules to prune.',
+        : 'No expired capsules.',
     )
   }
 
@@ -808,31 +817,25 @@ export function AmailView({
     <div className="ag-amail-list-pane">
       {visibleMessages.length === 0 ? (
         <div className="ag-amail-empty">
-          <div className="ag-amail-empty-icon" aria-hidden="true">
-            <Mail size={22} />
-          </div>
+          <Mail size={26} className="ag-amail-empty-icon" aria-hidden="true" />
           <p className="ag-amail-empty-title">
             {searchQuery.trim()
-              ? 'No messages match your search'
+              ? 'No matches'
               : section === 'inbox'
-                ? 'Your encrypted mesh inbox is empty'
-                : `No messages in ${section}`}
-          </p>
-          <p className="ag-amail-empty-sub">
-            Amail delivers end-to-end encrypted messages across peer-to-peer WebRTC mesh couriers
-            with zero email servers.
+                ? 'Inbox is empty'
+                : 'No messages'}
           </p>
           {section === 'inbox' && !searchQuery.trim() && (
             <button
               type="button"
-              className="ag-btn ag-btn-primary ag-btn-sm"
+              className="ag-amail-action-primary"
               onClick={() => {
                 onPlaySound?.('click')
                 openFreshComposer()
               }}
             >
               <PenSquare size={14} />
-              <span>Compose Amail</span>
+              <span>Compose</span>
             </button>
           )}
         </div>
@@ -874,7 +877,9 @@ export function AmailView({
                     {isUnread && <span className="ag-amail-unread-dot" aria-hidden="true" />}
                     <span
                       className="ag-amail-row-sender truncate"
-                      style={{ color: counterpartyPubkey ? pubkeyToColor(counterpartyPubkey) : undefined }}
+                      style={{
+                        color: counterpartyPubkey ? pubkeyToColor(counterpartyPubkey) : undefined,
+                      }}
                     >
                       {counterpartyName}
                     </span>
@@ -884,9 +889,7 @@ export function AmailView({
                     <span className="ag-amail-row-subject truncate">
                       {msg.subject.trim() || '(no subject)'}
                     </span>
-                    {snippet && (
-                      <span className="ag-amail-row-snippet truncate"> — {snippet}</span>
-                    )}
+                    {snippet && <span className="ag-amail-row-snippet truncate"> — {snippet}</span>}
                   </div>
                 </div>
 
@@ -899,7 +902,7 @@ export function AmailView({
                       <>
                         <button
                           type="button"
-                          className="ag-icon-btn-xs"
+                          className="ag-amail-icon-btn"
                           onClick={() => {
                             onPlaySound?.('click')
                             void amail.markRead(msg.id, !msg.isRead)
@@ -911,7 +914,7 @@ export function AmailView({
                         </button>
                         <button
                           type="button"
-                          className="ag-icon-btn-xs"
+                          className="ag-amail-icon-btn"
                           onClick={() => {
                             onPlaySound?.('click')
                             void amail.moveToFolder(
@@ -928,7 +931,7 @@ export function AmailView({
                     )}
                     <button
                       type="button"
-                      className="ag-icon-btn-xs ag-icon-btn-danger"
+                      className="ag-amail-icon-btn danger"
                       onClick={() => {
                         onPlaySound?.('click')
                         if (msg.folder === 'drafts') {
@@ -959,13 +962,13 @@ export function AmailView({
   )
 
   const renderReader = (msg: AmailMessage) => {
-    const statusPill = formatDeliveryPill(msg)
+    const statusMeta = formatDeliveryMeta(msg)
     return (
       <div className="ag-amail-reader">
         <div className="ag-amail-reader-toolbar">
           <button
             type="button"
-            className="ag-btn ag-btn-ghost ag-btn-xs"
+            className="ag-amail-ghost-btn"
             onClick={() => {
               onPlaySound?.('click')
               setSelectedMessageId(null)
@@ -978,7 +981,7 @@ export function AmailView({
           <div className="ag-amail-reader-actions">
             <button
               type="button"
-              className="ag-btn ag-btn-secondary ag-btn-xs"
+              className="ag-amail-tonal-btn"
               onClick={() => handleReply(msg)}
             >
               <Reply size={13} />
@@ -986,7 +989,7 @@ export function AmailView({
             </button>
             <button
               type="button"
-              className="ag-btn ag-btn-secondary ag-btn-xs"
+              className="ag-amail-tonal-btn"
               onClick={() => handleForward(msg)}
             >
               <Forward size={13} />
@@ -994,7 +997,7 @@ export function AmailView({
             </button>
             <button
               type="button"
-              className={`ag-icon-btn-sm ${msg.isStarred ? 'ag-amail-star-active' : ''}`}
+              className={`ag-amail-icon-btn ${msg.isStarred ? 'ag-amail-star-active' : ''}`}
               onClick={() => {
                 onPlaySound?.('click')
                 void amail.toggleStar(msg.id)
@@ -1006,7 +1009,7 @@ export function AmailView({
             </button>
             <button
               type="button"
-              className="ag-icon-btn-sm"
+              className="ag-amail-icon-btn"
               onClick={() => {
                 onPlaySound?.('click')
                 void amail.moveToFolder(msg.id, msg.folder === 'archive' ? 'inbox' : 'archive')
@@ -1019,7 +1022,7 @@ export function AmailView({
             </button>
             <button
               type="button"
-              className="ag-icon-btn-sm ag-icon-btn-danger"
+              className="ag-amail-icon-btn danger"
               onClick={() => {
                 onPlaySound?.('click')
                 if (msg.folder === 'trash') {
@@ -1040,18 +1043,14 @@ export function AmailView({
         <div className="ag-amail-reader-scroll">
           <div className="ag-amail-reader-head">
             <h2 className="ag-amail-reader-subject">{msg.subject.trim() || '(no subject)'}</h2>
-            <div className="ag-amail-reader-badges">
-              <span className={`ag-amail-status-pill ${statusPill.tone}`}>
-                {msg.deliveryStatus === 'read' ? (
-                  <CheckCheck size={12} />
-                ) : (
-                  <Lock size={11} />
-                )}
-                <span>{statusPill.label}</span>
+            <div className="ag-amail-reader-meta-row">
+              <span className={`ag-amail-status-text ${statusMeta.tone}`}>
+                {msg.deliveryStatus === 'read' ? <CheckCheck size={12} /> : <Lock size={11} />}
+                <span>{statusMeta.label}</span>
               </span>
               {threadMessages.length > 1 && (
-                <span className="ag-badge ag-badge-muted mono">
-                  {threadMessages.length} messages
+                <span className="ag-amail-thread-count mono">
+                  · {threadMessages.length} messages
                 </span>
               )}
             </div>
@@ -1059,9 +1058,9 @@ export function AmailView({
 
           <div className="ag-amail-thread-stack">
             {threadMessages.map((item) => {
-              const itemPill = formatDeliveryPill(item)
+              const itemMeta = formatDeliveryMeta(item)
               return (
-                <article key={item.id} className="ag-amail-message-card">
+                <article key={item.id} className="ag-amail-message-block">
                   <header className="ag-amail-msg-meta">
                     <div className="ag-amail-msg-sender-wrap">
                       <img
@@ -1081,7 +1080,7 @@ export function AmailView({
                           </span>
                           <button
                             type="button"
-                            className="ag-amail-npub-chip mono"
+                            className="ag-amail-npub-link mono"
                             onClick={() =>
                               void copyValue(`from-${item.id}`, item.fromNpub, 'Copied sender npub')
                             }
@@ -1096,10 +1095,10 @@ export function AmailView({
                           </button>
                         </div>
                         <div className="ag-amail-msg-to-row">
-                          <span>To: {item.toName}</span>
+                          <span>To {item.toName}</span>
                           <button
                             type="button"
-                            className="ag-amail-npub-chip subtle mono"
+                            className="ag-amail-npub-link subtle mono"
                             onClick={() =>
                               void copyValue(`to-${item.id}`, item.toNpub, 'Copied recipient npub')
                             }
@@ -1116,8 +1115,8 @@ export function AmailView({
                         {formatFullDateTime(item.sentAt)}
                       </span>
                       {threadMessages.length > 1 && (
-                        <span className={`ag-amail-status-inline ${itemPill.tone}`}>
-                          {itemPill.label}
+                        <span className={`ag-amail-status-text compact ${itemMeta.tone}`}>
+                          {itemMeta.label}
                         </span>
                       )}
                     </div>
@@ -1147,7 +1146,7 @@ export function AmailView({
         <div className="ag-amail-compose-title-wrap">
           <button
             type="button"
-            className="ag-btn ag-btn-ghost ag-btn-xs"
+            className="ag-amail-ghost-btn"
             onClick={() => {
               onPlaySound?.('click')
               setComposing(false)
@@ -1156,19 +1155,19 @@ export function AmailView({
             <ArrowLeft size={14} />
             <span>Back</span>
           </button>
-          <span className="ag-amail-compose-title">New Encrypted Amail</span>
+          <span className="ag-amail-compose-title">New Message</span>
         </div>
         <div className="ag-amail-compose-head-actions">
           <button
             type="button"
-            className="ag-btn ag-btn-secondary ag-btn-xs"
+            className="ag-amail-tonal-btn"
             onClick={() => void handleSaveDraft()}
           >
             <span>Save Draft</span>
           </button>
           <button
             type="button"
-            className="ag-icon-btn-xs ag-icon-btn-danger"
+            className="ag-amail-icon-btn danger"
             onClick={handleDiscardCompose}
             title="Discard draft"
             aria-label="Discard draft"
@@ -1179,9 +1178,9 @@ export function AmailView({
       </div>
 
       <div className="ag-amail-compose-scroll">
-        {/* Recipient To: Field */}
-        <div className="ag-amail-field" ref={toWrapRef}>
-          <label className="ag-amail-field-label" htmlFor="ag-amail-to-input">
+        {/* Hairline To: row */}
+        <div className="ag-amail-compose-line" ref={toWrapRef}>
+          <label className="ag-amail-line-label" htmlFor="ag-amail-to-input">
             To
           </label>
           <div className="ag-amail-to-box">
@@ -1215,7 +1214,7 @@ export function AmailView({
                 <input
                   id="ag-amail-to-input"
                   type="text"
-                  className="ag-input"
+                  className="ag-amail-line-input"
                   value={toInput}
                   onFocus={() => setToDropdownOpen(true)}
                   onChange={(e) => {
@@ -1224,7 +1223,10 @@ export function AmailView({
                     setToDropdownOpen(true)
                     if (composeError) setComposeError(null)
                     const direct = resolvePubkeyInput(val)
-                    if (direct && (val.startsWith('npub1') || val.includes('#dm=') || val.length === 64)) {
+                    if (
+                      direct &&
+                      (val.startsWith('npub1') || val.includes('#dm=') || val.length === 64)
+                    ) {
                       const known = mergedContacts.find(
                         (c) => c.pubkey.toLowerCase() === direct.pubkey.toLowerCase(),
                       )
@@ -1238,21 +1240,21 @@ export function AmailView({
                       setToDropdownOpen(false)
                     }
                   }}
-                  placeholder="Contact name, npub1…, 64-hex pubkey, or #dm= link"
+                  placeholder="Name or npub…"
                   autoComplete="off"
                 />
                 {onOpenScanner && (
                   <button
                     type="button"
-                    className="ag-btn ag-btn-secondary ag-btn-sm"
+                    className="ag-amail-icon-btn"
                     onClick={() => {
                       onPlaySound?.('click')
                       onOpenScanner()
                     }}
-                    title="Scan recipient QR code"
+                    title="Scan QR code"
+                    aria-label="Scan recipient QR code"
                   >
-                    <QrCode size={14} />
-                    <span className="ag-hide-xs">QR</span>
+                    <QrCode size={15} />
                   </button>
                 )}
               </div>
@@ -1296,8 +1298,8 @@ export function AmailView({
                       </span>
                     </span>
                     {c.isTrustedPeer && (
-                      <span className="ag-badge ag-badge-accent">
-                        <ShieldCheck size={9} />
+                      <span className="ag-amail-trusted-tag">
+                        <ShieldCheck size={11} />
                         <span>Trusted</span>
                       </span>
                     )}
@@ -1308,27 +1310,24 @@ export function AmailView({
           </div>
         </div>
 
-        {/* Subject */}
-        <div className="ag-amail-field">
-          <label className="ag-amail-field-label" htmlFor="ag-amail-subject">
-            Subject
-          </label>
+        {/* Hairline Subject row */}
+        <div className="ag-amail-compose-line">
           <input
             id="ag-amail-subject"
             type="text"
             maxLength={180}
-            className="ag-input"
+            className="ag-amail-line-input subject"
             value={subjectDraft}
             onChange={(e) => setSubjectDraft(e.target.value)}
             placeholder="Subject"
+            aria-label="Subject"
           />
         </div>
 
         {/* Body Write | Preview */}
         <div className="ag-amail-body-field">
-          <div className="ag-amail-body-head">
-            <span className="ag-amail-field-label">Message (Markdown + $LaTeX$ Math)</span>
-            <div className="ag-segmented ag-amail-mode-seg" role="tablist" aria-label="Editor mode">
+          <div className="ag-amail-body-toolbar">
+            <div className="ag-amail-seg" role="tablist" aria-label="Editor mode">
               <button
                 type="button"
                 role="tab"
@@ -1352,14 +1351,14 @@ export function AmailView({
 
           {composeTab === 'write' ? (
             <textarea
-              className="ag-textarea ag-amail-textarea"
+              className="ag-amail-textarea"
               rows={9}
               value={bodyDraft}
               onChange={(e) => {
                 setBodyDraft(e.target.value)
                 if (composeError) setComposeError(null)
               }}
-              placeholder="Write your encrypted message… Supports **Markdown**, lists, code blocks, and $E = mc^2$ math."
+              placeholder="Write a message…"
               aria-label="Email body"
             />
           ) : (
@@ -1367,7 +1366,7 @@ export function AmailView({
               {bodyDraft.trim() ? (
                 <RichMessageContent content={bodyDraft} />
               ) : (
-                <p className="ag-amail-preview-empty">Nothing to preview yet.</p>
+                <p className="ag-amail-preview-empty">Nothing to preview</p>
               )}
             </div>
           )}
@@ -1382,12 +1381,12 @@ export function AmailView({
               checked={requestReceipt}
               onChange={() => setRequestReceipt((v) => !v)}
             />
-            <span>Request read receipt</span>
+            <span>Read receipt</span>
           </label>
 
           <div className="ag-amail-ttl-group">
-            <span className="ag-amail-ttl-label">Mesh TTL</span>
-            <div className="ag-segmented ag-amail-ttl-seg" role="radiogroup" aria-label="Mesh TTL">
+            <span className="ag-amail-ttl-label">TTL</span>
+            <div className="ag-amail-seg" role="radiogroup" aria-label="Mesh TTL">
               {TTL_OPTIONS.map((opt) => (
                 <button
                   key={opt.sec}
@@ -1412,17 +1411,13 @@ export function AmailView({
       </div>
 
       <div className="ag-amail-compose-footer">
-        <span className="ag-amail-e2ee-note">
-          <Lock size={12} />
-          <span>NIP-44 E2EE sealed capsule · zero email servers</span>
-        </span>
         <button
           type="submit"
-          className="ag-btn ag-btn-primary"
+          className="ag-amail-action-primary"
           disabled={sendingMail}
         >
           <Send size={14} />
-          <span>{sendingMail ? 'Sealing & Sending…' : 'Send via Mesh'}</span>
+          <span>{sendingMail ? 'Sending…' : 'Send'}</span>
         </button>
       </div>
     </form>
@@ -1431,38 +1426,34 @@ export function AmailView({
   const renderContacts = () => (
     <div className="ag-amail-section-scroll">
       <div className="ag-amail-section-head">
-        <div>
-          <h3 className="ag-amail-section-title">Contacts</h3>
-          <p className="ag-amail-section-sub">
-            Pure Nostr public keys &amp; synced Trusted People — no email addresses required.
-          </p>
-        </div>
+        <h3 className="ag-amail-section-title">Contacts</h3>
       </div>
 
-      <form className="ag-amail-card ag-amail-contact-form" onSubmit={(e) => void handleAddContact(e)}>
+      <form className="ag-amail-add-bar" onSubmit={(e) => void handleAddContact(e)}>
         <div className="ag-amail-to-input-row">
           <input
             type="text"
-            className="ag-input mono"
+            className="ag-amail-soft-input mono"
             value={contactKeyDraft}
             onChange={(e) => {
               setContactKeyDraft(e.target.value)
               if (contactFeedback) setContactFeedback(null)
             }}
-            placeholder="Paste npub1…, 64-char hex pubkey, or #dm= link"
+            placeholder="npub1… or hex pubkey"
             aria-label="Contact public key or DM link"
           />
           {onOpenScanner && (
             <button
               type="button"
-              className="ag-btn ag-btn-secondary ag-btn-sm"
+              className="ag-amail-icon-btn"
               onClick={() => {
                 onPlaySound?.('click')
                 onOpenScanner()
               }}
               title="Scan QR code"
+              aria-label="Scan QR code"
             >
-              <QrCode size={14} />
+              <QrCode size={15} />
             </button>
           )}
         </div>
@@ -1470,24 +1461,24 @@ export function AmailView({
           <input
             type="text"
             maxLength={32}
-            className="ag-input"
+            className="ag-amail-soft-input"
             value={contactNickDraft}
             onChange={(e) => setContactNickDraft(e.target.value)}
-            placeholder="Nickname (optional)"
+            placeholder="Nickname"
             aria-label="Contact nickname"
           />
           <input
             type="text"
             maxLength={80}
-            className="ag-input"
+            className="ag-amail-soft-input"
             value={contactNoteDraft}
             onChange={(e) => setContactNoteDraft(e.target.value)}
-            placeholder="Note (optional)"
+            placeholder="Note"
             aria-label="Contact note"
           />
           <button
             type="submit"
-            className="ag-btn ag-btn-primary ag-btn-sm"
+            className="ag-amail-action-primary compact"
             disabled={!contactKeyDraft.trim()}
           >
             <UserPlus size={14} />
@@ -1507,11 +1498,9 @@ export function AmailView({
       </form>
 
       {mergedContacts.length === 0 ? (
-        <div className="ag-amail-card ag-amail-empty-inline">
-          No contacts yet. Add a peer&apos;s npub above or trust peers in chat.
-        </div>
+        <p className="ag-amail-empty-inline">No contacts yet</p>
       ) : (
-        <div className="ag-amail-contact-list" role="list">
+        <div className="ag-amail-flat-list" role="list">
           {mergedContacts.map((c) => {
             const isSavedAmailContact = amail.contacts.some(
               (saved) => saved.pubkey.toLowerCase() === c.pubkey.toLowerCase(),
@@ -1534,8 +1523,8 @@ export function AmailView({
                       {c.nickname}
                     </span>
                     {c.isTrustedPeer && (
-                      <span className="ag-badge ag-badge-accent">
-                        <ShieldCheck size={9} />
+                      <span className="ag-amail-trusted-tag">
+                        <ShieldCheck size={11} />
                         <span>Trusted</span>
                       </span>
                     )}
@@ -1548,7 +1537,7 @@ export function AmailView({
                 <div className="ag-amail-contact-actions">
                   <button
                     type="button"
-                    className="ag-btn ag-btn-primary ag-btn-xs"
+                    className="ag-amail-tonal-btn accent"
                     onClick={() => {
                       onPlaySound?.('click')
                       openFreshComposer({ to: { pubkey: c.pubkey, nickname: c.nickname } })
@@ -1559,7 +1548,7 @@ export function AmailView({
                   </button>
                   <button
                     type="button"
-                    className="ag-icon-btn-xs"
+                    className="ag-amail-icon-btn"
                     onClick={() => void copyValue(`c-${c.pubkey}`, c.npub, 'Copied npub')}
                     title="Copy npub"
                     aria-label={`Copy npub for ${c.nickname}`}
@@ -1569,7 +1558,7 @@ export function AmailView({
                   {isSavedAmailContact && (
                     <button
                       type="button"
-                      className="ag-icon-btn-xs ag-icon-btn-danger"
+                      className="ag-amail-icon-btn danger"
                       onClick={() => {
                         onPlaySound?.('click')
                         void amail.removeContact(c.pubkey)
@@ -1592,88 +1581,61 @@ export function AmailView({
   const renderMeshInspector = () => {
     const stats = amail.storageStats
     const st = amail.settings
+    const totalPurged = stats.totalDeliveredPurged + stats.totalExpiredPurged
+
     return (
       <div className="ag-amail-section-scroll">
         <div className="ag-amail-section-head">
-          <div>
-            <h3 className="ag-amail-section-title">Mesh Relay &amp; Storage</h3>
-            <p className="ag-amail-section-sub">
-              Briar-inspired store-and-forward courier vault. Third-party capsules are strictly
-              opaque NIP-44 ciphertext.
-            </p>
-          </div>
+          <h3 className="ag-amail-section-title">Mesh &amp; Storage</h3>
         </div>
 
-        {/* Storage Utilization Card */}
-        <div className="ag-amail-card">
-          <div className="ag-amail-card-head">
-            <span className="ag-amail-card-title">
-              <HardDrive size={14} />
-              <span>Local Storage Breakdown</span>
+        {/* Single Borderless Tonal Overview Strip */}
+        <div className="ag-amail-overview">
+          <div className="ag-amail-overview-bar-head">
+            <span className="ag-amail-overview-label">Vault</span>
+            <span className="ag-amail-overview-usage mono">
+              {formatBytes(stats.vaultBytes)} / {formatBytes(stats.vaultLimitBytes)} · {vaultPct}%
             </span>
-            <span className="ag-badge ag-badge-accent mono">{vaultPct}% vault used</span>
           </div>
 
           <div className="ag-amail-vault-track" aria-hidden="true">
             <span className="ag-amail-vault-fill" style={{ width: `${vaultPct}%` }} />
           </div>
 
-          <div className="ag-amail-storage-breakdown">
-            <div className="ag-amail-stat-chip">
-              <span className="ag-amail-stat-k">Relay Vault</span>
-              <span className="ag-amail-stat-v mono">
-                {formatBytes(stats.vaultBytes)} / {formatBytes(stats.vaultLimitBytes)}
-              </span>
+          <div className="ag-amail-metrics-strip">
+            <div className="ag-amail-metric">
+              <span className="ag-amail-metric-label">Couriers</span>
+              <span className="ag-amail-metric-val mono">{connectedCouriers}</span>
             </div>
-            <div className="ag-amail-stat-chip">
-              <span className="ag-amail-stat-k">My Mail</span>
-              <span className="ag-amail-stat-v mono">
-                {formatBytes(stats.mailBytes)} ({stats.mailCount})
-              </span>
+            <div className="ag-amail-metric">
+              <span className="ag-amail-metric-label">Carrying</span>
+              <span className="ag-amail-metric-val mono">{stats.vaultCapsuleCount}</span>
             </div>
-            <div className="ag-amail-stat-chip">
-              <span className="ag-amail-stat-k">ACK Tombstones</span>
-              <span className="ag-amail-stat-v mono">{stats.tombstoneCount}</span>
+            <div className="ag-amail-metric">
+              <span className="ag-amail-metric-label">Relayed</span>
+              <span className="ag-amail-metric-val mono">{stats.totalRelayedOut}</span>
+            </div>
+            <div className="ag-amail-metric">
+              <span className="ag-amail-metric-label">Purged</span>
+              <span className="ag-amail-metric-val mono">{totalPurged}</span>
+            </div>
+            <div className="ag-amail-metric">
+              <span className="ag-amail-metric-label">My Mail</span>
+              <span className="ag-amail-metric-val mono">{formatBytes(stats.mailBytes)}</span>
+            </div>
+            <div className="ag-amail-metric">
+              <span className="ag-amail-metric-label">ACKs</span>
+              <span className="ag-amail-metric-val mono">{stats.tombstoneCount}</span>
             </div>
           </div>
         </div>
 
-        {/* Live Mesh Telemetry */}
-        <div className="ag-amail-telemetry-grid">
-          <div className="ag-amail-kpi">
-            <span className="ag-amail-kpi-label">Mesh Relay</span>
-            <span className="ag-amail-kpi-val">{st.relayEnabled ? 'ON' : 'OFF'}</span>
-          </div>
-          <div className="ag-amail-kpi">
-            <span className="ag-amail-kpi-label">WebRTC Couriers</span>
-            <span className="ag-amail-kpi-val mono">{connectedCouriers}</span>
-          </div>
-          <div className="ag-amail-kpi">
-            <span className="ag-amail-kpi-label">Capsules Carrying</span>
-            <span className="ag-amail-kpi-val mono">{stats.vaultCapsuleCount}</span>
-          </div>
-          <div className="ag-amail-kpi">
-            <span className="ag-amail-kpi-label">Total Relayed</span>
-            <span className="ag-amail-kpi-val mono">{stats.totalRelayedOut}</span>
-          </div>
-          <div className="ag-amail-kpi">
-            <span className="ag-amail-kpi-label">Delivered &amp; Purged</span>
-            <span className="ag-amail-kpi-val mono">{stats.totalDeliveredPurged}</span>
-          </div>
-          <div className="ag-amail-kpi">
-            <span className="ag-amail-kpi-label">Expired Purged</span>
-            <span className="ag-amail-kpi-val mono">{stats.totalExpiredPurged}</span>
-          </div>
-        </div>
-
-        {/* Relay Controls */}
-        <div className="ag-amail-card ag-amail-controls-card">
-          <label className="ag-amail-toggle-row">
-            <div>
-              <div className="ag-amail-toggle-title">Enable Mesh Relay</div>
-              <div className="ag-amail-toggle-desc">
-                Store and forward sealed capsules for offline peers over WebRTC DataChannels.
-              </div>
+        {/* Flat Hairline-Divided Settings */}
+        <div className="ag-amail-settings-list">
+          <label className="ag-amail-setting-row">
+            <div className="ag-amail-setting-copy">
+              <span className="ag-amail-setting-title">Mesh relay</span>
+              <span className="ag-amail-setting-desc">Relay encrypted mail for offline peers</span>
             </div>
             <input
               type="checkbox"
@@ -1686,12 +1648,10 @@ export function AmailView({
             />
           </label>
 
-          <label className="ag-amail-toggle-row">
-            <div>
-              <div className="ag-amail-toggle-title">Send Read Receipts</div>
-              <div className="ag-amail-toggle-desc">
-                Notify senders when you open their Amail (if they requested a receipt).
-              </div>
+          <label className="ag-amail-setting-row">
+            <div className="ag-amail-setting-copy">
+              <span className="ag-amail-setting-title">Read receipts</span>
+              <span className="ag-amail-setting-desc">Notify senders when opened</span>
             </div>
             <input
               type="checkbox"
@@ -1704,9 +1664,9 @@ export function AmailView({
             />
           </label>
 
-          <div className="ag-amail-control-row">
-            <span className="ag-amail-toggle-title">Max Vault Size</span>
-            <div className="ag-segmented" role="radiogroup" aria-label="Max relay vault size">
+          <div className="ag-amail-setting-row stack">
+            <span className="ag-amail-setting-title">Vault limit</span>
+            <div className="ag-amail-seg wide" role="radiogroup" aria-label="Max relay vault size">
               {VAULT_SIZE_OPTIONS.map((opt) => (
                 <button
                   key={opt.bytes}
@@ -1725,9 +1685,9 @@ export function AmailView({
             </div>
           </div>
 
-          <div className="ag-amail-control-row">
-            <span className="ag-amail-toggle-title">Max Hops</span>
-            <div className="ag-segmented" role="radiogroup" aria-label="Max relay hops">
+          <div className="ag-amail-setting-row stack">
+            <span className="ag-amail-setting-title">Max hops</span>
+            <div className="ag-amail-seg wide" role="radiogroup" aria-label="Max relay hops">
               {MAX_HOPS_OPTIONS.map((h) => (
                 <button
                   key={h}
@@ -1749,16 +1709,16 @@ export function AmailView({
           <div className="ag-amail-mesh-actions">
             <button
               type="button"
-              className="ag-btn ag-btn-primary ag-btn-sm"
+              className="ag-amail-action-primary compact"
               disabled={amail.isSyncing}
               onClick={() => void handleSyncMesh()}
             >
               <RefreshCw size={13} className={amail.isSyncing ? 'ag-spin' : ''} />
-              <span>{amail.isSyncing ? 'Syncing Mesh…' : 'Sync Mesh Now'}</span>
+              <span>{amail.isSyncing ? 'Syncing…' : 'Sync'}</span>
             </button>
             <button
               type="button"
-              className="ag-btn ag-btn-secondary ag-btn-sm"
+              className="ag-amail-tonal-btn"
               onClick={() => void handlePruneExpired()}
             >
               <Clock size={13} />
@@ -1766,13 +1726,11 @@ export function AmailView({
             </button>
             <button
               type="button"
-              className={`ag-btn ag-btn-sm ${
-                confirmPurgeVault ? 'ag-btn-danger' : 'ag-btn-danger-outline'
-              }`}
+              className={`ag-amail-tonal-btn danger ${confirmPurgeVault ? 'armed' : ''}`}
               onClick={() => void handlePurgeVault()}
             >
               <Trash2 size={13} />
-              <span>{confirmPurgeVault ? 'Tap again to purge' : 'Purge Relay Vault'}</span>
+              <span>{confirmPurgeVault ? 'Confirm Purge' : 'Purge Vault'}</span>
             </button>
           </div>
 
@@ -1783,31 +1741,22 @@ export function AmailView({
           )}
         </div>
 
-        {/* Carried Sealed Relay Capsules Table */}
-        <div className="ag-amail-card">
-          <div className="ag-amail-card-head">
-            <span className="ag-amail-card-title">
-              <Database size={14} />
-              <span>Carried Sealed Capsules ({amail.relayCapsules.length})</span>
-            </span>
-            <span className="ag-amail-ciphertext-tag">
-              <Lock size={10} />
-              <span>Encrypted ciphertext · Zero plaintext visibility</span>
-            </span>
-          </div>
+        {/* Clean Borderless Relay Vault Table */}
+        <div className="ag-amail-vault-section">
+          <h4 className="ag-amail-subsection-title">
+            Relay Vault ({amail.relayCapsules.length})
+          </h4>
 
           {amail.relayCapsules.length === 0 ? (
-            <p className="ag-amail-empty-inline">
-              No third-party capsules currently buffered in your relay vault.
-            </p>
+            <p className="ag-amail-empty-inline">No buffered capsules</p>
           ) : (
             <div className="ag-amail-capsule-table" role="table" aria-label="Carried relay capsules">
               <div className="ag-amail-capsule-row head mono" role="row">
-                <span role="columnheader">Capsule ID</span>
+                <span role="columnheader">Capsule</span>
                 <span role="columnheader">Size</span>
                 <span role="columnheader">Hops</span>
                 <span role="columnheader">TTL</span>
-                <span role="columnheader">Dest Hint</span>
+                <span role="columnheader">Hint</span>
               </div>
               {amail.relayCapsules.map((cap) => (
                 <div key={cap.capsuleId} className="ag-amail-capsule-row mono" role="row">
@@ -1842,15 +1791,13 @@ export function AmailView({
         className="ag-amail-shell"
         role="dialog"
         aria-modal="true"
-        aria-label="Amail — Encrypted Mesh Mail"
+        aria-label="Amail"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Top Bar (Search + Mesh Status + Sync + Mobile Compose / Close) */}
+        {/* Top Bar */}
         <header className="ag-amail-topbar">
           <div className="ag-amail-brand">
-            <span className="ag-amail-brand-icon" aria-hidden="true">
-              <Mail size={15} />
-            </span>
+            <Mail size={16} className="ag-amail-brand-glyph" aria-hidden="true" />
             <span className="ag-amail-brand-name">Amail</span>
           </div>
 
@@ -1867,7 +1814,7 @@ export function AmailView({
                 }
                 if (selectedMessageId) setSelectedMessageId(null)
               }}
-              placeholder="Search mail…"
+              placeholder="Search…"
               aria-label="Search Amail messages"
             />
             {searchQuery && (
@@ -1892,9 +1839,12 @@ export function AmailView({
                 setSelectedMessageId(null)
                 setSection('mesh')
               }}
-              title="Open Mesh Relay & Storage Inspector"
+              title="Mesh & Storage"
             >
-              <Radio size={12} />
+              <span
+                className={`ag-amail-mesh-dot ${connectedCouriers > 0 ? 'live' : ''}`}
+                aria-hidden="true"
+              />
               <span className="ag-hide-xs">
                 {connectedCouriers > 0 ? `${connectedCouriers} mesh` : 'Mesh'}
               </span>
@@ -1902,10 +1852,10 @@ export function AmailView({
 
             <button
               type="button"
-              className="ag-icon-btn-sm"
+              className="ag-amail-icon-btn"
               disabled={amail.isSyncing}
               onClick={() => void handleSyncMesh()}
-              title="Sync Amail mesh now"
+              title="Sync mesh"
               aria-label="Sync Amail mesh now"
             >
               <RefreshCw size={14} className={amail.isSyncing ? 'ag-spin' : ''} />
@@ -1919,17 +1869,17 @@ export function AmailView({
                 openFreshComposer()
               }}
               aria-label="Compose Amail"
-              title="Compose Amail"
+              title="Compose"
             >
               <Plus size={16} />
             </button>
 
             <button
               type="button"
-              className="ag-icon-btn-sm ag-amail-close-btn"
+              className="ag-amail-icon-btn"
               onClick={onClose}
               aria-label="Close Amail"
-              title="Close Amail (Esc)"
+              title="Close (Esc)"
             >
               <X size={16} />
             </button>
@@ -1994,7 +1944,7 @@ export function AmailView({
           </div>
         )}
 
-        {/* Body Layout: Slim 188px Desktop Rail + Main Content Pane */}
+        {/* Body Layout */}
         <div className="ag-amail-body">
           <nav className="ag-amail-rail" aria-label="Amail folders">
             <button

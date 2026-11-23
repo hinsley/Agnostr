@@ -333,7 +333,7 @@ function TrustedImageView({
 }
 
 /* --------------------------------------------------------------------------
-   AI-INTERCEPTED IMAGE CARD — Screens image bytes in-memory via Liquid d1-2B
+   AI-INTERCEPTED IMAGE CARD — Screens image bytes in-memory via Safety Filter
    BEFORE any <img> element is ever mounted in the DOM.
    -------------------------------------------------------------------------- */
 interface ScreenedImageCardProps {
@@ -471,7 +471,7 @@ function ScreenedImageCard({
               caption,
             })
           }
-          title="Screened safe by Liquid d1-2B — click to inspect full resolution"
+          title="Screened safe locally — click to inspect full resolution"
           aria-label={`Inspect screened image from ${senderDisplayHandle}${metaSummary ? ` (${metaSummary})` : ''}`}
         >
           <img
@@ -481,7 +481,7 @@ function ScreenedImageCard({
             loading="lazy"
           />
 
-          <span className="ag-img-screened-badge mono" title="Cleared safe on-device by Liquid AI d1-2B">
+          <span className="ag-img-screened-badge mono" title="Cleared safe on-device by Safety Filter">
             <ShieldCheck size={10} />
             <span>Screened · Safe</span>
           </span>
@@ -512,7 +512,7 @@ function ScreenedImageCard({
     )
   }
 
-  // 2. FLAGGED by Liquid d1-2B
+  // 2. FLAGGED by Safety Filter
   if (verdict?.status === 'flagged') {
     const categoryLabel = formatFilterCategories(verdict.categories)
 
@@ -565,14 +565,14 @@ function ScreenedImageCard({
         ref={hostRef}
         className={`ag-img-shield-card flagged ${isViolet ? 'dm' : ''}`}
         role="region"
-        aria-label={`Image blocked by Liquid d1-2B (${categoryLabel})`}
+        aria-label={`Image blocked by Content Filter (${categoryLabel})`}
       >
         <div className="ag-img-shield-top">
           <div className="ag-img-shield-title-wrap">
             <span className="ag-img-shield-emblem flagged" aria-hidden="true">
               <ShieldAlert size={15} />
             </span>
-            <span className="ag-img-shield-title">Blocked by Liquid d1-2B</span>
+            <span className="ag-img-shield-title">Blocked by Content Filter</span>
           </div>
 
           <div className="ag-img-shield-badges">
@@ -641,7 +641,7 @@ function ScreenedImageCard({
         className={`ag-img-shield-card ai-intercept ${isViolet ? 'dm' : ''}`}
         role="status"
         aria-busy="true"
-        aria-label={isDownloading ? `Downloading Liquid d1-2B (${pct}%)` : 'Screening image with Liquid d1-2B'}
+        aria-label={isDownloading ? `Downloading Safety Filter (${pct}%)` : 'Screening image locally'}
       >
         <div className="ag-img-shield-top">
           <div className="ag-img-shield-title-wrap">
@@ -650,8 +650,8 @@ function ScreenedImageCard({
             </span>
             <span className="ag-img-shield-title">
               {isDownloading
-                ? `Downloading Liquid d1-2B · ${pct}%`
-                : 'Screening with Liquid d1-2B…'}
+                ? `Downloading Safety Filter · ${pct}%`
+                : 'Screening image…'}
             </span>
           </div>
           {metaSummary && <span className="ag-badge muted tabular">{metaSummary}</span>}
@@ -691,7 +691,7 @@ function ScreenedImageCard({
     )
   }
 
-  // 4. IDLE / ERROR -> Intercept card with 1-click Scan & View (Liquid d1-2B)
+  // 4. IDLE / ERROR -> Intercept card with 1-click Scan & View (Safety Filter)
   const isError = verdict?.status === 'error'
   return (
     <div
@@ -706,7 +706,7 @@ function ScreenedImageCard({
             {isError ? <AlertCircle size={14} /> : <Shield size={14} />}
           </span>
           <span className="ag-img-shield-title">
-            {isTrusted ? 'Image · AI Safety Screen' : 'Image · Untrusted Sender'}
+            {isTrusted ? 'Image · Safety Screen' : 'Image · Untrusted Sender'}
           </span>
         </div>
 
@@ -729,7 +729,7 @@ function ScreenedImageCard({
           </>
         ) : (
           <>
-            Hidden until screened locally with <strong>Liquid d1-2B</strong> (no image shown until
+            Hidden until screened locally with <strong>Safety Filter</strong> (never shown until
             cleared safe).
           </>
         )}
@@ -743,10 +743,10 @@ function ScreenedImageCard({
             autoRequestedKeyRef.current = cacheKey
             triggerScan()
           }}
-          title="Download/run Liquid d1-2B locally and show image only if safe"
+          title="Run on-device Safety Filter and show image only if safe"
         >
           {isError ? <RotateCw size={13} /> : <Sparkles size={13} />}
-          <span>{isError ? 'Retry Scan (Liquid d1-2B)' : 'Scan & View (Liquid d1-2B)'}</span>
+          <span>{isError ? 'Retry Scan' : 'Scan & View'}</span>
         </button>
 
         {!isTrusted && (

@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
 
 const MOBILE_MAX_WIDTH = 867
-const KEYBOARD_THRESHOLD_PX = 110
+const KEYBOARD_THRESHOLD_PX = 100
+const KEYBOARD_LARGE_DROP_PX = 160
 
 function getOrientation(layoutW: number, layoutH: number): 'portrait' | 'landscape' {
   const screenType = window.screen?.orientation?.type
@@ -50,6 +51,7 @@ export function useMobileViewport(): void {
 
     const root = document.documentElement
     const baselineByOrientation = { portrait: 0, landscape: 0 }
+    let lastLayoutW = 0
     let rafId: number | null = null
     let scrollGuardRafId: number | null = null
     const pendingTimers = new Set<number>()
@@ -97,6 +99,14 @@ export function useMobileViewport(): void {
       const orientation = getOrientation(layoutW, layoutH)
       const focusedInput = isTextInputFocused()
 
+      // If viewport width changed substantially (e.g. foldable/split-screen/resize),
+      // reset stale height baselines so keyboard state cannot get stuck.
+      if (lastLayoutW > 0 && Math.abs(layoutW - lastLayoutW) > 60) {
+        baselineByOrientation.portrait = 0
+        baselineByOrientation.landscape = 0
+      }
+      lastLayoutW = layoutW
+
       // Track full-height baseline per orientation when no keyboard is open,
       // and always grow baseline if the viewport expands (e.g. URL bar hides).
       const candidateMax = Math.max(layoutH, vvHeight)
@@ -120,11 +130,12 @@ export function useMobileViewport(): void {
       const keyboardOpen =
         isMobile &&
         (visualDrop > KEYBOARD_THRESHOLD_PX ||
+          heightDrop > KEYBOARD_LARGE_DROP_PX ||
           (focusedInput && heightDrop > KEYBOARD_THRESHOLD_PX))
 
       root.style.setProperty('--ag-vvh', `${Math.max(120, vvHeight)}px`)
       root.style.setProperty('--ag-vvt', `${vvOffsetTop}px`)
-      root.style.setProperty('--ag-mobile-tabbar-h', keyboardOpen ? '46px' : '56px')
+      root.style.setProperty('--ag-mobile-tabbar-h', keyboardOpen ? '0px' : '56px')
       root.dataset.keyboardOpen = keyboardOpen ? 'true' : 'false'
 
       resetStuckWindowScroll()
@@ -157,6 +168,7 @@ export function useMobileViewport(): void {
       scheduleSync()
       scheduleTimer(sync, 60)
       scheduleTimer(sync, 220)
+      scheduleTimer(sync, 420)
     }
 
     const handleWindowScroll = () => {

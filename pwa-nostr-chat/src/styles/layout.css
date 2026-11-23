@@ -11,7 +11,7 @@
 }
 
 html[data-keyboard-open='true'] {
-  --ag-mobile-tabbar-h: 46px;
+  --ag-mobile-tabbar-h: 0px;
 }
 
 html,
@@ -337,13 +337,13 @@ body,
     padding: 0.4rem 0 0.75rem;
   }
 
-  /* Composer sits directly above flex-flow MobileTabBar (tabbar owns bottom safe area) */
+  /* Composer sits directly above flex-flow MobileTabBar (or flush above keyboard when tabbar is hidden) */
   .ag-composer-dock {
     padding: 6px 10px 6px;
   }
 
   html[data-keyboard-open='true'] .ag-composer-dock {
-    padding: 4px 8px 4px;
+    padding: 5px 8px 6px;
   }
 
   .ag-backdrop {

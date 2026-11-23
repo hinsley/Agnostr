@@ -180,7 +180,7 @@ const NAV_ITEMS: readonly {
   { id: 'profile', label: 'Profile', subtitle: 'Name, keys & Lightning' },
   { id: 'notifications', label: 'Notifications', subtitle: 'Push alerts & call ringing' },
   { id: 'privacy', label: 'Privacy & Trust', subtitle: 'Trusted peers & blocks' },
-  { id: 'content-filter', label: 'Content Filter', subtitle: 'Liquid AI d1-2B safety' },
+  { id: 'content-filter', label: 'Content Filter', subtitle: 'On-device media & text safety' },
   { id: 'translator', label: 'Translator', subtitle: 'On-device LFM3-1.7B' },
   { id: 'appearance', label: 'Appearance', subtitle: 'Theme & sound effects' },
   { id: 'calls', label: 'Calls & Recording', subtitle: 'Quality, captions & TURN' },
@@ -256,7 +256,7 @@ export function SettingsModal({
   const [revealNsec, setRevealNsec] = useState(false)
   const [copiedField, setCopiedField] = useState<'npub' | 'nsec' | 'dm-link' | null>(null)
 
-  // Content Filter (Liquid AI d1-2B) drafts & quick test state
+  // Content Filter drafts & quick test state
   const [cfTestText, setCfTestText] = useState('')
   const [cfTesting, setCfTesting] = useState(false)
   const [cfTestLabel, setCfTestLabel] = useState<string | null>(null)
@@ -724,7 +724,7 @@ export function SettingsModal({
       await engine.contentFilter.clearModelCache()
       engine.contentFilter.clearVerdictCache()
       setCfTestResult(null)
-      setCfFeedback({ ok: true, msg: 'Cleared Liquid d1-2B model & verdict cache' })
+      setCfFeedback({ ok: true, msg: 'Cleared Content Filter model & verdict cache' })
     } catch (err) {
       setCfFeedback({
         ok: false,
@@ -1995,14 +1995,14 @@ export function SettingsModal({
 
     const callVideoHint =
       cfs.callVideoMode === 'trusted-only'
-        ? 'Untrusted peers stay strictly blocked (zero WebRTC media) until you trust them.'
+        ? 'Untrusted peers stay blocked (zero WebRTC media) until you trust them.'
         : cfs.callVideoMode === 'screen-untrusted'
-          ? 'Untrusted call video stays veiled behind a safety shield until cleared by Liquid d1-2B.'
-          : 'All remote call video stays veiled until cleared by Liquid d1-2B, re-veiling if flagged.'
+          ? 'Untrusted call video stays veiled until cleared by the on-device safety filter.'
+          : 'All remote call video stays veiled until cleared by the safety filter, re-veiling if flagged.'
 
     return (
       <div className="ag-set-pane-stack">
-        {/* Liquid AI d1-2B Model Card */}
+        {/* Content Filter Model Card */}
         <div className="ag-set-ai-card">
           <div className="ag-set-ai-head">
             <div className="ag-set-ai-title-wrap">
@@ -2037,8 +2037,8 @@ export function SettingsModal({
           )}
 
           <p className="ag-set-helper">
-            Runs 100% locally on your device via {cf.webGpuSupported ? 'WebGPU / WASM' : 'WASM'} —
-            media and messages never leave your browser.
+            Fast, phone-safe screening runs locally via {cf.webGpuSupported ? 'WebGPU / WASM' : 'WASM'}.
+            Optional text and custom-rule modules only download on demand when enabled.
           </p>
 
           <div className="ag-set-ai-actions">
@@ -2106,11 +2106,10 @@ export function SettingsModal({
           <div className="ag-set-toggle-copy">
             <span className="ag-set-toggle-title">
               <ShieldAlert size={16} />
-              <span>Enable AI Content Filtering</span>
+              <span>Enable Content Filter</span>
             </span>
             <span className="ag-set-toggle-desc">
-              Screen incoming media (and optional text or call video) locally with Liquid AI d1-2B
-              before it is displayed.
+              Screen incoming media locally before display.
             </span>
           </div>
           <input
@@ -2178,7 +2177,7 @@ export function SettingsModal({
                     <span>Custom filter instructions</span>
                   </span>
                   <span className="ag-set-toggle-desc">
-                    Add your own natural-language moderation rule evaluated on every scan.
+                    Downloads an optional on-device module when enabled to evaluate your own rules.
                   </span>
                 </div>
                 <input
@@ -2314,7 +2313,7 @@ export function SettingsModal({
                 className="ag-input"
                 value={cfTestText}
                 onChange={(e) => setCfTestText(e.target.value)}
-                placeholder="Type sample text to test d1-2B…"
+                placeholder="Type sample text to test filter…"
                 aria-label="Sample text to test content filter"
               />
               <button

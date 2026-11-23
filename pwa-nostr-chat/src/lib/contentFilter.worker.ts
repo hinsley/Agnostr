@@ -1,11 +1,14 @@
 /// <reference lib="webworker" />
 
 import {
+  CONTENT_FILTER_CACHE_NAME,
   CONTENT_FILTER_MODEL_ID,
   type ContentFilterCategory,
   type ContentFilterModelStatus,
   type ContentFilterRuntimeDevice,
 } from '../types/contentFilter.ts'
+
+export { CONTENT_FILTER_CACHE_NAME }
 
 export interface ContentFilterRulesPayload {
   filterNsfw: boolean
@@ -65,50 +68,60 @@ export type ContentFilterWorkerOutMessage =
       error: string
     }
 
-const HF_BASE_URL = `https://huggingface.co/${CONTENT_FILTER_MODEL_ID}/resolve/main`
-export const CONTENT_FILTER_CACHE_NAME = 'content-filter-cache'
+// Stage 1: Default phone-safe NSFW + NSFL (gore/extreme violence) image classifier (22.6 MB)
+const STAGE1_IMAGE_MODEL_URL = `https://huggingface.co/${CONTENT_FILTER_MODEL_ID}/resolve/main/onnx/image-safety-classifier-s.onnx`
+const STAGE1_IMAGE_EXPECTED_BYTES = 23_701_765
+const STAGE1_IMAGE_SIZE = 224
+const THRESHOLD_IMAGE_NSFL = 0.5
+const THRESHOLD_IMAGE_NSFW = 0.55
 
-// Exact LiquidAI/d1-2B-ONNX constants verified from config.json, lfm3.py, calibration.json
-const CALIBRATION_TEMP = 1.337398453966105
-const IM_START = '<|im_start|>'
-const IM_END = '<|im_end|>'
-const VISION_START = '<|vision_start|>'
-const IMAGE_TOKEN = '<|image|>'
-const VISION_END = '<|vision_end|>'
-const ASSISTANT_LEAD = '<think></think>'
-const ZERO_WIDTH_BREAK = '\u200b'
+// Stage 2: Lazy MobileCLIP-S0 zero-shot visual custom rules (loaded ONLY when customRulesEnabled on images)
+const MOBILECLIP_MODEL_ID = 'Xenova/mobileclip_s0'
+const MOBILECLIP_VISION_FP16_URL = `https://huggingface.co/${MOBILECLIP_MODEL_ID}/resolve/main/onnx/vision_model_fp16.onnx`
+const MOBILECLIP_VISION_FP32_URL = `https://huggingface.co/${MOBILECLIP_MODEL_ID}/resolve/main/onnx/vision_model.onnx`
+const MOBILECLIP_TEXT_INT8_URL = `https://huggingface.co/${MOBILECLIP_MODEL_ID}/resolve/main/onnx/text_model_int8.onnx`
+const MOBILECLIP_VISION_FP16_BYTES = 22_876_479
+const MOBILECLIP_VISION_FP32_BYTES = 45_543_630
+const MOBILECLIP_TEXT_INT8_BYTES = 42_799_230
+const MOBILECLIP_IMAGE_SIZE = 256
+const MOBILECLIP_EMBED_DIM = 512
+const MOBILECLIP_LOGIT_SCALE = 100
+const THRESHOLD_CLIP_CUSTOM_PROB = 0.72
+const THRESHOLD_CLIP_CUSTOM_MIN_SIM = 0.21
+const THRESHOLD_CLIP_CUSTOM_MARGIN = 0.03
 
-const PATCH_SIZE = 16
-const MERGE_SIZE = 2
-const TEMPORAL_PATCH_SIZE = 2
-const RESIZE_FACTOR = PATCH_SIZE * MERGE_SIZE // 32
-const MIN_PIXELS = 65_536 // 256x256 -> 64 visual tokens
-const MAX_PIXELS = 262_144 // 512x512 -> 256 visual tokens (fast + crisp in browser)
-const MAX_TEXT_CHARS = 2_000
-const HIDDEN_SIZE = 2048
+const CLIP_NEUTRAL_BASELINES = [
+  'a normal safe everyday photograph',
+  'a casual portrait, selfie, or landscape photo',
+  'an ordinary screenshot, meme, or graphic illustration',
+  'an innocent picture of food, pets, nature, or daily life',
+] as const
 
-const THRESHOLD_ILLEGAL = 0.5
-const THRESHOLD_NSFW = 0.55
-const THRESHOLD_CUSTOM = 0.55
+// Stage 3: Lazy DistilBERT 9-class text safety classifier (64.2 MB q8, loaded ONLY on text screening)
+const COMMENT_MOD_MODEL_ID = 'onnx-community/Comment-Moderation-ONNX'
+const COMMENT_MOD_ONNX_URL = `https://huggingface.co/${COMMENT_MOD_MODEL_ID}/resolve/main/onnx/model_int8.onnx`
+const COMMENT_MOD_EXPECTED_BYTES = 67_353_541
+// Exact id2label order verified from onnx-community/Comment-Moderation-ONNX/config.json:
+// 0: S (Sexual), 1: H (Hate), 2: V (Violence), 3: HR (Harassment),
+// 4: SH (Self-Harm), 5: S3 (Sexual/Minors), 6: H2 (Hate/Threat), 7: V2 (Violence/Graphic), 8: OK
+const CM_IDX_S = 0
+const CM_IDX_V = 2
+const CM_IDX_SH = 4
+const CM_IDX_S3 = 5
+const CM_IDX_H2 = 6
+const CM_IDX_V2 = 7
+const CM_IDX_OK = 8
 
-const YES_FORMS = ['yes', 'Yes', 'YES']
-const NO_FORMS = ['no', 'No', 'NO']
+// Stage 3b: Lazy MobileBERT-MNLI zero-shot NLI for natural-language custom text rules (25.2 MB q8)
+const MOBILEBERT_MNLI_MODEL_ID = 'Xenova/mobilebert-uncased-mnli'
+const MOBILEBERT_MNLI_ONNX_URL = `https://huggingface.co/${MOBILEBERT_MNLI_MODEL_ID}/resolve/main/onnx/model_int8.onnx`
+const MOBILEBERT_MNLI_EXPECTED_BYTES = 26_434_000
+// Exact id2label order verified from Xenova/mobilebert-uncased-mnli/config.json:
+// 0: ENTAILMENT, 1: NEUTRAL, 2: CONTRADICTION
+const NLI_IDX_ENTAILMENT = 0
+const NLI_IDX_CONTRADICTION = 2
 
-const SPECIAL_TOKEN_RE = /<\|[^|\s]{1,32}\|>|<\/?think>/g
-
-interface ModerationQuestion {
-  category: ContentFilterCategory
-  label: string
-  threshold: number
-  instructions: string
-  yesCriteria: string
-  noCriteria: string
-}
-
-interface TokenizerLike {
-  bos_token?: string | null
-  encode: (text: string, options?: { add_special_tokens?: boolean }) => number[]
-}
+const MAX_TEXT_CHARS = 1_500
 
 interface OrtTensorLike {
   data: Float32Array | BigInt64Array | Int32Array | Uint8Array
@@ -146,16 +159,47 @@ interface OrtModuleLike {
   }
 }
 
-interface LoadedModelBundle {
+interface TokenizerCallResult {
+  input_ids: number[] | number[][]
+  attention_mask?: number[] | number[][]
+  token_type_ids?: number[] | number[][]
+}
+
+type TokenizerCallable = (
+  text: string | string[],
+  options?: Record<string, unknown>
+) => TokenizerCallResult
+
+interface Stage1ImageModel {
   device: ContentFilterRuntimeDevice
-  decoderVariant: 'q4f16' | 'q4'
   ort: OrtModuleLike
-  tokenizer: TokenizerLike
-  bosToken: string
-  yesTokenIds: number[]
-  noTokenIds: number[]
-  visionSession: OrtSessionLike
-  decoderSession: OrtSessionLike
+  session: OrtSessionLike
+}
+
+interface Stage2ClipVisionModel {
+  device: ContentFilterRuntimeDevice
+  variant: 'fp16' | 'fp32'
+  ort: OrtModuleLike
+  session: OrtSessionLike
+}
+
+interface CachedClipRuleVectors {
+  key: string
+  ruleLabels: string[]
+  ruleEmbeddings: Float32Array[]
+  baselineEmbeddings: Float32Array[]
+}
+
+interface Stage3TextModModel {
+  ort: OrtModuleLike
+  tokenizer: TokenizerCallable
+  session: OrtSessionLike
+}
+
+interface Stage3NliModel {
+  ort: OrtModuleLike
+  tokenizer: TokenizerCallable
+  session: OrtSessionLike
 }
 
 type QueuedJob =
@@ -173,8 +217,17 @@ type QueuedJob =
 
 let transformersPromise: Promise<typeof import('@huggingface/transformers')> | null = null
 let ortPromise: Promise<OrtModuleLike> | null = null
-let activeBundle: LoadedModelBundle | null = null
+let legacyEvictionStarted = false
 let webGpuFailed = false
+
+let stage1Model: Stage1ImageModel | null = null
+let stage2VisionModel: Stage2ClipVisionModel | null = null
+let stage2ClipTokenizer: TokenizerCallable | null = null
+let cachedClipRules: CachedClipRuleVectors | null = null
+let stage3TextModel: Stage3TextModModel | null = null
+let stage3NliModel: Stage3NliModel | null = null
+
+let lastActiveDevice: ContentFilterRuntimeDevice | null = null
 
 const queue: QueuedJob[] = []
 let processing = false
@@ -183,16 +236,68 @@ function postOut(msg: ContentFilterWorkerOutMessage): void {
   self.postMessage(msg)
 }
 
-function escapeSpecialTokens(raw: string): string {
-  // Mirrors prompt.py `plain()`: inserts U+200B after '<' so untrusted user text
-  // can never forge <|im_end|>, <|image|>, or <think> tokens.
-  let out = raw
-  for (let pass = 0; pass < 3; pass++) {
-    const next = out.replace(SPECIAL_TOKEN_RE, (m) => `${m[0]}${ZERO_WIDTH_BREAK}${m.slice(1)}`)
-    if (next === out) break
-    out = next
+function sigmoid(x: number): number {
+  if (x >= 0) {
+    const z = Math.exp(-x)
+    return 1 / (1 + z)
+  }
+  const z = Math.exp(x)
+  return z / (1 + z)
+}
+
+function l2Normalize(vec: ArrayLike<number>): Float32Array {
+  const out = new Float32Array(vec.length)
+  let sumSq = 0
+  for (let i = 0; i < vec.length; i++) {
+    const v = vec[i]
+    sumSq += v * v
+  }
+  const inv = 1 / (Math.sqrt(sumSq) || 1)
+  for (let i = 0; i < vec.length; i++) {
+    out[i] = vec[i] * inv
   }
   return out
+}
+
+function dotProduct(a: Float32Array, b: Float32Array): number {
+  const len = Math.min(a.length, b.length)
+  let sum = 0
+  for (let i = 0; i < len; i++) {
+    sum += a[i] * b[i]
+  }
+  return sum
+}
+
+/**
+ * Silently evicts legacy 1.7 GB LiquidAI/d1-2B-ONNX entries from Cache Storage
+ * so phones immediately reclaim cached storage without user intervention.
+ */
+async function evictLegacyD1CacheOnce(): Promise<void> {
+  if (legacyEvictionStarted) return
+  legacyEvictionStarted = true
+  try {
+    if (typeof caches === 'undefined') return
+    const cache = await caches.open(CONTENT_FILTER_CACHE_NAME)
+    const keys = await cache.keys()
+    const deletions: Promise<boolean>[] = []
+    for (const req of keys) {
+      const u = req.url
+      if (
+        u.includes('LiquidAI/d1-2B-ONNX') ||
+        u.includes('LiquidAI%2Fd1-2B-ONNX') ||
+        u.includes('decoder_q4f16.onnx') ||
+        u.includes('decoder_q4.onnx') ||
+        u.includes('vision_encoder_q8.onnx')
+      ) {
+        deletions.push(cache.delete(req))
+      }
+    }
+    if (deletions.length > 0) {
+      await Promise.all(deletions)
+    }
+  } catch {
+    // Ignore cache inspection failures on restricted browsers
+  }
 }
 
 async function getTransformers(): Promise<typeof import('@huggingface/transformers')> {
@@ -215,13 +320,15 @@ async function getTransformers(): Promise<typeof import('@huggingface/transforme
 }
 
 async function getOrt(): Promise<OrtModuleLike> {
-  // Load transformers first so its ORT wasmPaths & WebGPU defaults are initialized
+  // Initialize transformers first so ORT wasmPaths are cleanly configured
   await getTransformers()
   if (!ortPromise) {
-    // LiquidAI/d1-2B-ONNX requires onnxruntime-web/webgpu in browser environments
     ortPromise = import('onnxruntime-web/webgpu') as unknown as Promise<OrtModuleLike>
   }
   const ort = await ortPromise
+  if (ort.env) {
+    ort.env.logLevel = 'error'
+  }
   if (ort.env?.wasm) {
     ort.env.wasm.proxy = false
     if (!self.crossOriginIsolated) {
@@ -229,7 +336,7 @@ async function getOrt(): Promise<OrtModuleLike> {
     }
   }
   if (ort.env?.webgpu) {
-    ort.env.webgpu.powerPreference = 'high-performance'
+    ort.env.webgpu.powerPreference = 'low-power'
   }
   return ort
 }
@@ -255,32 +362,34 @@ async function probeWebGpu(): Promise<{ available: boolean; hasFp16: boolean }> 
   }
 }
 
-async function disposeBundle(): Promise<void> {
-  const prev = activeBundle
-  activeBundle = null
-  if (!prev) return
+async function releaseSessionSafe(session: OrtSessionLike | null | undefined): Promise<void> {
+  if (!session || typeof session.release !== 'function') return
   try {
-    await prev.visionSession.release?.()
+    await session.release()
   } catch {
-    // Ignore session release error
-  }
-  try {
-    await prev.decoderSession.release?.()
-  } catch {
-    // Ignore session release error
+    // Ignore session release errors
   }
 }
 
-function allocateLargeBuffer(byteLength: number): ArrayBuffer {
-  try {
-    return new ArrayBuffer(byteLength)
-  } catch (err) {
-    if (err instanceof RangeError) {
-      const pages = Math.ceil(byteLength / 65_536)
-      return new WebAssembly.Memory({ initial: pages, maximum: pages }).buffer
-    }
-    throw err
-  }
+async function disposeAllModels(): Promise<void> {
+  const s1 = stage1Model
+  const s2 = stage2VisionModel
+  const s3 = stage3TextModel
+  const s3b = stage3NliModel
+
+  stage1Model = null
+  stage2VisionModel = null
+  stage2ClipTokenizer = null
+  cachedClipRules = null
+  stage3TextModel = null
+  stage3NliModel = null
+
+  await Promise.all([
+    releaseSessionSafe(s1?.session),
+    releaseSessionSafe(s2?.session),
+    releaseSessionSafe(s3?.session),
+    releaseSessionSafe(s3b?.session),
+  ])
 }
 
 async function readStreamWithProgress(
@@ -299,32 +408,28 @@ async function readStreamWithProgress(
 
   const reader = response.body.getReader()
   if (totalBytes > 0) {
-    const buffer = allocateLargeBuffer(totalBytes)
-    const out = new Uint8Array(buffer)
+    const out = new Uint8Array(totalBytes)
     let offset = 0
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
       if (!value || value.byteLength === 0) continue
       if (offset + value.byteLength > out.byteLength) {
-        // Fallback if server sent more bytes than Content-Length
-        const grown = new Uint8Array(allocateLargeBuffer(offset + value.byteLength))
-        grown.set(out.subarray(0, offset), 0)
-        grown.set(value, offset)
+        const chunks: Uint8Array[] = [out.subarray(0, offset), value]
         let extraOffset = offset + value.byteLength
-        const extras: Uint8Array[] = [grown]
+        onProgress(extraOffset, extraOffset)
         while (true) {
           const next = await reader.read()
           if (next.done) break
           if (next.value && next.value.byteLength > 0) {
-            extras.push(next.value)
+            chunks.push(next.value)
             extraOffset += next.value.byteLength
             onProgress(extraOffset, extraOffset)
           }
         }
-        const merged = new Uint8Array(allocateLargeBuffer(extraOffset))
+        const merged = new Uint8Array(extraOffset)
         let pos = 0
-        for (const chunk of extras) {
+        for (const chunk of chunks) {
           merged.set(chunk, pos)
           pos += chunk.byteLength
         }
@@ -349,7 +454,7 @@ async function readStreamWithProgress(
     received += value.byteLength
     onProgress(received, received)
   }
-  const merged = new Uint8Array(allocateLargeBuffer(received))
+  const merged = new Uint8Array(received)
   let pos = 0
   for (const chunk of chunks) {
     merged.set(chunk, pos)
@@ -361,15 +466,45 @@ async function readStreamWithProgress(
 async function fetchCachedBinary(
   url: string,
   expectedBytes: number,
-  onProgress: (loaded: number, total: number) => void
+  displayLabel: string,
+  emitStatus: boolean
 ): Promise<Uint8Array> {
+  let lastPercent = -1
+  let lastTs = 0
+  const report = (loaded: number, total: number) => {
+    if (!emitStatus) return
+    const pct = total > 0 ? Math.min(99, Math.max(0, Math.round((loaded / total) * 100))) : 0
+    const now = Date.now()
+    if (pct !== lastPercent && (now - lastTs > 100 || pct >= 99)) {
+      lastPercent = pct
+      lastTs = now
+      postOut({
+        type: 'status',
+        status: 'downloading',
+        progress: pct,
+        file: displayLabel,
+        runtimeDevice: lastActiveDevice,
+      })
+    }
+  }
+
+  if (emitStatus) {
+    postOut({
+      type: 'status',
+      status: 'downloading',
+      progress: 0,
+      file: displayLabel,
+      runtimeDevice: lastActiveDevice,
+    })
+  }
+
   let cache: Cache | null = null
   try {
     if (typeof caches !== 'undefined') {
       cache = await caches.open(CONTENT_FILTER_CACHE_NAME)
       const cachedRes = await cache.match(url)
       if (cachedRes && cachedRes.ok) {
-        return await readStreamWithProgress(cachedRes, expectedBytes, onProgress)
+        return await readStreamWithProgress(cachedRes, expectedBytes, report)
       }
     }
   } catch {
@@ -378,16 +513,17 @@ async function fetchCachedBinary(
 
   const res = await fetch(url, { mode: 'cors', credentials: 'omit' })
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} downloading ${url.split('/').pop() ?? 'model file'}`)
+    throw new Error(`HTTP ${res.status} downloading ${displayLabel}`)
   }
 
-  const bytes = await readStreamWithProgress(res, expectedBytes, onProgress)
+  const bytes = await readStreamWithProgress(res, expectedBytes, report)
 
   if (cache) {
     try {
-      const storeBody = bytes.buffer instanceof ArrayBuffer
-        ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-        : bytes
+      const storeBody =
+        bytes.buffer instanceof ArrayBuffer
+          ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+          : bytes
       await cache.put(
         url,
         new Response(storeBody as BodyInit, {
@@ -406,214 +542,375 @@ async function fetchCachedBinary(
   return bytes
 }
 
-function resolveSingleTokenIds(tokenizer: TokenizerLike, forms: readonly string[]): number[] {
-  const ids: number[] = []
-  const seen = new Set<number>()
-  for (const form of forms) {
-    const enc = tokenizer.encode(form, { add_special_tokens: false })
-    if (enc.length === 1 && !seen.has(enc[0])) {
-      ids.push(enc[0])
-      seen.add(enc[0])
-    }
+function createSessionOptions(device: ContentFilterRuntimeDevice): Record<string, unknown> {
+  return {
+    executionProviders: [device],
+    graphOptimizationLevel: 'all',
   }
-  return ids
 }
 
-async function ensureModelLoaded(forceWasm = false): Promise<LoadedModelBundle> {
-  if (activeBundle && (!forceWasm || activeBundle.device === 'wasm')) {
-    return activeBundle
+// ---------------------------------------------------------------------------
+// Stage 1: Default Phone-Safe Image Safety Classifier (22.6 MB SwiftFormer-S)
+// ---------------------------------------------------------------------------
+
+async function ensureStage1ImageModel(forceWasm = false): Promise<Stage1ImageModel> {
+  void evictLegacyD1CacheOnce()
+
+  if (stage1Model && (!forceWasm || stage1Model.device === 'wasm')) {
+    return stage1Model
   }
 
-  await disposeBundle()
+  if (stage1Model) {
+    await releaseSessionSafe(stage1Model.session)
+    stage1Model = null
+  }
+
+  const ort = await getOrt()
+  const bytes = await fetchCachedBinary(
+    STAGE1_IMAGE_MODEL_URL,
+    STAGE1_IMAGE_EXPECTED_BYTES,
+    'image-safety-classifier-s.onnx',
+    true
+  )
 
   const gpu = await probeWebGpu()
   const tryWebGpu = !forceWasm && !webGpuFailed && gpu.available
-  const desiredDevice: ContentFilterRuntimeDevice = tryWebGpu ? 'webgpu' : 'wasm'
-  const desiredVariant: 'q4f16' | 'q4' = tryWebGpu && gpu.hasFp16 ? 'q4f16' : 'q4'
+  let session: OrtSessionLike
+  let chosenDevice: ContentFilterRuntimeDevice
 
-  const visionOnnxName = 'vision_encoder_q8.onnx'
-  const visionDataName = 'vision_encoder_q8.onnx_data'
-  const decoderOnnxName = desiredVariant === 'q4f16' ? 'decoder_q4f16.onnx' : 'decoder_q4.onnx'
-  const decoderDataName =
-    desiredVariant === 'q4f16' ? 'decoder_q4f16.onnx_data' : 'decoder_q4.onnx_data'
-
-  const expectedVisionDataBytes = 196_200_000 // ~187.1 MB
-  const expectedDecoderDataBytes =
-    desiredVariant === 'q4f16' ? 1_567_500_000 : 1_741_800_000 // ~1.49 GB / ~1.66 GB
-
-  const fileProgress = new Map<string, { loaded: number; total: number }>([
-    ['tokenizer.json', { loaded: 0, total: 8_000_000 }],
-    [visionOnnxName, { loaded: 0, total: 130_000 }],
-    [visionDataName, { loaded: 0, total: expectedVisionDataBytes }],
-    [decoderOnnxName, { loaded: 0, total: 360_000 }],
-    [decoderDataName, { loaded: 0, total: expectedDecoderDataBytes }],
-  ])
-
-  let lastPercent = -1
-  let lastReportTs = 0
-
-  const reportProgress = (fileName: string, loaded: number, total: number, force = false) => {
-    const prev = fileProgress.get(fileName) ?? { loaded: 0, total }
-    const effTotal = total > 0 ? total : prev.total
-    fileProgress.set(fileName, {
-      loaded: Math.min(Math.max(loaded, 0), effTotal || loaded),
-      total: effTotal,
-    })
-
-    let sumLoaded = 0
-    let sumTotal = 0
-    for (const entry of fileProgress.values()) {
-      sumLoaded += entry.loaded
-      sumTotal += entry.total
+  if (tryWebGpu) {
+    try {
+      session = await ort.InferenceSession.create(bytes, createSessionOptions('webgpu'))
+      chosenDevice = 'webgpu'
+    } catch {
+      webGpuFailed = true
+      session = await ort.InferenceSession.create(bytes, createSessionOptions('wasm'))
+      chosenDevice = 'wasm'
     }
-    const percent =
-      sumTotal > 0 ? Math.min(99, Math.max(0, Math.round((sumLoaded / sumTotal) * 100))) : 0
-
-    const now = Date.now()
-    if (force || percent !== lastPercent || now - lastReportTs > 160) {
-      lastPercent = percent
-      lastReportTs = now
-      postOut({
-        type: 'status',
-        status: 'downloading',
-        progress: percent,
-        file: fileName,
-        runtimeDevice: null,
-      })
-    }
+  } else {
+    session = await ort.InferenceSession.create(bytes, createSessionOptions('wasm'))
+    chosenDevice = 'wasm'
   }
+
+  stage1Model = { device: chosenDevice, ort, session }
+  lastActiveDevice = chosenDevice
 
   postOut({
     type: 'status',
-    status: 'downloading',
-    progress: 0,
-    file: 'tokenizer.json',
-    runtimeDevice: null,
+    status: 'ready',
+    progress: 100,
+    file: null,
+    runtimeDevice: chosenDevice,
   })
 
-  const transformersMod = await getTransformers()
-  const ort = await getOrt()
+  return stage1Model
+}
 
-  const tokenizer = (await transformersMod.AutoTokenizer.from_pretrained(CONTENT_FILTER_MODEL_ID, {
-    progress_callback: (info: { file?: string; loaded?: number; total?: number; status?: string }) => {
-      if (typeof info.loaded === 'number' && typeof info.total === 'number' && info.total > 0) {
-        reportProgress('tokenizer.json', info.loaded, info.total)
-      } else if (info.status === 'done') {
-        reportProgress('tokenizer.json', 8_000_000, 8_000_000)
-      }
-    },
-  })) as unknown as TokenizerLike
-  reportProgress('tokenizer.json', 8_000_000, 8_000_000, true)
-
-  const yesTokenIds = resolveSingleTokenIds(tokenizer, YES_FORMS)
-  const noTokenIds = resolveSingleTokenIds(tokenizer, NO_FORMS)
-  if (yesTokenIds.length === 0 || noTokenIds.length === 0) {
-    throw new Error('Liquid d1-2B tokenizer missing yes/no decision tokens.')
+/**
+ * Decodes an image Blob to RGB pixels resized to `targetSize x targetSize`.
+ * When `centerCrop` is true, scales shortest edge to `targetSize` then center-crops.
+ */
+async function decodeImageToRgbNchw(
+  blob: Blob,
+  targetSize: number,
+  rescaleToUnit: boolean,
+  centerCrop: boolean
+): Promise<Float32Array> {
+  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') {
+    throw new Error('OffscreenCanvas image decoding is unavailable in this browser worker.')
   }
-  const bosToken = typeof tokenizer.bos_token === 'string' ? tokenizer.bos_token : '<|startoftext|>'
 
-  const createSessions = async (
-    device: ContentFilterRuntimeDevice,
-    decOnnx: string,
-    decData: string,
-    expDecBytes: number
-  ): Promise<{ visionSession: OrtSessionLike; decoderSession: OrtSessionLike }> => {
-    const visionEps = device === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm']
-    const decoderEps = device === 'webgpu' ? ['webgpu'] : ['wasm']
+  const bitmap = await createImageBitmap(blob)
+  let rgba: Uint8ClampedArray
+  try {
+    const canvas = new OffscreenCanvas(targetSize, targetSize)
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) {
+      throw new Error('Unable to initialize 2D OffscreenCanvas context for image screening.')
+    }
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
 
-    // 1. Load Vision Encoder first and free its external data buffer immediately after mount
-    let visionOnnxBytes: Uint8Array | null = await fetchCachedBinary(
-      `${HF_BASE_URL}/onnx/${visionOnnxName}`,
-      130_000,
-      (l, t) => reportProgress(visionOnnxName, l, t)
-    )
-    let visionDataBytes: Uint8Array | null = await fetchCachedBinary(
-      `${HF_BASE_URL}/onnx/${visionDataName}`,
-      expectedVisionDataBytes,
-      (l, t) => reportProgress(visionDataName, l, t)
-    )
-    const visionSession = await ort.InferenceSession.create(visionOnnxBytes, {
-      executionProviders: visionEps,
-      externalData: [{ path: visionDataName, data: visionDataBytes }],
-    })
-    visionOnnxBytes = null
-    visionDataBytes = null
+    if (centerCrop && bitmap.width > 0 && bitmap.height > 0) {
+      const side = Math.min(bitmap.width, bitmap.height)
+      const sx = Math.floor((bitmap.width - side) / 2)
+      const sy = Math.floor((bitmap.height - side) / 2)
+      ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, targetSize, targetSize)
+    } else {
+      ctx.drawImage(bitmap, 0, 0, targetSize, targetSize)
+    }
+    rgba = ctx.getImageData(0, 0, targetSize, targetSize).data
+  } finally {
+    bitmap.close()
+  }
 
-    // 2. Load Decoder and free its external data buffer immediately after mount
-    let decoderOnnxBytes: Uint8Array | null = await fetchCachedBinary(
-      `${HF_BASE_URL}/onnx/${decOnnx}`,
-      360_000,
-      (l, t) => reportProgress(decOnnx, l, t)
-    )
-    let decoderDataBytes: Uint8Array | null = await fetchCachedBinary(
-      `${HF_BASE_URL}/onnx/${decData}`,
-      expDecBytes,
-      (l, t) => reportProgress(decData, l, t)
-    )
+  const plane = targetSize * targetSize
+  const out = new Float32Array(3 * plane)
+  const scale = rescaleToUnit ? 1 / 255 : 1
+  for (let i = 0; i < plane; i++) {
+    const base = i * 4
+    out[i] = rgba[base] * scale
+    out[plane + i] = rgba[base + 1] * scale
+    out[2 * plane + i] = rgba[base + 2] * scale
+  }
+  return out
+}
+
+async function runStage1ImageClassification(
+  blob: Blob
+): Promise<{ pNsfl: number; pNsfw: number; pSfw: number; device: ContentFilterRuntimeDevice }> {
+  let model = await ensureStage1ImageModel(false)
+  // OwenElliott/image-safety-classifier-s expects RGB 0..255 float32 [1, 3, 224, 224]
+  // (normalization and softmax are baked directly into the ONNX graph)
+  const pixels = await decodeImageToRgbNchw(blob, STAGE1_IMAGE_SIZE, false, false)
+
+  const invoke = async (m: Stage1ImageModel): Promise<Float32Array> => {
+    const tensor = new m.ort.Tensor('float32', pixels, [
+      1,
+      3,
+      STAGE1_IMAGE_SIZE,
+      STAGE1_IMAGE_SIZE,
+    ])
     try {
-      const decoderSession = await ort.InferenceSession.create(decoderOnnxBytes, {
-        executionProviders: decoderEps,
-        externalData: [{ path: decData, data: decoderDataBytes }],
-      })
-      decoderOnnxBytes = null
-      decoderDataBytes = null
-      return { visionSession, decoderSession }
-    } catch (err) {
-      try {
-        await visionSession.release?.()
-      } catch {
-        // Ignore cleanup failure
+      const out = await m.session.run({ image: tensor })
+      const probTensor = out.probabilities ?? Object.values(out)[0]
+      if (!probTensor) {
+        throw new Error('Image safety classifier returned no probability tensor.')
       }
+      const vals = Float32Array.from(probTensor.data as Float32Array)
+      probTensor.dispose?.()
+      return vals
+    } finally {
+      tensor.dispose?.()
+    }
+  }
+
+  let probs: Float32Array
+  try {
+    probs = await invoke(model)
+  } catch (err) {
+    if (model.device === 'webgpu') {
+      webGpuFailed = true
+      model = await ensureStage1ImageModel(true)
+      probs = await invoke(model)
+    } else {
       throw err
     }
   }
 
-  let finalDevice: ContentFilterRuntimeDevice = desiredDevice
-  let finalVariant: 'q4f16' | 'q4' = desiredVariant
-  let sessions: { visionSession: OrtSessionLike; decoderSession: OrtSessionLike }
+  // Exact class order verified from config.json & README: ["NSFL", "NSFW", "SFW"]
+  return {
+    pNsfl: probs[0] ?? 0,
+    pNsfw: probs[1] ?? 0,
+    pSfw: probs[2] ?? 1,
+    device: model.device,
+  }
+}
 
-  if (desiredDevice === 'webgpu') {
-    try {
-      sessions = await createSessions(
-        'webgpu',
-        decoderOnnxName,
-        decoderDataName,
-        expectedDecoderDataBytes
-      )
-    } catch {
-      webGpuFailed = true
-      finalDevice = 'wasm'
-      finalVariant = 'q4'
-      fileProgress.delete(decoderOnnxName)
-      fileProgress.delete(decoderDataName)
-      fileProgress.set('decoder_q4.onnx', { loaded: 0, total: 360_000 })
-      fileProgress.set('decoder_q4.onnx_data', { loaded: 0, total: 1_741_800_000 })
-      sessions = await createSessions(
-        'wasm',
-        'decoder_q4.onnx',
-        'decoder_q4.onnx_data',
-        1_741_800_000
-      )
-    }
-  } else {
-    sessions = await createSessions(
-      'wasm',
-      'decoder_q4.onnx',
-      'decoder_q4.onnx_data',
-      1_741_800_000
+// ---------------------------------------------------------------------------
+// Custom Rule Clause Parsing (shared by Stage 2 visual & Stage 3 text rules)
+// ---------------------------------------------------------------------------
+
+function parseCustomRuleClauses(rawInstructions: string): string[] {
+  const cleaned = rawInstructions.trim().slice(0, 600)
+  if (!cleaned) return []
+
+  const rawParts = cleaned
+    .split(/[\n,;]+/)
+    .map((part) =>
+      part
+        .trim()
+        .replace(/^(?:no|block|filter|hide|ban|avoid|disallow|disallow all|without)\s+/i, '')
+        .replace(/[.!?]+$/, '')
+        .trim()
     )
+    .filter((part) => part.length >= 2)
+
+  const deduped: string[] = []
+  const seen = new Set<string>()
+  for (const part of rawParts) {
+    const key = part.toLowerCase()
+    if (!seen.has(key)) {
+      seen.add(key)
+      deduped.push(part.slice(0, 80))
+    }
+    if (deduped.length >= 10) break
+  }
+  return deduped.length > 0 ? deduped : [cleaned.slice(0, 80)]
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: Lazy MobileCLIP-S0 Visual Custom Rules (ONLY when customRulesEnabled)
+// ---------------------------------------------------------------------------
+
+async function ensureStage2ClipVision(forceWasm = false): Promise<Stage2ClipVisionModel> {
+  if (stage2VisionModel && (!forceWasm || stage2VisionModel.device === 'wasm')) {
+    return stage2VisionModel
   }
 
-  activeBundle = {
-    device: finalDevice,
-    decoderVariant: finalVariant,
+  if (stage2VisionModel) {
+    await releaseSessionSafe(stage2VisionModel.session)
+    stage2VisionModel = null
+  }
+
+  const ort = await getOrt()
+  const gpu = await probeWebGpu()
+  const tryWebGpuFp16 = !forceWasm && !webGpuFailed && gpu.available && gpu.hasFp16
+
+  let session: OrtSessionLike
+  let chosenDevice: ContentFilterRuntimeDevice
+  let chosenVariant: 'fp16' | 'fp32'
+
+  if (tryWebGpuFp16) {
+    try {
+      const bytes = await fetchCachedBinary(
+        MOBILECLIP_VISION_FP16_URL,
+        MOBILECLIP_VISION_FP16_BYTES,
+        'mobileclip-vision-fp16.onnx',
+        true
+      )
+      session = await ort.InferenceSession.create(bytes, createSessionOptions('webgpu'))
+      chosenDevice = 'webgpu'
+      chosenVariant = 'fp16'
+    } catch {
+      webGpuFailed = true
+      const bytes = await fetchCachedBinary(
+        MOBILECLIP_VISION_FP32_URL,
+        MOBILECLIP_VISION_FP32_BYTES,
+        'mobileclip-vision.onnx',
+        true
+      )
+      session = await ort.InferenceSession.create(bytes, createSessionOptions('wasm'))
+      chosenDevice = 'wasm'
+      chosenVariant = 'fp32'
+    }
+  } else {
+    // NEVER use broken vision_model_int8.onnx; use verified fp32 (43.4 MB)
+    const bytes = await fetchCachedBinary(
+      MOBILECLIP_VISION_FP32_URL,
+      MOBILECLIP_VISION_FP32_BYTES,
+      'mobileclip-vision.onnx',
+      true
+    )
+    if (!forceWasm && !webGpuFailed && gpu.available) {
+      try {
+        session = await ort.InferenceSession.create(bytes, createSessionOptions('webgpu'))
+        chosenDevice = 'webgpu'
+      } catch {
+        webGpuFailed = true
+        session = await ort.InferenceSession.create(bytes, createSessionOptions('wasm'))
+        chosenDevice = 'wasm'
+      }
+    } else {
+      session = await ort.InferenceSession.create(bytes, createSessionOptions('wasm'))
+      chosenDevice = 'wasm'
+    }
+    chosenVariant = 'fp32'
+  }
+
+  stage2VisionModel = {
+    device: chosenDevice,
+    variant: chosenVariant,
     ort,
-    tokenizer,
-    bosToken,
-    yesTokenIds,
-    noTokenIds,
-    visionSession: sessions.visionSession,
-    decoderSession: sessions.decoderSession,
+    session,
+  }
+  lastActiveDevice = chosenDevice
+
+  postOut({
+    type: 'status',
+    status: 'ready',
+    progress: 100,
+    file: null,
+    runtimeDevice: chosenDevice,
+  })
+
+  return stage2VisionModel
+}
+
+async function getClipCustomRuleVectors(
+  rawInstructions: string
+): Promise<CachedClipRuleVectors> {
+  const clauses = parseCustomRuleClauses(rawInstructions)
+  const key = clauses.map((c) => c.toLowerCase()).join('|')
+  if (cachedClipRules && cachedClipRules.key === key) {
+    return cachedClipRules
+  }
+
+  const mod = await getTransformers()
+  const ort = await getOrt()
+
+  if (!stage2ClipTokenizer) {
+    stage2ClipTokenizer = (await mod.AutoTokenizer.from_pretrained(
+      MOBILECLIP_MODEL_ID
+    )) as unknown as TokenizerCallable
+  }
+
+  const rulePrompts = clauses.map((clause) => `a photo or image of ${clause}`)
+  const allPrompts = [...rulePrompts, ...CLIP_NEUTRAL_BASELINES]
+
+  const encoded = stage2ClipTokenizer(allPrompts, {
+    padding: 'max_length',
+    truncation: true,
+    return_tensor: false,
+  })
+  const rows = encoded.input_ids as number[][]
+  const seqLen = rows[0]?.length ?? 77
+  const flatIds = new BigInt64Array(rows.length * seqLen)
+  for (let b = 0; b < rows.length; b++) {
+    const row = rows[b]
+    for (let t = 0; t < seqLen; t++) {
+      flatIds[b * seqLen + t] = BigInt(row[t] ?? 0)
+    }
+  }
+
+  // Load 40.8 MB text encoder ONLY long enough to encode these prompts, then immediately release it!
+  const textBytes = await fetchCachedBinary(
+    MOBILECLIP_TEXT_INT8_URL,
+    MOBILECLIP_TEXT_INT8_BYTES,
+    'mobileclip-text-int8.onnx',
+    true
+  )
+  const textSession = await ort.InferenceSession.create(
+    textBytes,
+    createSessionOptions('wasm')
+  )
+
+  let rawEmbeds: Float32Array
+  const idsTensor = new ort.Tensor('int64', flatIds, [rows.length, seqLen])
+  try {
+    const out = await textSession.run({ input_ids: idsTensor })
+    const embTensor = out.text_embeds ?? Object.values(out)[0]
+    if (!embTensor) {
+      throw new Error('MobileCLIP text encoder returned no embeddings.')
+    }
+    rawEmbeds = Float32Array.from(embTensor.data as Float32Array)
+    embTensor.dispose?.()
+  } finally {
+    idsTensor.dispose?.()
+    await releaseSessionSafe(textSession)
+  }
+
+  const ruleEmbeddings: Float32Array[] = []
+  for (let i = 0; i < clauses.length; i++) {
+    const slice = rawEmbeds.subarray(i * MOBILECLIP_EMBED_DIM, (i + 1) * MOBILECLIP_EMBED_DIM)
+    ruleEmbeddings.push(l2Normalize(slice))
+  }
+
+  const baselineEmbeddings: Float32Array[] = []
+  for (let i = 0; i < CLIP_NEUTRAL_BASELINES.length; i++) {
+    const idx = clauses.length + i
+    const slice = rawEmbeds.subarray(
+      idx * MOBILECLIP_EMBED_DIM,
+      (idx + 1) * MOBILECLIP_EMBED_DIM
+    )
+    baselineEmbeddings.push(l2Normalize(slice))
+  }
+
+  cachedClipRules = {
+    key,
+    ruleLabels: clauses,
+    ruleEmbeddings,
+    baselineEmbeddings,
   }
 
   postOut({
@@ -621,340 +918,463 @@ async function ensureModelLoaded(forceWasm = false): Promise<LoadedModelBundle> 
     status: 'ready',
     progress: 100,
     file: null,
-    runtimeDevice: finalDevice,
+    runtimeDevice: lastActiveDevice ?? 'wasm',
   })
 
-  return activeBundle
+  return cachedClipRules
 }
 
-function smartResize(
-  origHeight: number,
-  origWidth: number
-): { height: number; width: number } {
-  const safeH = Math.max(1, origHeight)
-  const safeW = Math.max(1, origWidth)
-  let hBar = Math.max(RESIZE_FACTOR, Math.round(safeH / RESIZE_FACTOR) * RESIZE_FACTOR)
-  let wBar = Math.max(RESIZE_FACTOR, Math.round(safeW / RESIZE_FACTOR) * RESIZE_FACTOR)
+async function runStage2ClipCustomImageCheck(
+  blob: Blob,
+  customInstructions: string
+): Promise<{ flagged: boolean; score: number; matchedRule?: string }> {
+  const vectors = await getClipCustomRuleVectors(customInstructions)
+  let vision = await ensureStage2ClipVision(false)
 
-  if (hBar * wBar > MAX_PIXELS) {
-    const beta = Math.sqrt((safeH * safeW) / MAX_PIXELS)
-    hBar = Math.max(RESIZE_FACTOR, Math.floor(safeH / beta / RESIZE_FACTOR) * RESIZE_FACTOR)
-    wBar = Math.max(RESIZE_FACTOR, Math.floor(safeW / beta / RESIZE_FACTOR) * RESIZE_FACTOR)
-  } else if (hBar * wBar < MIN_PIXELS) {
-    const beta = Math.sqrt(MIN_PIXELS / (safeH * safeW))
-    hBar = Math.max(RESIZE_FACTOR, Math.ceil((safeH * beta) / RESIZE_FACTOR) * RESIZE_FACTOR)
-    wBar = Math.max(RESIZE_FACTOR, Math.ceil((safeW * beta) / RESIZE_FACTOR) * RESIZE_FACTOR)
-  }
-  return { height: hBar, width: wBar }
-}
+  // MobileCLIP-S0 preprocessor: center crop 256x256, RGB rescaled 0..1 (do_normalize: false)
+  const pixels = await decodeImageToRgbNchw(blob, MOBILECLIP_IMAGE_SIZE, true, true)
 
-async function encodeImageToPatches(blob: Blob): Promise<{
-  data: Float32Array
-  hBlocks: number
-  wBlocks: number
-  numImageTokens: number
-}> {
-  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') {
-    throw new Error('OffscreenCanvas image decoding is unavailable in this browser worker.')
-  }
-
-  const bitmap = await createImageBitmap(blob)
-  let rgba: Uint8ClampedArray
-  let targetH: number
-  let targetW: number
-  try {
-    const resized = smartResize(bitmap.height, bitmap.width)
-    targetH = resized.height
-    targetW = resized.width
-
-    const canvas = new OffscreenCanvas(targetW, targetH)
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })
-    if (!ctx) {
-      throw new Error('Unable to initialize 2D OffscreenCanvas context for image screening.')
-    }
-    ctx.imageSmoothingEnabled = true
-    ctx.imageSmoothingQuality = 'high'
-    ctx.drawImage(bitmap, 0, 0, targetW, targetH)
-    rgba = ctx.getImageData(0, 0, targetW, targetH).data
-  } finally {
-    bitmap.close()
-  }
-
-  const hBlocks = targetH / RESIZE_FACTOR
-  const wBlocks = targetW / RESIZE_FACTOR
-  const patchVecLen = 3 * TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE // 1536
-  const data = new Float32Array(hBlocks * wBlocks * MERGE_SIZE * MERGE_SIZE * patchVecLen)
-
-  // Exact Lfm3VlImageProcessor patchify layout:
-  // [hBlocks, wBlocks, mergeH=2, mergeW=2, channel=3, temporal=2, py=16, px=16]
-  let outIdx = 0
-  for (let bh = 0; bh < hBlocks; bh++) {
-    for (let bw = 0; bw < wBlocks; bw++) {
-      for (let mh = 0; mh < MERGE_SIZE; mh++) {
-        const baseY = (bh * MERGE_SIZE + mh) * PATCH_SIZE
-        for (let mw = 0; mw < MERGE_SIZE; mw++) {
-          const baseX = (bw * MERGE_SIZE + mw) * PATCH_SIZE
-          for (let c = 0; c < 3; c++) {
-            // Static image: temporal_patch_size = 2 duplicates the identical frame
-            for (let t = 0; t < TEMPORAL_PATCH_SIZE; t++) {
-              for (let py = 0; py < PATCH_SIZE; py++) {
-                const rowOffset = (baseY + py) * targetW + baseX
-                for (let px = 0; px < PATCH_SIZE; px++) {
-                  const pixel = rgba[(rowOffset + px) * 4 + c]
-                  data[outIdx++] = pixel / 127.5 - 1.0
-                }
-              }
-            }
-          }
-        }
+  const invokeVision = async (m: Stage2ClipVisionModel): Promise<Float32Array> => {
+    const tensor = new m.ort.Tensor('float32', pixels, [
+      1,
+      3,
+      MOBILECLIP_IMAGE_SIZE,
+      MOBILECLIP_IMAGE_SIZE,
+    ])
+    try {
+      const out = await m.session.run({ pixel_values: tensor })
+      const embTensor = out.image_embeds ?? Object.values(out)[0]
+      if (!embTensor) {
+        throw new Error('MobileCLIP vision encoder returned no image embeddings.')
       }
+      const vec = l2Normalize(embTensor.data as Float32Array)
+      embTensor.dispose?.()
+      return vec
+    } finally {
+      tensor.dispose?.()
+    }
+  }
+
+  let imgVec: Float32Array
+  try {
+    imgVec = await invokeVision(vision)
+  } catch (err) {
+    if (vision.device === 'webgpu') {
+      webGpuFailed = true
+      vision = await ensureStage2ClipVision(true)
+      imgVec = await invokeVision(vision)
+    } else {
+      throw err
+    }
+  }
+
+  const baselineSims = vectors.baselineEmbeddings.map((b) => dotProduct(imgVec, b))
+  const maxBaselineSim = Math.max(...baselineSims)
+
+  let bestProb = 0
+  let bestLabel: string | undefined
+  let bestFlagged = false
+
+  for (let i = 0; i < vectors.ruleEmbeddings.length; i++) {
+    const ruleSim = dotProduct(imgVec, vectors.ruleEmbeddings[i])
+    const allLogits = [
+      ruleSim * MOBILECLIP_LOGIT_SCALE,
+      ...baselineSims.map((s) => s * MOBILECLIP_LOGIT_SCALE),
+    ]
+    const maxLogit = Math.max(...allLogits)
+    let sumExp = 0
+    for (const l of allLogits) sumExp += Math.exp(l - maxLogit)
+    const prob = Math.exp(allLogits[0] - maxLogit) / sumExp
+
+    if (prob > bestProb) {
+      bestProb = prob
+      bestLabel = vectors.ruleLabels[i]
+    }
+    if (
+      prob >= THRESHOLD_CLIP_CUSTOM_PROB &&
+      ruleSim >= THRESHOLD_CLIP_CUSTOM_MIN_SIM &&
+      ruleSim >= maxBaselineSim + THRESHOLD_CLIP_CUSTOM_MARGIN
+    ) {
+      bestFlagged = true
     }
   }
 
   return {
-    data,
-    hBlocks,
-    wBlocks,
-    numImageTokens: hBlocks * wBlocks,
+    flagged: bestFlagged,
+    score: bestProb,
+    matchedRule: bestFlagged ? bestLabel : undefined,
   }
 }
 
-function buildActiveQuestions(rules: ContentFilterRulesPayload, isImage: boolean): ModerationQuestion[] {
-  const subject = isImage ? 'image' : 'message'
-  const questions: ModerationQuestion[] = []
+// ---------------------------------------------------------------------------
+// Stage 3: Lazy Text Moderation (Comment-Moderation-ONNX 64.2 MB + MobileBERT-MNLI 25.2 MB)
+// ---------------------------------------------------------------------------
 
-  if (rules.filterNsfw) {
-    questions.push({
-      category: 'nsfw',
-      label: 'NSFW / Explicit',
-      threshold: THRESHOLD_NSFW,
-      instructions: `Does this ${subject} contain NSFW, pornographic, sexually explicit, or graphic adult nudity?`,
-      yesCriteria: `The ${subject} depicts explicit sexual acts, pornography, exposed genitals, or graphic adult NSFW content`,
-      noCriteria: `The ${subject} is safe for work, normal photography, art, meme, clothing, or non-explicit`,
-    })
-  }
+async function ensureStage3TextModModel(): Promise<Stage3TextModModel> {
+  void evictLegacyD1CacheOnce()
+  if (stage3TextModel) return stage3TextModel
 
-  if (rules.filterIllegal) {
-    questions.push({
-      category: 'illegal',
-      label: 'Illegal / Extreme Harm',
-      threshold: THRESHOLD_ILLEGAL,
-      instructions: `Does this ${subject} depict or promote illegal content such as child sexual exploitation (CSAM), extreme graphic gore or murder, terrorism, or severe illegal harm?`,
-      yesCriteria: `The ${subject} depicts or promotes CSAM, extreme violence/gore, terrorism, or severe illegal harm`,
-      noCriteria: `The ${subject} does not depict or promote illegal or extremely harmful material`,
-    })
-  }
+  const mod = await getTransformers()
+  const ort = await getOrt()
 
-  const customRule = rules.customInstructions.trim()
-  if (rules.customRulesEnabled && customRule.length > 0) {
-    const cleanRule = escapeSpecialTokens(customRule.slice(0, 500))
-    questions.push({
-      category: 'custom',
-      label: 'Custom Rule',
-      threshold: THRESHOLD_CUSTOM,
-      instructions: `Does this ${subject} violate the following content moderation rule? Rule: ${cleanRule}`,
-      yesCriteria: `The ${subject} clearly violates the rule: ${cleanRule}`,
-      noCriteria: `The ${subject} complies with the rule and should be allowed`,
-    })
-  }
+  const bytes = await fetchCachedBinary(
+    COMMENT_MOD_ONNX_URL,
+    COMMENT_MOD_EXPECTED_BYTES,
+    'comment-moderation-int8.onnx',
+    true
+  )
+  const tokenizer = (await mod.AutoTokenizer.from_pretrained(
+    COMMENT_MOD_MODEL_ID
+  )) as unknown as TokenizerCallable
 
-  return questions
+  const session = await ort.InferenceSession.create(bytes, createSessionOptions('wasm'))
+  stage3TextModel = { ort, tokenizer, session }
+  if (!lastActiveDevice) lastActiveDevice = 'wasm'
+
+  postOut({
+    type: 'status',
+    status: 'ready',
+    progress: 100,
+    file: null,
+    runtimeDevice: lastActiveDevice,
+  })
+
+  return stage3TextModel
 }
 
-function buildQuestionSuffix(q: ModerationQuestion): string {
-  const body =
-    `${q.instructions}\n` +
-    `Yes: ${q.yesCriteria}\n` +
-    `No: ${q.noCriteria}\n\n` +
-    `Reply with yes or no only.`
-  return `${escapeSpecialTokens(body)}${IM_END}\n${IM_START}assistant\n${ASSISTANT_LEAD}`
+async function ensureStage3NliModel(): Promise<Stage3NliModel> {
+  if (stage3NliModel) return stage3NliModel
+
+  const mod = await getTransformers()
+  const ort = await getOrt()
+
+  const bytes = await fetchCachedBinary(
+    MOBILEBERT_MNLI_ONNX_URL,
+    MOBILEBERT_MNLI_EXPECTED_BYTES,
+    'mobilebert-mnli-int8.onnx',
+    true
+  )
+  const tokenizer = (await mod.AutoTokenizer.from_pretrained(
+    MOBILEBERT_MNLI_MODEL_ID
+  )) as unknown as TokenizerCallable
+
+  const session = await ort.InferenceSession.create(bytes, createSessionOptions('wasm'))
+  stage3NliModel = { ort, tokenizer, session }
+  if (!lastActiveDevice) lastActiveDevice = 'wasm'
+
+  postOut({
+    type: 'status',
+    status: 'ready',
+    progress: 100,
+    file: null,
+    runtimeDevice: lastActiveDevice,
+  })
+
+  return stage3NliModel
 }
 
-async function runDecisionPass(
-  bundle: LoadedModelBundle,
-  kind: 'image' | 'text',
-  rules: ContentFilterRulesPayload,
-  blob?: Blob,
-  text?: string,
-  caption?: string
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function matchCustomTextKeywords(text: string, clauses: readonly string[]): string | null {
+  const lower = text.toLowerCase()
+  for (const clause of clauses) {
+    const c = clause.toLowerCase().trim()
+    if (c.length < 3) continue
+    // Direct word-boundary match for concise terms/phrases (<= 3 words)
+    const words = c.split(/\s+/).filter(Boolean)
+    if (words.length <= 3) {
+      const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escapeRegExp(c)}(?:$|[^\\p{L}\\p{N}])`, 'iu')
+      if (re.test(lower)) {
+        return clause
+      }
+    }
+  }
+  return null
+}
+
+async function runStage3CustomTextCheck(
+  text: string,
+  customInstructions: string
+): Promise<{ flagged: boolean; score: number; matchedRule?: string }> {
+  const clauses = parseCustomRuleClauses(customInstructions)
+  if (clauses.length === 0) {
+    return { flagged: false, score: 0 }
+  }
+
+  // 1. Zero-cost instant keyword/phrase match first
+  const keywordHit = matchCustomTextKeywords(text, clauses)
+  if (keywordHit) {
+    return { flagged: true, score: 0.99, matchedRule: keywordHit }
+  }
+
+  // 2. Lazy MobileBERT-MNLI zero-shot NLI for natural-language rules
+  const nli = await ensureStage3NliModel()
+  let bestScore = 0
+  let matchedRule: string | undefined
+  let flagged = false
+
+  for (const clause of clauses) {
+    const hypothesis = `This message contains ${clause}.`
+    const enc = nli.tokenizer(text, {
+      text_pair: hypothesis,
+      truncation: true,
+      max_length: 256,
+      return_tensor: false,
+    })
+    const idsArr = enc.input_ids as number[]
+    const maskArr = (enc.attention_mask as number[] | undefined) ?? idsArr.map(() => 1)
+    const ttiArr = (enc.token_type_ids as number[] | undefined) ?? idsArr.map(() => 0)
+
+    const idsTensor = new nli.ort.Tensor(
+      'int64',
+      BigInt64Array.from(idsArr.map(BigInt)),
+      [1, idsArr.length]
+    )
+    const maskTensor = new nli.ort.Tensor(
+      'int64',
+      BigInt64Array.from(maskArr.map(BigInt)),
+      [1, maskArr.length]
+    )
+    const ttiTensor = new nli.ort.Tensor(
+      'int64',
+      BigInt64Array.from(ttiArr.map(BigInt)),
+      [1, ttiArr.length]
+    )
+
+    let logits: Float32Array
+    try {
+      const out = await nli.session.run({
+        input_ids: idsTensor,
+        attention_mask: maskTensor,
+        token_type_ids: ttiTensor,
+      })
+      const logitTensor = out.logits ?? Object.values(out)[0]
+      logits = Float32Array.from(logitTensor.data as Float32Array)
+      logitTensor.dispose?.()
+    } finally {
+      idsTensor.dispose?.()
+      maskTensor.dispose?.()
+      ttiTensor.dispose?.()
+    }
+
+    const eLogit = logits[NLI_IDX_ENTAILMENT] ?? -10
+    const cLogit = logits[NLI_IDX_CONTRADICTION] ?? 0
+    // Standard HF NLI zero-shot probability: entailment vs contradiction
+    const maxEc = Math.max(eLogit, cLogit)
+    const pEntail =
+      Math.exp(eLogit - maxEc) / (Math.exp(eLogit - maxEc) + Math.exp(cLogit - maxEc))
+
+    if (pEntail > bestScore) {
+      bestScore = pEntail
+    }
+    if (pEntail >= 0.78 && eLogit > cLogit + 1.25) {
+      flagged = true
+      matchedRule = clause
+      break
+    }
+  }
+
+  return { flagged, score: bestScore, matchedRule }
+}
+
+async function screenImageJob(
+  blob: Blob,
+  rules: ContentFilterRulesPayload
 ): Promise<{
   safe: boolean
   flagged: boolean
   categories: ContentFilterCategory[]
   reason?: string
   scores: Partial<Record<ContentFilterCategory, number>>
+  runtimeDevice: ContentFilterRuntimeDevice | null
 }> {
-  const questions = buildActiveQuestions(rules, kind === 'image')
-  if (questions.length === 0) {
-    return { safe: true, flagged: false, categories: [], scores: {} }
+  const categories: ContentFilterCategory[] = []
+  const reasons: string[] = []
+  const scores: Partial<Record<ContentFilterCategory, number>> = {}
+  let device: ContentFilterRuntimeDevice | null = lastActiveDevice
+
+  // Stage 1: Fast 22.6 MB NSFW + NSFL (gore/extreme violence) shield
+  if (rules.filterIllegal || rules.filterNsfw) {
+    const s1 = await runStage1ImageClassification(blob)
+    device = s1.device
+    if (rules.filterIllegal) {
+      scores.illegal = Number(s1.pNsfl.toFixed(4))
+      if (s1.pNsfl >= THRESHOLD_IMAGE_NSFL) {
+        categories.push('illegal')
+        reasons.push('NSFL / graphic violence')
+      }
+    }
+    if (rules.filterNsfw) {
+      scores.nsfw = Number(s1.pNsfw.toFixed(4))
+      if (s1.pNsfw >= THRESHOLD_IMAGE_NSFW) {
+        categories.push('nsfw')
+        reasons.push('NSFW / explicit')
+      }
+    }
   }
 
-  const { ort, tokenizer, bosToken, yesTokenIds, noTokenIds } = bundle
-  const disposables: OrtTensorLike[] = []
-
-  try {
-    let imageFeaturesTensor: OrtTensorLike
-    let numImageTokens = 0
-
-    if (kind === 'image' && blob) {
-      const patches = await encodeImageToPatches(blob)
-      numImageTokens = patches.numImageTokens
-      const pixelTensor = new ort.Tensor('float32', patches.data, [
-        patches.hBlocks,
-        patches.wBlocks,
-        MERGE_SIZE,
-        MERGE_SIZE,
-        3 * TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE,
-      ])
-      disposables.push(pixelTensor)
-
-      const visionOut = await bundle.visionSession.run({ pixel_values: pixelTensor })
-      const feat = visionOut.image_features ?? Object.values(visionOut)[0]
-      if (!feat) {
-        throw new Error('Vision encoder returned no image_features tensor.')
-      }
-      imageFeaturesTensor = feat
-      disposables.push(imageFeaturesTensor)
-    } else {
-      imageFeaturesTensor = new ort.Tensor('float32', new Float32Array(0), [0, HIDDEN_SIZE])
-      disposables.push(imageFeaturesTensor)
+  // Stage 2: Lazy MobileCLIP-S0 ONLY when user explicitly enabled custom rules
+  const customText = rules.customInstructions.trim()
+  if (rules.customRulesEnabled && customText.length > 0) {
+    const s2 = await runStage2ClipCustomImageCheck(blob, customText)
+    scores.custom = Number(s2.score.toFixed(4))
+    if (s2.flagged) {
+      categories.push('custom')
+      reasons.push(s2.matchedRule ? `Custom rule (${s2.matchedRule})` : 'Custom filter rule')
     }
-
-    const videoFeaturesTensor = new ort.Tensor('float32', new Float32Array(0), [0, HIDDEN_SIZE])
-    disposables.push(videoFeaturesTensor)
-
-    const mediaMarkup =
-      numImageTokens > 0
-        ? `${VISION_START}${IMAGE_TOKEN.repeat(numImageTokens)}${VISION_END}`
-        : ''
-
-    const stateStr = (kind === 'text' ? text : caption)?.trim().slice(0, MAX_TEXT_CHARS) ?? ''
-    const hasState = stateStr.length > 0
-    const header = hasState ? 'QUESTION:\n' : ''
-    const stateBody = hasState ? `${escapeSpecialTokens(stateStr)}\n\n\n${header}` : ''
-    const prefix = `${bosToken}${IM_START}user\n${mediaMarkup}${stateBody}`
-
-    const suffixes = questions.map(buildQuestionSuffix)
-
-    // Exact attention.py `pack_set`: pack state (-1) + questions (1..N) in a single forward pass
-    const firstFullIds = tokenizer.encode(prefix + suffixes[0], { add_special_tokens: false })
-    const firstSuffixLen = tokenizer.encode(suffixes[0], { add_special_tokens: false }).length
-    const stateLen = Math.max(0, firstFullIds.length - firstSuffixLen)
-
-    const allIds: number[] = [...firstFullIds]
-    const allQuestionIds: number[] = [
-      ...new Array<number>(stateLen).fill(-1),
-      ...new Array<number>(firstFullIds.length - stateLen).fill(1),
-    ]
-    const slotPositions: number[] = [allIds.length - 1]
-
-    for (let k = 1; k < suffixes.length; k++) {
-      const own = tokenizer.encode(header + suffixes[k], { add_special_tokens: false })
-      for (const id of own) {
-        allIds.push(id)
-        allQuestionIds.push(k + 1)
-      }
-      slotPositions.push(allIds.length - 1)
+    if (stage2VisionModel) {
+      device = stage2VisionModel.device
     }
+  } else if (stage2VisionModel) {
+    // Reclaim MobileCLIP vision RAM when user disables custom rules
+    await releaseSessionSafe(stage2VisionModel.session)
+    stage2VisionModel = null
+  }
 
-    const seqLen = allIds.length
-    const inputIdsData = new BigInt64Array(seqLen)
-    const attentionMaskData = new BigInt64Array(seqLen)
-    const positionIdsData = new BigInt64Array(seqLen)
-    const questionIdsData = new BigInt64Array(seqLen)
-    for (let i = 0; i < seqLen; i++) {
-      inputIdsData[i] = BigInt(allIds[i])
-      attentionMaskData[i] = 1n
-      positionIdsData[i] = BigInt(i)
-      questionIdsData[i] = BigInt(allQuestionIds[i])
-    }
-    const slotPosData = new BigInt64Array(slotPositions.length)
-    for (let j = 0; j < slotPositions.length; j++) {
-      slotPosData[j] = BigInt(slotPositions[j])
-    }
+  const flagged = categories.length > 0
+  return {
+    safe: !flagged,
+    flagged,
+    categories,
+    reason: reasons.length > 0 ? reasons.join(', ') : undefined,
+    scores,
+    runtimeDevice: device,
+  }
+}
 
-    const inputIdsTensor = new ort.Tensor('int64', inputIdsData, [1, seqLen])
-    const attentionMaskTensor = new ort.Tensor('int64', attentionMaskData, [1, seqLen])
-    const positionIdsTensor = new ort.Tensor('int64', positionIdsData, [1, seqLen])
-    const questionIdsTensor = new ort.Tensor('int64', questionIdsData, [1, seqLen])
-    const slotPosTensor = new ort.Tensor('int64', slotPosData, [slotPositions.length])
-    disposables.push(
-      inputIdsTensor,
-      attentionMaskTensor,
-      positionIdsTensor,
-      questionIdsTensor,
-      slotPosTensor
+async function screenTextJob(
+  rawText: string,
+  rules: ContentFilterRulesPayload
+): Promise<{
+  safe: boolean
+  flagged: boolean
+  categories: ContentFilterCategory[]
+  reason?: string
+  scores: Partial<Record<ContentFilterCategory, number>>
+  runtimeDevice: ContentFilterRuntimeDevice | null
+}> {
+  const cleanText = rawText.trim().slice(0, MAX_TEXT_CHARS)
+  if (!cleanText) {
+    return {
+      safe: true,
+      flagged: false,
+      categories: [],
+      scores: {},
+      runtimeDevice: lastActiveDevice,
+    }
+  }
+
+  const categories: ContentFilterCategory[] = []
+  const reasons: string[] = []
+  const scores: Partial<Record<ContentFilterCategory, number>> = {}
+
+  if (rules.filterIllegal || rules.filterNsfw) {
+    const mod = await ensureStage3TextModModel()
+    const enc = mod.tokenizer(cleanText, {
+      truncation: true,
+      max_length: 256,
+      return_tensor: false,
+    })
+    const idsArr = enc.input_ids as number[]
+    const maskArr = (enc.attention_mask as number[] | undefined) ?? idsArr.map(() => 1)
+
+    const idsTensor = new mod.ort.Tensor(
+      'int64',
+      BigInt64Array.from(idsArr.map(BigInt)),
+      [1, idsArr.length]
+    )
+    const maskTensor = new mod.ort.Tensor(
+      'int64',
+      BigInt64Array.from(maskArr.map(BigInt)),
+      [1, maskArr.length]
     )
 
-    const decoderOut = await bundle.decoderSession.run({
-      input_ids: inputIdsTensor,
-      attention_mask: attentionMaskTensor,
-      position_ids: positionIdsTensor,
-      image_features: imageFeaturesTensor,
-      video_features: videoFeaturesTensor,
-      question_ids: questionIdsTensor,
-      slot_positions: slotPosTensor,
-    })
-
-    for (const outTensor of Object.values(decoderOut)) {
-      if (outTensor) disposables.push(outTensor)
+    let logits: Float32Array
+    try {
+      const out = await mod.session.run({
+        input_ids: idsTensor,
+        attention_mask: maskTensor,
+      })
+      const logitTensor = out.logits ?? Object.values(out)[0]
+      logits = Float32Array.from(logitTensor.data as Float32Array)
+      logitTensor.dispose?.()
+    } finally {
+      idsTensor.dispose?.()
+      maskTensor.dispose?.()
     }
 
-    const logitsTensor = decoderOut.logits ?? Object.values(decoderOut)[0]
-    if (!logitsTensor) {
-      throw new Error('Liquid d1-2B decoder returned no logits tensor.')
-    }
-    const logitsData = logitsTensor.data as Float32Array
-    const vocabSize = logitsTensor.dims[logitsTensor.dims.length - 1] || 128_000
+    const pS = sigmoid(logits[CM_IDX_S] ?? -10)
+    const pV = sigmoid(logits[CM_IDX_V] ?? -10)
+    const pSH = sigmoid(logits[CM_IDX_SH] ?? -10)
+    const pS3 = sigmoid(logits[CM_IDX_S3] ?? -10)
+    const pH2 = sigmoid(logits[CM_IDX_H2] ?? -10)
+    const pV2 = sigmoid(logits[CM_IDX_V2] ?? -10)
+    const pOK = sigmoid(logits[CM_IDX_OK] ?? 0)
 
-    const scores: Partial<Record<ContentFilterCategory, number>> = {}
-    const flaggedCategories: ContentFilterCategory[] = []
-    const reasonParts: string[] = []
-
-    for (let j = 0; j < questions.length; j++) {
-      const q = questions[j]
-      const rowOffset = j * vocabSize
-
-      let yesLogit = -Infinity
-      for (const tid of yesTokenIds) {
-        const v = logitsData[rowOffset + tid]
-        if (typeof v === 'number' && v > yesLogit) yesLogit = v
+    if (rules.filterIllegal) {
+      const lowSafe = pOK < 0.2
+      const veryLowSafe = pOK < 0.1
+      const illegalReasons: string[] = []
+      if (pS3 >= 0.4 || (pS3 >= 0.3 && lowSafe)) {
+        illegalReasons.push('child safety')
       }
-      let noLogit = -Infinity
-      for (const tid of noTokenIds) {
-        const v = logitsData[rowOffset + tid]
-        if (typeof v === 'number' && v > noLogit) noLogit = v
+      if (pV2 >= 0.35 || (pV2 >= 0.22 && pV >= 0.6 && lowSafe)) {
+        illegalReasons.push('graphic violence')
+      }
+      if (pSH >= 0.4 || (pSH >= 0.2 && veryLowSafe)) {
+        illegalReasons.push('self-harm')
+      }
+      if (pH2 >= 0.5 || (pH2 >= 0.4 && lowSafe)) {
+        illegalReasons.push('violent threat')
+      }
+      if ((pV >= 0.65 || (pV >= 0.62 && lowSafe)) && !illegalReasons.includes('graphic violence')) {
+        illegalReasons.push('severe violence')
       }
 
-      const scaledDiff = (noLogit - yesLogit) / CALIBRATION_TEMP
-      const pYes = Number.isFinite(scaledDiff)
-        ? 1 / (1 + Math.exp(Math.max(-60, Math.min(60, scaledDiff))))
-        : 0
-      const rounded = Math.round(pYes * 1000) / 1000
-      scores[q.category] = rounded
+      const violenceWeighted = pV * (1 - pOK)
+      const illegalScore = Math.max(pS3, pV2, pSH, pH2, violenceWeighted)
+      scores.illegal = Number(illegalScore.toFixed(4))
 
-      if (pYes >= q.threshold) {
-        flaggedCategories.push(q.category)
-        reasonParts.push(`${q.label} (${Math.round(pYes * 100)}%)`)
-      }
-    }
-
-    const flagged = flaggedCategories.length > 0
-    return {
-      safe: !flagged,
-      flagged,
-      categories: flaggedCategories,
-      reason: flagged ? reasonParts.join(' · ') : undefined,
-      scores,
-    }
-  } finally {
-    for (const tensor of disposables) {
-      try {
-        tensor.dispose?.()
-      } catch {
-        // Ignore disposal errors
+      if (illegalReasons.length > 0) {
+        categories.push('illegal')
+        reasons.push(`Illegal / severe harm (${illegalReasons.join(', ')})`)
       }
     }
+
+    if (rules.filterNsfw) {
+      scores.nsfw = Number(pS.toFixed(4))
+      if (pS >= 0.55) {
+        categories.push('nsfw')
+        reasons.push('NSFW / sexual content')
+      }
+    }
+  }
+
+  const customText = rules.customInstructions.trim()
+  if (rules.customRulesEnabled && customText.length > 0) {
+    const customRes = await runStage3CustomTextCheck(cleanText, customText)
+    scores.custom = Number(customRes.score.toFixed(4))
+    if (customRes.flagged) {
+      categories.push('custom')
+      reasons.push(
+        customRes.matchedRule ? `Custom rule (${customRes.matchedRule})` : 'Custom filter rule'
+      )
+    }
+  } else if (stage3NliModel) {
+    await releaseSessionSafe(stage3NliModel.session)
+    stage3NliModel = null
+  }
+
+  const flagged = categories.length > 0
+  return {
+    safe: !flagged,
+    flagged,
+    categories,
+    reason: reasons.length > 0 ? reasons.join(', ') : undefined,
+    scores,
+    runtimeDevice: lastActiveDevice ?? 'wasm',
   }
 }
 
@@ -966,98 +1386,65 @@ async function processQueue(): Promise<void> {
       const job = queue.shift()
       if (!job) continue
 
-      if (job.type === 'clear-cache') {
-        await disposeBundle()
-        try {
-          if (typeof caches !== 'undefined') {
-            await caches.delete(CONTENT_FILTER_CACHE_NAME)
-          }
-        } catch {
-          // Ignore cache deletion failure
-        }
-        postOut({
-          type: 'status',
-          status: 'idle',
-          progress: 0,
-          file: null,
-          runtimeDevice: null,
-        })
-        postOut({ type: 'cache-cleared', requestId: job.requestId })
-        continue
-      }
-
       try {
-        if (job.type === 'preload') {
-          const bundle = await ensureModelLoaded()
-          postOut({
-            type: 'result',
-            requestId: job.requestId,
-            safe: true,
-            flagged: false,
-            categories: [],
-            scores: {},
-            runtimeDevice: bundle.device,
-          })
-          continue
-        }
-
-        // Fast short-circuit if no moderation rules are active
-        const activeQuestions = buildActiveQuestions(job.rules, job.kind === 'image')
-        if (activeQuestions.length === 0) {
-          postOut({
-            type: 'result',
-            requestId: job.requestId,
-            safe: true,
-            flagged: false,
-            categories: [],
-            scores: {},
-            runtimeDevice: activeBundle?.device ?? null,
-          })
-          continue
-        }
-
-        let bundle = await ensureModelLoaded()
-        let outcome: Awaited<ReturnType<typeof runDecisionPass>>
-        try {
-          outcome = await runDecisionPass(
-            bundle,
-            job.kind,
-            job.rules,
-            job.blob,
-            job.text,
-            job.caption
-          )
-        } catch (inferErr) {
-          if (bundle.device === 'webgpu') {
-            webGpuFailed = true
-            bundle = await ensureModelLoaded(true)
-            outcome = await runDecisionPass(
-              bundle,
-              job.kind,
-              job.rules,
-              job.blob,
-              job.text,
-              job.caption
-            )
-          } else {
-            throw inferErr
+        if (job.type === 'clear-cache') {
+          await disposeAllModels()
+          try {
+            if (typeof caches !== 'undefined') {
+              await caches.delete(CONTENT_FILTER_CACHE_NAME)
+            }
+          } catch {
+            // Ignore cache delete failure
           }
+          lastActiveDevice = null
+          postOut({
+            type: 'status',
+            status: 'idle',
+            progress: 0,
+            file: null,
+            runtimeDevice: null,
+          })
+          postOut({ type: 'cache-cleared', requestId: job.requestId })
+          continue
         }
 
+        if (job.type === 'preload') {
+          const model = await ensureStage1ImageModel(false)
+          postOut({
+            type: 'result',
+            requestId: job.requestId,
+            safe: true,
+            flagged: false,
+            categories: [],
+            scores: {},
+            runtimeDevice: model.device,
+          })
+          continue
+        }
+
+        if (job.kind === 'image') {
+          if (!job.blob) {
+            throw new Error('Missing image payload for screening.')
+          }
+          const res = await screenImageJob(job.blob, job.rules)
+          postOut({
+            type: 'result',
+            requestId: job.requestId,
+            ...res,
+          })
+          continue
+        }
+
+        const res = await screenTextJob(job.text ?? '', job.rules)
         postOut({
           type: 'result',
           requestId: job.requestId,
-          safe: outcome.safe,
-          flagged: outcome.flagged,
-          categories: outcome.categories,
-          reason: outcome.reason,
-          scores: outcome.scores,
-          runtimeDevice: bundle.device,
+          ...res,
         })
       } catch (err) {
         const message =
-          err instanceof Error ? err.message : 'Liquid d1-2B content filtering failed.'
-        if (job.type === 'preload' || !activeBundle) {
+          err instanceof Error ? err.message : 'On-device content screening failed.'
+        if (job.type === 'preload' || !stage1Model) {
           postOut({
             type: 'status',
             status: 'error',
@@ -1076,13 +1463,16 @@ async function processQueue(): Promise<void> {
   }
 }
 
+// Proactively evict any legacy 1.7 GB d1-2B weights on worker boot
+void evictLegacyD1CacheOnce()
+
 self.onmessage = (event: MessageEvent<ContentFilterWorkerInMessage>) => {
   const msg = event.data
   if (!msg || typeof msg !== 'object') return
 
   if (msg.type === 'dispose') {
     queue.length = 0
-    void disposeBundle()
+    void disposeAllModels()
     return
   }
 

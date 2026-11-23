@@ -1857,11 +1857,9 @@
     border-top: 1px solid var(--border-subtle);
   }
 
-  /* Compact keyboard-open tabbar: flush above virtual keyboard, drop home-indicator padding */
+  /* Hide bottom nav bar completely while virtual keyboard is open so composer sits flush above keyboard */
   html[data-keyboard-open='true'] .ag-mobile-tabbar {
-    height: var(--ag-mobile-tabbar-h, 46px);
-    min-height: var(--ag-mobile-tabbar-h, 46px);
-    padding: 2px 4px;
+    display: none !important;
   }
 
   .ag-mtab-btn {
@@ -1875,11 +1873,6 @@
     color: var(--text-muted);
     border-radius: var(--radius-sm);
     transition: color var(--dur-fast) ease;
-  }
-
-  html[data-keyboard-open='true'] .ag-mtab-btn {
-    min-height: 40px;
-    gap: 1px;
   }
 
   .ag-mtab-btn.active {
@@ -1896,15 +1889,6 @@
     align-items: center;
     justify-content: center;
     height: 22px;
-  }
-
-  html[data-keyboard-open='true'] .ag-mtab-icon-wrap {
-    height: 19px;
-  }
-
-  html[data-keyboard-open='true'] .ag-mtab-icon-wrap svg {
-    width: 18px;
-    height: 18px;
   }
 
   .ag-mtab-badge {
@@ -1943,10 +1927,6 @@
     font-size: 11px;
     font-weight: 600;
     line-height: 1.1;
-  }
-
-  html[data-keyboard-open='true'] .ag-mtab-label {
-    font-size: 10px;
   }
 }
 
@@ -5058,10 +5038,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 8px 11px;
   border-radius: var(--radius-md);
-  background-color: var(--bg-surface);
-  border: 1px solid rgba(245, 158, 11, 0.32);
+  background-color: var(--bg-elevated);
   min-width: 0;
   flex-wrap: wrap;
 }
@@ -5071,15 +5050,15 @@
   align-items: center;
   gap: 9px;
   min-width: 0;
-  flex: 1 1 160px;
+  flex: 1 1 150px;
 }
 
 .ag-cashu-token-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-sm);
-  background-color: var(--status-warn-soft);
-  color: var(--status-warn);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-soft);
+  color: var(--accent);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5098,17 +5077,8 @@
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.ag-cashu-token-tag {
-  font-size: 10.5px;
   font-weight: 600;
-  padding: 1px 6px;
-  border-radius: var(--radius-full);
-  background-color: var(--status-warn-soft);
-  color: var(--status-warn);
+  color: var(--text-primary);
 }
 
 .ag-cashu-token-sub {
@@ -5127,34 +5097,34 @@
 .ag-cashu-token-copy-btn {
   width: 28px;
   height: 28px;
-  border-radius: var(--radius-xs);
-  background-color: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  color: var(--text-muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
 }
 
 .ag-cashu-token-copy-btn:hover {
+  background-color: var(--bg-hover);
   color: var(--text-primary);
-  border-color: var(--border-strong);
 }
 
 .ag-cashu-claim-btn {
   height: 28px;
-  padding: 0 10px;
-  border-radius: var(--radius-xs);
-  background-color: var(--status-warn);
-  color: #111318;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  background-color: var(--accent);
+  color: var(--text-inverse);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   white-space: nowrap;
-  transition: filter var(--dur-fast) ease;
+  transition: background-color var(--dur-fast) ease;
 }
 
 .ag-cashu-claim-btn:hover {
-  filter: brightness(1.08);
+  background-color: var(--accent-hover);
 }
 
 /* On-Device Content Filter Text Shield (Active ONLY when textScope !== 'off') */
@@ -5910,10 +5880,10 @@
   }
 
   html[data-keyboard-open='true'] .ag-toast-stack {
-    bottom: calc(var(--ag-mobile-tabbar-h, 46px) + 8px);
+    bottom: calc(var(--ag-mobile-tabbar-h, 0px) + 10px);
   }
 
   html[data-keyboard-open='true'] .ag-app[data-mobile-screen='chat'] .ag-toast-stack {
-    bottom: calc(var(--ag-mobile-tabbar-h, 46px) + 58px);
+    bottom: calc(var(--ag-mobile-tabbar-h, 0px) + 64px);
   }
 }

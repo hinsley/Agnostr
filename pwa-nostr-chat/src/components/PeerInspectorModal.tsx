@@ -300,7 +300,7 @@ export function PeerInspectorModal({
             <span>
               {isTrustedPeer
                 ? 'Trusted peer — voice memos & media unlock automatically and their text stays visible in Trusted-Only mode.'
-                : 'Untrusted — voice memos & media stay protected until cleared by Liquid d1-2B or until you trust this peer.'}
+                : 'Untrusted — voice memos & media stay protected until cleared by the Safety Filter or until you trust this peer.'}
             </span>
           </div>
         )}

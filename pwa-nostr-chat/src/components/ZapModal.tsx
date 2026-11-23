@@ -125,7 +125,6 @@ function ZapModalInner({
   const parsedAmount = Math.floor(Number.parseInt(amountInput, 10) || 0)
   const recipientName = target.nickname?.trim() || formatShortPubkey(target.pubkey)
 
-  // Pick active mint if it has enough balance, otherwise pick the highest-balance mint
   const bestMintUrl = (() => {
     if (wallet.activeMintBalanceSats >= parsedAmount) return wallet.activeMintUrl
     let best = wallet.activeMintUrl
@@ -143,7 +142,7 @@ function ZapModalInner({
 
   const handleGetInvoice = useCallback(async () => {
     if (parsedAmount <= 0) {
-      setError('Enter a positive amount in satoshis.')
+      setError('Enter a positive amount in sats.')
       return
     }
     setWorking(true)
@@ -158,7 +157,7 @@ function ZapModalInner({
       setInvoiceResult(res)
       setStage('invoice')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to generate Lightning Zap invoice.')
+      setError(err instanceof Error ? err.message : 'Failed to generate Lightning invoice.')
     } finally {
       setWorking(false)
     }
@@ -166,7 +165,7 @@ function ZapModalInner({
 
   const handlePayWithCashu = useCallback(async () => {
     if (parsedAmount <= 0) {
-      setError('Enter a positive amount in satoshis.')
+      setError('Enter a positive amount in sats.')
       return
     }
     setWorking(true)
@@ -196,7 +195,7 @@ function ZapModalInner({
       })
       setStage('paid')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cashu Zap payment failed.')
+      setError(err instanceof Error ? err.message : 'Payment failed.')
     } finally {
       setWorking(false)
     }
@@ -242,20 +241,10 @@ function ZapModalInner({
       >
         <header className="ag-wallet-header">
           <div className="ag-wallet-title-group">
-            <span className="ag-wallet-badge-icon" aria-hidden="true">
-              <Zap size={18} />
-            </span>
             <div className="ag-wallet-title-copy">
               <h2 id="ag-zap-modal-title" className="ag-wallet-title truncate">
-                Lightning Zap
+                Zap
               </h2>
-              <p className="ag-wallet-subtitle truncate">
-                {target.eventId
-                  ? `Zapping message by ${recipientName}`
-                  : target.channelLabel
-                    ? `${recipientName} · ${target.channelLabel}`
-                    : `Send sats to ${recipientName}`}
-              </p>
             </div>
           </div>
 
@@ -271,27 +260,21 @@ function ZapModalInner({
         </header>
 
         <div className="ag-wallet-body">
-          {/* Recipient Identity Strip */}
-          <div className="ag-zap-recipient-card">
+          {/* Recipient Strip */}
+          <div className="ag-zap-recipient-row">
             <div className="ag-zap-recipient-copy">
               <span className="ag-zap-recipient-name truncate">{recipientName}</span>
               {resolvingAddress ? (
-                <span className="ag-wallet-card-meta">
-                  Looking up Lightning Address on Nostr relays…
-                </span>
+                <span className="ag-wallet-meta">Looking up…</span>
               ) : resolvedLud16 ? (
                 <span className="ag-zap-recipient-lud16" title={resolvedLud16}>
                   ⚡ {resolvedLud16}
                 </span>
               ) : (
-                <span className="ag-wallet-card-meta">
-                  No Lightning Address published by this peer yet
-                </span>
+                <span className="ag-wallet-meta">No Lightning address</span>
               )}
             </div>
-            {invoiceResult?.allowsNostr && (
-              <span className="ag-wallet-pill accent">NIP-57</span>
-            )}
+            {invoiceResult?.allowsNostr && <span className="ag-wallet-pill accent">NIP-57</span>}
           </div>
 
           {error && (
@@ -304,7 +287,7 @@ function ZapModalInner({
           {stage === 'paid' && paidSummary ? (
             <div className="ag-zap-success">
               <div className="ag-zap-success-ring" aria-hidden="true">
-                <Check size={28} />
+                <Check size={26} />
               </div>
               <div>
                 <div className="ag-wallet-balance-amount" style={{ justifyContent: 'center' }}>
@@ -313,9 +296,7 @@ function ZapModalInner({
                 </div>
                 <p className="ag-wallet-subtitle" style={{ marginTop: '0.35rem' }}>
                   Sent to {recipientName}
-                  {paidSummary.feePaidSats > 0
-                    ? ` · ${paidSummary.feePaidSats} sat fee`
-                    : ' · Zero routing fee'}
+                  {paidSummary.feePaidSats > 0 ? ` · ${paidSummary.feePaidSats} sat fee` : ''}
                 </p>
               </div>
               <button
@@ -340,24 +321,24 @@ function ZapModalInner({
                   )}
                 </div>
 
-                <div className="ag-wallet-kv-list" style={{ width: '100%' }}>
-                  <div className="ag-wallet-kv">
-                    <span className="ag-wallet-kv-label">Amount</span>
-                    <span className="ag-wallet-kv-val tabular">
-                      {invoiceResult.amountSats.toLocaleString()} sats
-                    </span>
-                  </div>
-                  <div className="ag-wallet-kv">
-                    <span className="ag-wallet-kv-label">Recipient</span>
-                    <span className="ag-wallet-kv-val mono">{invoiceResult.recipientLud16}</span>
-                  </div>
-                  <div className="ag-wallet-kv">
-                    <span className="ag-wallet-kv-label">Protocol</span>
-                    <span className="ag-wallet-kv-val">
-                      {invoiceResult.allowsNostr
-                        ? 'NIP-57 Zap (kind: 9734 signed)'
-                        : 'Standard LNURL-Pay'}
-                    </span>
+                <div className="ag-wallet-tonal" style={{ width: '100%' }}>
+                  <div className="ag-wallet-kv-list">
+                    <div className="ag-wallet-kv">
+                      <span className="ag-wallet-kv-label">Amount</span>
+                      <span className="ag-wallet-kv-val tabular">
+                        {invoiceResult.amountSats.toLocaleString()} sats
+                      </span>
+                    </div>
+                    <div className="ag-wallet-kv">
+                      <span className="ag-wallet-kv-label">To</span>
+                      <span className="ag-wallet-kv-val mono">{invoiceResult.recipientLud16}</span>
+                    </div>
+                    <div className="ag-wallet-kv">
+                      <span className="ag-wallet-kv-label">Type</span>
+                      <span className="ag-wallet-kv-val">
+                        {invoiceResult.allowsNostr ? 'NIP-57 Zap' : 'LNURL-Pay'}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
@@ -381,8 +362,8 @@ function ZapModalInner({
                     )}
                     <span>
                       {working
-                        ? 'Paying from Cashu Wallet…'
-                        : `Pay ${invoiceResult.amountSats.toLocaleString()} sats with Cashu`}
+                        ? 'Paying…'
+                        : `Pay ${invoiceResult.amountSats.toLocaleString()} sats`}
                     </span>
                   </button>
                 )}
@@ -393,7 +374,7 @@ function ZapModalInner({
                   onClick={() => void handleCopyInvoice()}
                 >
                   {copiedInvoice ? <Check size={15} /> : <Copy size={15} />}
-                  <span>{copiedInvoice ? 'Copied!' : 'Copy Invoice'}</span>
+                  <span>{copiedInvoice ? 'Copied' : 'Copy'}</span>
                 </button>
 
                 <a
@@ -402,7 +383,7 @@ function ZapModalInner({
                   style={{ textDecoration: 'none' }}
                 >
                   <ExternalLink size={15} />
-                  <span>Open Wallet App</span>
+                  <span>Open App</span>
                 </a>
               </div>
 
@@ -420,12 +401,11 @@ function ZapModalInner({
             </>
           ) : (
             <>
-              {/* Preset Sat Chips */}
               <div className="ag-wallet-field">
                 <div className="ag-wallet-label-row">
                   <span className="ag-wallet-label">Amount (sats)</span>
-                  <span className="ag-wallet-card-meta tabular">
-                    Cashu balance: {wallet.totalBalanceSats.toLocaleString()} sats
+                  <span className="ag-wallet-meta tabular">
+                    {wallet.totalBalanceSats.toLocaleString()} sats available
                   </span>
                 </div>
                 <div className="ag-wallet-presets">
@@ -439,7 +419,7 @@ function ZapModalInner({
                         setError(null)
                       }}
                     >
-                      ⚡ {amt.toLocaleString()}
+                      {amt >= 1000 ? `${amt / 1000}k` : amt}
                     </button>
                   ))}
                 </div>
@@ -459,7 +439,6 @@ function ZapModalInner({
                 />
               </div>
 
-              {/* Optional Zap Note */}
               <div className="ag-wallet-field">
                 <label className="ag-wallet-label" htmlFor="ag-zap-comment">
                   Note (optional)
@@ -471,33 +450,28 @@ function ZapModalInner({
                   className="ag-wallet-input"
                   value={comment}
                   onChange={(e) => setComment(e.target.value)}
-                  placeholder="Say thanks…"
+                  placeholder="Optional note"
                 />
               </div>
 
-              {/* Built-In Cashu Wallet Status Strip */}
               <div className="ag-zap-wallet-strip">
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                    Built-in Cashu Wallet
-                  </div>
-                  <div className="ag-wallet-card-meta truncate">
+                  <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Wallet</div>
+                  <div className="ag-wallet-meta truncate">
                     {formatMintHost(bestMintUrl)} · {bestMintBalance.toLocaleString()} sats
                   </div>
                 </div>
                 {!canPayWithCashu && onOpenWallet && (
                   <button
                     type="button"
-                    className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
+                    className="ag-wbtn ag-wbtn-link"
                     onClick={handleOpenTopUp}
                   >
-                    <Wallet size={13} />
-                    <span>Top Up</span>
+                    Top up
                   </button>
                 )}
               </div>
 
-              {/* Action Buttons */}
               <div className="ag-wallet-btn-row">
                 <button
                   type="button"
@@ -514,8 +488,8 @@ function ZapModalInner({
                     {working
                       ? 'Zapping…'
                       : canPayWithCashu
-                        ? `Pay ${parsedAmount.toLocaleString()} sats with Cashu Wallet`
-                        : 'Insufficient Cashu Balance'}
+                        ? `Pay ${parsedAmount.toLocaleString()} sats`
+                        : 'Insufficient Balance'}
                   </span>
                 </button>
 
@@ -530,7 +504,7 @@ function ZapModalInner({
                   ) : (
                     <QrCode size={15} />
                   )}
-                  <span>Pay with External Lightning QR</span>
+                  <span>Show QR Invoice</span>
                 </button>
               </div>
             </>

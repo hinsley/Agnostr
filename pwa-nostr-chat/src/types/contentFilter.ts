@@ -1,7 +1,8 @@
 import type { ImageAttachment } from './protocol.ts'
 
-export const CONTENT_FILTER_MODEL_ID = 'LiquidAI/d1-2B-ONNX'
-export const CONTENT_FILTER_MODEL_LABEL = 'Liquid AI d1-2B'
+export const CONTENT_FILTER_MODEL_ID = 'OwenElliott/image-safety-classifier-s'
+export const CONTENT_FILTER_MODEL_LABEL = 'Image Safety Classifier (23 MB)'
+export const CONTENT_FILTER_CACHE_NAME = 'content-filter-cache'
 
 export type ContentFilterMediaScope = 'untrusted' | 'all' | 'off'
 export type ContentFilterTextScope = 'off' | 'untrusted' | 'all'
@@ -18,11 +19,11 @@ export type ContentFilterVerdictStatus =
   | 'error'
 
 export interface ContentFilterSettings {
-  /** Master on/off toggle for Liquid AI d1-2B on-device content filtering (default: true) */
+  /** Master on/off toggle for on-device content filtering (default: true) */
   enabled: boolean
   /** Flag NSFW / pornographic / sexually explicit content (default: true) */
   filterNsfw: boolean
-  /** Flag illegal / CSAM / extreme violence / severe harm content (default: true) */
+  /** Flag illegal / NSFL / extreme violence / severe harm content (default: true) */
   filterIllegal: boolean
   /** Enable user-defined natural-language moderation rule (default: false) */
   customRulesEnabled: boolean
@@ -87,19 +88,19 @@ export interface ContentFilterEngine {
   clearVerdictCache: () => void
   cachedVerdictCount: number
 
-  /** True when media from this sender must be intercepted & screened by d1-2B before display */
+  /** True when media from this sender must be intercepted & screened before display */
   shouldScreenMedia: (senderPubkey: string, isSelf: boolean) => boolean
-  /** True when text messages from this sender must be screened by d1-2B before display */
+  /** True when text messages from this sender must be screened before display */
   shouldScreenText: (senderPubkey: string, isSelf: boolean) => boolean
-  /** True when untrusted call video is explicitly opted into d1-2B screening (false under default 'trusted-only') */
+  /** True when untrusted call video is explicitly opted into screening (false under default 'trusted-only') */
   shouldAllowScreenedCallVideo: (senderPubkey: string, isSelf: boolean) => boolean
-  /** True when incoming video frames from this peer must pass d1-2B screening before unveiling */
+  /** True when incoming video frames from this peer must pass screening before unveiling */
   shouldScreenCallVideo: (senderPubkey: string, isSelf: boolean) => boolean
 
   verdicts: Record<string, ContentFilterVerdict>
   getVerdict: (cacheKey: string) => ContentFilterVerdict | null
 
-  /** Fetches media bytes in-memory only, runs Liquid d1-2B in worker, and exposes objectUrl ONLY if safe */
+  /** Fetches media bytes in-memory only, runs on-device safety screening in worker, and exposes objectUrl ONLY if safe */
   screenImageAttachment: (
     cacheKey: string,
     image: ImageAttachment,

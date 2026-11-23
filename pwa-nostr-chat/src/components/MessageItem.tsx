@@ -138,7 +138,7 @@ export interface MessageItemProps {
   onJumpToMessage?: (messageId: string) => void
   onCopyText?: (text: string) => void
   onNotify?: (title: string) => void
-  // On-device Content Filter (Liquid d1-2B)
+  // On-device Content Filter
   contentFilter?: ContentFilterEngine
   shouldScreenText?: boolean
   textFilterVerdict?: ContentFilterVerdict | null
@@ -807,7 +807,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
               {isTextPendingScreen ? (
                 <div className="ag-text-filter-shield scanning" role="status">
                   <Loader2 size={12} className="ag-spin" />
-                  <span>Screening message with Liquid d1-2B…</span>
+                  <span>Screening with Content Filter…</span>
                 </div>
               ) : hideTextBehindFilter ? (
                 <div className={`ag-text-filter-shield flagged ${isTextIllegal ? 'illegal' : ''}`}>
@@ -906,7 +906,6 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                     <div className="ag-cashu-token-copy">
                       <div className="ag-cashu-token-title tabular">
                         <span>{tok.amountSats.toLocaleString()} sats</span>
-                        <span className="ag-cashu-token-tag">Cashu Ecash</span>
                       </div>
                       <div className="ag-cashu-token-sub truncate">
                         <span>{formatMintHost(tok.mintUrl)}</span>
@@ -921,10 +920,10 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                       onClick={(e) => {
                         e.stopPropagation()
                         navigator.clipboard?.writeText(tok.raw).catch(() => {})
-                        onNotify?.('Cashu token copied')
+                        onNotify?.('Token copied')
                       }}
-                      title="Copy raw Cashu token"
-                      aria-label="Copy Cashu token"
+                      title="Copy token"
+                      aria-label="Copy token"
                     >
                       <Copy size={13} />
                     </button>
@@ -937,7 +936,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                           onClaimCashuToken(tok.raw)
                         }}
                       >
-                        Claim to Wallet
+                        Claim
                       </button>
                     )}
                   </div>

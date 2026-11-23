@@ -450,7 +450,7 @@ function ParticipantTile({
     }
   }, [shielded, hasLiveVideo, participant.stream, liveVideoTrackId, liveVideoTrack])
 
-  // Periodic offscreen frame screening via Liquid d1-2B when user opted into video screening
+  // Periodic offscreen frame screening via on-device Safety Filter when user opted into video screening
   useEffect(() => {
     if (!screenVideo || !hasLiveVideo || !contentFilter || shielded) {
       setVideoScreenStatus('screening')
@@ -664,7 +664,7 @@ function ParticipantTile({
                     <ShieldAlert size={20} />
                   </span>
                   <span className="ag-call-veil-title">
-                    Video blocked by Liquid d1-2B · Flagged
+                    Video blocked by Safety Filter · Flagged
                   </span>
                   {videoFlagDetail && (
                     <span className="ag-call-veil-sub">{videoFlagDetail}</span>
@@ -677,8 +677,8 @@ function ParticipantTile({
                   </span>
                   <span className="ag-call-veil-title">
                     {contentFilter?.modelStatus === 'downloading'
-                      ? `Downloading Liquid d1-2B · ${Math.round(contentFilter.downloadProgress)}%`
-                      : 'Screening video with Liquid d1-2B…'}
+                      ? `Downloading Safety Filter · ${Math.round(contentFilter.downloadProgress)}%`
+                      : 'Screening video…'}
                   </span>
                 </>
               )}
@@ -718,10 +718,10 @@ function ParticipantTile({
           {screenVideo && hasLiveVideo && videoScreenStatus === 'safe' && (
             <span
               className="ag-call-micro-pill ag-call-pill-screened mono"
-              title="Video screened safe on-device by Liquid d1-2B"
+              title="Video screened safe on-device by Safety Filter"
             >
               <ShieldCheck size={10} />
-              <span>d1-2B</span>
+              <span>Screened</span>
             </span>
           )}
           {participant.screenSharing && (
