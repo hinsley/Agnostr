@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { Phone, RefreshCw, Video, WifiOff, X } from 'lucide-react'
+import { Loader2, Phone, RefreshCw, ShieldAlert, ShieldCheck, Video, WifiOff, X } from 'lucide-react'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
 import { useBackNavigation } from './hooks/useBackNavigation'
 import { useMobileSwipeDrawers } from './hooks/useMobileSwipeDrawers'
@@ -128,6 +128,73 @@ export function App() {
     null
   )
   const [panicFlash, setPanicFlash] = useState(false)
+
+  // Subtle startup safety-filter loading/ready floating popup state
+  const cfStatus = engine.contentFilter.modelStatus
+  const cfProgress = engine.contentFilter.downloadProgress
+  const cfRuntime = engine.contentFilter.runtimeDevice
+  const cfEnabled = engine.contentFilter.settings.enabled
+  const [cfPopupDismissed, setCfPopupDismissed] = useState(false)
+  const [cfReadyVisible, setCfReadyVisible] = useState(false)
+  const cfSawPendingRef = useRef(cfStatus !== 'ready')
+  const cfPrevStatusRef = useRef(cfStatus)
+
+  useEffect(() => {
+    const prev = cfPrevStatusRef.current
+    cfPrevStatusRef.current = cfStatus
+
+    if (cfStatus === 'downloading') {
+      cfSawPendingRef.current = true
+      if (prev !== 'downloading') {
+        setCfPopupDismissed(false)
+      }
+      setCfReadyVisible(false)
+      return
+    }
+
+    if (cfStatus === 'ready') {
+      if (cfSawPendingRef.current && prev !== 'ready' && cfEnabled) {
+        cfSawPendingRef.current = false
+        setCfReadyVisible(true)
+        const timer = window.setTimeout(() => {
+          setCfReadyVisible(false)
+        }, 2600)
+        return () => window.clearTimeout(timer)
+      }
+      if (!cfEnabled) {
+        setCfReadyVisible(false)
+      }
+      return
+    }
+
+    if (cfStatus === 'error') {
+      cfSawPendingRef.current = true
+      if (prev !== 'error') {
+        setCfPopupDismissed(false)
+      }
+      setCfReadyVisible(false)
+      return
+    }
+
+    // 'idle'
+    cfSawPendingRef.current = true
+    setCfPopupDismissed(false)
+    setCfReadyVisible(false)
+  }, [cfStatus, cfEnabled])
+
+  const cfPopupState: 'loading' | 'ready' | 'error' | null = cfPopupDismissed
+    ? null
+    : cfStatus === 'downloading'
+      ? 'loading'
+      : cfStatus === 'ready' && cfReadyVisible && cfEnabled
+        ? 'ready'
+        : cfStatus === 'error' && cfEnabled
+          ? 'error'
+          : null
+
+  const cfPct = Math.max(0, Math.min(100, Math.round(cfProgress)))
+  const cfRuntimeLabel =
+    cfRuntime === 'webgpu' ? 'WebGPU' : cfRuntime === 'wasm' ? 'WASM' : null
 
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
   const isServer =
@@ -1926,6 +1993,63 @@ export function App() {
         onConfirm={engine.confirmPendingTrust}
         onCancel={engine.cancelPendingTrust}
       />
+
+      {/* Subtle On-Device Safety Filter Loading / Ready Floating Popup */}
+      {cfPopupState && (
+        <div
+          className={`ag-cf-status-popup is-${cfPopupState}`}
+          role="status"
+          aria-live="polite"
+        >
+          {cfPopupState === 'loading' ? (
+            <Loader2 size={14} className="ag-cf-popup-icon ag-spin" aria-hidden="true" />
+          ) : cfPopupState === 'ready' ? (
+            <ShieldCheck size={14} className="ag-cf-popup-icon" aria-hidden="true" />
+          ) : (
+            <ShieldAlert size={14} className="ag-cf-popup-icon" aria-hidden="true" />
+          )}
+
+          <span className="ag-cf-popup-text truncate">
+            {cfPopupState === 'loading'
+              ? cfPct > 0 && cfPct < 100
+                ? `Loading safety filter · ${cfPct}%`
+                : 'Loading safety filter…'
+              : cfPopupState === 'ready'
+                ? 'Safety filter ready'
+                : 'Safety filter unavailable'}
+          </span>
+
+          {cfPopupState === 'ready' && cfRuntimeLabel && (
+            <span className="ag-cf-popup-tag">{cfRuntimeLabel}</span>
+          )}
+
+          {cfPopupState === 'error' && (
+            <button
+              type="button"
+              className="ag-cf-popup-retry"
+              onClick={() => {
+                setCfPopupDismissed(false)
+                void engine.contentFilter.preloadModel({ silent: true })
+              }}
+            >
+              Retry
+            </button>
+          )}
+
+          <button
+            type="button"
+            className="ag-cf-popup-dismiss"
+            onClick={() => {
+              setCfPopupDismissed(true)
+              setCfReadyVisible(false)
+            }}
+            aria-label="Dismiss safety filter notification"
+            title="Dismiss"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
 
       {/* Non-Blocking Notifications */}
       <ToastStack toasts={engine.toasts} onDismiss={engine.dismissToast} />

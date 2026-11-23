@@ -1492,10 +1492,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   // Allow untrusted group-call WebRTC connections ONLY when user explicitly opted into AI video screening
   const allowScreenedUntrustedGroupCalls = Boolean(
     contentFilterEngine.settings.enabled &&
-      (contentFilterEngine.settings.filterNsfw ||
-        contentFilterEngine.settings.filterIllegal ||
-        (contentFilterEngine.settings.customRulesEnabled &&
-          contentFilterEngine.settings.customInstructions.trim().length > 0)) &&
+      (contentFilterEngine.settings.filterNsfw || contentFilterEngine.settings.filterIllegal) &&
       (contentFilterEngine.settings.callVideoMode === 'screen-untrusted' ||
         contentFilterEngine.settings.callVideoMode === 'screen-all')
   )

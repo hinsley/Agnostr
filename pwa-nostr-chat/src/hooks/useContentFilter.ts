@@ -9,6 +9,7 @@ import {
   type ContentFilterRuntimeDevice,
   type ContentFilterSettings,
   type ContentFilterVerdict,
+  type PreloadModelOptions,
   type ScreenContentOptions,
   type ScreenImageAttachmentOptions,
 } from '../types/contentFilter.ts'
@@ -49,20 +50,29 @@ function detectWebGpuSupport(): boolean {
 }
 
 function computeRulesFingerprint(settings: ContentFilterSettings): string {
-  return [
-    settings.filterNsfw ? '1' : '0',
-    settings.filterIllegal ? '1' : '0',
-    settings.customRulesEnabled ? '1' : '0',
-    settings.customRulesEnabled ? settings.customInstructions.trim() : '',
-  ].join('|')
+  return [settings.filterNsfw ? '1' : '0', settings.filterIllegal ? '1' : '0'].join('|')
 }
 
 function hasAnyActiveRule(settings: ContentFilterSettings): boolean {
   if (!settings.enabled) return false
-  return Boolean(
-    settings.filterNsfw ||
-      settings.filterIllegal ||
-      (settings.customRulesEnabled && settings.customInstructions.trim().length > 0)
+  return Boolean(settings.filterNsfw || settings.filterIllegal)
+}
+
+function shouldAutoPreloadModel(settings: ContentFilterSettings): boolean {
+  if (!hasAnyActiveRule(settings)) return false
+  return settings.mediaScope !== 'off' || settings.callVideoMode !== 'trusted-only'
+}
+
+function isLegacyCacheUrl(url: string): boolean {
+  return (
+    url.includes('LiquidAI/d1-2B-ONNX') ||
+    url.includes('LiquidAI%2Fd1-2B-ONNX') ||
+    url.includes('decoder_q4f16.onnx') ||
+    url.includes('decoder_q4.onnx') ||
+    url.includes('vision_encoder_q8.onnx') ||
+    url.includes('mobileclip_s0') ||
+    url.includes('Comment-Moderation-ONNX') ||
+    url.includes('mobilebert-uncased-mnli')
   )
 }
 
@@ -139,6 +149,8 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
   const workerRef = useRef<Worker | null>(null)
   const pendingReqRef = useRef<Map<string, PendingWorkerRequest>>(new Map())
   const inflightScreenRef = useRef<Map<string, Promise<ContentFilterVerdict>>>(new Map())
+  const inflightPreloadRef = useRef<Promise<boolean> | null>(null)
+  const skipNextAutoLoadRef = useRef<boolean>(false)
   const reqSeqRef = useRef<number>(0)
 
   const safeObjectUrlsRef = useRef<Map<string, string>>(new Map())
@@ -299,7 +311,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
         const pending = pendingReqRef.current.get(msg.requestId)
         if (pending) {
           pendingReqRef.current.delete(msg.requestId)
-          pending.reject(new Error(msg.error || 'Content filtering error.'))
+          pending.reject(new Error(msg.error || 'Image safety filtering error.'))
         }
       }
     }
@@ -309,6 +321,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       setModelStatus('error')
       modelStatusRef.current = 'error'
       setModelError(errMsg)
+      inflightPreloadRef.current = null
       for (const [id, pending] of Array.from(pendingReqRef.current.entries())) {
         pendingReqRef.current.delete(id)
         pending.reject(new Error(errMsg))
@@ -320,7 +333,9 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
   }, [])
 
   const postWorkerRequest = useCallback(
-    (payload: ContentFilterWorkerInMessage & { requestId: string }): Promise<ContentFilterWorkerOutMessage> => {
+    (
+      payload: ContentFilterWorkerInMessage & { requestId: string }
+    ): Promise<ContentFilterWorkerOutMessage> => {
       const worker = getWorker()
       return new Promise((resolve, reject) => {
         pendingReqRef.current.set(payload.requestId, { resolve, reject })
@@ -333,6 +348,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
   const terminateWorker = useCallback(() => {
     const w = workerRef.current
     workerRef.current = null
+    inflightPreloadRef.current = null
     if (w) {
       try {
         w.postMessage({ type: 'dispose' } satisfies ContentFilterWorkerInMessage)
@@ -348,7 +364,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     inflightScreenRef.current.clear()
   }, [])
 
-  // Silently reclaim any legacy 1.7 GB d1-2B weights cached by older builds
+  // Silently reclaim legacy d1-2B / MobileCLIP / text-filter weights cached by older builds
   useEffect(() => {
     if (typeof caches === 'undefined') return
     let cancelled = false
@@ -360,14 +376,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
         const keys = await cache.keys()
         for (const req of keys) {
           if (cancelled) return
-          const u = req.url
-          if (
-            u.includes('LiquidAI/d1-2B-ONNX') ||
-            u.includes('LiquidAI%2Fd1-2B-ONNX') ||
-            u.includes('decoder_q4f16.onnx') ||
-            u.includes('decoder_q4.onnx') ||
-            u.includes('vision_encoder_q8.onnx')
-          ) {
+          if (isLegacyCacheUrl(req.url)) {
             await cache.delete(req)
           }
         }
@@ -387,19 +396,75 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     }
   }, [terminateWorker, revokeAllObjectUrls])
 
+  const preloadModel = useCallback(
+    async (preloadOpts?: PreloadModelOptions): Promise<boolean> => {
+      if (modelStatusRef.current === 'ready') return true
+      if (inflightPreloadRef.current) {
+        return await inflightPreloadRef.current
+      }
+
+      const silent = Boolean(preloadOpts?.silent)
+      skipNextAutoLoadRef.current = false
+      const requestId = `cf-preload-${++reqSeqRef.current}`
+
+      const task = (async (): Promise<boolean> => {
+        try {
+          const res = await postWorkerRequest({ type: 'preload', requestId })
+          if (res.type === 'result') {
+            if (!silent) {
+              pushToastRef.current?.(
+                'success',
+                `${CONTENT_FILTER_MODEL_LABEL} ready`,
+                `Running locally via ${res.runtimeDevice === 'webgpu' ? 'WebGPU' : 'WASM'}.`
+              )
+            }
+            return true
+          }
+          return false
+        } catch (err) {
+          const message =
+            err instanceof Error
+              ? err.message
+              : `Unable to download ${CONTENT_FILTER_MODEL_LABEL}.`
+          if (!silent) {
+            pushToastRef.current?.('error', 'Content Filter download failed', message)
+          }
+          return false
+        } finally {
+          inflightPreloadRef.current = null
+        }
+      })()
+
+      inflightPreloadRef.current = task
+      return await task
+    },
+    [postWorkerRequest]
+  )
+
+  // Auto-load the 22.6 MB image safety model on app startup (and whenever protection becomes active while idle)
+  useEffect(() => {
+    if (!shouldAutoPreloadModel(settings)) return
+    if (skipNextAutoLoadRef.current) return
+    if (modelStatusRef.current !== 'idle') return
+    void preloadModel({ silent: true })
+  }, [
+    settings,
+    preloadModel,
+  ])
+
   const updateSettings = useCallback(
     (patch: Partial<ContentFilterSettings>) => {
       setSettings((prev) => {
         const next: ContentFilterSettings = {
           ...prev,
           ...patch,
-          customInstructions:
-            patch.customInstructions !== undefined
-              ? patch.customInstructions.slice(0, 600)
-              : prev.customInstructions,
         }
         settingsRef.current = next
         saveContentFilterSettings(next)
+
+        if (!shouldAutoPreloadModel(prev) && shouldAutoPreloadModel(next)) {
+          skipNextAutoLoadRef.current = false
+        }
 
         const nextFp = computeRulesFingerprint(next)
         if (nextFp !== rulesFingerprintRef.current) {
@@ -422,15 +487,6 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     const pk = senderPubkey.toLowerCase()
     if (isSelf || ownPubkeysRef.current.has(pk) || blockedSetRef.current.has(pk)) return false
     if (cfg.mediaScope === 'all') return true
-    return !trustedSetRef.current.has(pk)
-  }, [])
-
-  const shouldScreenText = useCallback((senderPubkey: string, isSelf: boolean): boolean => {
-    const cfg = settingsRef.current
-    if (!hasAnyActiveRule(cfg) || cfg.textScope === 'off') return false
-    const pk = senderPubkey.toLowerCase()
-    if (isSelf || ownPubkeysRef.current.has(pk) || blockedSetRef.current.has(pk)) return false
-    if (cfg.textScope === 'all') return true
     return !trustedSetRef.current.has(pk)
   }, [])
 
@@ -457,28 +513,6 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     return !trustedSetRef.current.has(pk)
   }, [])
 
-  const preloadModel = useCallback(async (): Promise<boolean> => {
-    if (modelStatusRef.current === 'ready') return true
-    const requestId = `cf-preload-${++reqSeqRef.current}`
-    try {
-      const res = await postWorkerRequest({ type: 'preload', requestId })
-      if (res.type === 'result') {
-        pushToastRef.current?.(
-          'success',
-          `${CONTENT_FILTER_MODEL_LABEL} ready`,
-          `Running locally via ${res.runtimeDevice === 'webgpu' ? 'WebGPU' : 'WASM'}.`
-        )
-        return true
-      }
-      return false
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : `Unable to download ${CONTENT_FILTER_MODEL_LABEL}.`
-      pushToastRef.current?.('error', 'Content Filter download failed', message)
-      return false
-    }
-  }, [postWorkerRequest])
-
   const clearVerdictCache = useCallback(() => {
     clearFilterVerdictsStorage()
     verdictsRef.current = {}
@@ -488,6 +522,8 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
   }, [revokeAllObjectUrls])
 
   const clearModelCache = useCallback(async (): Promise<void> => {
+    skipNextAutoLoadRef.current = true
+    inflightPreloadRef.current = null
     clearVerdictCache()
     if (workerRef.current) {
       const requestId = `cf-clear-${++reqSeqRef.current}`
@@ -514,7 +550,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     pushToastRef.current?.(
       'info',
       'Content Filter cache cleared',
-      'Cached safety filter models and screening verdicts removed.'
+      'Cached safety filter model and screening verdicts removed.'
     )
   }, [clearVerdictCache, postWorkerRequest, terminateWorker])
 
@@ -523,8 +559,6 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     return {
       filterNsfw: cfg.filterNsfw,
       filterIllegal: cfg.filterIllegal,
-      customRulesEnabled: cfg.customRulesEnabled,
-      customInstructions: cfg.customInstructions,
     }
   }, [])
 
@@ -573,9 +607,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
           const res = await postWorkerRequest({
             type: 'screen',
             requestId,
-            kind: 'image',
             blob,
-            caption: options?.caption,
             rules,
           })
           if (res.type !== 'result') {
@@ -635,7 +667,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
           status: 'flagged',
           safe: false,
           flagged: true,
-          categories: ['custom'],
+          categories: [],
           reason: 'Sender is muted / blocked',
           checkedAt: Date.now(),
         }
@@ -724,9 +756,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
           const res = await postWorkerRequest({
             type: 'screen',
             requestId,
-            kind: 'image',
             blob,
-            caption: options?.caption,
             rules,
           })
           if (res.type !== 'result') {
@@ -782,102 +812,6 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       storeFlaggedBlobForReveal,
       postWorkerRequest,
     ]
-  )
-
-  const screenText = useCallback(
-    async (
-      cacheKey: string,
-      text: string,
-      options?: { skipCache?: boolean }
-    ): Promise<ContentFilterVerdict> => {
-      const clean = text.trim()
-      if (!clean || !hasAnyActiveRule(settingsRef.current)) {
-        return {
-          status: 'safe',
-          safe: true,
-          flagged: false,
-          categories: [],
-          checkedAt: Date.now(),
-        }
-      }
-
-      const skipCache = Boolean(options?.skipCache)
-      if (!skipCache) {
-        const cached = verdictsRef.current[cacheKey]
-        if (cached && (cached.status === 'safe' || cached.status === 'flagged')) {
-          return cached
-        }
-        const inflight = inflightScreenRef.current.get(cacheKey)
-        if (inflight) return await inflight
-      }
-
-      const fpAtStart = rulesFingerprintRef.current
-      const rules = getRulesPayload()
-
-      upsertVerdict(
-        cacheKey,
-        {
-          status: modelStatusRef.current === 'ready' ? 'scanning' : 'downloading',
-          safe: false,
-          flagged: false,
-          categories: [],
-          checkedAt: Date.now(),
-        },
-        false
-      )
-
-      const task = (async (): Promise<ContentFilterVerdict> => {
-        try {
-          const requestId = `cf-txt-${++reqSeqRef.current}`
-          const res = await postWorkerRequest({
-            type: 'screen',
-            requestId,
-            kind: 'text',
-            text: clean,
-            rules,
-          })
-          if (res.type !== 'result') {
-            throw new Error('Unexpected response from content filter worker.')
-          }
-          const finalVerdict: ContentFilterVerdict = {
-            status: res.flagged ? 'flagged' : 'safe',
-            safe: res.safe && !res.flagged,
-            flagged: res.flagged,
-            categories: res.categories,
-            reason: res.reason,
-            scores: res.scores,
-            checkedAt: Date.now(),
-          }
-          if (rulesFingerprintRef.current === fpAtStart) {
-            upsertVerdict(cacheKey, finalVerdict, !skipCache)
-          }
-          return finalVerdict
-        } catch (err) {
-          const errorVerdict: ContentFilterVerdict = {
-            status: 'error',
-            safe: false,
-            flagged: false,
-            categories: [],
-            error: err instanceof Error ? err.message : 'Text screening failed.',
-            checkedAt: Date.now(),
-          }
-          if (rulesFingerprintRef.current === fpAtStart) {
-            upsertVerdict(cacheKey, errorVerdict, false)
-          }
-          return errorVerdict
-        } finally {
-          if (!skipCache) {
-            inflightScreenRef.current.delete(cacheKey)
-          }
-        }
-      })()
-
-      if (!skipCache) {
-        inflightScreenRef.current.set(cacheKey, task)
-      }
-      return await task
-    },
-    [getRulesPayload, postWorkerRequest, upsertVerdict]
   )
 
   const getVerdict = useCallback((cacheKey: string): ContentFilterVerdict | null => {
@@ -942,6 +876,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
   }, [])
 
   const resetAll = useCallback(() => {
+    skipNextAutoLoadRef.current = true
     terminateWorker()
     revokeAllObjectUrls()
     clearFilterVerdictsStorage()
@@ -982,14 +917,12 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       clearVerdictCache,
       cachedVerdictCount,
       shouldScreenMedia,
-      shouldScreenText,
       shouldAllowScreenedCallVideo,
       shouldScreenCallVideo,
       verdicts,
       getVerdict,
       screenImageAttachment,
       screenImageBlob,
-      screenText,
       getSafeImageObjectUrl,
       revealFlaggedImage,
       revokeForSender,
@@ -1009,14 +942,12 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       clearVerdictCache,
       cachedVerdictCount,
       shouldScreenMedia,
-      shouldScreenText,
       shouldAllowScreenedCallVideo,
       shouldScreenCallVideo,
       verdicts,
       getVerdict,
       screenImageAttachment,
       screenImageBlob,
-      screenText,
       getSafeImageObjectUrl,
       revealFlaggedImage,
       revokeForSender,

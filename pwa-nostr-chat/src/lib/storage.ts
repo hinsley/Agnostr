@@ -5,7 +5,6 @@ import {
   type ContentFilterCategory,
   type ContentFilterMediaScope,
   type ContentFilterSettings,
-  type ContentFilterTextScope,
   type ContentFilterVerdict,
 } from '../types/contentFilter.ts'
 import type {
@@ -777,10 +776,6 @@ function isValidMediaScope(v: unknown): v is ContentFilterMediaScope {
   return v === 'untrusted' || v === 'all' || v === 'off'
 }
 
-function isValidTextScope(v: unknown): v is ContentFilterTextScope {
-  return v === 'off' || v === 'untrusted' || v === 'all'
-}
-
 function isValidCallVideoMode(v: unknown): v is ContentFilterCallVideoMode {
   return v === 'trusted-only' || v === 'screen-untrusted' || v === 'screen-all'
 }
@@ -803,20 +798,9 @@ export function loadContentFilterSettings(): ContentFilterSettings {
       typeof parsed.filterIllegal === 'boolean'
         ? parsed.filterIllegal
         : DEFAULT_CONTENT_FILTER_SETTINGS.filterIllegal,
-    customRulesEnabled:
-      typeof parsed.customRulesEnabled === 'boolean'
-        ? parsed.customRulesEnabled
-        : DEFAULT_CONTENT_FILTER_SETTINGS.customRulesEnabled,
-    customInstructions:
-      typeof parsed.customInstructions === 'string'
-        ? parsed.customInstructions.slice(0, 600)
-        : DEFAULT_CONTENT_FILTER_SETTINGS.customInstructions,
     mediaScope: isValidMediaScope(parsed.mediaScope)
       ? parsed.mediaScope
       : DEFAULT_CONTENT_FILTER_SETTINGS.mediaScope,
-    textScope: isValidTextScope(parsed.textScope)
-      ? parsed.textScope
-      : DEFAULT_CONTENT_FILTER_SETTINGS.textScope,
     callVideoMode: isValidCallVideoMode(parsed.callVideoMode)
       ? parsed.callVideoMode
       : DEFAULT_CONTENT_FILTER_SETTINGS.callVideoMode,
@@ -847,7 +831,7 @@ export function loadFilterVerdicts(expectedFingerprint: string): Record<string, 
     if (val.status !== 'safe' && val.status !== 'flagged') continue
     const categories = Array.isArray(val.categories)
       ? val.categories.filter(
-          (c): c is ContentFilterCategory => c === 'nsfw' || c === 'illegal' || c === 'custom'
+          (c): c is ContentFilterCategory => c === 'nsfw' || c === 'illegal'
         )
       : []
     out[key] = {

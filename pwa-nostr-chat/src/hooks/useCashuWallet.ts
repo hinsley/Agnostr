@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { mnemonicToSeedSync } from '@scure/bip39'
 import type { ToastLevel } from '../types/protocol.ts'
 import type {
   BoltzReversePairInfo,
@@ -13,7 +14,9 @@ import type {
   CashuSentTokenStatus,
   StoredCashuProof,
   WalletBackupPayload,
+  WalletDraftKeys,
   WalletEngine,
+  WalletImportMode,
   WalletTransaction,
 } from '../types/wallet.ts'
 import {
@@ -39,16 +42,24 @@ import {
   checkCashuSentTokenClaimed,
   claimCashuTokenProofs,
   clearCashuWalletInstanceCache,
+  configureCashuWalletRuntime,
   createCashuMeltQuote,
   createCashuMintQuote,
   createEmptyWalletState,
   decodeCashuTokenPreview,
   deduplicateProofs,
+  derivePrivateKeyHexFromSeed,
+  detectWalletImportFormat,
   executeCashuMeltQuote,
+  generateCashuWalletKeys,
   inspectCashuMint,
+  isValidBip39Mnemonic,
   loadPersistedCashuWallet,
   normalizeMintError,
+  normalizeMnemonicPhrase,
   parseWalletBackupJson,
+  parseWalletPrivateKeyHex,
+  restoreCashuProofsFromMint,
   savePersistedCashuWallet,
   sendCashuTokenProofs,
   sumStoredProofs,
@@ -104,6 +115,31 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     []
   )
 
+  const syncRuntimeSeed = useCallback(
+    (state: PersistedCashuWalletState) => {
+      configureCashuWalletRuntime({
+        mnemonic: state.mnemonic,
+        privateKeyHex: state.privateKeyHex,
+        counters: state.keysetCounters,
+        onCountersChanged: (snapshot) => {
+          const cur = stateRef.current
+          const next: PersistedCashuWalletState = {
+            ...cur,
+            keysetCounters: snapshot,
+          }
+          stateRef.current = next
+          savePersistedCashuWallet(next)
+        },
+      })
+    },
+    []
+  )
+
+  // Synchronize runtime NUT-13 seed & counter store with persisted wallet credentials
+  useEffect(() => {
+    syncRuntimeSeed(walletState)
+  }, [syncRuntimeSeed, walletState])
+
   const commitSwaps = useCallback((updater: (prev: BoltzSwapRecord[]) => BoltzSwapRecord[]) => {
     const next = updater(boltzSwapsRef.current)
     boltzSwapsRef.current = next
@@ -116,6 +152,19 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     activeMintQuoteRef.current = quote
     setActiveMintQuote(quote)
   }, [])
+
+  const ensureInitializedWithKeys = useCallback(() => {
+    const cur = stateRef.current
+    if (cur.initialized && (cur.mnemonic || cur.privateKeyHex)) return
+    const fresh = !cur.mnemonic && !cur.privateKeyHex ? generateCashuWalletKeys() : null
+    const next = commitState((prev) => ({
+      ...prev,
+      initialized: true,
+      mnemonic: prev.mnemonic ?? fresh?.mnemonic,
+      privateKeyHex: prev.privateKeyHex ?? fresh?.privateKeyHex,
+    }))
+    syncRuntimeSeed(next)
+  }, [commitState, syncRuntimeSeed])
 
   const appendProofsToMint = useCallback(
     (mintUrl: string, newProofs: StoredCashuProof[], labelHint?: string) => {
@@ -139,6 +188,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
             ]
         return {
           ...prev,
+          initialized: true,
           mints,
           proofsByMint: {
             ...prev.proofsByMint,
@@ -197,6 +247,374 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
   }, [balancesByMint])
 
   const activeMintBalanceSats = balancesByMint[walletState.activeMintUrl] ?? 0
+
+  /* ------------------------------------------------------------------------
+     Setup, NUT-13 BIP-39 Seed & Private Key Management
+     ------------------------------------------------------------------------ */
+
+  const generateDraftWalletKeys = useCallback((): WalletDraftKeys => {
+    return generateCashuWalletKeys()
+  }, [])
+
+  const createNewWallet = useCallback(
+    (opts?: { mnemonic?: string; privateKeyHex?: string; mintUrl?: string }) => {
+      const draft =
+        opts?.mnemonic && isValidBip39Mnemonic(opts.mnemonic)
+          ? {
+              mnemonic: normalizeMnemonicPhrase(opts.mnemonic),
+              privateKeyHex:
+                (opts.privateKeyHex && parseWalletPrivateKeyHex(opts.privateKeyHex)) ||
+                derivePrivateKeyHexFromSeed(
+                  mnemonicToSeedSync(normalizeMnemonicPhrase(opts.mnemonic))
+                ),
+            }
+          : opts?.privateKeyHex && parseWalletPrivateKeyHex(opts.privateKeyHex)
+            ? {
+                mnemonic: undefined,
+                privateKeyHex: parseWalletPrivateKeyHex(opts.privateKeyHex)!,
+              }
+            : generateCashuWalletKeys()
+
+      clearCashuWalletInstanceCache()
+      setActiveQuoteSynced(null)
+      setLastError(null)
+
+      const requestedMint = opts?.mintUrl ? normalizeMintUrl(opts.mintUrl) : null
+
+      const next = commitState((prev) => {
+        const mints = prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints
+        const activeMintUrl =
+          requestedMint && mints.some((m) => m.url === requestedMint)
+            ? requestedMint
+            : prev.activeMintUrl
+        return {
+          version: 1,
+          initialized: true,
+          ...(draft.mnemonic ? { mnemonic: draft.mnemonic } : {}),
+          privateKeyHex: draft.privateKeyHex,
+          keysetCounters: {},
+          activeMintUrl,
+          mints,
+          proofsByMint: {},
+          history: [],
+          sentTokens: [],
+        }
+      })
+
+      syncRuntimeSeed(next)
+      pushToastRef.current?.('success', 'Cashu wallet created', formatMintHost(next.activeMintUrl))
+    },
+    [commitState, setActiveQuoteSynced, syncRuntimeSeed]
+  )
+
+  const restoreProofsFromSeed = useCallback(
+    async (mintUrl?: string): Promise<{ restoredSats: number; restoredProofs: number }> => {
+      const targetUrl = normalizeMintUrl(mintUrl ?? stateRef.current.activeMintUrl)
+      if (!targetUrl) throw new Error('No mint selected.')
+      if (!stateRef.current.mnemonic && !stateRef.current.privateKeyHex) {
+        throw new Error('No recovery phrase or private key configured.')
+      }
+
+      setBusy(true)
+      setLastError(null)
+      try {
+        syncRuntimeSeed(stateRef.current)
+        const res = await restoreCashuProofsFromMint(targetUrl)
+
+        let addedCount = 0
+        let addedSats = 0
+        commitState((prev) => {
+          const existing = prev.proofsByMint[targetUrl] ?? []
+          const existingSecrets = new Set(existing.map((p) => p.secret))
+          const newlyFound = res.unspentProofs.filter((p) => !existingSecrets.has(p.secret))
+          addedCount = newlyFound.length
+          addedSats = sumStoredProofs(newlyFound)
+          return {
+            ...prev,
+            keysetCounters: { ...prev.keysetCounters, ...res.counters },
+            proofsByMint:
+              newlyFound.length > 0
+                ? {
+                    ...prev.proofsByMint,
+                    [targetUrl]: deduplicateProofs([...existing, ...newlyFound]),
+                  }
+                : prev.proofsByMint,
+          }
+        })
+
+        if (addedSats > 0) {
+          pushToastRef.current?.(
+            'success',
+            `Restored ${addedSats.toLocaleString()} sats`,
+            `${addedCount} unspent proof${addedCount === 1 ? '' : 's'} on ${formatMintHost(targetUrl)}`
+          )
+        }
+        return { restoredSats: addedSats, restoredProofs: addedCount }
+      } catch (err) {
+        const msg = normalizeMintError(err, 'Failed to restore proofs from seed.')
+        setLastError(msg)
+        throw new Error(msg)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [commitState, syncRuntimeSeed]
+  )
+
+  const importBackupJson = useCallback(
+    async (rawJson: string) => {
+      const backup = parseWalletBackupJson(rawJson)
+      let importedMints = 0
+      let importedProofs = 0
+      let totalSats = 0
+
+      const nextState = commitState((prev) => {
+        const mintMap = new Map<string, CashuMintAccount>()
+        for (const m of prev.mints) mintMap.set(m.url, m)
+        for (const m of backup.mints) {
+          if (!mintMap.has(m.url)) {
+            mintMap.set(m.url, m)
+            importedMints += 1
+          }
+        }
+
+        const nextProofsByMint: Record<string, StoredCashuProof[]> = { ...prev.proofsByMint }
+        for (const [url, incomingProofs] of Object.entries(backup.proofsByMint)) {
+          const before = nextProofsByMint[url] ?? []
+          const beforeSecrets = new Set(before.map((p) => p.secret))
+          const newlyAdded = incomingProofs.filter((p) => !beforeSecrets.has(p.secret))
+          importedProofs += newlyAdded.length
+          nextProofsByMint[url] = deduplicateProofs([...before, ...incomingProofs])
+          if (!mintMap.has(url)) {
+            const cat = findCatalogMint(url)
+            mintMap.set(url, {
+              url,
+              label: cat?.name || formatMintHost(url),
+              description: cat?.description,
+              addedAt: Date.now(),
+            })
+            importedMints += 1
+          }
+        }
+
+        for (const list of Object.values(nextProofsByMint)) {
+          totalSats += sumStoredProofs(list)
+        }
+
+        const historyIds = new Set(prev.history.map((h) => h.id))
+        const mergedHistory = [
+          ...prev.history,
+          ...backup.history.filter((h) => h && h.id && !historyIds.has(h.id)),
+        ]
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, 250)
+
+        const sentIds = new Set(prev.sentTokens.map((s) => s.id))
+        const mergedSent = [
+          ...prev.sentTokens,
+          ...backup.sentTokens.filter((s) => s && s.id && !sentIds.has(s.id)),
+        ]
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, 100)
+
+        const nextCounters: Record<string, number> = { ...prev.keysetCounters }
+        if (backup.keysetCounters) {
+          for (const [ksId, c] of Object.entries(backup.keysetCounters)) {
+            nextCounters[ksId] = Math.max(nextCounters[ksId] ?? 0, c)
+          }
+        }
+
+        const adoptedMnemonic = backup.mnemonic ?? prev.mnemonic
+        const adoptedPrivKey = backup.privateKeyHex ?? prev.privateKeyHex
+
+        return {
+          version: 1,
+          initialized: true,
+          ...(adoptedMnemonic ? { mnemonic: adoptedMnemonic } : {}),
+          ...(adoptedPrivKey ? { privateKeyHex: adoptedPrivKey } : {}),
+          keysetCounters: nextCounters,
+          activeMintUrl: mintMap.has(backup.activeMintUrl)
+            ? backup.activeMintUrl
+            : prev.activeMintUrl,
+          mints: Array.from(mintMap.values()),
+          proofsByMint: nextProofsByMint,
+          history: mergedHistory,
+          sentTokens: mergedSent,
+        }
+      })
+
+      syncRuntimeSeed(nextState)
+
+      if (backup.boltzSwaps.length > 0) {
+        commitSwaps((prev) => {
+          const ids = new Set(prev.map((s) => s.id))
+          return [...prev, ...backup.boltzSwaps.filter((s) => s && s.id && !ids.has(s.id))]
+            .sort((a, b) => b.createdAt - a.createdAt)
+            .slice(0, 40)
+        })
+      }
+
+      if (backup.boltzApiUrl) {
+        const saved = saveStoredBoltzApiUrl(backup.boltzApiUrl)
+        boltzApiUrlRef.current = saved
+        setBoltzApiUrlState(saved)
+      }
+
+      pushToastRef.current?.(
+        'success',
+        'Wallet backup restored',
+        `+${importedProofs} proof${importedProofs === 1 ? '' : 's'} · ${totalSats.toLocaleString()} sats total`
+      )
+      return { importedMints, importedProofs, totalSats }
+    },
+    [commitState, commitSwaps, syncRuntimeSeed]
+  )
+
+  const importWalletKeyOrSeed = useCallback(
+    async (
+      rawInput: string,
+      opts?: { mintUrl?: string; scanMints?: boolean }
+    ): Promise<{ mode: WalletImportMode; restoredSats: number; restoredProofs: number }> => {
+      const detected = detectWalletImportFormat(rawInput)
+      if (!detected) {
+        throw new Error(
+          'Unrecognized format. Paste a 12/24-word BIP-39 phrase, 64-hex / nsec1… private key, or backup JSON.'
+        )
+      }
+
+      if (detected.mode === 'json') {
+        const res = await importBackupJson(rawInput)
+        // If backup JSON also carried a seed/key and user opted to scan, scan active mint too
+        let extraSats = 0
+        let extraProofs = 0
+        if (opts?.scanMints && (stateRef.current.mnemonic || stateRef.current.privateKeyHex)) {
+          try {
+            const scan = await restoreProofsFromSeed(opts.mintUrl ?? stateRef.current.activeMintUrl)
+            extraSats = scan.restoredSats
+            extraProofs = scan.restoredProofs
+          } catch {
+            // Keep imported JSON proofs even if online scan fails
+          }
+        }
+        return {
+          mode: 'json',
+          restoredSats: res.totalSats + extraSats,
+          restoredProofs: res.importedProofs + extraProofs,
+        }
+      }
+
+      setBusy(true)
+      setLastError(null)
+      try {
+        clearCashuWalletInstanceCache()
+        setActiveQuoteSynced(null)
+
+        const targetMint =
+          (opts?.mintUrl && normalizeMintUrl(opts.mintUrl)) || stateRef.current.activeMintUrl
+
+        if (detected.mode === 'mnemonic') {
+          const mnemonic = normalizeMnemonicPhrase(rawInput)
+          const privateKeyHex = derivePrivateKeyHexFromSeed(mnemonicToSeedSync(mnemonic))
+          const next = commitState((prev) => ({
+            version: 1,
+            initialized: true,
+            mnemonic,
+            privateKeyHex,
+            keysetCounters: {},
+            activeMintUrl: prev.mints.some((m) => m.url === targetMint)
+              ? targetMint
+              : prev.activeMintUrl,
+            mints: prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints,
+            proofsByMint: {},
+            history: [],
+            sentTokens: [],
+          }))
+          syncRuntimeSeed(next)
+        } else {
+          const privateKeyHex = parseWalletPrivateKeyHex(rawInput)
+          if (!privateKeyHex) {
+            throw new Error('Invalid private key.')
+          }
+          const next = commitState((prev) => ({
+            version: 1,
+            initialized: true,
+            privateKeyHex,
+            keysetCounters: {},
+            activeMintUrl: prev.mints.some((m) => m.url === targetMint)
+              ? targetMint
+              : prev.activeMintUrl,
+            mints: prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints,
+            proofsByMint: {},
+            history: [],
+            sentTokens: [],
+          }))
+          syncRuntimeSeed(next)
+        }
+
+        let restoredSats = 0
+        let restoredProofs = 0
+        if (opts?.scanMints !== false) {
+          try {
+            const scan = await restoreCashuProofsFromMint(stateRef.current.activeMintUrl)
+            restoredSats = scan.restoredSats
+            restoredProofs = scan.unspentProofs.length
+            commitState((prev) => ({
+              ...prev,
+              keysetCounters: { ...prev.keysetCounters, ...scan.counters },
+              proofsByMint:
+                scan.unspentProofs.length > 0
+                  ? {
+                      ...prev.proofsByMint,
+                      [prev.activeMintUrl]: scan.unspentProofs,
+                    }
+                  : prev.proofsByMint,
+            }))
+          } catch {
+            // Mint may be unreachable during import; wallet keys are still safely imported
+          }
+        }
+
+        pushToastRef.current?.(
+          'success',
+          restoredSats > 0
+            ? `Imported & restored ${restoredSats.toLocaleString()} sats`
+            : 'Wallet imported',
+          formatMintHost(stateRef.current.activeMintUrl)
+        )
+        return { mode: detected.mode, restoredSats, restoredProofs }
+      } catch (err) {
+        const msg = normalizeMintError(err, 'Failed to import wallet key.')
+        setLastError(msg)
+        throw new Error(msg)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [commitState, importBackupJson, restoreProofsFromSeed, setActiveQuoteSynced, syncRuntimeSeed]
+  )
+
+  const exportBackupJson = useCallback((): string => {
+    const cur = stateRef.current
+    const payload: WalletBackupPayload = {
+      version: 1,
+      exportedAt: Date.now(),
+      activeMintUrl: cur.activeMintUrl,
+      ...(cur.mnemonic ? { mnemonic: cur.mnemonic } : {}),
+      ...(cur.privateKeyHex ? { privateKeyHex: cur.privateKeyHex } : {}),
+      keysetCounters: cur.keysetCounters,
+      mints: cur.mints,
+      proofsByMint: cur.proofsByMint,
+      history: cur.history,
+      sentTokens: cur.sentTokens,
+      boltzSwaps: boltzSwapsRef.current,
+      boltzApiUrl: boltzApiUrlRef.current,
+    }
+    return JSON.stringify(payload, null, 2)
+  }, [])
+
+  const exportWalletKeyJson = useCallback((): string => {
+    return exportBackupJson()
+  }, [exportBackupJson])
 
   /* ------------------------------------------------------------------------
      Mint Management
@@ -381,6 +799,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
   const receiveCashuToken = useCallback(
     async (rawToken: string) => {
+      ensureInitializedWithKeys()
       setBusy(true)
       setLastError(null)
       try {
@@ -415,7 +834,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         setBusy(false)
       }
     },
-    [appendProofsToMint, commitState, recordTransaction]
+    [appendProofsToMint, commitState, ensureInitializedWithKeys, recordTransaction]
   )
 
   const createCashuToken = useCallback(
@@ -562,6 +981,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       description?: string,
       mintUrl?: string
     ): Promise<CashuMintQuoteRecord> => {
+      ensureInitializedWithKeys()
       const targetUrl = normalizeMintUrl(mintUrl ?? stateRef.current.activeMintUrl)
       if (!targetUrl) throw new Error('No mint selected.')
       setBusy(true)
@@ -578,7 +998,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         setBusy(false)
       }
     },
-    [setActiveQuoteSynced]
+    [ensureInitializedWithKeys, setActiveQuoteSynced]
   )
 
   const checkAndClaimMintQuote = useCallback(
@@ -633,7 +1053,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     if (!activeMintQuote || activeMintQuote.state !== 'UNPAID') return
     const timer = window.setInterval(() => {
       void checkAndClaimMintQuote(activeMintQuote.quoteId).catch(() => {
-        // Silent retry on transient network hiccup
+        // Silent retry
       })
     }, 3500)
     return () => window.clearInterval(timer)
@@ -650,7 +1070,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       if (!targetUrl) throw new Error('No mint selected.')
       const parsed = parseLightningPayload(invoiceOrAddress)
       if (!parsed) {
-        throw new Error('Enter a valid BOLT-11 invoice (lnbc...) or Lightning Address (user@domain).')
+        throw new Error('Enter a valid BOLT-11 invoice (lnbc…) or Lightning Address (user@domain).')
       }
 
       setBusy(true)
@@ -805,6 +1225,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
   const createOnchainReceiveSwap = useCallback(
     async (amountSats: number, mintUrl?: string): Promise<BoltzSwapRecord> => {
+      ensureInitializedWithKeys()
       const targetUrl = normalizeMintUrl(mintUrl ?? stateRef.current.activeMintUrl)
       if (!targetUrl) throw new Error('No mint selected.')
       const cleanSats = Math.floor(amountSats)
@@ -860,7 +1281,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         setBusy(false)
       }
     },
-    [commitSwaps, recordTransaction]
+    [commitSwaps, ensureInitializedWithKeys, recordTransaction]
   )
 
   const createOnchainSendSwap = useCallback(
@@ -891,7 +1312,6 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
           throw new Error(`Insufficient balance (${available.toLocaleString()} sats on selected mint).`)
         }
 
-        // Create and persist reverse swap FIRST so claim private key + preimage are stored safely
         const swap = await createBoltzReverseSwap({
           apiUrl: boltzApiUrlRef.current,
           destinationAddress,
@@ -901,7 +1321,6 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         })
         commitSwaps((prev) => [swap, ...prev].slice(0, 40))
 
-        // Melt Cashu proofs to pay the Boltz hold invoice
         try {
           const meltPreview = await createCashuMeltQuote({
             mintUrl: targetUrl,
@@ -989,7 +1408,6 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         updatedAt: Date.now(),
       }
 
-      // If submarine swap is paid/claimed and Cashu mint quote not yet claimed, claim proofs now!
       if (
         updated.direction === 'submarine' &&
         !updated.mintClaimed &&
@@ -1028,7 +1446,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
             updated = { ...updated, mintClaimed: true }
           }
         } catch {
-          // Will retry on next poll
+          // Retry on next poll
         }
       }
 
@@ -1068,117 +1486,6 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     return buildBoltzSwapRescueJson(swap)
   }, [])
 
-  /* ------------------------------------------------------------------------
-     Backup, Restore & Panic Wipe
-     ------------------------------------------------------------------------ */
-
-  const exportBackupJson = useCallback((): string => {
-    const cur = stateRef.current
-    const payload: WalletBackupPayload = {
-      version: 1,
-      exportedAt: Date.now(),
-      activeMintUrl: cur.activeMintUrl,
-      mints: cur.mints,
-      proofsByMint: cur.proofsByMint,
-      history: cur.history,
-      sentTokens: cur.sentTokens,
-      boltzSwaps: boltzSwapsRef.current,
-      boltzApiUrl: boltzApiUrlRef.current,
-    }
-    return JSON.stringify(payload, null, 2)
-  }, [])
-
-  const importBackupJson = useCallback(
-    async (rawJson: string) => {
-      const backup = parseWalletBackupJson(rawJson)
-      let importedMints = 0
-      let importedProofs = 0
-      let totalSats = 0
-
-      commitState((prev) => {
-        const mintMap = new Map<string, CashuMintAccount>()
-        for (const m of prev.mints) mintMap.set(m.url, m)
-        for (const m of backup.mints) {
-          if (!mintMap.has(m.url)) {
-            mintMap.set(m.url, m)
-            importedMints += 1
-          }
-        }
-
-        const nextProofsByMint: Record<string, StoredCashuProof[]> = { ...prev.proofsByMint }
-        for (const [url, incomingProofs] of Object.entries(backup.proofsByMint)) {
-          const before = nextProofsByMint[url] ?? []
-          const beforeSecrets = new Set(before.map((p) => p.secret))
-          const newlyAdded = incomingProofs.filter((p) => !beforeSecrets.has(p.secret))
-          importedProofs += newlyAdded.length
-          nextProofsByMint[url] = deduplicateProofs([...before, ...incomingProofs])
-          if (!mintMap.has(url)) {
-            const cat = findCatalogMint(url)
-            mintMap.set(url, {
-              url,
-              label: cat?.name || formatMintHost(url),
-              description: cat?.description,
-              addedAt: Date.now(),
-            })
-            importedMints += 1
-          }
-        }
-
-        for (const list of Object.values(nextProofsByMint)) {
-          totalSats += sumStoredProofs(list)
-        }
-
-        const historyIds = new Set(prev.history.map((h) => h.id))
-        const mergedHistory = [
-          ...prev.history,
-          ...backup.history.filter((h) => h && h.id && !historyIds.has(h.id)),
-        ]
-          .sort((a, b) => b.createdAt - a.createdAt)
-          .slice(0, 250)
-
-        const sentIds = new Set(prev.sentTokens.map((s) => s.id))
-        const mergedSent = [
-          ...prev.sentTokens,
-          ...backup.sentTokens.filter((s) => s && s.id && !sentIds.has(s.id)),
-        ]
-          .sort((a, b) => b.createdAt - a.createdAt)
-          .slice(0, 100)
-
-        return {
-          version: 1,
-          activeMintUrl: mintMap.has(backup.activeMintUrl)
-            ? backup.activeMintUrl
-            : prev.activeMintUrl,
-          mints: Array.from(mintMap.values()),
-          proofsByMint: nextProofsByMint,
-          history: mergedHistory,
-          sentTokens: mergedSent,
-        }
-      })
-
-      if (backup.boltzSwaps.length > 0) {
-        commitSwaps((prev) => {
-          const ids = new Set(prev.map((s) => s.id))
-          return [...prev, ...backup.boltzSwaps.filter((s) => s && s.id && !ids.has(s.id))]
-            .sort((a, b) => b.createdAt - a.createdAt)
-            .slice(0, 40)
-        })
-      }
-
-      if (backup.boltzApiUrl) {
-        setBoltzApiUrl(backup.boltzApiUrl)
-      }
-
-      pushToastRef.current?.(
-        'success',
-        'Wallet backup restored',
-        `+${importedProofs} proof${importedProofs === 1 ? '' : 's'} · ${totalSats.toLocaleString()} sats total`
-      )
-      return { importedMints, importedProofs, totalSats }
-    },
-    [commitState, commitSwaps, setBoltzApiUrl]
-  )
-
   const clearHistory = useCallback(() => {
     commitState((prev) => ({ ...prev, history: [] }))
   }, [commitState])
@@ -1209,6 +1516,9 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
   return useMemo<WalletEngine>(
     () => ({
+      initialized: walletState.initialized,
+      mnemonic: walletState.mnemonic ?? null,
+      privateKeyHex: walletState.privateKeyHex ?? null,
       mints: walletState.mints,
       activeMintUrl: walletState.activeMintUrl,
       balancesByMint,
@@ -1222,6 +1532,11 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       boltzApiUrl,
       busy,
       lastError,
+      generateDraftWalletKeys,
+      createNewWallet,
+      importWalletKeyOrSeed,
+      restoreProofsFromSeed,
+      exportWalletKeyJson,
       selectMint,
       addMint,
       removeMint,
@@ -1251,6 +1566,9 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       resetAll,
     }),
     [
+      walletState.initialized,
+      walletState.mnemonic,
+      walletState.privateKeyHex,
       walletState.mints,
       walletState.activeMintUrl,
       walletState.history,
@@ -1264,6 +1582,11 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       boltzApiUrl,
       busy,
       lastError,
+      generateDraftWalletKeys,
+      createNewWallet,
+      importWalletKeyOrSeed,
+      restoreProofsFromSeed,
+      exportWalletKeyJson,
       selectMint,
       addMint,
       removeMint,

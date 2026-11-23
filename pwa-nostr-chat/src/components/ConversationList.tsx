@@ -39,6 +39,7 @@ import {
   UserPlus,
   Users,
   Video,
+  Wallet,
   X,
   Zap,
 } from 'lucide-react'
@@ -747,58 +748,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
 
         <div className="ag-conv-header-actions">
-          {/* Compact 1-Tap Amail Encrypted Mesh Mail Button (Desktop & Mobile) */}
-          {onOpenAmail && (
-            <button
-              type="button"
-              className={`ag-amail-header-btn ${amailOpen ? 'active' : ''}`}
-              onClick={() => {
-                onPlaySound?.('click')
-                onOpenAmail('inbox')
-              }}
-              title={
-                engine.amail.unreadInboxCount > 0
-                  ? `Open Amail (${engine.amail.unreadInboxCount} unread)`
-                  : 'Open Amail — Encrypted Mesh Mail'
-              }
-              aria-label={
-                engine.amail.unreadInboxCount > 0
-                  ? `Open Amail (${engine.amail.unreadInboxCount} unread)`
-                  : 'Open Amail'
-              }
-              aria-pressed={amailOpen}
-            >
-              <Mail size={13} className="ag-amail-header-icon" aria-hidden="true" />
-              <span className="ag-amail-header-label">Amail</span>
-              {engine.amail.unreadInboxCount > 0 && (
-                <span className="ag-ping-badge ag-amail-header-badge tabular">
-                  {formatBadgeCount(engine.amail.unreadInboxCount)}
-                </span>
-              )}
-            </button>
-          )}
-
-          {/* Compact 1-Tap Cashu Ecash Wallet Button (Desktop & Mobile) */}
-          {onOpenWallet && (
-            <button
-              type="button"
-              className="ag-wallet-header-btn"
-              onClick={() => {
-                onPlaySound?.('click')
-                onOpenWallet({ tab: 'overview' })
-              }}
-              title={`Open Cashu Ecash Wallet (${engine.wallet.totalBalanceSats.toLocaleString()} sats)`}
-              aria-label={`Open Cashu Wallet (${engine.wallet.totalBalanceSats} sats)`}
-            >
-              <Zap size={13} className="ag-wallet-header-icon" aria-hidden="true" />
-              <span className="ag-wallet-header-balance tabular truncate">
-                {engine.wallet.totalBalanceSats > 0
-                  ? `${engine.wallet.totalBalanceSats.toLocaleString()} sats`
-                  : 'Wallet'}
-              </span>
-            </button>
-          )}
-
           {/* Desktop quick Map & Settings buttons */}
           <button
             type="button"
@@ -2268,8 +2217,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         )}
       </div>
 
-      {/* Desktop Bottom Profile Bar (hidden on mobile where MobileTabBar lives) */}
-      <div className="ag-conv-footer ag-desktop-only">
+      {/* Bottom User Dock (Desktop left rail & Mobile Conversations drawer) */}
+      <div className="ag-conv-footer">
         <button
           type="button"
           className="ag-profile-bar-btn"
@@ -2291,17 +2240,71 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           </div>
         </button>
 
-        {pwa && !pwa.isInstalled && onOpenInstall && (
-          <button
-            type="button"
-            className="ag-install-pill-btn"
-            onClick={onOpenInstall}
-            title="Install Agnostr App"
-          >
-            <Download size={13} />
-            <span>Install</span>
-          </button>
-        )}
+        <div className="ag-conv-footer-actions">
+          {onOpenAmail && (
+            <button
+              type="button"
+              className={`ag-circle-btn ag-dock-icon-btn ${amailOpen ? 'active' : ''}`}
+              onClick={() => {
+                onPlaySound?.('click')
+                onOpenAmail('inbox')
+              }}
+              title={
+                engine.amail.unreadInboxCount > 0
+                  ? `Amail (${engine.amail.unreadInboxCount} unread)`
+                  : 'Amail'
+              }
+              aria-label={
+                engine.amail.unreadInboxCount > 0
+                  ? `Amail (${engine.amail.unreadInboxCount} unread)`
+                  : 'Amail'
+              }
+              aria-pressed={amailOpen}
+            >
+              <Mail size={18} aria-hidden="true" />
+              {engine.amail.unreadInboxCount > 0 && (
+                <span className="ag-ping-badge ag-dock-icon-badge tabular">
+                  {formatBadgeCount(engine.amail.unreadInboxCount)}
+                </span>
+              )}
+            </button>
+          )}
+
+          {onOpenWallet && (
+            <button
+              type="button"
+              className="ag-circle-btn ag-dock-icon-btn"
+              onClick={() => {
+                onPlaySound?.('click')
+                onOpenWallet({ tab: 'overview' })
+              }}
+              title={
+                engine.wallet.totalBalanceSats > 0
+                  ? `Wallet · ${engine.wallet.totalBalanceSats.toLocaleString()} sats`
+                  : 'Wallet'
+              }
+              aria-label={
+                engine.wallet.totalBalanceSats > 0
+                  ? `Wallet · ${engine.wallet.totalBalanceSats.toLocaleString()} sats`
+                  : 'Wallet'
+              }
+            >
+              <Wallet size={18} aria-hidden="true" />
+            </button>
+          )}
+
+          {pwa && !pwa.isInstalled && onOpenInstall && (
+            <button
+              type="button"
+              className="ag-circle-btn ag-dock-icon-btn"
+              onClick={onOpenInstall}
+              title="Install Agnostr App"
+              aria-label="Install Agnostr App"
+            >
+              <Download size={17} aria-hidden="true" />
+            </button>
+          )}
+        </div>
       </div>
     </aside>
   )

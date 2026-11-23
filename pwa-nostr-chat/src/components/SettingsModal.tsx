@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   AlertTriangle,
@@ -47,9 +48,10 @@ import type { AgnostrEngine, SignMode, ThemeId } from '../types/protocol.ts'
 import type {
   ContentFilterCallVideoMode,
   ContentFilterMediaScope,
-  ContentFilterTextScope,
+  ContentFilterSettings,
   ContentFilterVerdict,
 } from '../types/contentFilter.ts'
+import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import type { NotificationFilterMode } from '../types/notifications.ts'
 import {
   SUPPORTED_TRANSLATION_LANGUAGES,
@@ -156,14 +158,8 @@ const NOTIF_FILTER_MODES: readonly { id: NotificationFilterMode; label: string }
 
 const MEDIA_SCOPE_OPTIONS: readonly { id: ContentFilterMediaScope; label: string }[] = [
   { id: 'untrusted', label: 'Untrusted' },
-  { id: 'all', label: 'Everyone' },
+  { id: 'all', label: 'All' },
   { id: 'off', label: 'Off' },
-]
-
-const TEXT_SCOPE_OPTIONS: readonly { id: ContentFilterTextScope; label: string }[] = [
-  { id: 'off', label: 'Off' },
-  { id: 'untrusted', label: 'Untrusted' },
-  { id: 'all', label: 'Everyone' },
 ]
 
 const CALL_VIDEO_MODE_OPTIONS: readonly { id: ContentFilterCallVideoMode; label: string }[] = [
@@ -171,6 +167,51 @@ const CALL_VIDEO_MODE_OPTIONS: readonly { id: ContentFilterCallVideoMode; label:
   { id: 'screen-untrusted', label: 'Screen Untrusted' },
   { id: 'screen-all', label: 'Screen All' },
 ]
+
+type PendingCfDisableKind = 'master' | 'media-off' | 'nsfw' | 'illegal'
+
+const CF_DISABLE_CONFIRM_COPY: Record<
+  PendingCfDisableKind,
+  {
+    title: string
+    warning: string
+    detail: string
+    patch: Partial<ContentFilterSettings>
+  }
+> = {
+  master: {
+    title: 'Turn off image safety filter?',
+    warning:
+      'Turning off protection exposes your device to unscreened NSFW, extreme gore/NSFL, and potentially illegal imagery from untrusted strangers on public relays.',
+    detail:
+      'Public Nostr relays are unmoderated. We strongly recommend keeping the on-device image safety filter enabled at all times.',
+    patch: { enabled: false },
+  },
+  'media-off': {
+    title: 'Stop screening incoming images?',
+    warning:
+      'Setting incoming media screening to Off exposes your device to unscreened NSFW, extreme gore/NSFL, and potentially illegal imagery from untrusted strangers on public relays.',
+    detail:
+      'Without image screening, untrusted media is no longer checked locally before display. Keep this on Untrusted or All for safety.',
+    patch: { mediaScope: 'off' },
+  },
+  nsfw: {
+    title: 'Disable NSFW / explicit filter?',
+    warning:
+      'Turning off NSFW filtering exposes your device to unscreened sexually explicit images, nudity, and graphic adult media from untrusted strangers on public relays.',
+    detail:
+      'Public relays carry unmoderated media. Keeping NSFW protection enabled prevents surprise explicit imagery.',
+    patch: { filterNsfw: false },
+  },
+  illegal: {
+    title: 'Disable illegal & gore (NSFL) filter?',
+    warning:
+      'Turning off illegal & gore filtering disables permanent blocking of extreme gore, severe violence, and potentially illegal imagery from untrusted strangers on public relays.',
+    detail:
+      'This is your strongest on-device safeguard against severe harm on unmoderated relays. Strongly recommended to keep enabled.',
+    patch: { filterIllegal: false },
+  },
+}
 
 const NAV_ITEMS: readonly {
   id: SettingsTab
@@ -180,7 +221,7 @@ const NAV_ITEMS: readonly {
   { id: 'profile', label: 'Profile', subtitle: 'Name, keys & Lightning' },
   { id: 'notifications', label: 'Notifications', subtitle: 'Push alerts & call ringing' },
   { id: 'privacy', label: 'Privacy & Trust', subtitle: 'Trusted peers & blocks' },
-  { id: 'content-filter', label: 'Content Filter', subtitle: 'On-device media & text safety' },
+  { id: 'content-filter', label: 'Content Filter', subtitle: 'On-device image & video safety' },
   { id: 'translator', label: 'Translator', subtitle: 'On-device LFM3-1.7B' },
   { id: 'appearance', label: 'Appearance', subtitle: 'Theme & sound effects' },
   { id: 'calls', label: 'Calls & Recording', subtitle: 'Quality, captions & TURN' },
@@ -256,14 +297,15 @@ export function SettingsModal({
   const [revealNsec, setRevealNsec] = useState(false)
   const [copiedField, setCopiedField] = useState<'npub' | 'nsec' | 'dm-link' | null>(null)
 
-  // Content Filter drafts & quick test state
-  const [cfTestText, setCfTestText] = useState('')
+  // Content Filter quick test & disable confirmation state
   const [cfTesting, setCfTesting] = useState(false)
   const [cfTestLabel, setCfTestLabel] = useState<string | null>(null)
   const [cfTestResult, setCfTestResult] = useState<ContentFilterVerdict | null>(null)
   const [cfClearingCache, setCfClearingCache] = useState(false)
   const [cfFeedback, setCfFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [pendingCfDisable, setPendingCfDisable] = useState<PendingCfDisableKind | null>(null)
   const cfFileInputRef = useRef<HTMLInputElement | null>(null)
+  const keepProtectionBtnRef = useRef<HTMLButtonElement | null>(null)
 
   // Translator (Liquid LFM3-1.7B) drafts
   const [trClearingCache, setTrClearingCache] = useState(false)
@@ -362,18 +404,44 @@ export function SettingsModal({
     engine.notifications.settings.vapidPublicKey,
   ])
 
+  const cancelCfDisable = useCallback(() => {
+    setPendingCfDisable(null)
+  }, [])
+
+  // Android / PWA Back button cancels image-filter disable warning dialog
+  useBackHandler(Boolean(pendingCfDisable), cancelCfDisable)
+
+  // Clear pending disable warning when Settings closes; default focus to Keep Protection On
+  useEffect(() => {
+    if (!open) {
+      setPendingCfDisable(null)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!pendingCfDisable) return
+    const rafId = window.requestAnimationFrame(() => {
+      keepProtectionBtnRef.current?.focus()
+    })
+    return () => window.cancelAnimationFrame(rafId)
+  }, [pendingCfDisable])
+
   // Escape dismissal
   useEffect(() => {
     if (!open) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
+        if (pendingCfDisable) {
+          setPendingCfDisable(null)
+          return
+        }
         onClose()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, onClose])
+  }, [open, pendingCfDisable, onClose])
 
   const cancelPanicHold = useCallback(() => {
     if (rafRef.current !== null) {
@@ -671,26 +739,6 @@ export function SettingsModal({
       }
     } finally {
       setLud16Saving(false)
-    }
-  }
-
-  const handleCfTestText = async (e: FormEvent) => {
-    e.preventDefault()
-    const sample = cfTestText.trim()
-    if (!sample || cfTesting) return
-    setCfTesting(true)
-    setCfTestLabel('Text test')
-    setCfTestResult(null)
-    onPlaySound?.('click')
-    try {
-      const verdict = await engine.contentFilter.screenText(
-        `settings-test-text:${Date.now()}`,
-        sample,
-        { skipCache: true },
-      )
-      setCfTestResult(verdict)
-    } finally {
-      setCfTesting(false)
     }
   }
 
@@ -1974,7 +2022,23 @@ export function SettingsModal({
     const cf = engine.contentFilter
     const cfs = cf.settings
     const isDownloading = cf.modelStatus === 'downloading'
+    const canReloadModel = cf.modelStatus === 'idle' || cf.modelStatus === 'error'
     const pct = Math.max(0, Math.min(100, Math.round(cf.downloadProgress)))
+
+    const isMasterOff = !cfs.enabled
+    const isMediaOff = cfs.mediaScope === 'off'
+    const isNsfwOff = !cfs.filterNsfw
+    const isIllegalOff = !cfs.filterIllegal
+    const isProtectionWeakened = isMasterOff || isMediaOff || isNsfwOff || isIllegalOff
+
+    const weakenedTitle =
+      isMasterOff || isMediaOff
+        ? 'Image safety protection is off'
+        : isIllegalOff && isNsfwOff
+          ? 'All image safety filters are off'
+          : isIllegalOff
+            ? 'Illegal & gore (NSFL) protection is off'
+            : 'NSFW / explicit protection is off'
 
     const statusBadge =
       cf.modelStatus === 'ready'
@@ -1988,10 +2052,10 @@ export function SettingsModal({
                   : 'Ready',
           }
         : isDownloading
-          ? { cls: 'ag-badge-warn', text: `Loading ${pct}%` }
+          ? { cls: 'ag-badge-warn', text: pct > 0 ? `Loading ${pct}%` : 'Loading…' }
           : cf.modelStatus === 'error'
             ? { cls: 'ag-badge-danger', text: 'Error' }
-            : { cls: 'ag-badge-muted', text: 'Not downloaded' }
+            : { cls: 'ag-badge-muted', text: 'Not loaded' }
 
     const callVideoHint =
       cfs.callVideoMode === 'trusted-only'
@@ -2000,8 +2064,45 @@ export function SettingsModal({
           ? 'Untrusted call video stays veiled until cleared by the on-device safety filter.'
           : 'All remote call video stays veiled until cleared by the safety filter, re-veiling if flagged.'
 
+    const handleRestoreFullProtection = () => {
+      cf.updateSettings({
+        enabled: true,
+        filterNsfw: true,
+        filterIllegal: true,
+        mediaScope: cfs.mediaScope === 'off' ? 'untrusted' : cfs.mediaScope,
+      })
+      onPlaySound?.('click')
+    }
+
     return (
       <div className="ag-set-pane-stack">
+        {/* Danger Banner whenever image protection is disabled or weakened */}
+        {isProtectionWeakened && (
+          <div className="ag-set-cf-danger-banner" role="alert">
+            <span className="ag-set-cf-danger-icon" aria-hidden="true">
+              <ShieldAlert size={18} />
+            </span>
+            <div className="ag-set-cf-danger-body">
+              <span className="ag-set-cf-danger-title">{weakenedTitle}</span>
+              <span className="ag-set-cf-danger-desc">
+                Your device may display unscreened NSFW, extreme gore/NSFL, or illegal imagery from
+                untrusted strangers on public relays. Strongly recommended to keep image filtering
+                on.
+              </span>
+              <div className="ag-set-cf-danger-actions">
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-primary ag-btn-sm"
+                  onClick={handleRestoreFullProtection}
+                >
+                  <ShieldCheck size={13} />
+                  <span>Turn Back On</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Content Filter Model Card */}
         <div className="ag-set-ai-card">
           <div className="ag-set-ai-head">
@@ -2037,40 +2138,29 @@ export function SettingsModal({
           )}
 
           <p className="ag-set-helper">
-            Fast, phone-safe screening runs locally via {cf.webGpuSupported ? 'WebGPU / WASM' : 'WASM'}.
-            Optional text and custom-rule modules only download on demand when enabled.
+            Loads automatically on startup and screens images 100% locally via{' '}
+            {cf.webGpuSupported ? 'WebGPU / WASM' : 'WASM'}.
           </p>
 
           <div className="ag-set-ai-actions">
-            <button
-              type="button"
-              className="ag-btn ag-btn-primary ag-btn-sm"
-              disabled={isDownloading}
-              onClick={() => {
-                setCfFeedback(null)
-                onPlaySound?.('click')
-                void cf.preloadModel().then((ok) => {
-                  if (ok) {
-                    setCfFeedback({ ok: true, msg: `${cf.modelLabel} is ready locally` })
-                  }
-                })
-              }}
-            >
-              {isDownloading ? (
-                <Loader2 size={13} className="ag-spin" />
-              ) : cf.modelStatus === 'ready' ? (
-                <Check size={13} />
-              ) : (
-                <Download size={13} />
-              )}
-              <span>
-                {isDownloading
-                  ? `Downloading ${pct}%`
-                  : cf.modelStatus === 'ready'
-                    ? 'Model Ready'
-                    : 'Download / Preload Model'}
-              </span>
-            </button>
+            {canReloadModel && (
+              <button
+                type="button"
+                className="ag-btn ag-btn-primary ag-btn-sm"
+                onClick={() => {
+                  setCfFeedback(null)
+                  onPlaySound?.('click')
+                  void cf.preloadModel().then((ok) => {
+                    if (ok) {
+                      setCfFeedback({ ok: true, msg: `${cf.modelLabel} is ready locally` })
+                    }
+                  })
+                }}
+              >
+                <RefreshCw size={13} />
+                <span>Reload Model</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -2083,8 +2173,8 @@ export function SettingsModal({
                 {cfClearingCache
                   ? 'Clearing…'
                   : cf.cachedVerdictCount > 0
-                    ? `Clear Model & Verdict Cache (${cf.cachedVerdictCount})`
-                    : 'Clear Model & Verdict Cache'}
+                    ? `Clear Cache (${cf.cachedVerdictCount})`
+                    : 'Clear Cache'}
               </span>
             </button>
           </div>
@@ -2106,10 +2196,10 @@ export function SettingsModal({
           <div className="ag-set-toggle-copy">
             <span className="ag-set-toggle-title">
               <ShieldAlert size={16} />
-              <span>Enable Content Filter</span>
+              <span>Image Safety Filter</span>
             </span>
             <span className="ag-set-toggle-desc">
-              Screen incoming media locally before display.
+              Screen incoming images locally before display.
             </span>
           </div>
           <input
@@ -2117,21 +2207,25 @@ export function SettingsModal({
             className="ag-switch"
             checked={cfs.enabled}
             onChange={() => {
-              cf.updateSettings({ enabled: !cfs.enabled })
               onPlaySound?.('click')
+              if (cfs.enabled) {
+                setPendingCfDisable('master')
+              } else {
+                cf.updateSettings({ enabled: true })
+              }
             }}
           />
         </label>
 
-        {/* What to Filter */}
+        {/* Categories */}
         <div className={`ag-set-group ${!cfs.enabled ? 'ag-set-dimmed' : ''}`}>
-          <span className="ag-set-label">What to Filter</span>
+          <span className="ag-set-label">Categories</span>
 
           <div className="ag-set-stack-sm">
             <label className="ag-set-toggle-card">
               <div className="ag-set-toggle-copy">
                 <span className="ag-set-toggle-title">
-                  <span>NSFW / Explicit content</span>
+                  <span>NSFW / Explicit</span>
                 </span>
                 <span className="ag-set-toggle-desc">
                   Block sexually explicit images, nudity, and graphic adult media.
@@ -2143,8 +2237,12 @@ export function SettingsModal({
                 disabled={!cfs.enabled}
                 checked={cfs.filterNsfw}
                 onChange={() => {
-                  cf.updateSettings({ filterNsfw: !cfs.filterNsfw })
                   onPlaySound?.('click')
+                  if (cfs.filterNsfw) {
+                    setPendingCfDisable('nsfw')
+                  } else {
+                    cf.updateSettings({ filterNsfw: true })
+                  }
                 }}
               />
             </label>
@@ -2152,10 +2250,11 @@ export function SettingsModal({
             <label className="ag-set-toggle-card">
               <div className="ag-set-toggle-copy">
                 <span className="ag-set-toggle-title">
-                  <span>Illegal &amp; extreme harm</span>
+                  <span>Illegal &amp; Gore (NSFL)</span>
                 </span>
                 <span className="ag-set-toggle-desc">
-                  Permanently block illegal content, CSAM, and severe violence (no reveal override).
+                  Permanently block illegal imagery, extreme gore, and severe violence (no reveal
+                  override).
                 </span>
               </div>
               <input
@@ -2164,53 +2263,21 @@ export function SettingsModal({
                 disabled={!cfs.enabled}
                 checked={cfs.filterIllegal}
                 onChange={() => {
-                  cf.updateSettings({ filterIllegal: !cfs.filterIllegal })
                   onPlaySound?.('click')
+                  if (cfs.filterIllegal) {
+                    setPendingCfDisable('illegal')
+                  } else {
+                    cf.updateSettings({ filterIllegal: true })
+                  }
                 }}
               />
             </label>
-
-            <div className="ag-set-custom-rule-card">
-              <label className="ag-set-custom-rule-head">
-                <div className="ag-set-toggle-copy">
-                  <span className="ag-set-toggle-title">
-                    <span>Custom filter instructions</span>
-                  </span>
-                  <span className="ag-set-toggle-desc">
-                    Downloads an optional on-device module when enabled to evaluate your own rules.
-                  </span>
-                </div>
-                <input
-                  type="checkbox"
-                  className="ag-switch"
-                  disabled={!cfs.enabled}
-                  checked={cfs.customRulesEnabled}
-                  onChange={() => {
-                    cf.updateSettings({ customRulesEnabled: !cfs.customRulesEnabled })
-                    onPlaySound?.('click')
-                  }}
-                />
-              </label>
-
-              {cfs.customRulesEnabled && (
-                <textarea
-                  className="ag-textarea ag-set-rule-textarea"
-                  rows={3}
-                  maxLength={400}
-                  disabled={!cfs.enabled}
-                  value={cfs.customInstructions}
-                  onChange={(e) => cf.updateSettings({ customInstructions: e.target.value })}
-                  placeholder="e.g., Flag heavy profanity, slurs, or crypto scam spam"
-                  aria-label="Custom content filter instructions"
-                />
-              )}
-            </div>
           </div>
         </div>
 
-        {/* Where to Apply */}
+        {/* Scope */}
         <div className={`ag-set-group ${!cfs.enabled ? 'ag-set-dimmed' : ''}`}>
-          <span className="ag-set-label">Where to Apply</span>
+          <span className="ag-set-label">Scope</span>
 
           <div className="ag-set-scope-list">
             <div className="ag-set-scope-item">
@@ -2232,37 +2299,12 @@ export function SettingsModal({
                     aria-checked={cfs.mediaScope === opt.id}
                     className={cfs.mediaScope === opt.id ? 'active' : ''}
                     onClick={() => {
+                      onPlaySound?.('click')
+                      if (opt.id === 'off' && cfs.mediaScope !== 'off') {
+                        setPendingCfDisable('media-off')
+                        return
+                      }
                       cf.updateSettings({ mediaScope: opt.id })
-                      onPlaySound?.('click')
-                    }}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="ag-set-scope-item">
-              <div className="ag-set-label-row">
-                <span className="ag-set-scope-title">Text Messages</span>
-                <span className="ag-set-scope-default">Default: Off</span>
-              </div>
-              <div
-                className="ag-segmented"
-                role="radiogroup"
-                aria-label="Text message filter scope"
-              >
-                {TEXT_SCOPE_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    role="radio"
-                    disabled={!cfs.enabled}
-                    aria-checked={cfs.textScope === opt.id}
-                    className={cfs.textScope === opt.id ? 'active' : ''}
-                    onClick={() => {
-                      cf.updateSettings({ textScope: opt.id })
-                      onPlaySound?.('click')
                     }}
                   >
                     {opt.label}
@@ -2307,24 +2349,6 @@ export function SettingsModal({
         <div className="ag-set-group">
           <span className="ag-set-label">Quick Test</span>
           <div className="ag-set-test-box">
-            <form className="ag-set-inline-row" onSubmit={(e) => void handleCfTestText(e)}>
-              <input
-                type="text"
-                className="ag-input"
-                value={cfTestText}
-                onChange={(e) => setCfTestText(e.target.value)}
-                placeholder="Type sample text to test filter…"
-                aria-label="Sample text to test content filter"
-              />
-              <button
-                type="submit"
-                className="ag-btn ag-btn-primary ag-btn-sm"
-                disabled={cfTesting || !cfTestText.trim()}
-              >
-                {cfTesting ? <Loader2 size={13} className="ag-spin" /> : 'Test Text'}
-              </button>
-            </form>
-
             <div className="ag-set-test-img-row">
               <input
                 ref={cfFileInputRef}
@@ -2339,10 +2363,10 @@ export function SettingsModal({
                 disabled={cfTesting}
                 onClick={() => cfFileInputRef.current?.click()}
               >
-                <ImageIcon size={13} />
-                <span>Test Image File…</span>
+                {cfTesting ? <Loader2 size={13} className="ag-spin" /> : <ImageIcon size={13} />}
+                <span>{cfTesting ? 'Screening…' : 'Test Image File…'}</span>
               </button>
-              <span className="ag-set-helper">Evaluated locally using your active rules above.</span>
+              <span className="ag-set-helper">Evaluated locally using your active categories.</span>
             </div>
 
             {cfTestResult && (
@@ -2366,12 +2390,16 @@ export function SettingsModal({
                   )}
                   <strong>
                     {cfTestResult.status === 'flagged'
-                      ? `Flagged (${cfTestResult.categories.join(', ') || 'policy'})`
+                      ? `Flagged (${cfTestResult.categories
+                          .map((c) => (c === 'nsfw' ? 'NSFW' : 'Illegal / Gore'))
+                          .join(', ') || 'policy'})`
                       : cfTestResult.status === 'error'
                         ? 'Error'
                         : 'Safe'}
                   </strong>
-                  {cfTestLabel && <span className="ag-set-verdict-label truncate">· {cfTestLabel}</span>}
+                  {cfTestLabel && (
+                    <span className="ag-set-verdict-label truncate">· {cfTestLabel}</span>
+                  )}
                 </span>
                 {(cfTestResult.reason || cfTestResult.error) && (
                   <span className="ag-set-verdict-detail">
@@ -3530,6 +3558,84 @@ export function SettingsModal({
           </div>
         </div>
       </div>
+
+      {pendingCfDisable &&
+        createPortal(
+          <div
+            className="ag-cf-confirm-backdrop"
+            role="presentation"
+            onClick={cancelCfDisable}
+          >
+            <div
+              className="ag-cf-confirm-modal"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="ag-cf-confirm-title"
+              aria-describedby="ag-cf-confirm-desc"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="ag-cf-confirm-head">
+                <span className="ag-cf-confirm-badge" aria-hidden="true">
+                  <ShieldAlert size={22} />
+                </span>
+                <div className="ag-cf-confirm-title-wrap">
+                  <h2 id="ag-cf-confirm-title" className="ag-cf-confirm-title">
+                    {CF_DISABLE_CONFIRM_COPY[pendingCfDisable].title}
+                  </h2>
+                  <p className="ag-cf-confirm-subtitle">Not recommended · Unscreened media risk</p>
+                </div>
+                <button
+                  type="button"
+                  className="ag-cf-confirm-close"
+                  onClick={cancelCfDisable}
+                  aria-label="Keep protection on"
+                  title="Keep protection on (Esc)"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="ag-cf-confirm-callout">
+                <AlertTriangle size={16} className="ag-cf-confirm-callout-icon" aria-hidden="true" />
+                <p id="ag-cf-confirm-desc" className="ag-cf-confirm-callout-text">
+                  {CF_DISABLE_CONFIRM_COPY[pendingCfDisable].warning}
+                </p>
+              </div>
+
+              <p className="ag-cf-confirm-note">
+                {CF_DISABLE_CONFIRM_COPY[pendingCfDisable].detail}
+              </p>
+
+              <div className="ag-cf-confirm-actions">
+                <button
+                  type="button"
+                  className="ag-cf-confirm-disable-btn"
+                  onClick={() => {
+                    const patch = CF_DISABLE_CONFIRM_COPY[pendingCfDisable].patch
+                    engine.contentFilter.updateSettings(patch)
+                    setPendingCfDisable(null)
+                    onPlaySound?.('click')
+                  }}
+                >
+                  <span>Turn Off Anyway</span>
+                </button>
+                <button
+                  ref={keepProtectionBtnRef}
+                  type="button"
+                  className="ag-cf-confirm-keep-btn"
+                  onClick={() => {
+                    setPendingCfDisable(null)
+                    onPlaySound?.('click')
+                  }}
+                >
+                  <ShieldCheck size={15} />
+                  <span>Keep Protection On</span>
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }

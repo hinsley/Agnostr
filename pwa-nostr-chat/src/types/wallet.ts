@@ -217,6 +217,9 @@ export interface WalletBackupPayload {
   version: 1
   exportedAt: number
   activeMintUrl: string
+  mnemonic?: string
+  privateKeyHex?: string
+  keysetCounters?: Record<string, number>
   mints: CashuMintAccount[]
   proofsByMint: Record<string, StoredCashuProof[]>
   history: WalletTransaction[]
@@ -292,7 +295,19 @@ export interface WalletInitialIntent {
    Engine Contracts Exposed on AgnostrEngine (`engine.wallet` & `engine.zaps`)
    -------------------------------------------------------------------------- */
 
+export type WalletImportMode = 'mnemonic' | 'privkey' | 'json'
+
+export interface WalletDraftKeys {
+  mnemonic: string
+  privateKeyHex: string
+}
+
 export interface WalletEngine {
+  // Onboarding & NUT-13 seed / key state
+  initialized: boolean
+  mnemonic: string | null
+  privateKeyHex: string | null
+
   // Multi-mint balances & state
   mints: CashuMintAccount[]
   activeMintUrl: string
@@ -307,6 +322,27 @@ export interface WalletEngine {
   boltzApiUrl: string
   busy: boolean
   lastError: string | null
+
+  // Setup, seed & private key management
+  generateDraftWalletKeys: () => WalletDraftKeys
+  createNewWallet: (opts?: {
+    mnemonic?: string
+    privateKeyHex?: string
+    mintUrl?: string
+  }) => void
+  importWalletKeyOrSeed: (
+    rawInput: string,
+    opts?: { mintUrl?: string; scanMints?: boolean }
+  ) => Promise<{
+    mode: WalletImportMode
+    restoredSats: number
+    restoredProofs: number
+  }>
+  restoreProofsFromSeed: (mintUrl?: string) => Promise<{
+    restoredSats: number
+    restoredProofs: number
+  }>
+  exportWalletKeyJson: () => string
 
   // Mint management
   selectMint: (mintUrl: string) => void

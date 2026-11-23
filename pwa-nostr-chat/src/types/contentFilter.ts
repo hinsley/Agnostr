@@ -5,9 +5,8 @@ export const CONTENT_FILTER_MODEL_LABEL = 'Image Safety Classifier (23 MB)'
 export const CONTENT_FILTER_CACHE_NAME = 'content-filter-cache'
 
 export type ContentFilterMediaScope = 'untrusted' | 'all' | 'off'
-export type ContentFilterTextScope = 'off' | 'untrusted' | 'all'
 export type ContentFilterCallVideoMode = 'trusted-only' | 'screen-untrusted' | 'screen-all'
-export type ContentFilterCategory = 'nsfw' | 'illegal' | 'custom'
+export type ContentFilterCategory = 'nsfw' | 'illegal'
 export type ContentFilterModelStatus = 'idle' | 'downloading' | 'ready' | 'error'
 export type ContentFilterRuntimeDevice = 'webgpu' | 'wasm'
 export type ContentFilterVerdictStatus =
@@ -19,20 +18,14 @@ export type ContentFilterVerdictStatus =
   | 'error'
 
 export interface ContentFilterSettings {
-  /** Master on/off toggle for on-device content filtering (default: true) */
+  /** Master on/off toggle for on-device image safety filtering (default: true) */
   enabled: boolean
-  /** Flag NSFW / pornographic / sexually explicit content (default: true) */
+  /** Flag NSFW / pornographic / sexually explicit imagery (default: true) */
   filterNsfw: boolean
-  /** Flag illegal / NSFL / extreme violence / severe harm content (default: true) */
+  /** Flag illegal / NSFL / extreme gore & graphic violence imagery (default: true) */
   filterIllegal: boolean
-  /** Enable user-defined natural-language moderation rule (default: false) */
-  customRulesEnabled: boolean
-  /** User-defined moderation instructions (e.g. profanity, slurs, scam spam) */
-  customInstructions: string
   /** Incoming image & media interception scope (default: 'untrusted') */
   mediaScope: ContentFilterMediaScope
-  /** Incoming chat text filtering scope (default: 'off') */
-  textScope: ContentFilterTextScope
   /** Incoming call video handling mode (default: 'trusted-only') */
   callVideoMode: ContentFilterCallVideoMode
 }
@@ -41,10 +34,7 @@ export const DEFAULT_CONTENT_FILTER_SETTINGS: ContentFilterSettings = {
   enabled: true,
   filterNsfw: true,
   filterIllegal: true,
-  customRulesEnabled: false,
-  customInstructions: '',
   mediaScope: 'untrusted',
-  textScope: 'off',
   callVideoMode: 'trusted-only',
 }
 
@@ -70,6 +60,11 @@ export interface ScreenContentOptions {
   skipCache?: boolean
 }
 
+export interface PreloadModelOptions {
+  /** Suppress standard toast notifications (used for automatic startup preload with dedicated popup) */
+  silent?: boolean
+}
+
 export interface ContentFilterEngine {
   settings: ContentFilterSettings
   updateSettings: (patch: Partial<ContentFilterSettings>) => void
@@ -83,15 +78,13 @@ export interface ContentFilterEngine {
   modelError: string | null
   webGpuSupported: boolean
 
-  preloadModel: () => Promise<boolean>
+  preloadModel: (opts?: PreloadModelOptions) => Promise<boolean>
   clearModelCache: () => Promise<void>
   clearVerdictCache: () => void
   cachedVerdictCount: number
 
   /** True when media from this sender must be intercepted & screened before display */
   shouldScreenMedia: (senderPubkey: string, isSelf: boolean) => boolean
-  /** True when text messages from this sender must be screened before display */
-  shouldScreenText: (senderPubkey: string, isSelf: boolean) => boolean
   /** True when untrusted call video is explicitly opted into screening (false under default 'trusted-only') */
   shouldAllowScreenedCallVideo: (senderPubkey: string, isSelf: boolean) => boolean
   /** True when incoming video frames from this peer must pass screening before unveiling */
@@ -113,13 +106,6 @@ export interface ContentFilterEngine {
     cacheKey: string,
     blob: Blob,
     opts?: ScreenContentOptions
-  ) => Promise<ContentFilterVerdict>
-
-  /** Screens text content (chat messages when textScope !== 'off', or Settings quick test) */
-  screenText: (
-    cacheKey: string,
-    text: string,
-    opts?: { skipCache?: boolean }
   ) => Promise<ContentFilterVerdict>
 
   /** Returns the verified local blob: objectUrl ONLY for images cleared safe (null otherwise) */

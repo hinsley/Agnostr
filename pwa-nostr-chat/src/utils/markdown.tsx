@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { getCachedHighlightedCode, highlightCodeToHtml } from '../lib/codeHighlight'
 import { getCachedMathSvg, hasMathSyntax, renderMathToSvg } from '../lib/mathjax'
 import { makeTopicChannelKey, normalizeTopicSlug } from '../lib/radioChannel'
 
@@ -595,8 +596,33 @@ function renderInline(
   return nodes
 }
 
-function CodeBlock({ lang, code }: { lang: string; code: string }) {
+const CodeBlock: React.FC<{ lang: string; code: string }> = React.memo(({ lang, code }) => {
   const [copied, setCopied] = useState(false)
+  const [highlightedHtml, setHighlightedHtml] = useState<string | null>(() =>
+    getCachedHighlightedCode(lang, code)
+  )
+
+  useEffect(() => {
+    const cached = getCachedHighlightedCode(lang, code)
+    if (cached !== null) {
+      setHighlightedHtml(cached)
+      return
+    }
+    let cancelled = false
+    setHighlightedHtml(null)
+    void highlightCodeToHtml(lang, code)
+      .then((html) => {
+        if (!cancelled && html) {
+          setHighlightedHtml(html)
+        }
+      })
+      .catch(() => {
+        // Keep clean plain-text code fallback on load/highlight failure
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [lang, code])
 
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -614,11 +640,20 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
         </button>
       </div>
       <pre className="ag-codeblock-pre" data-no-swipe="true">
-        <code>{code}</code>
+        {highlightedHtml ? (
+          <code
+            className="ag-codeblock-code hljs"
+            dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+          />
+        ) : (
+          <code className="ag-codeblock-code">{code}</code>
+        )}
       </pre>
     </div>
   )
-}
+})
+
+CodeBlock.displayName = 'CodeBlock'
 
 const TABLE_SEP_REGEX = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/
 const HR_LINE_REGEX = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/

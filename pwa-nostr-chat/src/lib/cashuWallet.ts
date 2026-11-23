@@ -7,11 +7,17 @@ import {
   Wallet,
   getEncodedToken,
   getTokenMetadata,
+  type CounterRange,
+  type CounterSource,
   type MeltQuoteBolt11Response,
   type MintQuoteBolt11Response,
   type Proof,
   type ProofLike,
 } from '@cashu/cashu-ts'
+import { sha256 } from '@noble/hashes/sha256'
+import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from '@scure/bip39'
+import { wordlist as englishWordlist } from '@scure/bip39/wordlists/english'
+import { getPublicKey } from 'nostr-tools'
 import type {
   CashuMeltQuotePreview,
   CashuMintAccount,
@@ -22,6 +28,8 @@ import type {
   CashuTokenPreview,
   StoredCashuProof,
   WalletBackupPayload,
+  WalletDraftKeys,
+  WalletImportMode,
   WalletTransaction,
 } from '../types/wallet.ts'
 import {
@@ -32,6 +40,12 @@ import {
   normalizeMintUrl,
   probeCashuMint,
 } from './cashuMints.ts'
+import {
+  bytesToHex,
+  encodeNsecSafe,
+  hexToBytes,
+  parseSecretKey,
+} from './identity.ts'
 
 export const CASHU_WALLET_STORAGE_KEY = 'agnostr:v2:cashu_wallet'
 
@@ -40,13 +54,152 @@ const MAX_SENT_TOKENS = 100
 const CASHU_TOKEN_GLOBAL_REGEX = /\b(cashu[AB][A-Za-z0-9_-]{20,})\b/g
 const CASHU_TOKEN_SINGLE_REGEX = /^(?:cashu:)?(cashu[AB][A-Za-z0-9_-]{20,})$/i
 
+const utf8Encoder = new TextEncoder()
+
 export interface PersistedCashuWalletState {
   version: 1
+  initialized: boolean
+  mnemonic?: string
+  privateKeyHex?: string
+  keysetCounters: Record<string, number>
   activeMintUrl: string
   mints: CashuMintAccount[]
   proofsByMint: Record<string, StoredCashuProof[]>
   history: WalletTransaction[]
   sentTokens: CashuSentTokenRecord[]
+}
+
+/* --------------------------------------------------------------------------
+   NUT-13 BIP-39 Seed & Wallet Private Key Helpers
+   -------------------------------------------------------------------------- */
+
+export function normalizeMnemonicPhrase(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+}
+
+export function isValidBip39Mnemonic(raw: string): boolean {
+  const norm = normalizeMnemonicPhrase(raw)
+  const words = norm.split(' ').filter(Boolean)
+  if (words.length !== 12 && words.length !== 24) return false
+  return validateMnemonic(norm, englishWordlist)
+}
+
+/**
+ * Derives a valid 32-byte secp256k1 wallet private key hex deterministically from a 64-byte BIP-39 seed.
+ */
+export function derivePrivateKeyHexFromSeed(seed: Uint8Array): string {
+  const domain = utf8Encoder.encode('agnostr-cashu-p2pk-v1:')
+  for (let i = 0; i < 16; i++) {
+    const buf = new Uint8Array(domain.length + seed.length + 1)
+    buf.set(domain, 0)
+    buf.set(seed, domain.length)
+    buf[domain.length + seed.length] = i
+    const candidate = sha256(buf)
+    try {
+      getPublicKey(candidate)
+      return bytesToHex(candidate)
+    } catch {
+      // Retry if scalar invalid
+    }
+  }
+  return bytesToHex(sha256(seed))
+}
+
+/**
+ * Generates a fresh 12-word BIP-39 English recovery phrase and deterministic 64-hex private key.
+ */
+export function generateCashuWalletKeys(): WalletDraftKeys {
+  const mnemonic = generateMnemonic(englishWordlist, 128)
+  const seed = mnemonicToSeedSync(mnemonic)
+  const privateKeyHex = derivePrivateKeyHexFromSeed(seed)
+  return { mnemonic, privateKeyHex }
+}
+
+/**
+ * Derives a 64-byte NUT-13 `bip39seed` from either a BIP-39 mnemonic (standard) or
+ * deterministically stretched from a 64-hex private key if imported without a phrase.
+ */
+export function deriveNut13SeedBytes(params: {
+  mnemonic?: string | null
+  privateKeyHex?: string | null
+}): Uint8Array | undefined {
+  if (params.mnemonic && isValidBip39Mnemonic(params.mnemonic)) {
+    return mnemonicToSeedSync(normalizeMnemonicPhrase(params.mnemonic))
+  }
+  if (params.privateKeyHex) {
+    const pkBytes = hexToBytes(params.privateKeyHex)
+    if (pkBytes && pkBytes.length === 32) {
+      const a = sha256(new Uint8Array([...utf8Encoder.encode('agnostr-cashu-seed-a:'), ...pkBytes]))
+      const b = sha256(new Uint8Array([...utf8Encoder.encode('agnostr-cashu-seed-b:'), ...pkBytes]))
+      const out = new Uint8Array(64)
+      out.set(a, 0)
+      out.set(b, 32)
+      return out
+    }
+  }
+  return undefined
+}
+
+export function encodeWalletPrivateKeyNsec(privateKeyHex: string | null | undefined): string | null {
+  if (!privateKeyHex) return null
+  const bytes = hexToBytes(privateKeyHex)
+  if (!bytes || bytes.length !== 32) return null
+  return encodeNsecSafe(bytes)
+}
+
+export function parseWalletPrivateKeyHex(raw: string): string | null {
+  const parsed = parseSecretKey(raw)
+  if (!parsed || parsed.length !== 32) return null
+  return bytesToHex(parsed)
+}
+
+export interface DetectedWalletImport {
+  mode: WalletImportMode
+  label: string
+}
+
+/**
+ * Synchronously detects whether pasted/uploaded text is a 12/24-word BIP-39 phrase,
+ * a 64-hex / `nsec1…` private key, or a Cashu wallet backup JSON object.
+ */
+export function detectWalletImportFormat(raw: string): DetectedWalletImport | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        (typeof parsed.proofsByMint === 'object' ||
+          typeof parsed.mnemonic === 'string' ||
+          typeof parsed.privateKeyHex === 'string')
+      ) {
+        return { mode: 'json', label: 'Backup JSON' }
+      }
+    } catch {
+      return null
+    }
+    return null
+  }
+
+  if (parseWalletPrivateKeyHex(trimmed)) {
+    return {
+      mode: 'privkey',
+      label: trimmed.toLowerCase().startsWith('nsec1') ? 'Private key (nsec)' : 'Private key',
+    }
+  }
+
+  if (isValidBip39Mnemonic(trimmed)) {
+    const count = normalizeMnemonicPhrase(trimmed).split(' ').length
+    return { mode: 'mnemonic', label: `${count}-word seed` }
+  }
+
+  return null
 }
 
 /* --------------------------------------------------------------------------
@@ -223,12 +376,25 @@ export function buildDefaultMintsList(): CashuMintAccount[] {
 export function createEmptyWalletState(): PersistedCashuWalletState {
   return {
     version: 1,
+    initialized: false,
+    keysetCounters: {},
     activeMintUrl: DEFAULT_ACTIVE_MINT_URL,
     mints: buildDefaultMintsList(),
     proofsByMint: {},
     history: [],
     sentTokens: [],
   }
+}
+
+function sanitizeCounters(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object') return {}
+  const out: Record<string, number> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
+      out[k] = Math.floor(v)
+    }
+  }
+  return out
 }
 
 export function loadPersistedCashuWallet(): PersistedCashuWalletState {
@@ -302,14 +468,51 @@ export function loadPersistedCashuWallet(): PersistedCashuWalletState {
           .slice(0, MAX_SENT_TOKENS)
       : []
 
-    return {
+    const mnemonic =
+      typeof parsed.mnemonic === 'string' && isValidBip39Mnemonic(parsed.mnemonic)
+        ? normalizeMnemonicPhrase(parsed.mnemonic)
+        : undefined
+    const privateKeyHex =
+      typeof parsed.privateKeyHex === 'string'
+        ? parseWalletPrivateKeyHex(parsed.privateKeyHex) ?? undefined
+        : mnemonic
+          ? derivePrivateKeyHexFromSeed(mnemonicToSeedSync(mnemonic))
+          : undefined
+
+    const hasExistingActivity =
+      Object.values(proofsByMint).some((list) => list.length > 0) ||
+      history.length > 0 ||
+      sentTokens.length > 0
+
+    // Never lock out existing users who already have saved proofs or history
+    const initialized =
+      typeof parsed.initialized === 'boolean'
+        ? parsed.initialized || hasExistingActivity
+        : hasExistingActivity || Boolean(mnemonic || privateKeyHex)
+
+    // Seamlessly attach deterministic keys for upgraded legacy users with existing proofs/history
+    let finalMnemonic = mnemonic
+    let finalPrivKey = privateKeyHex
+    if (initialized && !finalMnemonic && !finalPrivKey) {
+      const fresh = generateCashuWalletKeys()
+      finalMnemonic = fresh.mnemonic
+      finalPrivKey = fresh.privateKeyHex
+    }
+
+    const state: PersistedCashuWalletState = {
       version: 1,
+      initialized,
+      ...(finalMnemonic ? { mnemonic: finalMnemonic } : {}),
+      ...(finalPrivKey ? { privateKeyHex: finalPrivKey } : {}),
+      keysetCounters: sanitizeCounters(parsed.keysetCounters),
       activeMintUrl,
       mints: Array.from(mintMap.values()),
       proofsByMint,
       history,
       sentTokens,
     }
+
+    return state
   } catch {
     return fallback
   }
@@ -319,6 +522,10 @@ export function savePersistedCashuWallet(state: PersistedCashuWalletState): void
   try {
     const trimmed: PersistedCashuWalletState = {
       version: 1,
+      initialized: state.initialized,
+      ...(state.mnemonic ? { mnemonic: state.mnemonic } : {}),
+      ...(state.privateKeyHex ? { privateKeyHex: state.privateKeyHex } : {}),
+      keysetCounters: state.keysetCounters,
       activeMintUrl: state.activeMintUrl,
       mints: state.mints,
       proofsByMint: state.proofsByMint,
@@ -332,15 +539,80 @@ export function savePersistedCashuWallet(state: PersistedCashuWalletState): void
 }
 
 /* --------------------------------------------------------------------------
-   Multi-Mint `@cashu/cashu-ts` v4 Session Manager
+   Multi-Mint `@cashu/cashu-ts` v4 Session Manager + NUT-13 CounterSource
    -------------------------------------------------------------------------- */
 
 const walletCache = new Map<string, Promise<Wallet>>()
 const activeMeltQuoteCache = new Map<string, MeltQuoteBolt11Response>()
 
+let activeSeedBytes: Uint8Array | undefined = undefined
+let activeCountersMap: Record<string, number> = {}
+let countersChangedListener: ((snapshot: Record<string, number>) => void) | null = null
+
+const persistentCounterSource: CounterSource = {
+  async reserve(keysetId: string, n: number): Promise<CounterRange> {
+    const start = activeCountersMap[keysetId] ?? 0
+    if (n > 0) {
+      activeCountersMap = { ...activeCountersMap, [keysetId]: start + n }
+      countersChangedListener?.({ ...activeCountersMap })
+    }
+    return { start, count: n }
+  },
+  async reserveAt(keysetId: string, start: number, count: number): Promise<CounterRange> {
+    const cur = activeCountersMap[keysetId] ?? 0
+    if (start < cur) {
+      throw new Error(`Counter ${start} already issued for keyset ${keysetId}.`)
+    }
+    if (count > 0 || start > cur) {
+      activeCountersMap = { ...activeCountersMap, [keysetId]: start + count }
+      countersChangedListener?.({ ...activeCountersMap })
+    }
+    return { start, count }
+  },
+  async advanceToAtLeast(keysetId: string, minNext: number): Promise<void> {
+    const cur = activeCountersMap[keysetId] ?? 0
+    if (minNext > cur) {
+      activeCountersMap = { ...activeCountersMap, [keysetId]: minNext }
+      countersChangedListener?.({ ...activeCountersMap })
+    }
+  },
+  async snapshot(): Promise<Record<string, number>> {
+    return { ...activeCountersMap }
+  },
+}
+
+/**
+ * Configures the active NUT-13 BIP-39 seed & persistent counter store used by all
+ * `@cashu/cashu-ts` Wallet instances. Clears cached Wallet instances whenever the seed changes.
+ */
+export function configureCashuWalletRuntime(opts: {
+  mnemonic?: string | null
+  privateKeyHex?: string | null
+  counters: Record<string, number>
+  onCountersChanged?: (snapshot: Record<string, number>) => void
+}): void {
+  const nextSeed = deriveNut13SeedBytes({
+    mnemonic: opts.mnemonic,
+    privateKeyHex: opts.privateKeyHex,
+  })
+  const prevHex = activeSeedBytes ? bytesToHex(activeSeedBytes) : ''
+  const nextHex = nextSeed ? bytesToHex(nextSeed) : ''
+
+  activeCountersMap = { ...opts.counters }
+  countersChangedListener = opts.onCountersChanged ?? null
+
+  if (prevHex !== nextHex) {
+    activeSeedBytes = nextSeed
+    walletCache.clear()
+    activeMeltQuoteCache.clear()
+  }
+}
+
 export function clearCashuWalletInstanceCache(): void {
   walletCache.clear()
   activeMeltQuoteCache.clear()
+  activeSeedBytes = undefined
+  activeCountersMap = {}
 }
 
 export async function getLoadedCashuWallet(
@@ -359,7 +631,16 @@ export async function getLoadedCashuWallet(
 
   const loader = (async () => {
     const mint = new Mint(normalized)
-    const wallet = new Wallet(mint, { unit: 'sat' })
+    const wallet = new Wallet(mint, {
+      unit: 'sat',
+      ...(activeSeedBytes
+        ? {
+            bip39seed: activeSeedBytes,
+            secretsPolicy: 'auto' as const,
+            counterSource: persistentCounterSource,
+          }
+        : {}),
+    })
     await wallet.loadMint(forceRefresh)
     return wallet
   })()
@@ -410,16 +691,74 @@ export function normalizeMintError(err: unknown, fallback: string): string {
 }
 
 /* --------------------------------------------------------------------------
-   Core Protocol Operations (NUT-04, NUT-05, NUT-07, Swap Send/Receive)
+   Core Protocol Operations (NUT-04, NUT-05, NUT-07, NUT-13, Swap Send/Receive)
    -------------------------------------------------------------------------- */
 
 export async function inspectCashuMint(mintUrl: string): Promise<CashuMintInfoSummary> {
   const summary = await probeCashuMint(mintUrl)
   if (summary.online) {
-    // Warm up cashu-ts wallet cache in the background for fast subsequent quotes
     void getLoadedCashuWallet(summary.url, true).catch(() => {})
   }
   return summary
+}
+
+/**
+ * NUT-13 deterministic wallet recovery scan across all `sat` keysets on `mintUrl`.
+ * Verifies recovered proofs against NUT-07 `checkProofsStates` so only `UNSPENT`
+ * proofs are credited, and advances persisted counters cleanly past the last signature.
+ */
+export async function restoreCashuProofsFromMint(mintUrl: string): Promise<{
+  unspentProofs: StoredCashuProof[]
+  restoredSats: number
+  counters: Record<string, number>
+}> {
+  if (!activeSeedBytes) {
+    throw new Error('No recovery seed or wallet private key configured.')
+  }
+  const normalized = normalizeMintUrl(mintUrl)
+  if (!normalized) throw new Error('Invalid mint URL.')
+
+  const wallet = await getLoadedCashuWallet(normalized, true)
+  const keysets = wallet.keyChain.getKeysets().filter((k) => k.unit === 'sat')
+
+  const recoveredRaw: Proof[] = []
+  for (const ks of keysets) {
+    try {
+      const res = await wallet.batchRestore(3, 25, 0, ks.id)
+      if (typeof res.lastCounterWithSignature === 'number') {
+        await persistentCounterSource.advanceToAtLeast(ks.id, res.lastCounterWithSignature + 1)
+      }
+      if (res.proofs.length > 0) {
+        recoveredRaw.push(...res.proofs)
+      }
+    } catch {
+      // Some inactive/legacy keysets may not support restore — continue scanning others
+    }
+  }
+
+  if (recoveredRaw.length === 0) {
+    return {
+      unspentProofs: [],
+      restoredSats: 0,
+      counters: { ...activeCountersMap },
+    }
+  }
+
+  // Filter strictly to UNSPENT proofs via NUT-07
+  const states = await wallet.checkProofsStates(recoveredRaw)
+  const unspent: StoredCashuProof[] = []
+  for (let i = 0; i < recoveredRaw.length; i++) {
+    if (states[i]?.state === CheckStateEnum.UNSPENT) {
+      unspent.push(toStoredProof(recoveredRaw[i]))
+    }
+  }
+
+  const deduped = deduplicateProofs(unspent)
+  return {
+    unspentProofs: deduped,
+    restoredSats: sumStoredProofs(deduped),
+    counters: { ...activeCountersMap },
+  }
 }
 
 /**
@@ -501,7 +840,7 @@ export async function claimCashuTokenProofs(rawToken: string): Promise<{
 }> {
   const preview = decodeCashuTokenPreview(rawToken)
   if (!preview) {
-    throw new Error('Invalid Cashu token. Paste a valid cashuA... or cashuB... token.')
+    throw new Error('Invalid Cashu token. Paste a valid cashuA… or cashuB… token.')
   }
   if (preview.unit && preview.unit !== 'sat') {
     throw new Error(`Unsupported Cashu token unit "${preview.unit}". Only satoshi (sat) tokens are supported.`)
@@ -611,13 +950,7 @@ export async function createCashuMeltQuote(params: {
 }
 
 /**
- * NUT-05: Executes a melt quote atomically:
- * 1. Prepares exact `send` proofs (`amount + fee_reserve` + input fees) via `wallet.send`.
- * 2. Calls `onCommitKeep(keepProofs)` IMMEDIATELY before melting so change proofs are
- *    safely persisted even if the network drops mid-payment.
- * 3. Melts `send` proofs and returns any overpaid fee-reserve `change` proofs.
- * 4. On failure, verifies `send` proof states via NUT-07 so any `UNSPENT` proofs are
- *    automatically recovered instead of lost!
+ * NUT-05: Executes a melt quote atomically with pre-melt keep-proof commit & NUT-07 recovery.
  */
 export async function executeCashuMeltQuote(params: {
   preview: CashuMeltQuotePreview
@@ -651,7 +984,6 @@ export async function executeCashuMeltQuote(params: {
   const keepStored = deduplicateProofs(keep.map(toStoredProof))
   const sendStored = deduplicateProofs(send.map(toStoredProof))
 
-  // Persist keep change proofs BEFORE melting send proofs
   onCommitKeep(keepStored)
 
   try {
@@ -672,7 +1004,6 @@ export async function executeCashuMeltQuote(params: {
       preimage: meltRes.quote.payment_preimage ?? null,
     }
   } catch (err) {
-    // Recovery safety: check NUT-07 proof states on `send` so UNSPENT proofs are never lost
     try {
       const states = await wallet.checkProofsStates(send)
       const recovered: StoredCashuProof[] = []
@@ -685,8 +1016,6 @@ export async function executeCashuMeltQuote(params: {
         onCommitKeep(deduplicateProofs([...keepStored, ...recovered]))
       }
     } catch {
-      // If state check also fails due to offline network, restore send proofs optimistically
-      // so user can run Verify Proofs once reconnected
       onCommitKeep(deduplicateProofs([...keepStored, ...sendStored]))
     }
     throw err
@@ -750,6 +1079,7 @@ export async function checkCashuSentTokenClaimed(
 
 /**
  * Validates and parses an imported JSON backup file (`WalletBackupPayload`).
+ * Accepts both full wallet backups (with `proofsByMint`) and key-only exports (`mnemonic` / `privateKeyHex`).
  */
 export function parseWalletBackupJson(rawJson: string): WalletBackupPayload {
   let parsed: unknown
@@ -762,17 +1092,32 @@ export function parseWalletBackupJson(rawJson: string): WalletBackupPayload {
     throw new Error('Backup JSON must be an object.')
   }
   const obj = parsed as Partial<WalletBackupPayload>
-  if (!obj.proofsByMint || typeof obj.proofsByMint !== 'object') {
-    throw new Error('Backup JSON is missing Cashu proofs (`proofsByMint`).')
+
+  const mnemonic =
+    typeof obj.mnemonic === 'string' && isValidBip39Mnemonic(obj.mnemonic)
+      ? normalizeMnemonicPhrase(obj.mnemonic)
+      : undefined
+  const privateKeyHex =
+    typeof obj.privateKeyHex === 'string'
+      ? parseWalletPrivateKeyHex(obj.privateKeyHex) ?? undefined
+      : mnemonic
+        ? derivePrivateKeyHexFromSeed(mnemonicToSeedSync(mnemonic))
+        : undefined
+
+  const hasProofsObj = Boolean(obj.proofsByMint && typeof obj.proofsByMint === 'object')
+  if (!hasProofsObj && !mnemonic && !privateKeyHex) {
+    throw new Error('Backup JSON must contain proofs, a recovery phrase, or a private key.')
   }
 
   const normalizedProofs: Record<string, StoredCashuProof[]> = {}
-  for (const [url, list] of Object.entries(obj.proofsByMint)) {
-    const norm = normalizeMintUrl(url)
-    if (!norm || !Array.isArray(list)) continue
-    const cleaned = deduplicateProofs(list)
-    if (cleaned.length > 0) {
-      normalizedProofs[norm] = cleaned
+  if (hasProofsObj && obj.proofsByMint) {
+    for (const [url, list] of Object.entries(obj.proofsByMint)) {
+      const norm = normalizeMintUrl(url)
+      if (!norm || !Array.isArray(list)) continue
+      const cleaned = deduplicateProofs(list)
+      if (cleaned.length > 0) {
+        normalizedProofs[norm] = cleaned
+      }
     }
   }
 
@@ -798,6 +1143,9 @@ export function parseWalletBackupJson(rawJson: string): WalletBackupPayload {
     activeMintUrl:
       (typeof obj.activeMintUrl === 'string' && normalizeMintUrl(obj.activeMintUrl)) ||
       DEFAULT_ACTIVE_MINT_URL,
+    ...(mnemonic ? { mnemonic } : {}),
+    ...(privateKeyHex ? { privateKeyHex } : {}),
+    keysetCounters: sanitizeCounters(obj.keysetCounters),
     mints,
     proofsByMint: normalizedProofs,
     history: Array.isArray(obj.history) ? obj.history : [],

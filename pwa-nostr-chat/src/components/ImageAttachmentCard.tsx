@@ -8,10 +8,8 @@ import {
   Lock,
   Maximize2,
   RotateCw,
-  Shield,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
   User,
 } from 'lucide-react'
 import type { ImageAttachment } from '../types/protocol.ts'
@@ -41,7 +39,7 @@ export interface ImageAttachmentCardProps {
 function formatFilterCategories(categories: readonly ContentFilterCategory[]): string {
   if (categories.length === 0) return 'Policy'
   return categories
-    .map((c) => (c === 'nsfw' ? 'NSFW' : c === 'illegal' ? 'Illegal / Severe Harm' : 'Custom Rule'))
+    .map((c) => (c === 'nsfw' ? 'NSFW' : 'Illegal / Gore'))
     .join(', ')
 }
 
@@ -444,17 +442,17 @@ function ScreenedImageCard({
       })
   }, [scanningLocal, contentFilter, cacheKey, stableImage, senderPubkey, caption])
 
-  // Auto-screen when model is already ready in memory, or rehydrate blob URL for a persisted 'safe' verdict
+  // Auto-screen automatically as soon as the image enters view (waits cleanly on the auto-loading model),
+  // or rehydrate blob URL for a persisted 'safe' verdict
   useEffect(() => {
     if (!inView || scanningLocal) return
-    const needsAutoScreen =
-      contentFilter.modelStatus === 'ready' && (!verdict || verdict.status === 'idle')
+    const needsAutoScreen = !verdict || verdict.status === 'idle'
     const needsSafeRehydrate = verdict?.status === 'safe' && !safeUrl
     if (!needsAutoScreen && !needsSafeRehydrate) return
     if (autoRequestedKeyRef.current === cacheKey) return
     autoRequestedKeyRef.current = cacheKey
     triggerScan()
-  }, [inView, scanningLocal, contentFilter.modelStatus, verdict, safeUrl, cacheKey, triggerScan])
+  }, [inView, scanningLocal, verdict, safeUrl, cacheKey, triggerScan])
 
   // 1. Cleared SAFE & verified in-memory object URL ready -> render crisp image with Screened · Safe pill
   if (verdict?.status === 'safe' && safeUrl) {
@@ -627,86 +625,123 @@ function ScreenedImageCard({
     )
   }
 
-  // 3. DOWNLOADING or SCANNING
-  const isDownloading =
-    verdict?.status === 'downloading' ||
-    (scanningLocal && contentFilter.modelStatus === 'downloading')
-  const isScanning = scanningLocal || verdict?.status === 'scanning' || isDownloading
-
-  if (isScanning) {
-    const pct = Math.max(0, Math.min(100, Math.round(contentFilter.downloadProgress)))
+  // 3. ERROR -> Compact retry card (strictly for error verdicts)
+  if (verdict?.status === 'error') {
     return (
       <div
         ref={hostRef}
         className={`ag-img-shield-card ai-intercept ${isViolet ? 'dm' : ''}`}
-        role="status"
-        aria-busy="true"
-        aria-label={isDownloading ? `Downloading Safety Filter (${pct}%)` : 'Screening image locally'}
+        role="region"
+        aria-label={`Image screening failed for ${senderDisplayHandle}`}
       >
         <div className="ag-img-shield-top">
           <div className="ag-img-shield-title-wrap">
             <span className="ag-img-shield-emblem ai" aria-hidden="true">
-              <Loader2 size={14} className="ag-spin" />
+              <AlertCircle size={14} />
             </span>
             <span className="ag-img-shield-title">
-              {isDownloading
-                ? `Downloading Safety Filter · ${pct}%`
-                : 'Screening image…'}
+              {isTrusted ? 'Image · Safety Screen' : 'Image · Untrusted Sender'}
             </span>
           </div>
-          {metaSummary && <span className="ag-badge muted tabular">{metaSummary}</span>}
+
+          <div className="ag-img-shield-badges">
+            {metaSummary && <span className="ag-badge muted tabular">{metaSummary}</span>}
+            {isE2ee && (
+              <span className="ag-badge dm" title="End-to-end encrypted image blob">
+                <Lock size={9} />
+                <span>E2EE</span>
+              </span>
+            )}
+          </div>
         </div>
 
-        {isDownloading && (
-          <div className="ag-img-progress-track" aria-hidden="true">
-            <span className="ag-img-progress-fill" style={{ width: `${pct}%` }} />
-          </div>
-        )}
-
         <p className="ag-img-shield-note">
-          Checking media locally on your device before showing it.
+          Screening failed: <strong>{verdict.error || 'Unable to verify image'}</strong>. Retry
+          scan or trust sender.
         </p>
 
-        {!isTrusted && (
-          <div className="ag-img-shield-actions">
+        <div className="ag-img-shield-actions">
+          <button
+            type="button"
+            className="ag-img-shield-btn trust"
+            onClick={() => {
+              autoRequestedKeyRef.current = cacheKey
+              triggerScan()
+            }}
+            title="Retry local Safety Filter scan and show image only if safe"
+          >
+            <RotateCw size={13} />
+            <span>Retry Scan</span>
+          </button>
+
+          {!isTrusted && (
             <button
               type="button"
               className="ag-img-shield-btn"
               onClick={() => onTrustSender(senderPubkey, senderNickname)}
+              title={`Trust ${senderDisplayHandle}`}
             >
               <ShieldCheck size={13} />
-              <span>Trust {senderDisplayHandle}</span>
+              <span>Trust Peer</span>
             </button>
+          )}
+
+          <button
+            type="button"
+            className="ag-img-shield-btn"
+            onClick={() => onInspectSender(senderPubkey, senderNickname)}
+            title={`Inspect ${senderDisplayHandle}`}
+          >
+            <User size={13} />
+            <span>Inspect</span>
+          </button>
+
+          {!isTrusted && (
             <button
               type="button"
               className="ag-img-shield-btn danger"
               onClick={() => onBlockSender(senderPubkey, senderDisplayHandle)}
+              title={`Block ${senderDisplayHandle}`}
             >
               <Ban size={13} />
               <span>Block</span>
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     )
   }
 
-  // 4. IDLE / ERROR -> Intercept card with 1-click Scan & View (Safety Filter)
-  const isError = verdict?.status === 'error'
+  // 4. AUTO-LOADING / SCREENING -> Compact status card (no click gate; reveals automatically once cleared safe)
+  const isDownloading =
+    verdict?.status === 'downloading' || contentFilter.modelStatus === 'downloading'
+  const pct = Math.max(0, Math.min(100, Math.round(contentFilter.downloadProgress)))
+
   return (
     <div
       ref={hostRef}
       className={`ag-img-shield-card ai-intercept ${isViolet ? 'dm' : ''}`}
-      role="region"
-      aria-label={`Intercepted image from ${senderDisplayHandle}`}
+      role="status"
+      aria-busy="true"
+      aria-label={
+        isDownloading
+          ? pct > 0
+            ? `Loading safety filter (${pct}%)`
+            : 'Loading safety filter'
+          : 'Screening image locally'
+      }
     >
       <div className="ag-img-shield-top">
         <div className="ag-img-shield-title-wrap">
           <span className="ag-img-shield-emblem ai" aria-hidden="true">
-            {isError ? <AlertCircle size={14} /> : <Shield size={14} />}
+            <Loader2 size={14} className="ag-spin" />
           </span>
           <span className="ag-img-shield-title">
-            {isTrusted ? 'Image · Safety Screen' : 'Image · Untrusted Sender'}
+            {isDownloading
+              ? pct > 0
+                ? `Loading safety filter · ${pct}%`
+                : 'Loading safety filter…'
+              : 'Screening image…'}
           </span>
         </div>
 
@@ -721,68 +756,36 @@ function ScreenedImageCard({
         </div>
       </div>
 
+      {isDownloading && (
+        <div className="ag-img-progress-track" aria-hidden="true">
+          <span className="ag-img-progress-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+
       <p className="ag-img-shield-note">
-        {isError ? (
-          <>
-            Screening failed: <strong>{verdict.error || 'Unable to verify image'}</strong>. Retry
-            scan or trust sender.
-          </>
-        ) : (
-          <>
-            Hidden until screened locally with <strong>Safety Filter</strong> (never shown until
-            cleared safe).
-          </>
-        )}
+        Checking image locally before display.
       </p>
 
-      <div className="ag-img-shield-actions">
-        <button
-          type="button"
-          className="ag-img-shield-btn trust"
-          onClick={() => {
-            autoRequestedKeyRef.current = cacheKey
-            triggerScan()
-          }}
-          title="Run on-device Safety Filter and show image only if safe"
-        >
-          {isError ? <RotateCw size={13} /> : <Sparkles size={13} />}
-          <span>{isError ? 'Retry Scan' : 'Scan & View'}</span>
-        </button>
-
-        {!isTrusted && (
+      {!isTrusted && (
+        <div className="ag-img-shield-actions">
           <button
             type="button"
             className="ag-img-shield-btn"
             onClick={() => onTrustSender(senderPubkey, senderNickname)}
-            title={`Trust ${senderDisplayHandle}`}
           >
             <ShieldCheck size={13} />
-            <span>Trust Peer</span>
+            <span>Trust {senderDisplayHandle}</span>
           </button>
-        )}
-
-        <button
-          type="button"
-          className="ag-img-shield-btn"
-          onClick={() => onInspectSender(senderPubkey, senderNickname)}
-          title={`Inspect ${senderDisplayHandle}`}
-        >
-          <User size={13} />
-          <span>Inspect</span>
-        </button>
-
-        {!isTrusted && (
           <button
             type="button"
             className="ag-img-shield-btn danger"
             onClick={() => onBlockSender(senderPubkey, senderDisplayHandle)}
-            title={`Block ${senderDisplayHandle}`}
           >
             <Ban size={13} />
             <span>Block</span>
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   )
 }

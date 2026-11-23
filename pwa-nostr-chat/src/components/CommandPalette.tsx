@@ -934,9 +934,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       {
         id: 'act-settings-content-filter',
         group: 'Settings',
-        title: 'Content Filter Settings',
-        subtitle: `${engine.contentFilter.modelLabel} · Media: ${engine.contentFilter.settings.mediaScope} · Text: ${engine.contentFilter.settings.textScope}`,
-        keywords: 'content filter settings safety classifier nsfw nsfl illegal moderation media ai',
+        title: 'Image Safety Filter Settings',
+        subtitle: `${engine.contentFilter.modelLabel} · Images: ${engine.contentFilter.settings.mediaScope}`,
+        keywords: 'content filter settings image safety classifier nsfw nsfl illegal gore media ai',
         badge: engine.contentFilter.settings.enabled ? 'ON' : 'OFF',
         icon: <ShieldAlert size={15} />,
         run: () => {

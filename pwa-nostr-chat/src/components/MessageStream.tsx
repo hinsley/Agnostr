@@ -14,7 +14,6 @@ import {
   PanelRightOpen,
   Radio,
   Server,
-  ShieldAlert,
   ShieldCheck,
   UserPlus,
   X,
@@ -586,13 +585,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       ? engine.hiddenByWhitelistCount
       : 0
 
-  const handleRequestScreenText = useCallback(
-    (msgId: string, text: string) => {
-      void engine.contentFilter.screenText(`text:${msgId}`, text)
-    },
-    [engine.contentFilter]
-  )
-
   // Watch recent visible non-DM event IDs for live NIP-57 kind: 9735 Zap Receipts
   const watchedZapIdsKey = useMemo(() => {
     if (isDm) return ''
@@ -1007,11 +999,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   ? engine.transcription.memoTranscripts[voiceMemoKey]
                   : undefined
 
-                const shouldScreenText =
-                  !msg.isSystem && engine.contentFilter.shouldScreenText(msg.pubkey, msg.isOwn)
-                const textFilterVerdict = shouldScreenText
-                  ? engine.contentFilter.getVerdict(`text:${msg.id}`)
-                  : null
                 const senderLud16 =
                   !msg.isOwn && !msg.isSystem
                     ? engine.zaps.getPeerLightningAddress(msg.pubkey)
@@ -1097,9 +1084,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     onCopyText={() => engine.pushToast('info', 'Copied to clipboard')}
                     onNotify={(title) => engine.pushToast('info', title)}
                     contentFilter={engine.contentFilter}
-                    shouldScreenText={shouldScreenText}
-                    textFilterVerdict={textFilterVerdict}
-                    onRequestScreenText={handleRequestScreenText}
                     senderLightningAddress={senderLud16}
                     zapTotalSats={zapTotalSats}
                     onOpenZap={onOpenZap}
@@ -1114,14 +1098,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 )
 
                 const underlyingText = extractCleanMessageText(msg)
-                const underlyingBlockedByFilter =
-                  shouldScreenText &&
-                  underlyingText.length > 0 &&
-                  (!textFilterVerdict ||
-                    textFilterVerdict.status === 'idle' ||
-                    textFilterVerdict.status === 'downloading' ||
-                    textFilterVerdict.status === 'scanning' ||
-                    textFilterVerdict.status === 'flagged')
                 const handle = formatHandle(msg.nickname, msg.pubkey)
 
                 return (
@@ -1160,16 +1136,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                               </div>
                             )}
                             <div className="ag-translator-orig-body">
-                              {underlyingBlockedByFilter ? (
-                                <span className="ag-translator-orig-masked">
-                                  <ShieldAlert size={11} />
-                                  <span>
-                                    {textFilterVerdict?.status === 'flagged'
-                                      ? 'Hidden by Content Filter'
-                                      : 'Screening…'}
-                                  </span>
-                                </span>
-                              ) : underlyingText ? (
+                              {underlyingText ? (
                                 <RichMessageContent
                                   content={underlyingText}
                                   onTuneGeohash={onTuneChannel}

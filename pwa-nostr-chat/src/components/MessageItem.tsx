@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import {
   AlertCircle,
   AtSign,
@@ -9,8 +9,6 @@ import {
   Copy,
   CornerUpLeft,
   ExternalLink,
-  Eye,
-  EyeOff,
   Hash,
   Languages,
   Link2,
@@ -20,7 +18,6 @@ import {
   Phone,
   Radio,
   RefreshCw,
-  ShieldAlert,
   ShieldCheck,
   ShieldOff,
   Smile,
@@ -30,7 +27,7 @@ import {
   Zap,
 } from 'lucide-react'
 import type { GeoMessage, ImageAttachment, VoiceMemoAttachment } from '../types/protocol'
-import type { ContentFilterEngine, ContentFilterVerdict } from '../types/contentFilter'
+import type { ContentFilterEngine } from '../types/contentFilter'
 import type {
   MemoTranscriptState,
   TranscriptionModelStatus,
@@ -138,11 +135,8 @@ export interface MessageItemProps {
   onJumpToMessage?: (messageId: string) => void
   onCopyText?: (text: string) => void
   onNotify?: (title: string) => void
-  // On-device Content Filter
+  // On-device Image Content Filter
   contentFilter?: ContentFilterEngine
-  shouldScreenText?: boolean
-  textFilterVerdict?: ContentFilterVerdict | null
-  onRequestScreenText?: (msgId: string, text: string) => void
   // Cashu Ecash & NIP-57 Lightning Zaps
   senderLightningAddress?: string | null
   zapTotalSats?: number
@@ -198,9 +192,6 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onCopyText,
     onNotify,
     contentFilter,
-    shouldScreenText = false,
-    textFilterVerdict = null,
-    onRequestScreenText,
     senderLightningAddress = null,
     zapTotalSats = 0,
     onOpenZap,
@@ -214,7 +205,6 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
   }) => {
     const [pickerOpen, setPickerOpen] = useState(false)
     const [copied, setCopied] = useState(false)
-    const [revealedFlaggedText, setRevealedFlaggedText] = useState(false)
     const { openContextMenu } = useContextMenu()
 
     const rawVisibleContent = useMemo(() => {
@@ -227,21 +217,6 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
           )
         : message.content
     }, [message.isSystem, message.voiceMemo, message.imageAttachment, message.content])
-
-    // Trigger text screening strictly when textScope !== 'off' (DEFAULT OFF -> zero work!)
-    useEffect(() => {
-      if (message.isSystem || !shouldScreenText || !onRequestScreenText) return
-      if (!rawVisibleContent.trim()) return
-      if (textFilterVerdict && textFilterVerdict.status !== 'idle') return
-      onRequestScreenText(message.id, rawVisibleContent)
-    }, [
-      message.isSystem,
-      message.id,
-      shouldScreenText,
-      rawVisibleContent,
-      textFilterVerdict,
-      onRequestScreenText,
-    ])
 
     // Extract Cashu Ecash tokens (fast check -> empty array for 99.9% of messages)
     const cashuTokens: CashuTokenPreview[] = useMemo(() => {
@@ -305,22 +280,6 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             cashuTokens.map((t) => t.raw)
           )
         : baseTextContent
-
-    const isTextScreeningActive = shouldScreenText && rawVisibleContent.trim().length > 0
-    const isTextPendingScreen =
-      isTextScreeningActive &&
-      (!textFilterVerdict ||
-        textFilterVerdict.status === 'idle' ||
-        textFilterVerdict.status === 'downloading' ||
-        textFilterVerdict.status === 'scanning')
-    const isTextFlagged = isTextScreeningActive && textFilterVerdict?.status === 'flagged'
-    const isTextIllegal = Boolean(isTextFlagged && textFilterVerdict?.categories.includes('illegal'))
-    const hideTextBehindFilter = isTextFlagged && (isTextIllegal || !revealedFlaggedText)
-    const textFlagReason =
-      textFilterVerdict?.reason ||
-      (textFilterVerdict?.categories?.length
-        ? textFilterVerdict.categories.map((c) => c.toUpperCase()).join(', ')
-        : 'Flagged')
 
     const canZapSender = Boolean(!message.isOwn && senderLightningAddress && onOpenZap)
 
@@ -801,101 +760,55 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             </button>
           )}
 
-          {/* Full-Width Message Text Body (with optional Content Filter & Translator Mode) */}
+          {/* Full-Width Message Text Body (with optional Translator Mode) */}
           {(visibleContent.length > 0 || translationStatus === 'loading' || translationStatus === 'error') && (
             <>
-              {isTextPendingScreen ? (
-                <div className="ag-text-filter-shield scanning" role="status">
+              {translationStatus === 'loading' && displayContentOverride === undefined ? (
+                <div className="ag-translator-inline-status">
                   <Loader2 size={12} className="ag-spin" />
-                  <span>Screening with Content Filter…</span>
+                  <span>Translating…</span>
                 </div>
-              ) : hideTextBehindFilter ? (
-                <div className={`ag-text-filter-shield flagged ${isTextIllegal ? 'illegal' : ''}`}>
-                  <ShieldAlert size={13} className="ag-text-filter-icon" />
-                  <span className="truncate">
-                    Hidden by Content Filter ({textFlagReason})
-                  </span>
-                  {!isTextIllegal && (
+              ) : visibleContent.length > 0 ? (
+                <RichMessageContent
+                  content={visibleContent}
+                  onTuneGeohash={onTuneGeohash}
+                  onClickMention={onClickMention}
+                  highlightQuery={highlightQuery}
+                  knownHandles={knownHandles}
+                />
+              ) : null}
+
+              {translationBadge && (
+                <div className="ag-translator-msg-meta">
+                  <Languages size={11} />
+                  <span>{translationBadge}</span>
+                </div>
+              )}
+
+              {translationStatus === 'error' && (
+                <div className="ag-translator-inline-status error">
+                  <AlertCircle size={12} />
+                  <span className="truncate">{translationError || 'Translation failed'}</span>
+                  {onRetryTranslation && (
                     <button
                       type="button"
-                      className="ag-text-filter-toggle"
+                      className="ag-translator-retry-btn"
                       onClick={(e) => {
                         e.stopPropagation()
-                        setRevealedFlaggedText(true)
+                        onRetryTranslation()
                       }}
                     >
-                      <Eye size={12} />
-                      <span>Show</span>
+                      <RefreshCw size={11} />
+                      <span>Retry</span>
                     </button>
                   )}
                 </div>
-              ) : (
-                <>
-                  {isTextFlagged && revealedFlaggedText && !isTextIllegal && (
-                    <div className="ag-text-filter-revealed-bar">
-                      <span>Flagged ({textFlagReason})</span>
-                      <button
-                        type="button"
-                        className="ag-text-filter-toggle"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setRevealedFlaggedText(false)
-                        }}
-                      >
-                        <EyeOff size={11} />
-                        <span>Hide</span>
-                      </button>
-                    </div>
-                  )}
-
-                  {translationStatus === 'loading' && displayContentOverride === undefined ? (
-                    <div className="ag-translator-inline-status">
-                      <Loader2 size={12} className="ag-spin" />
-                      <span>Translating…</span>
-                    </div>
-                  ) : visibleContent.length > 0 ? (
-                    <RichMessageContent
-                      content={visibleContent}
-                      onTuneGeohash={onTuneGeohash}
-                      onClickMention={onClickMention}
-                      highlightQuery={highlightQuery}
-                      knownHandles={knownHandles}
-                    />
-                  ) : null}
-
-                  {translationBadge && (
-                    <div className="ag-translator-msg-meta">
-                      <Languages size={11} />
-                      <span>{translationBadge}</span>
-                    </div>
-                  )}
-
-                  {translationStatus === 'error' && (
-                    <div className="ag-translator-inline-status error">
-                      <AlertCircle size={12} />
-                      <span className="truncate">{translationError || 'Translation failed'}</span>
-                      {onRetryTranslation && (
-                        <button
-                          type="button"
-                          className="ag-text-filter-toggle"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onRetryTranslation()
-                          }}
-                        >
-                          <RefreshCw size={11} />
-                          <span>Retry</span>
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </>
               )}
             </>
           )}
 
           {/* Inline Cashu Ecash Token Claim Cards */}
-          {cashuTokens.length > 0 && !hideTextBehindFilter && !isTextPendingScreen && (
+          {cashuTokens.length > 0 && (
             <div className="ag-cashu-token-list">
               {cashuTokens.map((tok, idx) => (
                 <div key={`${tok.raw.slice(0, 18)}-${idx}`} className="ag-cashu-token-card">
