@@ -2,13 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PulseRoom } from '../types/protocol.ts'
 import {
   extractGeohashTag,
+  extractTopicChannelTag,
   getTagValue,
   KIND_GEOHASH_CHAT,
   KIND_GEOHASH_PRESENCE,
+  KIND_NAMED_RADIO_CHAT,
   verifyEventCached,
 } from '../lib/bitchatProtocol.ts'
 import { decodeCenter, findNearestCityLabel } from '../lib/geohash.ts'
 import { PULSE_RELAYS } from '../lib/geoRelays.ts'
+import { TOPIC_CHANNEL_PREFIX } from '../lib/radioChannel.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 
 const PULSE_WINDOW_MS = 15 * 60 * 1000
@@ -81,13 +84,28 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
     const unsub = pool.subscribe(
       'agnostr-global-pulse',
       PULSE_RELAYS,
-      [{ kinds: [KIND_GEOHASH_CHAT, KIND_GEOHASH_PRESENCE], since, limit: 80 }],
+      [{ kinds: [KIND_GEOHASH_CHAT, KIND_GEOHASH_PRESENCE, KIND_NAMED_RADIO_CHAT], since, limit: 100 }],
       {
         onEvent: (ev) => {
-          if (ev.kind !== KIND_GEOHASH_CHAT && ev.kind !== KIND_GEOHASH_PRESENCE) return
+          if (
+            ev.kind !== KIND_GEOHASH_CHAT &&
+            ev.kind !== KIND_GEOHASH_PRESENCE &&
+            ev.kind !== KIND_NAMED_RADIO_CHAT
+          ) {
+            return
+          }
           if (seenIdsRef.current.has(ev.id)) return
-          const gh = extractGeohashTag(ev.tags)
-          if (!gh) return
+
+          const isTopic = ev.kind === KIND_NAMED_RADIO_CHAT
+          let roomKey: string | null = null
+          if (isTopic) {
+            const slug = extractTopicChannelTag(ev.tags)
+            if (!slug) return
+            roomKey = `${TOPIC_CHANNEL_PREFIX}${slug}`
+          } else {
+            roomKey = extractGeohashTag(ev.tags)
+            if (!roomKey) return
+          }
           if (!verifyEventCached(ev)) return
 
           seenIdsRef.current.add(ev.id)
@@ -100,21 +118,35 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
           const evMs = Math.min(ev.created_at * 1000, now)
           const pk = ev.pubkey.toLowerCase()
 
-          let room = roomsRef.current.get(gh)
+          let room = roomsRef.current.get(roomKey)
           if (!room) {
-            const center = decodeCenter(gh)
-            room = {
-              geohash: gh,
-              center,
-              precision: gh.length,
-              nearestCity: findNearestCityLabel(center.lat, center.lon, gh),
-              messageTimestamps: [],
-              peers: new Map(),
-              lastActivityAt: evMs,
-              lastPreview: '',
-              lastSender: '',
+            if (isTopic) {
+              room = {
+                geohash: roomKey,
+                center: { lat: 0, lon: 0 },
+                precision: 0,
+                nearestCity: null,
+                messageTimestamps: [],
+                peers: new Map(),
+                lastActivityAt: evMs,
+                lastPreview: '',
+                lastSender: '',
+              }
+            } else {
+              const center = decodeCenter(roomKey)
+              room = {
+                geohash: roomKey,
+                center,
+                precision: roomKey.length,
+                nearestCity: findNearestCityLabel(center.lat, center.lon, roomKey),
+                messageTimestamps: [],
+                peers: new Map(),
+                lastActivityAt: evMs,
+                lastPreview: '',
+                lastSender: '',
+              }
             }
-            roomsRef.current.set(gh, room)
+            roomsRef.current.set(roomKey, room)
           }
 
           room.peers.set(pk, Math.max(room.peers.get(pk) ?? 0, evMs))
@@ -122,7 +154,7 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
             room.lastActivityAt = evMs
           }
 
-          if (ev.kind === KIND_GEOHASH_CHAT) {
+          if (ev.kind === KIND_GEOHASH_CHAT || ev.kind === KIND_NAMED_RADIO_CHAT) {
             const text = (ev.content ?? '').trim()
             if (text) {
               room.messageTimestamps.push(evMs)

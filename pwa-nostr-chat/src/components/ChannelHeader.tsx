@@ -2,6 +2,7 @@ import React from 'react'
 import type { CSSProperties } from 'react'
 import {
   ArrowLeft,
+  Hash,
   Info,
   Lock,
   Map as MapIcon,
@@ -15,6 +16,7 @@ import {
   Video,
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol'
+import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel'
 import { identiconDataUrl } from '../utils/identicon'
 
 function getServerMonogram(name: string): string {
@@ -83,6 +85,8 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   const isServerCallFull =
     isServer && !inThisServerCall && serverCallCount >= engine.calls.maxParticipants
   const activeGeoKey = engine.activeGeohash.toLowerCase()
+  const isTopicRadio = !isDm && !isServer && isTopicChannel(engine.activeGeohash)
+  const radioLabel = formatRadioChannelLabel(engine.activeGeohash)
   const geoCallCount = !isDm && !isServer ? engine.calls.getGeoCallCount(activeGeoKey) : 0
   const inThisGeoCall = Boolean(
     !isDm &&
@@ -137,7 +141,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     if (isGeoCallFull) {
       engine.pushToast(
         'warning',
-        `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`,
+        `${isTopicRadio ? 'Topic Radio' : 'Geo Radio'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`,
         'Group calls support up to 6 participants at once.'
       )
       return
@@ -145,9 +149,11 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     void engine.calls.joinGeoCall(engine.activeGeohash, media)
   }
 
-  const onlineSubtitle = engine.presence.isUncertainCount
-    ? 'Private precision · Ephemeral'
-    : `${engine.presence.onlineCount} online · Ephemeral`
+  const onlineSubtitle = isTopicRadio
+    ? 'Named Radio · Ephemeral'
+    : engine.presence.isUncertainCount
+      ? 'Private precision · Ephemeral'
+      : `${engine.presence.onlineCount} online · Ephemeral`
 
   return (
     <header className="ag-header">
@@ -257,17 +263,23 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
               </>
             ) : (
               <>
-                <div className="ag-header-avatar radio" aria-hidden="true">
-                  <Radio size={18} />
+                <div
+                  className={`ag-header-avatar ${isTopicRadio ? 'topic' : 'radio'}`}
+                  aria-hidden="true"
+                >
+                  {isTopicRadio ? <Hash size={18} /> : <Radio size={18} />}
                 </div>
                 <div className="ag-header-text">
                   <div className="ag-header-title-row">
                     <span className="ag-header-title truncate">
-                      <span className="mono">#{engine.activeGeohash}</span>
-                      {engine.cell.nearestCity && (
+                      <span className="mono">{radioLabel}</span>
+                      {!isTopicRadio && engine.cell.nearestCity && (
                         <span className="ag-header-city"> · {engine.cell.nearestCity}</span>
                       )}
                     </span>
+                    {isTopicRadio && (
+                      <span className="ag-header-topic-pill ag-hide-xs">Topic · 23333</span>
+                    )}
                   </div>
                   <div className="ag-header-sub truncate">
                     {isDisconnected && <span className="ag-offline-dot" aria-hidden="true" />}
@@ -395,18 +407,18 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 onClick={() =>
                   engine.togglePinChannel(
                     engine.activeGeohash,
-                    engine.cell.nearestCity || undefined
+                    isTopicRadio ? undefined : engine.cell.nearestCity || undefined
                   )
                 }
                 title={
                   isGeoPinned
-                    ? `Unpin #${engine.activeGeohash} from Radio tab`
-                    : `Pin #${engine.activeGeohash} to Radio tab`
+                    ? `Unpin ${radioLabel} from Radio tab`
+                    : `Pin ${radioLabel} to Radio tab`
                 }
                 aria-label={
                   isGeoPinned
-                    ? `Unpin #${engine.activeGeohash}`
-                    : `Pin #${engine.activeGeohash}`
+                    ? `Unpin ${radioLabel}`
+                    : `Pin ${radioLabel}`
                 }
                 aria-pressed={isGeoPinned}
               >
@@ -420,19 +432,19 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 disabled={isGeoCallFull}
                 title={
                   inThisGeoCall
-                    ? `Focus active #${engine.activeGeohash} call`
+                    ? `Focus active ${radioLabel} call`
                     : isGeoCallFull
-                      ? `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                      ? `${isTopicRadio ? 'Topic Radio' : 'Geo Radio'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
                       : geoCallCount > 0
-                        ? `Join #${engine.activeGeohash} Voice Call (${geoCallCount}/${engine.calls.maxParticipants})`
-                        : `Start Voice Call in #${engine.activeGeohash}`
+                        ? `Join ${radioLabel} Voice Call (${geoCallCount}/${engine.calls.maxParticipants})`
+                        : `Start Voice Call in ${radioLabel}`
                 }
                 aria-label={
                   inThisGeoCall
                     ? 'Focus active voice call'
                     : geoCallCount > 0
                       ? `Join voice call (${geoCallCount} of ${engine.calls.maxParticipants})`
-                      : `Start voice call in #${engine.activeGeohash}`
+                      : `Start voice call in ${radioLabel}`
                 }
               >
                 <Phone size={17} />
@@ -450,31 +462,33 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 disabled={isGeoCallFull}
                 title={
                   inThisGeoCall
-                    ? `Focus active #${engine.activeGeohash} call`
+                    ? `Focus active ${radioLabel} call`
                     : isGeoCallFull
-                      ? `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                      ? `${isTopicRadio ? 'Topic Radio' : 'Geo Radio'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
                       : geoCallCount > 0
-                        ? `Join #${engine.activeGeohash} Video Call (${geoCallCount}/${engine.calls.maxParticipants})`
-                        : `Start Video Call in #${engine.activeGeohash}`
+                        ? `Join ${radioLabel} Video Call (${geoCallCount}/${engine.calls.maxParticipants})`
+                        : `Start Video Call in ${radioLabel}`
                 }
                 aria-label={
                   inThisGeoCall
                     ? 'Focus active video call'
-                    : `Start video call in #${engine.activeGeohash}`
+                    : `Start video call in ${radioLabel}`
                 }
               >
                 <Video size={18} />
               </button>
 
-              <button
-                type="button"
-                className="ag-circle-btn ag-desktop-only"
-                onClick={onExpandRadar}
-                title="Open Full Map"
-                aria-label="Open Geohash Map"
-              >
-                <MapIcon size={18} />
-              </button>
+              {!isTopicRadio && (
+                <button
+                  type="button"
+                  className="ag-circle-btn ag-desktop-only"
+                  onClick={onExpandRadar}
+                  title="Open Full Map"
+                  aria-label="Open Geohash Map"
+                >
+                  <MapIcon size={18} />
+                </button>
+              )}
 
               <button
                 type="button"

@@ -5,6 +5,7 @@ import {
   Check,
   Copy,
   Download,
+  Hash,
   Link2,
   Lock,
   LogOut,
@@ -34,6 +35,11 @@ import type { ServerSettingsTab } from './ServerSettingsModal.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 import { encodeGeohash } from '../lib/geohash.ts'
+import {
+  buildRadioChannelShareUrl,
+  formatRadioChannelLabel,
+  isTopicChannel,
+} from '../lib/radioChannel.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 
@@ -85,7 +91,7 @@ export function RoomInfoSheet({
   isSwiping = false,
   inShell = false,
 }: RoomInfoSheetProps) {
-  const [copiedId, setCopiedId] = useState<'npub' | 'invite' | 'dm-link' | null>(null)
+  const [copiedId, setCopiedId] = useState<'npub' | 'invite' | 'dm-link' | 'room-link' | null>(null)
   const [confirmLeave, setConfirmLeave] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const { openContextMenu } = useContextMenu()
@@ -123,7 +129,7 @@ export function RoomInfoSheet({
   const { activeView, activeGeohash, cell, presence, location, servers, calls } = engine
 
   const copyText = async (
-    key: 'npub' | 'invite' | 'dm-link',
+    key: 'npub' | 'invite' | 'dm-link' | 'room-link',
     value: string,
     toastTitle: string,
     detail?: string,
@@ -339,11 +345,15 @@ export function RoomInfoSheet({
   }
 
   const renderGeoBody = () => {
+    const isTopic = isTopicChannel(activeGeohash)
+    const channelLabel = formatRadioChannelLabel(activeGeohash)
     const isPinned = engine.isChannelPinned(activeGeohash)
-    const cityLabel = cell.nearestCity || cell.label
-    const subtitle = presence.isUncertainCount
-      ? 'Ephemeral · High-precision room'
-      : `Ephemeral · ${presence.onlineCount} online`
+    const cityLabel = isTopic ? null : cell.nearestCity || cell.label
+    const subtitle = isTopic
+      ? 'Topic Radio · kind 23333 · Ephemeral'
+      : presence.isUncertainCount
+        ? 'Ephemeral · High-precision room'
+        : `Ephemeral · ${presence.onlineCount} online`
 
     const normalizedGh = activeGeohash.trim().toLowerCase()
     const geoCallRoster = calls.getGeoCallPresence(normalizedGh)
@@ -365,10 +375,10 @@ export function RoomInfoSheet({
         {/* Hero */}
         <div className="ag-sheet-hero">
           <div className="ag-sheet-emblem accent">
-            <Radio size={26} />
+            {isTopic ? <Hash size={26} /> : <Radio size={26} />}
           </div>
           <h2 className="ag-sheet-hero-title">
-            <span className="mono">#{activeGeohash}</span>
+            <span className="mono">{channelLabel}</span>
             {cityLabel && <span className="ag-sheet-hero-city"> · {cityLabel}</span>}
           </h2>
           <p className="ag-sheet-hero-sub">{subtitle}</p>
@@ -376,24 +386,41 @@ export function RoomInfoSheet({
 
         {/* Primary Actions */}
         <div className="ag-sheet-action-grid">
-          <button
-            type="button"
-            className="ag-sheet-action-btn primary"
-            onClick={() => {
-              onPlaySound?.('click')
-              onClose()
-              onExpandRadar()
-            }}
-          >
-            <MapIcon size={17} />
-            <span>Open Full Map</span>
-          </button>
+          {isTopic ? (
+            <button
+              type="button"
+              className="ag-sheet-action-btn primary"
+              onClick={() =>
+                void copyText(
+                  'room-link',
+                  buildRadioChannelShareUrl(activeGeohash),
+                  `Copied ${channelLabel} link`,
+                )
+              }
+            >
+              {copiedId === 'room-link' ? <Check size={17} /> : <Link2 size={17} />}
+              <span>{copiedId === 'room-link' ? 'Copied Link' : 'Copy Room Link'}</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="ag-sheet-action-btn primary"
+              onClick={() => {
+                onPlaySound?.('click')
+                onClose()
+                onExpandRadar()
+              }}
+            >
+              <MapIcon size={17} />
+              <span>Open Full Map</span>
+            </button>
+          )}
           <button
             type="button"
             className={`ag-sheet-action-btn ${isPinned ? 'active' : ''}`}
             onClick={() => {
               onPlaySound?.('click')
-              engine.togglePinChannel(activeGeohash, cell.nearestCity || undefined)
+              engine.togglePinChannel(activeGeohash, isTopic ? undefined : cell.nearestCity || undefined)
             }}
           >
             {isPinned ? <PinOff size={17} /> : <Pin size={17} />}
@@ -401,12 +428,12 @@ export function RoomInfoSheet({
           </button>
         </div>
 
-        {/* Geo Radio Group Call */}
+        {/* Radio Group Call */}
         <section className="ag-sheet-section">
           <div className="ag-sheet-section-head">
             <span className="ag-sheet-section-title">
-              <Radio size={13} />
-              <span>Radio Group Call</span>
+              {isTopic ? <Hash size={13} /> : <Radio size={13} />}
+              <span>{isTopic ? 'Topic Radio Group Call' : 'Radio Group Call'}</span>
             </span>
             <span className="ag-sheet-section-meta mono">
               {geoCallCount > 0
@@ -478,58 +505,60 @@ export function RoomInfoSheet({
           </div>
         </section>
 
-        {/* Precision Zoom Stepper */}
-        <section className="ag-sheet-section">
-          <div className="ag-sheet-section-head">
-            <span className="ag-sheet-section-title">Area Precision</span>
-            <span className="ag-sheet-section-meta">
-              {cell.label} · {cell.approxSizeLabel}
-            </span>
-          </div>
-          <div className="ag-sheet-zoom-row">
-            <button
-              type="button"
-              className="ag-sheet-step-btn"
-              onClick={handleZoomOut}
-              disabled={cell.precision <= 1}
-              aria-label="Zoom out to wider area"
-              title="Wider area"
-            >
-              <Minus size={15} />
-            </button>
-            <div className="ag-sheet-prefix-strip" role="list" aria-label="Geohash precision levels">
-              {cell.prefixChain.map((step) => {
-                const isCurrent = step.geohash === cell.geohash
-                return (
-                  <button
-                    key={step.geohash}
-                    type="button"
-                    role="listitem"
-                    className={`ag-sheet-prefix-pill mono ${isCurrent ? 'active' : ''}`}
-                    title={`${step.label} (${step.approxSizeLabel})`}
-                    onClick={() => {
-                      if (isCurrent) return
-                      onPlaySound?.('tune')
-                      onTuneChannel(step.geohash)
-                    }}
-                  >
-                    #{step.geohash}
-                  </button>
-                )
-              })}
+        {/* Precision Zoom Stepper (Geohash rooms only) */}
+        {!isTopic && (
+          <section className="ag-sheet-section">
+            <div className="ag-sheet-section-head">
+              <span className="ag-sheet-section-title">Area Precision</span>
+              <span className="ag-sheet-section-meta">
+                {cell.label} · {cell.approxSizeLabel}
+              </span>
             </div>
-            <button
-              type="button"
-              className="ag-sheet-step-btn"
-              onClick={handleZoomIn}
-              disabled={cell.precision >= 8}
-              aria-label="Zoom in to narrower area"
-              title="Closer area"
-            >
-              <Plus size={15} />
-            </button>
-          </div>
-        </section>
+            <div className="ag-sheet-zoom-row">
+              <button
+                type="button"
+                className="ag-sheet-step-btn"
+                onClick={handleZoomOut}
+                disabled={cell.precision <= 1}
+                aria-label="Zoom out to wider area"
+                title="Wider area"
+              >
+                <Minus size={15} />
+              </button>
+              <div className="ag-sheet-prefix-strip" role="list" aria-label="Geohash precision levels">
+                {cell.prefixChain.map((step) => {
+                  const isCurrent = step.geohash === cell.geohash
+                  return (
+                    <button
+                      key={step.geohash}
+                      type="button"
+                      role="listitem"
+                      className={`ag-sheet-prefix-pill mono ${isCurrent ? 'active' : ''}`}
+                      title={`${step.label} (${step.approxSizeLabel})`}
+                      onClick={() => {
+                        if (isCurrent) return
+                        onPlaySound?.('tune')
+                        onTuneChannel(step.geohash)
+                      }}
+                    >
+                      #{step.geohash}
+                    </button>
+                  )
+                })}
+              </div>
+              <button
+                type="button"
+                className="ag-sheet-step-btn"
+                onClick={handleZoomIn}
+                disabled={cell.precision >= 8}
+                aria-label="Zoom in to narrower area"
+                title="Closer area"
+              >
+                <Plus size={15} />
+              </button>
+            </div>
+          </section>
+        )}
 
         {/* People List */}
         <section className="ag-sheet-section">
@@ -539,7 +568,7 @@ export function RoomInfoSheet({
           </div>
 
           {sortedGeoPeers.length === 0 ? (
-            <p className="ag-sheet-empty">No one else seen in #{activeGeohash} yet.</p>
+            <p className="ag-sheet-empty">No one else seen in {channelLabel} yet.</p>
           ) : (
             <div className="ag-sheet-list" role="list">
               {sortedGeoPeers.map((peer) => {

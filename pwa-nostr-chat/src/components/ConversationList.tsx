@@ -47,8 +47,15 @@ import type { ServerHubTab } from './ServerHubModal'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { SettingsTab } from './SettingsModal'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu'
-import { isValidGeohash, normalizeGeohash } from '../lib/geohash'
 import { encodeNpubSafe } from '../lib/identity'
+import {
+  buildRadioChannelShareUrl,
+  formatRadioChannelLabel,
+  isTopicChannel,
+  makeTopicChannelKey,
+  parseQuickTuneInput,
+  POPULAR_TOPIC_CHANNELS,
+} from '../lib/radioChannel'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
 import { formatHandle, identiconDataUrl } from '../utils/identicon'
 
@@ -128,6 +135,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 }) => {
   const { openContextMenu } = useContextMenu()
   const [freqDraft, setFreqDraft] = useState('')
+  const [tuneMode, setTuneMode] = useState<'geo' | 'topic'>('geo')
   const [dmDraft, setDmDraft] = useState('')
   const [collapsedServers, setCollapsedServers] = useState<Record<string, boolean>>({})
   const [addingChannelServerId, setAddingChannelServerId] = useState<string | null>(null)
@@ -140,7 +148,16 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     e.preventDefault()
     const clean = freqDraft.trim()
     if (!clean) return
-    const ok = onTuneChannel(clean)
+    const resolved = parseQuickTuneInput(clean, tuneMode)
+    if (!resolved) {
+      engine.pushToast(
+        'warning',
+        'Invalid channel name',
+        'Use letters, numbers, hyphens, or underscores — or enter a #geohash / city.'
+      )
+      return
+    }
+    const ok = onTuneChannel(resolved.key)
     if (ok !== false) {
       setFreqDraft('')
     }
@@ -182,93 +199,101 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
   const openRoomContextMenu = (
     e: React.MouseEvent,
-    geohash: string,
+    channelKey: string,
     label?: string
   ) => {
-    const pinned = engine.isChannelPinned(geohash)
-    const callCount = engine.calls.getGeoCallCount(geohash)
+    const isTopic = isTopicChannel(channelKey)
+    const displayLabel = formatRadioChannelLabel(channelKey)
+    const pinned = engine.isChannelPinned(channelKey)
+    const callCount = engine.calls.getGeoCallCount(channelKey)
     const inThisGeoCall =
       activeCall?.mode === 'geo' &&
-      (activeCall.geohash ?? '').toLowerCase() === geohash.toLowerCase()
+      (activeCall.geohash ?? '').toLowerCase() === channelKey.toLowerCase()
     const isFull = !inThisGeoCall && callCount >= engine.calls.maxParticipants
-    const roomUrl = `${window.location.origin}${window.location.pathname}#${geohash}`
+    const roomUrl = buildRadioChannelShareUrl(channelKey)
+    const items: ContextMenuItem[] = [
+      {
+        id: `room-tune-${channelKey}`,
+        label: `Tune to ${displayLabel}`,
+        icon: isTopic ? <Hash size={15} /> : <Radio size={15} />,
+        onSelect: () => onTuneChannel(channelKey),
+      },
+      {
+        id: `room-call-voice-${channelKey}`,
+        label: inThisGeoCall
+          ? 'Focus Active Call'
+          : isFull
+            ? `Voice Call Full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+            : callCount > 0
+              ? `Join Voice Call (${callCount}/${engine.calls.maxParticipants})`
+              : 'Join Voice Call',
+        icon: <Phone size={15} />,
+        disabled: isFull,
+        dividerBefore: true,
+        onSelect: () => {
+          onTuneChannel(channelKey)
+          if (inThisGeoCall) {
+            onFocusActiveCall?.()
+            return
+          }
+          void engine.calls.joinGeoCall(channelKey, 'audio')
+        },
+      },
+      {
+        id: `room-call-video-${channelKey}`,
+        label: inThisGeoCall
+          ? 'Focus Active Video Call'
+          : isFull
+            ? `Video Call Full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+            : callCount > 0
+              ? `Join Video Call (${callCount}/${engine.calls.maxParticipants})`
+              : 'Join Video Call',
+        icon: <Video size={15} />,
+        disabled: isFull,
+        onSelect: () => {
+          onTuneChannel(channelKey)
+          if (inThisGeoCall) {
+            onFocusActiveCall?.()
+            return
+          }
+          void engine.calls.joinGeoCall(channelKey, 'video')
+        },
+      },
+      {
+        id: `room-copy-${channelKey}`,
+        label: 'Copy Room Link',
+        icon: <Link2 size={15} />,
+        dividerBefore: true,
+        onSelect: () => {
+          navigator.clipboard?.writeText(roomUrl).catch(() => {})
+          engine.pushToast('info', `Copied ${displayLabel} room link`)
+        },
+      },
+    ]
+
+    if (!isTopic) {
+      items.push({
+        id: `room-map-${channelKey}`,
+        label: 'Open on Radar Map',
+        icon: <MapIcon size={15} />,
+        onSelect: () => {
+          onTuneChannel(channelKey)
+          onExpandRadar()
+        },
+      })
+    }
+
+    items.push({
+      id: `room-pin-${channelKey}`,
+      label: pinned ? 'Remove Bookmark' : 'Bookmark Room',
+      icon: pinned ? <StarOff size={15} /> : <Star size={15} />,
+      dividerBefore: true,
+      onSelect: () => engine.togglePinChannel(channelKey, isTopic ? undefined : label),
+    })
+
     openContextMenu(e, {
-      header: `#${geohash}${label ? ` · ${label}` : ''}`,
-      items: [
-        {
-          id: `room-tune-${geohash}`,
-          label: `Tune to #${geohash}`,
-          icon: <Radio size={15} />,
-          onSelect: () => onTuneChannel(geohash),
-        },
-        {
-          id: `room-call-voice-${geohash}`,
-          label: inThisGeoCall
-            ? 'Focus Active Call'
-            : isFull
-              ? `Voice Call Full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
-              : callCount > 0
-                ? `Join Voice Call (${callCount}/${engine.calls.maxParticipants})`
-                : 'Join Voice Call',
-          icon: <Phone size={15} />,
-          disabled: isFull,
-          dividerBefore: true,
-          onSelect: () => {
-            onTuneChannel(geohash)
-            if (inThisGeoCall) {
-              onFocusActiveCall?.()
-              return
-            }
-            void engine.calls.joinGeoCall(geohash, 'audio')
-          },
-        },
-        {
-          id: `room-call-video-${geohash}`,
-          label: inThisGeoCall
-            ? 'Focus Active Video Call'
-            : isFull
-              ? `Video Call Full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
-              : callCount > 0
-                ? `Join Video Call (${callCount}/${engine.calls.maxParticipants})`
-                : 'Join Video Call',
-          icon: <Video size={15} />,
-          disabled: isFull,
-          onSelect: () => {
-            onTuneChannel(geohash)
-            if (inThisGeoCall) {
-              onFocusActiveCall?.()
-              return
-            }
-            void engine.calls.joinGeoCall(geohash, 'video')
-          },
-        },
-        {
-          id: `room-copy-${geohash}`,
-          label: 'Copy Room Link',
-          icon: <Link2 size={15} />,
-          dividerBefore: true,
-          onSelect: () => {
-            navigator.clipboard?.writeText(roomUrl).catch(() => {})
-            engine.pushToast('info', `Copied #${geohash} room link`)
-          },
-        },
-        {
-          id: `room-map-${geohash}`,
-          label: 'Open on Radar Map',
-          icon: <MapIcon size={15} />,
-          onSelect: () => {
-            onTuneChannel(geohash)
-            onExpandRadar()
-          },
-        },
-        {
-          id: `room-pin-${geohash}`,
-          label: pinned ? 'Remove Bookmark' : 'Bookmark Room',
-          icon: pinned ? <StarOff size={15} /> : <Star size={15} />,
-          dividerBefore: true,
-          onSelect: () => engine.togglePinChannel(geohash, label),
-        },
-      ],
+      header: `${displayLabel}${isTopic ? ' · Topic 23333' : label ? ` · ${label}` : ''}`,
+      items,
     })
   }
 
@@ -754,83 +779,157 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         {/* ================= RADIO TAB ================= */}
         {activeTab === 'radio' && (
           <div className="ag-conv-section-stack">
-            {/* Compact #geohash jump + Quick Pin + GPS + Open Map */}
-            <div className="ag-radio-quickbar">
-              <form className="ag-jump-form" onSubmit={handleQuickTune}>
-                <span className="ag-jump-hash">#</span>
-                <input
-                  type="text"
-                  className="ag-jump-input"
-                  value={freqDraft}
-                  onChange={(e) => setFreqDraft(e.target.value)}
-                  placeholder="Geohash or city…"
-                  aria-label="Jump to geohash or city"
-                />
-                {freqDraft.trim() && (
-                  <button type="submit" className="ag-jump-go-btn" aria-label="Go">
-                    Go
-                  </button>
-                )}
-              </form>
-
-              {(() => {
-                const normalizedDraft = normalizeGeohash(freqDraft)
-                const targetGh =
-                  normalizedDraft && isValidGeohash(normalizedDraft)
-                    ? normalizedDraft
-                    : engine.activeGeohash
-                const targetPinned = engine.isChannelPinned(targetGh)
-                return (
+            {/* Radio Quick-Tune Controls (Geo | Topic Mode + Tune + Pin + GPS + Map) */}
+            <div className="ag-radio-tune-box">
+              <div className="ag-radio-tune-mode-row">
+                <div
+                  className="ag-radio-mode-seg"
+                  role="group"
+                  aria-label="Radio channel mode"
+                >
                   <button
                     type="button"
-                    className={`ag-quick-tool-btn ${targetPinned ? 'active' : ''}`}
+                    className={`ag-radio-mode-btn ${tuneMode === 'geo' ? 'active' : ''}`}
                     onClick={() => {
                       onPlaySound?.('click')
-                      engine.togglePinChannel(
-                        targetGh,
-                        targetGh === engine.activeGeohash
-                          ? engine.cell.nearestCity || undefined
-                          : undefined
-                      )
-                      if (normalizedDraft && isValidGeohash(normalizedDraft)) {
-                        setFreqDraft('')
-                      }
+                      setTuneMode('geo')
                     }}
-                    title={targetPinned ? `Unpin #${targetGh}` : `Pin #${targetGh}`}
-                    aria-label={targetPinned ? `Unpin #${targetGh}` : `Pin #${targetGh}`}
-                    aria-pressed={targetPinned}
+                    aria-pressed={tuneMode === 'geo'}
+                    title="Geohash or city channels (auto-routes non-geohash names to Topic 23333)"
                   >
-                    {targetPinned ? <PinOff size={15} /> : <Pin size={15} />}
+                    <Radio size={12} />
+                    <span>Geo</span>
                   </button>
-                )
-              })()}
+                  <button
+                    type="button"
+                    className={`ag-radio-mode-btn ${tuneMode === 'topic' ? 'active' : ''}`}
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      setTuneMode('topic')
+                    }}
+                    aria-pressed={tuneMode === 'topic'}
+                    title="Named Topic Radio channels (Nostr kind 23333)"
+                  >
+                    <Hash size={12} />
+                    <span>Topic</span>
+                  </button>
+                </div>
 
-              <button
-                type="button"
-                className={`ag-quick-tool-btn ${engine.location.status === 'locating' ? 'locating' : ''}`}
-                onClick={onLocateMe}
-                disabled={engine.location.status === 'locating'}
-                title="Locate my area with GPS"
-                aria-label="Locate my area with GPS"
-              >
-                <Crosshair size={16} />
-              </button>
+                <div className="ag-radio-mode-tools">
+                  <button
+                    type="button"
+                    className={`ag-quick-tool-btn compact ${engine.location.status === 'locating' ? 'locating' : ''}`}
+                    onClick={onLocateMe}
+                    disabled={engine.location.status === 'locating'}
+                    title="Locate my area with GPS"
+                    aria-label="Locate my area with GPS"
+                  >
+                    <Crosshair size={15} />
+                  </button>
 
-              <button
-                type="button"
-                className="ag-quick-map-pill"
-                onClick={onExpandRadar}
-                title="Open Full Map"
-              >
-                <MapIcon size={14} />
-                <span>Map</span>
-              </button>
+                  <button
+                    type="button"
+                    className="ag-quick-map-pill compact"
+                    onClick={onExpandRadar}
+                    title="Open Full Map"
+                  >
+                    <MapIcon size={13} />
+                    <span>Map</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="ag-radio-quickbar">
+                <form className="ag-jump-form" onSubmit={handleQuickTune}>
+                  <span className="ag-jump-hash">#</span>
+                  <input
+                    type="text"
+                    className="ag-jump-input"
+                    value={freqDraft}
+                    onChange={(e) => setFreqDraft(e.target.value)}
+                    placeholder={
+                      tuneMode === 'topic'
+                        ? 'bitcoin, nostr, tech…'
+                        : 'Geohash, city, or topic…'
+                    }
+                    aria-label={
+                      tuneMode === 'topic'
+                        ? 'Jump to named topic channel (kind 23333)'
+                        : 'Jump to geohash, city, or topic channel'
+                    }
+                  />
+                  {freqDraft.trim() && (
+                    <button type="submit" className="ag-jump-go-btn" aria-label="Go">
+                      Go
+                    </button>
+                  )}
+                </form>
+
+                {(() => {
+                  const resolvedDraft = freqDraft.trim()
+                    ? parseQuickTuneInput(freqDraft, tuneMode)
+                    : null
+                  const targetKey = resolvedDraft ? resolvedDraft.key : engine.activeGeohash
+                  const targetLabel = formatRadioChannelLabel(targetKey)
+                  const targetIsTopic = isTopicChannel(targetKey)
+                  const targetPinned = engine.isChannelPinned(targetKey)
+                  return (
+                    <button
+                      type="button"
+                      className={`ag-quick-tool-btn ${targetPinned ? 'active' : ''}`}
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        engine.togglePinChannel(
+                          targetKey,
+                          !targetIsTopic && targetKey === engine.activeGeohash
+                            ? engine.cell.nearestCity || undefined
+                            : undefined
+                        )
+                        if (resolvedDraft) {
+                          setFreqDraft('')
+                        }
+                      }}
+                      title={targetPinned ? `Unpin ${targetLabel}` : `Pin ${targetLabel}`}
+                      aria-label={targetPinned ? `Unpin ${targetLabel}` : `Pin ${targetLabel}`}
+                      aria-pressed={targetPinned}
+                    >
+                      {targetPinned ? <PinOff size={15} /> : <Pin size={15} />}
+                    </button>
+                  )
+                })()}
+              </div>
+
+              {tuneMode === 'topic' && (
+                <div className="ag-topic-quick-chips" aria-label="Popular topic channels">
+                  {POPULAR_TOPIC_CHANNELS.map((topic) => {
+                    const topicKey = makeTopicChannelKey(topic.slug) ?? `topic:${topic.slug}`
+                    const active = isChannelActive(topicKey)
+                    return (
+                      <button
+                        key={topic.slug}
+                        type="button"
+                        className={`ag-topic-quick-chip ${active ? 'active' : ''}`}
+                        onClick={() => {
+                          onPlaySound?.('click')
+                          onTuneChannel(topicKey)
+                        }}
+                        title={`${topic.label} · ${topic.description} (kind 23333)`}
+                      >
+                        <Hash size={11} />
+                        <span>{topic.slug}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
             </div>
 
-            {/* Active Room (if not already listed in Pinned or Live) */}
+            {/* Active Room (if not already listed in Pinned or Active Rooms) */}
             {showActiveRoomCard && (() => {
               const gh = engine.activeGeohash
               const ghKey = gh.toLowerCase()
+              const isTopic = isTopicChannel(gh)
+              const displayLabel = formatRadioChannelLabel(gh)
               const active = isChannelActive(gh)
               const pinned = engine.isChannelPinned(gh)
               const unread = engine.unreadCounts[ghKey] ?? 0
@@ -840,13 +939,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               const inCall =
                 activeCall?.mode === 'geo' &&
                 (activeCall.geohash ?? '').toLowerCase() === ghKey
+              const currentSubtitle = isTopic
+                ? 'Topic Radio · kind 23333'
+                : engine.presence.isUncertainCount
+                  ? 'Ephemeral room'
+                  : `${engine.presence.onlineCount} online · Ephemeral`
               return (
               <section className="ag-conv-group" aria-label="Current room">
                 <div className="ag-conv-group-label">Current Room</div>
                 <div
                   className={`ag-chat-row-wrap ${active ? 'active' : ''} ${hasUnread ? 'is-unread' : ''} ${mentions > 0 ? 'has-pings' : ''}`}
                   onContextMenu={(e) =>
-                    openRoomContextMenu(e, gh, engine.cell.nearestCity || undefined)
+                    openRoomContextMenu(e, gh, isTopic ? undefined : engine.cell.nearestCity || undefined)
                   }
                 >
                   <button
@@ -854,25 +958,23 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     className="ag-chat-row"
                     onClick={() => onTuneChannel(gh)}
                   >
-                    <div className="ag-chat-row-avatar radio">
-                      <Radio size={18} />
+                    <div className={`ag-chat-row-avatar ${isTopic ? 'topic' : 'radio'}`}>
+                      {isTopic ? <Hash size={17} /> : <Radio size={18} />}
                     </div>
                     <div className="ag-chat-row-body">
                       <div className="ag-chat-row-top">
                         <span className="ag-chat-row-name truncate">
-                          <span className="mono">#{gh}</span>
-                          {engine.cell.nearestCity && (
+                          <span className="mono">{displayLabel}</span>
+                          {isTopic ? (
+                            <span className="ag-topic-pill">Topic</span>
+                          ) : engine.cell.nearestCity ? (
                             <span className="ag-chat-row-city"> · {engine.cell.nearestCity}</span>
-                          )}
+                          ) : null}
                         </span>
                         <span className="ag-chat-row-time">live</span>
                       </div>
                       <div className="ag-chat-row-bottom">
-                        <span className="ag-chat-row-preview truncate">
-                          {engine.presence.isUncertainCount
-                            ? 'Ephemeral room'
-                            : `${engine.presence.onlineCount} online · Ephemeral`}
-                        </span>
+                        <span className="ag-chat-row-preview truncate">{currentSubtitle}</span>
                         <span className="ag-row-badges">
                           {callCount > 0 && (
                             <span
@@ -905,10 +1007,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     onClick={(e) => {
                       e.stopPropagation()
                       onPlaySound?.('click')
-                      engine.togglePinChannel(gh, engine.cell.nearestCity || undefined)
+                      engine.togglePinChannel(gh, isTopic ? undefined : engine.cell.nearestCity || undefined)
                     }}
-                    title={pinned ? `Unpin #${gh}` : `Pin #${gh}`}
-                    aria-label={pinned ? `Unpin #${gh}` : `Pin #${gh}`}
+                    title={pinned ? `Unpin ${displayLabel}` : `Pin ${displayLabel}`}
+                    aria-label={pinned ? `Unpin ${displayLabel}` : `Pin ${displayLabel}`}
                     aria-pressed={pinned}
                   >
                     {pinned ? <PinOff size={14} /> : <Pin size={14} />}
@@ -924,6 +1026,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 <div className="ag-conv-group-label">Pinned</div>
                 {engine.pinnedChannels.map((pin) => {
                   const ghKey = pin.geohash.toLowerCase()
+                  const isTopic = isTopicChannel(pin.geohash)
+                  const displayLabel = formatRadioChannelLabel(pin.geohash)
                   const active = isChannelActive(pin.geohash)
                   const livePulse = pulseByHash.get(ghKey)
                   const unread = Math.max(pin.unreadCount, engine.unreadCounts[ghKey] ?? 0)
@@ -933,16 +1037,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   const inCall =
                     activeCall?.mode === 'geo' &&
                     (activeCall.geohash ?? '').toLowerCase() === ghKey
-                  const displayCity = pin.label || livePulse?.nearestCity || undefined
+                  const displayCity = isTopic ? undefined : (pin.label || livePulse?.nearestCity || undefined)
                   const subtitle = livePulse?.lastPreview
                     ? livePulse.lastPreview
                     : livePulse && livePulse.peerCount > 0
                       ? `${livePulse.peerCount} ${livePulse.peerCount === 1 ? 'person' : 'people'} active`
                       : livePulse && livePulse.messageCount > 0
                         ? `${livePulse.messageCount} recent ${livePulse.messageCount === 1 ? 'message' : 'messages'}`
-                        : active && !engine.presence.isUncertainCount && engine.presence.onlineCount > 0
-                          ? `${engine.presence.onlineCount} online · Pinned`
-                          : 'Pinned room · Ephemeral'
+                        : isTopic
+                          ? 'Pinned topic · kind 23333'
+                          : active && !engine.presence.isUncertainCount && engine.presence.onlineCount > 0
+                            ? `${engine.presence.onlineCount} online · Pinned`
+                            : 'Pinned room · Ephemeral'
                   return (
                     <div
                       key={pin.geohash}
@@ -954,14 +1060,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                         className="ag-chat-row"
                         onClick={() => onTuneChannel(pin.geohash)}
                       >
-                        <div className="ag-chat-row-avatar pinned">
-                          <Star size={17} fill="currentColor" />
+                        <div className={`ag-chat-row-avatar ${isTopic ? 'topic' : 'pinned'}`}>
+                          {isTopic ? <Hash size={17} /> : <Star size={17} fill="currentColor" />}
                         </div>
                         <div className="ag-chat-row-body">
                           <div className="ag-chat-row-top">
                             <span className="ag-chat-row-name truncate">
-                              <span className="mono">#{pin.geohash}</span>
-                              {displayCity && <span className="ag-chat-row-city"> · {displayCity}</span>}
+                              <span className="mono">{displayLabel}</span>
+                              {isTopic ? (
+                                <span className="ag-topic-pill">Topic</span>
+                              ) : displayCity ? (
+                                <span className="ag-chat-row-city"> · {displayCity}</span>
+                              ) : null}
                             </span>
                             {livePulse ? (
                               <span className="ag-chat-row-time tabular">
@@ -1007,10 +1117,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                         onClick={(e) => {
                           e.stopPropagation()
                           onPlaySound?.('click')
-                          engine.togglePinChannel(pin.geohash, pin.label)
+                          engine.togglePinChannel(pin.geohash, isTopic ? undefined : pin.label)
                         }}
-                        title={`Unpin #${pin.geohash}`}
-                        aria-label={`Unpin #${pin.geohash}`}
+                        title={`Unpin ${displayLabel}`}
+                        aria-label={`Unpin ${displayLabel}`}
                         aria-pressed={true}
                       >
                         <PinOff size={14} />
@@ -1030,7 +1140,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   <p>
                     {engine.pulseRooms.length > 0
                       ? 'All nearby active rooms are pinned above.'
-                      : 'Listening for nearby active rooms…'}
+                      : 'Listening for active radio & topic rooms…'}
                   </p>
                   <button type="button" className="ag-soft-pill-btn" onClick={onExpandRadar}>
                     <Compass size={14} />
@@ -1040,6 +1150,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               ) : (
                 liveRooms.map((room) => {
                   const ghKey = room.geohash.toLowerCase()
+                  const isTopic = isTopicChannel(room.geohash)
+                  const displayLabel = formatRadioChannelLabel(room.geohash)
                   const active = isChannelActive(room.geohash)
                   const pinned = engine.isChannelPinned(room.geohash)
                   const unread = engine.unreadCounts[ghKey] ?? 0
@@ -1059,7 +1171,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       key={room.geohash}
                       className={`ag-chat-row-wrap ${active ? 'active' : ''} ${hasUnread ? 'is-unread' : ''} ${mentions > 0 ? 'has-pings' : ''}`}
                       onContextMenu={(e) =>
-                        openRoomContextMenu(e, room.geohash, room.nearestCity || undefined)
+                        openRoomContextMenu(
+                          e,
+                          room.geohash,
+                          isTopic ? undefined : room.nearestCity || undefined
+                        )
                       }
                     >
                       <button
@@ -1067,16 +1183,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                         className="ag-chat-row"
                         onClick={() => onTuneChannel(room.geohash)}
                       >
-                        <div className="ag-chat-row-avatar radio">
-                          <Radio size={18} />
+                        <div className={`ag-chat-row-avatar ${isTopic ? 'topic' : 'radio'}`}>
+                          {isTopic ? <Hash size={17} /> : <Radio size={18} />}
                         </div>
                         <div className="ag-chat-row-body">
                           <div className="ag-chat-row-top">
                             <span className="ag-chat-row-name truncate">
-                              <span className="mono">#{room.geohash}</span>
-                              {room.nearestCity && (
+                              <span className="mono">{displayLabel}</span>
+                              {isTopic ? (
+                                <span className="ag-topic-pill">Topic</span>
+                              ) : room.nearestCity ? (
                                 <span className="ag-chat-row-city"> · {room.nearestCity}</span>
-                              )}
+                              ) : null}
                             </span>
                             <span className="ag-chat-row-time tabular">
                               {formatRelativeTime(room.lastActivityAt)}
@@ -1118,10 +1236,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                         onClick={(e) => {
                           e.stopPropagation()
                           onPlaySound?.('click')
-                          engine.togglePinChannel(room.geohash, room.nearestCity || undefined)
+                          engine.togglePinChannel(
+                            room.geohash,
+                            isTopic ? undefined : room.nearestCity || undefined
+                          )
                         }}
-                        title={pinned ? `Unpin #${room.geohash}` : `Pin #${room.geohash}`}
-                        aria-label={pinned ? `Unpin #${room.geohash}` : `Pin #${room.geohash}`}
+                        title={pinned ? `Unpin ${displayLabel}` : `Pin ${displayLabel}`}
+                        aria-label={pinned ? `Unpin ${displayLabel}` : `Pin ${displayLabel}`}
                         aria-pressed={pinned}
                       >
                         {pinned ? <PinOff size={14} /> : <Pin size={14} />}

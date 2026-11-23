@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { Filter } from 'nostr-tools'
 import type {
   ActiveView,
   AgnostrEngine,
@@ -32,6 +33,7 @@ import { revokeImagePreviewUrl } from '../lib/imageProcessor.ts'
 import {
   buildGeohashChatTemplate,
   buildLocationNoteTemplate,
+  buildNamedRadioChatTemplate,
   buildPresenceTemplate,
   buildReactionTemplate,
   clearProtocolCaches,
@@ -39,6 +41,7 @@ import {
   doesContentMentionUser,
   extractGeohashTag,
   extractMentions,
+  extractTopicChannelTag,
   getTagValue,
   hasTagPair,
   isAgnostrClientTag,
@@ -46,9 +49,11 @@ import {
   KIND_GEOHASH_CHAT,
   KIND_GEOHASH_PRESENCE,
   KIND_LOCATION_NOTE,
+  KIND_NAMED_RADIO_CHAT,
   mineNip13NonceTag,
   parseGeohashChatEvent,
   parseLocationNoteEvent,
+  parseNamedRadioChatEvent,
   parseReactionEvent,
   verifyEventCached,
   type ParsedReaction,
@@ -57,10 +62,8 @@ import { executeSlashCommand, SLASH_COMMANDS } from '../lib/commands.ts'
 import {
   buildGeohashCell,
   DEFAULT_GEOHASH,
-  isValidGeohash,
   normalizeGeohash,
   QUICK_CITIES,
-  resolveGeohashOrCity,
 } from '../lib/geohash.ts'
 import {
   BUNDLED_GEO_RELAYS,
@@ -68,6 +71,7 @@ import {
   fetchBitchatGeoRelays,
   mergeGeoDirectories,
   normalizeRelayUrl,
+  PULSE_RELAYS,
   selectRelaysForGeohash,
   type GeoRelayEntry,
 } from '../lib/geoRelays.ts'
@@ -84,6 +88,17 @@ import {
   nextPresenceDelayMs,
   PresenceTracker,
 } from '../lib/presenceService.ts'
+import {
+  formatRadioChannelHash,
+  getTopicSlug,
+  isTopicChannel,
+  isValidRadioChannelKey,
+  makeTopicChannelKey,
+  normalizeRadioChannelKey,
+  parseQuickTuneInput,
+  parseRadioChannelHash,
+  TOPIC_CHANNEL_PREFIX,
+} from '../lib/radioChannel.ts'
 import { RelayPool } from '../lib/relayPool.ts'
 import {
   clearChannelMessagesStorage,
@@ -198,8 +213,8 @@ function backfillReplyReferences(list: GeoMessage[]): GeoMessage[] {
 
 function readInitialGeohash(): string {
   if (typeof window !== 'undefined') {
-    const hash = normalizeGeohash(window.location.hash || '')
-    if (hash && isValidGeohash(hash)) return hash
+    const parsed = parseRadioChannelHash(window.location.hash || '')
+    if (parsed) return parsed
   }
   return loadActiveGeohash()
 }
@@ -304,9 +319,10 @@ export function useAgnostrEngine(): AgnostrEngine {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
       const lowerHash = rawHash.toLowerCase()
       if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=') || lowerHash.startsWith('dm=')) return
-      const currentHash = normalizeGeohash(rawHash)
-      if (currentHash !== activeGeohash) {
-        window.history.replaceState(window.history.state, '', `#${activeGeohash}`)
+      const currentKey = parseRadioChannelHash(window.location.hash || '')
+      const targetHash = formatRadioChannelHash(activeGeohash)
+      if (currentKey !== activeGeohash || window.location.hash !== targetHash) {
+        window.history.replaceState(window.history.state, '', targetHash)
       }
     } catch {
       // Ignore
@@ -318,10 +334,10 @@ export function useAgnostrEngine(): AgnostrEngine {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
       const lowerHash = rawHash.toLowerCase()
       if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=') || lowerHash.startsWith('dm=')) return
-      const hash = normalizeGeohash(rawHash)
-      if (hash && isValidGeohash(hash)) {
-        setActiveGeohash(hash)
-        setActiveView({ type: 'channel', geohash: hash })
+      const parsed = parseRadioChannelHash(window.location.hash || '')
+      if (parsed) {
+        setActiveGeohash(parsed)
+        setActiveView({ type: 'channel', geohash: parsed })
       }
     }
     window.addEventListener('hashchange', onHashChange)
@@ -388,7 +404,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   const geoSeenIdsRef = useRef<Set<string>>(new Set())
 
   const incrementGeoUnread = useCallback((rawGh: string, isDirectPing: boolean) => {
-    const gh = normalizeGeohash(rawGh)
+    const gh = normalizeRadioChannelKey(rawGh) ?? normalizeGeohash(rawGh)
     if (!gh) return
     setGeoUnreadCounts((prev) => {
       const next = { ...prev, [gh]: (prev[gh] ?? 0) + 1 }
@@ -417,7 +433,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   }, [])
 
   const clearGeoUnread = useCallback((rawGh: string) => {
-    const gh = normalizeGeohash(rawGh)
+    const gh = normalizeRadioChannelKey(rawGh) ?? normalizeGeohash(rawGh)
     if (!gh) return
     setGeoUnreadCounts((prev) => {
       if (!prev[gh]) return prev
@@ -550,9 +566,11 @@ export function useAgnostrEngine(): AgnostrEngine {
     refreshPeers,
   ])
 
-  // Active geohash subscription (kind 20000 chat + kind 20001 presence + kind 20007 reactions)
+  // Active radio channel subscription (geohash: kind 20000/20001/20007; topic: kind 23333/20007 #d)
   useEffect(() => {
     const gh = activeGeohash
+    const isTopic = isTopicChannel(gh)
+    const topicSlug = getTopicSlug(gh)
     const cached = backfillReplyReferences(
       loadChannelMessages(gh).filter((m) => !blockedSetRef.current.has(m.pubkey.toLowerCase()))
     )
@@ -586,17 +604,34 @@ export function useAgnostrEngine(): AgnostrEngine {
     }, 3000)
 
     const since = Math.floor(Date.now() / 1000) - 3600
+    const subId = isTopic && topicSlug ? `agnostr-topic-${topicSlug}` : `agnostr-geo-${gh}`
+    const filters =
+      isTopic && topicSlug
+        ? [
+            {
+              kinds: [KIND_NAMED_RADIO_CHAT],
+              '#d': [topicSlug],
+              limit: 80,
+            },
+            {
+              kinds: [KIND_EPHEMERAL_REACTION],
+              '#d': [topicSlug],
+              since,
+            },
+          ]
+        : [
+            {
+              kinds: [KIND_GEOHASH_CHAT, KIND_GEOHASH_PRESENCE, KIND_EPHEMERAL_REACTION],
+              '#g': [gh],
+              since,
+              limit: 250,
+            },
+          ]
+
     const unsub = pool.subscribe(
-      `agnostr-geo-${gh}`,
+      subId,
       relaySelection.channelRelays,
-      [
-        {
-          kinds: [KIND_GEOHASH_CHAT, KIND_GEOHASH_PRESENCE, KIND_EPHEMERAL_REACTION],
-          '#g': [gh],
-          since,
-          limit: 250,
-        },
-      ],
+      filters,
       {
         onEose: () => {
           isHistoryReplay = false
@@ -644,8 +679,8 @@ export function useAgnostrEngine(): AgnostrEngine {
             return
           }
 
-          // Geohash presence heartbeat (kind 20001)
-          if (ev.kind === KIND_GEOHASH_PRESENCE) {
+          // Geohash presence heartbeat (kind 20001 — geohash channels only)
+          if (!isTopic && ev.kind === KIND_GEOHASH_PRESENCE) {
             const evGh = extractGeohashTag(ev.tags)
             if (evGh !== gh) return
             const isAgnostr = isAgnostrClientTag(ev.tags)
@@ -673,24 +708,33 @@ export function useAgnostrEngine(): AgnostrEngine {
             return
           }
 
-          // Geohash public message (kind 20000)
-          if (ev.kind === KIND_GEOHASH_CHAT) {
-            const parsed = parseGeohashChatEvent(ev, gh, ownPubkeysRef.current, (id) =>
-              messagesRef.current.find((m) => m.id === id)
-            )
+          // Radio public message (kind 20000 for geohash, kind 23333 for named topic)
+          const isExpectedChatKind = isTopic
+            ? ev.kind === KIND_NAMED_RADIO_CHAT
+            : ev.kind === KIND_GEOHASH_CHAT
+          if (isExpectedChatKind) {
+            const parsed = isTopic
+              ? parseNamedRadioChatEvent(ev, gh, ownPubkeysRef.current, (id) =>
+                  messagesRef.current.find((m) => m.id === id)
+                )
+              : parseGeohashChatEvent(ev, gh, ownPubkeysRef.current, (id) =>
+                  messagesRef.current.find((m) => m.id === id)
+                )
             if (!parsed) {
-              // Empty teleport ping still updates presence if valid #g
-              const evGh = extractGeohashTag(ev.tags)
-              if (evGh === gh) {
-                presenceTracker.recordActivity({
-                  geohash: gh,
-                  pubkey: pk,
-                  seenAtSec: isHistoryReplay ? ev.created_at : Math.floor(Date.now() / 1000),
-                  nickname: getTagValue(ev.tags, 'n'),
-                  isTeleported: hasTagPair(ev.tags, 't', 'teleport'),
-                  isAgnostrClient: isAgnostrClientTag(ev.tags),
-                })
-                refreshPeers(gh)
+              if (!isTopic) {
+                // Empty teleport ping still updates presence if valid #g
+                const evGh = extractGeohashTag(ev.tags)
+                if (evGh === gh) {
+                  presenceTracker.recordActivity({
+                    geohash: gh,
+                    pubkey: pk,
+                    seenAtSec: isHistoryReplay ? ev.created_at : Math.floor(Date.now() / 1000),
+                    nickname: getTagValue(ev.tags, 'n'),
+                    isTeleported: hasTagPair(ev.tags, 't', 'teleport'),
+                    isAgnostrClient: isAgnostrClientTag(ev.tags),
+                  })
+                  refreshPeers(gh)
+                }
               }
               return
             }
@@ -830,11 +874,11 @@ export function useAgnostrEngine(): AgnostrEngine {
     refreshTrustedPeerLabel,
   ])
 
-  // Location dead-drop notes subscription (kind 1 + NIP-40 expiration)
+  // Location dead-drop notes subscription (kind 1 + NIP-40 expiration — geohash channels only)
   useEffect(() => {
     const gh = activeGeohash
     setLocationNotes([])
-    if (!pool) return
+    if (!pool || isTopicChannel(gh)) return
 
     let isNoteReplay = true
     const seenNoteIds = new Set<string>()
@@ -900,10 +944,35 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   useEffect(() => {
     if (!pool || !watchedPinnedKey) return
-    const watchedGeos = watchedPinnedKey.split(',').filter(Boolean)
-    if (watchedGeos.length === 0) return
+    const watchedChannels = watchedPinnedKey.split(',').filter(Boolean)
+    if (watchedChannels.length === 0) return
+
+    const watchedSet = new Set(watchedChannels)
+    const watchedGeos: string[] = []
+    const watchedTopicSlugs: string[] = []
+    for (const ch of watchedChannels) {
+      const slug = getTopicSlug(ch)
+      if (slug) {
+        watchedTopicSlugs.push(slug)
+      } else {
+        watchedGeos.push(ch)
+      }
+    }
+    if (watchedGeos.length === 0 && watchedTopicSlugs.length === 0) return
 
     const since = Math.floor(Date.now() / 1000)
+    const filters: Filter[] = []
+    if (watchedGeos.length > 0) {
+      filters.push({ kinds: [KIND_GEOHASH_CHAT], '#g': watchedGeos, since })
+    }
+    if (watchedTopicSlugs.length > 0) {
+      filters.push({ kinds: [KIND_NAMED_RADIO_CHAT], '#d': watchedTopicSlugs, since })
+    }
+    const watchRelays =
+      watchedTopicSlugs.length > 0
+        ? Array.from(new Set([...CORE_DM_RELAYS, ...PULSE_RELAYS.slice(0, 7)]))
+        : CORE_DM_RELAYS
+
     let backfillDone = false
     const eoseFallback = window.setTimeout(() => {
       backfillDone = true
@@ -911,15 +980,16 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     const unsub = pool.subscribe(
       'agnostr-pinned-watch',
-      CORE_DM_RELAYS,
-      [{ kinds: [KIND_GEOHASH_CHAT], '#g': watchedGeos, since }],
+      watchRelays,
+      filters,
       {
         onEose: () => {
           backfillDone = true
           window.clearTimeout(eoseFallback)
         },
         onEvent: (ev) => {
-          if (ev.kind !== KIND_GEOHASH_CHAT || geoSeenIdsRef.current.has(ev.id)) return
+          if (ev.kind !== KIND_GEOHASH_CHAT && ev.kind !== KIND_NAMED_RADIO_CHAT) return
+          if (geoSeenIdsRef.current.has(ev.id)) return
           if (!backfillDone && ev.created_at < since - 2) return
           if (!verifyEventCached(ev)) return
           geoSeenIdsRef.current.add(ev.id)
@@ -928,8 +998,14 @@ export function useAgnostrEngine(): AgnostrEngine {
             if (first) geoSeenIdsRef.current.delete(first)
           }
           const pk = ev.pubkey.toLowerCase()
-          const gh = extractGeohashTag(ev.tags)
-          if (!gh || !(ev.content ?? '').trim()) return
+          let gh: string | null = null
+          if (ev.kind === KIND_NAMED_RADIO_CHAT) {
+            const slug = extractTopicChannelTag(ev.tags)
+            gh = slug ? `${TOPIC_CHANNEL_PREFIX}${slug}` : null
+          } else {
+            gh = extractGeohashTag(ev.tags)
+          }
+          if (!gh || !watchedSet.has(gh) || !(ev.content ?? '').trim()) return
 
           // Never double-count if user just switched onto this geohash
           if (activeViewRef.current.type === 'channel' && activeViewRef.current.geohash === gh) {
@@ -1208,28 +1284,60 @@ export function useAgnostrEngine(): AgnostrEngine {
   }, [activeView, clearGeoUnread])
 
   const markChannelRead = useCallback((geohash?: string) => {
-    const target = normalizeGeohash(geohash ?? activeGeohash)
+    const raw = geohash ?? activeGeohash
+    const target = normalizeRadioChannelKey(raw) ?? normalizeGeohash(raw)
     setUnreadDividerId(null)
     clearGeoUnread(target)
   }, [activeGeohash, clearGeoUnread])
 
-  const tuneGeohash = useCallback((geohashOrCity: string): boolean => {
-    const resolved = resolveGeohashOrCity(geohashOrCity)
-    if (!resolved) {
-      pushToast('warning', 'Invalid geohash or city', `"${geohashOrCity}" is not a valid base32 geohash or known city.`)
-      return false
-    }
-    setActiveGeohash(resolved)
-    setActiveView({ type: 'channel', geohash: resolved })
+  const applyTunedChannel = useCallback((channelKey: string) => {
+    setActiveGeohash(channelKey)
+    setActiveView({ type: 'channel', geohash: channelKey })
     setUnreadDividerId(null)
     setRecentChannels((prev) => {
-      const next = [resolved, ...prev.filter((g) => g !== resolved)].slice(0, 12)
+      const next = [channelKey, ...prev.filter((g) => g !== channelKey)].slice(0, 12)
       saveRecentChannels(next)
       return next
     })
-    clearGeoUnread(resolved)
+    clearGeoUnread(channelKey)
+  }, [clearGeoUnread])
+
+  const tuneRadioChannel = useCallback((channelKeyOrInput: string): boolean => {
+    const direct = normalizeRadioChannelKey(channelKeyOrInput)
+    if (direct) {
+      applyTunedChannel(direct)
+      return true
+    }
+    const resolved = parseQuickTuneInput(channelKeyOrInput, 'geo')
+    if (!resolved) {
+      pushToast(
+        'warning',
+        'Invalid radio channel',
+        `"${channelKeyOrInput}" is not a valid geohash, city, or topic name.`
+      )
+      return false
+    }
+    applyTunedChannel(resolved.key)
     return true
-  }, [pushToast, clearGeoUnread])
+  }, [applyTunedChannel, pushToast])
+
+  const tuneTopicChannel = useCallback((rawSlug: string): boolean => {
+    const topicKey = makeTopicChannelKey(rawSlug)
+    if (!topicKey) {
+      pushToast(
+        'warning',
+        'Invalid topic name',
+        'Use 1–48 letters, numbers, hyphens, or underscores (e.g. bitcoin, nostr).'
+      )
+      return false
+    }
+    applyTunedChannel(topicKey)
+    return true
+  }, [applyTunedChannel, pushToast])
+
+  const tuneGeohash = useCallback((geohashOrCity: string): boolean => {
+    return tuneRadioChannel(geohashOrCity)
+  }, [tuneRadioChannel])
 
   const locateMe = useCallback(async (): Promise<string | null> => {
     const gh = await rawLocateMe()
@@ -1243,14 +1351,17 @@ export function useAgnostrEngine(): AgnostrEngine {
   }, [rawLocateMe, tuneGeohash, pushToast])
 
   const isChannelPinned = useCallback(
-    (geohash: string) => pinnedChannels.some((p) => p.geohash === normalizeGeohash(geohash)),
+    (geohash: string) => {
+      const key = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+      return pinnedChannels.some((p) => p.geohash === key)
+    },
     [pinnedChannels]
   )
 
   const togglePinChannel = useCallback(
     (geohash: string, label?: string) => {
-      const gh = normalizeGeohash(geohash)
-      if (!isValidGeohash(gh)) return
+      const gh = normalizeRadioChannelKey(geohash)
+      if (!gh) return
       setPinnedChannels((prev) => {
         const exists = prev.some((p) => p.geohash === gh)
         const next = exists
@@ -1281,27 +1392,36 @@ export function useAgnostrEngine(): AgnostrEngine {
     [ensureThread]
   )
 
-  // Publish public geohash message (kind 20000 + optional NIP-13 PoW)
+  // Publish public radio message (kind 20000 geohash or kind 23333 topic + optional NIP-13 PoW)
   const sendPublicContent = useCallback(
     async (rawText: string, replyOverride?: GeoMessage | null): Promise<boolean> => {
       const content = rawText.trim()
       if (!content || !pool) return false
 
       const gh = activeGeohash
+      const isTopic = isTopicChannel(gh)
       const nick = identityManager.getNickname()
       const activeKey = identityManager.getKeyMaterialForGeohash(gh)
       const replyTarget = replyOverride !== undefined ? replyOverride : replyingTo
 
       setSending(true)
       try {
-        const template = buildGeohashChatTemplate({
-          content,
-          geohash: gh,
-          nickname: nick,
-          isTeleported: location.isTeleported,
-          replyTo: replyTarget,
-          broadcastClientTag: settings.broadcastClientTag,
-        })
+        const template = isTopic
+          ? buildNamedRadioChatTemplate({
+              content,
+              topic: gh,
+              nickname: nick,
+              replyTo: replyTarget,
+              broadcastClientTag: settings.broadcastClientTag,
+            })
+          : buildGeohashChatTemplate({
+              content,
+              geohash: gh,
+              nickname: nick,
+              isTeleported: location.isTeleported,
+              replyTo: replyTarget,
+              broadcastClientTag: settings.broadcastClientTag,
+            })
 
         // Mine 8-bit NIP-13 PoW non-blocking when enabled and pubkey is known
         if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
@@ -1312,9 +1432,13 @@ export function useAgnostrEngine(): AgnostrEngine {
         }
 
         const signed = await identityManager.signEvent(template, gh)
-        const optimistic = parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
-          messagesRef.current.find((m) => m.id === id)
-        )
+        const optimistic = isTopic
+          ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
+              messagesRef.current.find((m) => m.id === id)
+            )
+          : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
+              messagesRef.current.find((m) => m.id === id)
+            )
         if (optimistic) {
           optimistic.deliveryStatus = 'sending'
           optimistic.isOwn = true
@@ -1423,6 +1547,14 @@ export function useAgnostrEngine(): AgnostrEngine {
       const content = rawContent.trim()
       if (!content || !pool) return false
       const gh = activeGeohash
+      if (isTopicChannel(gh)) {
+        pushToast(
+          'warning',
+          'Dead-drop notes are geohash-only',
+          'Switch to a geohash channel to drop a 24h location note.'
+        )
+        return false
+      }
       try {
         const template = buildLocationNoteTemplate({
           geohash: gh,
@@ -1837,16 +1969,26 @@ export function useAgnostrEngine(): AgnostrEngine {
 
         setVoiceSendPhase('signing')
         const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
+        const isTopic = isTopicChannel(gh)
         const activeKey = identityManager.getKeyMaterialForGeohash(gh)
-        const template = buildGeohashChatTemplate({
-          content,
-          geohash: gh,
-          nickname: identityManager.getNickname(),
-          isTeleported: location.isTeleported,
-          replyTo: replyingTo,
-          voiceMemo: attachment,
-          broadcastClientTag: settings.broadcastClientTag,
-        })
+        const template = isTopic
+          ? buildNamedRadioChatTemplate({
+              content,
+              topic: gh,
+              nickname: identityManager.getNickname(),
+              replyTo: replyingTo,
+              voiceMemo: attachment,
+              broadcastClientTag: settings.broadcastClientTag,
+            })
+          : buildGeohashChatTemplate({
+              content,
+              geohash: gh,
+              nickname: identityManager.getNickname(),
+              isTeleported: location.isTeleported,
+              replyTo: replyingTo,
+              voiceMemo: attachment,
+              broadcastClientTag: settings.broadcastClientTag,
+            })
 
         if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
           const nonceTag = await mineNip13NonceTag(template, activeKey.pubkey, settings.powTargetBits, 450)
@@ -1856,9 +1998,13 @@ export function useAgnostrEngine(): AgnostrEngine {
         }
 
         const signed = await identityManager.signEvent(template, gh)
-        const optimistic = parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
-          messagesRef.current.find((m) => m.id === id)
-        )
+        const optimistic = isTopic
+          ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
+              messagesRef.current.find((m) => m.id === id)
+            )
+          : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
+              messagesRef.current.find((m) => m.id === id)
+            )
         if (optimistic) {
           optimistic.deliveryStatus = 'sending'
           optimistic.isOwn = true
@@ -1989,7 +2135,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       hashes.add(callsEngine.activeCall.geohash)
     }
     for (const gh of hashes) {
-      if (isValidGeohash(gh)) {
+      if (isValidRadioChannelKey(gh)) {
         set.add(identityManager.getDerivedGeohashKeyMaterial(gh).pubkey.toLowerCase())
       }
     }
@@ -2117,16 +2263,26 @@ export function useAgnostrEngine(): AgnostrEngine {
 
         setVoiceSendPhase('signing')
         const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
+        const isTopic = isTopicChannel(gh)
         const activeKey = identityManager.getKeyMaterialForGeohash(gh)
-        const template = buildGeohashChatTemplate({
-          content,
-          geohash: gh,
-          nickname: identityManager.getNickname(),
-          isTeleported: location.isTeleported,
-          replyTo: replyingTo,
-          imageAttachment: attachment,
-          broadcastClientTag: settings.broadcastClientTag,
-        })
+        const template = isTopic
+          ? buildNamedRadioChatTemplate({
+              content,
+              topic: gh,
+              nickname: identityManager.getNickname(),
+              replyTo: replyingTo,
+              imageAttachment: attachment,
+              broadcastClientTag: settings.broadcastClientTag,
+            })
+          : buildGeohashChatTemplate({
+              content,
+              geohash: gh,
+              nickname: identityManager.getNickname(),
+              isTeleported: location.isTeleported,
+              replyTo: replyingTo,
+              imageAttachment: attachment,
+              broadcastClientTag: settings.broadcastClientTag,
+            })
 
         if (settings.powEnabled && settings.powTargetBits > 0 && activeKey.pubkey) {
           const nonceTag = await mineNip13NonceTag(template, activeKey.pubkey, settings.powTargetBits, 450)
@@ -2136,9 +2292,13 @@ export function useAgnostrEngine(): AgnostrEngine {
         }
 
         const signed = await identityManager.signEvent(template, gh)
-        const optimistic = parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
-          messagesRef.current.find((m) => m.id === id)
-        )
+        const optimistic = isTopic
+          ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
+              messagesRef.current.find((m) => m.id === id)
+            )
+          : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, (id) =>
+              messagesRef.current.find((m) => m.id === id)
+            )
         if (optimistic) {
           optimistic.deliveryStatus = 'sending'
           optimistic.isOwn = true
@@ -2419,6 +2579,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           strictWhitelistMode: settings.strictWhitelistMode,
           setNickname,
           tuneGeohash,
+          tuneTopicChannel,
           openDmThread,
           sendDirectMessage,
           sendPublicContent: (text) => sendPublicContent(text, null),
@@ -2454,6 +2615,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.strictWhitelistMode,
       setNickname,
       tuneGeohash,
+      tuneTopicChannel,
       openDmThread,
       sendDirectMessage,
       sendPublicContent,
@@ -2488,8 +2650,9 @@ export function useAgnostrEngine(): AgnostrEngine {
     : 0
 
   const exportTranscript = useCallback(
-    (format: 'markdown' | 'json') => formatTranscriptExport(format, cell, visibleMessages),
-    [cell, visibleMessages]
+    (format: 'markdown' | 'json') =>
+      formatTranscriptExport(format, cell, visibleMessages, activeGeohash),
+    [cell, visibleMessages, activeGeohash]
   )
 
   // Relay telemetry aggregates
@@ -2546,6 +2709,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     sendDirectMessage,
 
     tuneGeohash,
+    tuneRadioChannel,
+    tuneTopicChannel,
     locateMe,
     sendInput,
     sendReaction,

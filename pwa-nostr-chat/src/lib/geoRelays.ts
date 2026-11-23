@@ -1,5 +1,6 @@
 import type { RelayRole } from '../types/protocol.ts'
 import { decodeCenter, haversineKm } from './geohash.ts'
+import { isTopicChannel } from './radioChannel.ts'
 
 export interface GeoRelayEntry {
   url: string
@@ -189,7 +190,8 @@ export function selectRelaysForGeohash(
   customRelays: readonly string[],
   geoCount = 5
 ): ChannelRelaySelection {
-  const center = decodeCenter(geohash)
+  const isTopic = isTopicChannel(geohash)
+  const center = isTopic ? null : decodeCenter(geohash)
   const metaMap = new Map<string, SelectedRelayMeta>()
   const coreDmSet = new Set<string>(CORE_DM_RELAYS)
 
@@ -220,32 +222,47 @@ export function selectRelaysForGeohash(
     }
   }
 
-  // Prefer bundled live-verified relays first when distances tie, plus full directory
-  const bundledSet = new Set(BUNDLED_GEO_RELAYS.map((e) => e.url))
-  const scored = directory
-    .map((entry) => ({
-      entry,
-      distanceKm: haversineKm(center.lat, center.lon, entry.lat, entry.lon),
-      verified: bundledSet.has(entry.url),
-    }))
-    .sort((a, b) => {
-      // Slight preference (300km bonus) for live-verified relays so dead remote entries don't starve rooms
-      const scoreA = a.distanceKm - (a.verified ? 300 : 0)
-      const scoreB = b.distanceKm - (b.verified ? 300 : 0)
-      return scoreA - scoreB
-    })
-
   const channelSet = new Set<string>()
 
-  // 1. Closest N geo-routed relays
-  for (const item of scored.slice(0, geoCount)) {
-    channelSet.add(item.entry.url)
-    addRole(
-      item.entry.url,
-      'geo',
-      { lat: item.entry.lat, lon: item.entry.lon, distanceKm: Math.round(item.distanceKm) },
-      item.entry.supportsDm
-    )
+  if (isTopic) {
+    // Named kind:23333 topic channels are global (non-geographic): fan out across broad
+    // core + top pulse relays (including bitchat.nostr1.com & ephemeral-friendly global relays).
+    for (const url of PULSE_RELAYS.slice(0, 7)) {
+      channelSet.add(url)
+      const dirEntry = directory.find((d) => d.url === url)
+      addRole(
+        url,
+        'pulse',
+        dirEntry ? { lat: dirEntry.lat, lon: dirEntry.lon } : undefined,
+        coreDmSet.has(url)
+      )
+    }
+  } else if (center) {
+    // Prefer bundled live-verified relays first when distances tie, plus full directory
+    const bundledSet = new Set(BUNDLED_GEO_RELAYS.map((e) => e.url))
+    const scored = directory
+      .map((entry) => ({
+        entry,
+        distanceKm: haversineKm(center.lat, center.lon, entry.lat, entry.lon),
+        verified: bundledSet.has(entry.url),
+      }))
+      .sort((a, b) => {
+        // Slight preference (300km bonus) for live-verified relays so dead remote entries don't starve rooms
+        const scoreA = a.distanceKm - (a.verified ? 300 : 0)
+        const scoreB = b.distanceKm - (b.verified ? 300 : 0)
+        return scoreA - scoreB
+      })
+
+    // 1. Closest N geo-routed relays
+    for (const item of scored.slice(0, geoCount)) {
+      channelSet.add(item.entry.url)
+      addRole(
+        item.entry.url,
+        'geo',
+        { lat: item.entry.lat, lon: item.entry.lon, distanceKm: Math.round(item.distanceKm) },
+        item.entry.supportsDm
+      )
+    }
   }
 
   // 2. Core global + DM relays (always participate in channel + DMs)
@@ -261,7 +278,7 @@ export function selectRelaysForGeohash(
         ? {
             lat: dirEntry.lat,
             lon: dirEntry.lon,
-            distanceKm: Math.round(haversineKm(center.lat, center.lon, dirEntry.lat, dirEntry.lon)),
+            distanceKm: center ? Math.round(haversineKm(center.lat, center.lon, dirEntry.lat, dirEntry.lon)) : undefined,
           }
         : undefined,
       true
@@ -289,7 +306,7 @@ export function selectRelaysForGeohash(
         ? {
             lat: dirEntry.lat,
             lon: dirEntry.lon,
-            distanceKm: Math.round(haversineKm(center.lat, center.lon, dirEntry.lat, dirEntry.lon)),
+            distanceKm: center ? Math.round(haversineKm(center.lat, center.lon, dirEntry.lat, dirEntry.lon)) : undefined,
           }
         : undefined,
       coreDmSet.has(url)

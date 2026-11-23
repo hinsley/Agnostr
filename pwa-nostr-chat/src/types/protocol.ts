@@ -415,6 +415,8 @@ export interface AgnostrEngine {
 
   // Channel & messaging actions
   tuneGeohash: (geohashOrCity: string) => boolean
+  tuneRadioChannel: (channelKeyOrInput: string) => boolean
+  tuneTopicChannel: (slug: string) => boolean
   locateMe: () => Promise<string | null>
   sendInput: (rawText: string) => Promise<boolean>
   sendReaction: (message: GeoMessage, emoji: string) => Promise<void>

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { getCachedMathSvg, hasMathSyntax, renderMathToSvg } from '../lib/mathjax'
+import { makeTopicChannelKey, normalizeTopicSlug } from '../lib/radioChannel'
 
 export interface MarkdownCallbacks {
   onTuneGeohash?: (geohash: string) => void
@@ -51,10 +52,10 @@ const BASE_NON_MENTION_PATTERNS = [
   String.raw`==[^=\n]+?==`,
   String.raw`\*[^*\s\n](?:[^*\n]*?[^*\s\n])?\*`,
   String.raw`(?<![\p{L}\p{N}_])_[^_\s\n](?:[^_\n]*?[^_\s\n])?_(?![\p{L}\p{N}_])`,
-  // 5. Bare URLs, nostr: URIs, #geohash channel pills
+  // 5. Bare URLs, nostr: URIs, #geohash / #topic channel pills
   String.raw`https?:\/\/[^\s<>"')]+`,
   String.raw`nostr:(?:npub|nprofile|note|nevent|naddr)1[02-9ac-hj-np-z]+`,
-  String.raw`(?<=^|[\s([,])#[0-9bcdefghjkmnpqrstuvwxyz]{1,12}\b`,
+  String.raw`(?<=^|[\s([,])#(?:topic:[a-z0-9][a-z0-9_-]{0,47}|[a-z][a-z0-9_-]{1,47}|[0-9bcdefghjkmnpqrstuvwxyz]{1,12})\b`,
 ]
 
 function escapeRegexLiteral(text: string): string {
@@ -135,8 +136,8 @@ function sanitizeMarkdownUrl(rawUrl: string): SanitizedLink | null {
 
   const lower = cleaned.toLowerCase()
 
-  // Internal Agnostr deep links (`#dm=...` or `#invite=...`)
-  if (lower.startsWith('#dm=') || lower.startsWith('#invite=')) {
+  // Internal Agnostr deep links (`#dm=...`, `#invite=...`, `#topic=...`)
+  if (lower.startsWith('#dm=') || lower.startsWith('#invite=') || lower.startsWith('#topic=')) {
     return { kind: 'internal', hash: cleaned, title: cleaned }
   }
 
@@ -160,7 +161,11 @@ function sanitizeMarkdownUrl(rawUrl: string): SanitizedLink | null {
         parsed.pathname === window.location.pathname
       ) {
         const lowerHash = parsed.hash.toLowerCase()
-        if (lowerHash.startsWith('#dm=') || lowerHash.startsWith('#invite=')) {
+        if (
+          lowerHash.startsWith('#dm=') ||
+          lowerHash.startsWith('#invite=') ||
+          lowerHash.startsWith('#topic=')
+        ) {
           return { kind: 'internal', hash: parsed.hash, title: parsed.href }
         }
       }
@@ -505,22 +510,48 @@ function renderInline(
         </span>
       )
     } else if (token.startsWith('#')) {
-      const gh = token.slice(1).toLowerCase()
-      if (GEOHASH_BASE32.test(gh) && opts.onTuneGeohash) {
+      const rawTag = token.slice(1).toLowerCase()
+      const explicitTopic = rawTag.startsWith('topic:')
+      if (!explicitTopic && GEOHASH_BASE32.test(rawTag) && opts.onTuneGeohash) {
         nodes.push(
           <button
             key={k}
             type="button"
             className="ag-geo-chip"
-            title={`Tune to #${gh}`}
+            title={`Tune to #${rawTag}`}
             onClick={(e) => {
               e.stopPropagation()
-              opts.onTuneGeohash?.(gh)
+              opts.onTuneGeohash?.(rawTag)
             }}
           >
-            #{gh}
+            #{rawTag}
           </button>
         )
+      } else if (opts.onTuneGeohash) {
+        const slug = normalizeTopicSlug(rawTag)
+        const topicKey = slug ? makeTopicChannelKey(slug) : null
+        if (slug && topicKey) {
+          nodes.push(
+            <button
+              key={k}
+              type="button"
+              className="ag-geo-chip"
+              title={`Join Topic Radio #${slug} (kind 23333)`}
+              onClick={(e) => {
+                e.stopPropagation()
+                opts.onTuneGeohash?.(topicKey)
+              }}
+            >
+              #{slug}
+            </button>
+          )
+        } else {
+          nodes.push(
+            <React.Fragment key={k}>
+              {renderHighlightedText(token, opts.highlightQuery)}
+            </React.Fragment>
+          )
+        }
       } else {
         nodes.push(
           <React.Fragment key={k}>

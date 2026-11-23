@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react'
 import {
   ArrowDown,
   Crosshair,
+  Hash,
   Lock,
   Map as MapIcon,
   Radio,
@@ -16,6 +17,7 @@ import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { LightboxImagePayload } from './ImageLightboxModal'
 import { MessageItem } from './MessageItem'
 import { doesContentMentionUser } from '../lib/bitchatProtocol'
+import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel'
 import { identiconDataUrl, formatHandle } from '../utils/identicon'
 
 function getServerMonogram(name: string): string {
@@ -654,38 +656,56 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 </div>
               </div>
             ) : (
-              /* Serene Geohash Room Empty State */
+              /* Serene Geohash or Named Topic Radio Empty State */
+              (() => {
+                const activeIsTopic = isTopicChannel(engine.activeGeohash)
+                const activeRadioLabel = formatRadioChannelLabel(engine.activeGeohash)
+                const hottestIsTopic = hottestPulse ? isTopicChannel(hottestPulse.geohash) : false
+                const hottestLabel = hottestPulse
+                  ? formatRadioChannelLabel(hottestPulse.geohash)
+                  : ''
+                return (
               <div className="ag-empty-stage">
                 <div className="ag-empty-radio-icon" aria-hidden="true">
-                  <Radio size={26} />
+                  {activeIsTopic ? <Hash size={26} /> : <Radio size={26} />}
                 </div>
 
                 <div className="ag-empty-copy">
                   <h2 className="ag-empty-title">
-                    <span className="mono">#{engine.activeGeohash}</span>
-                    {engine.cell.nearestCity ? ` · ${engine.cell.nearestCity}` : ''}
+                    <span className="mono">{activeRadioLabel}</span>
+                    {!activeIsTopic && engine.cell.nearestCity ? ` · ${engine.cell.nearestCity}` : ''}
                   </h2>
                   <p className="ag-empty-sub">
-                    Messages here are live and ephemeral — say hello to start chatting nearby.
+                    {activeIsTopic
+                      ? 'Live ephemeral topic channel (kind 23333) — say hello to start chatting.'
+                      : 'Messages here are live and ephemeral — say hello to start chatting nearby.'}
                   </p>
                 </div>
 
                 <div className="ag-empty-actions">
-                  <button type="button" className="ag-cta-btn primary" onClick={onLocateMe}>
-                    <Crosshair size={15} />
-                    <span>Locate Me</span>
-                  </button>
+                  {!activeIsTopic && (
+                    <button type="button" className="ag-cta-btn primary" onClick={onLocateMe}>
+                      <Crosshair size={15} />
+                      <span>Locate Me</span>
+                    </button>
+                  )}
 
                   {hottestPulse ? (
                     <button
                       type="button"
-                      className="ag-cta-btn"
+                      className={`ag-cta-btn ${activeIsTopic ? 'primary' : ''}`}
                       onClick={() => onTuneChannel(hottestPulse.geohash)}
                     >
-                      <Radio size={15} style={{ color: 'var(--accent)' }} />
+                      {hottestIsTopic ? (
+                        <Hash size={15} style={{ color: activeIsTopic ? 'currentColor' : 'var(--accent)' }} />
+                      ) : (
+                        <Radio size={15} style={{ color: activeIsTopic ? 'currentColor' : 'var(--accent)' }} />
+                      )}
                       <span>
-                        Join #{hottestPulse.geohash}
-                        {hottestPulse.nearestCity ? ` · ${hottestPulse.nearestCity}` : ''}
+                        Join {hottestLabel}
+                        {!hottestIsTopic && hottestPulse.nearestCity
+                          ? ` · ${hottestPulse.nearestCity}`
+                          : ''}
                       </span>
                     </button>
                   ) : (
@@ -696,6 +716,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   )}
                 </div>
               </div>
+                )
+              })()
             )
           ) : (
             displayMessages.map((msg, idx) => {

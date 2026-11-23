@@ -1,6 +1,7 @@
 import type { ChannelPresenceSummary, PeerInfo } from '../types/protocol.ts'
 import { getPrecisionInfo, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe, formatDisplayHandle } from './identity.ts'
+import { isTopicChannel } from './radioChannel.ts'
 
 export const ONLINE_WINDOW_SEC = 5 * 60 // 5 minutes per docs/GeohashPresenceSpec.md
 export const PRESENCE_MIN_INTERVAL_MS = 40_000
@@ -182,10 +183,18 @@ export class PresenceTracker {
     peers: readonly PeerInfo[],
     presenceBroadcastEnabled: boolean
   ): ChannelPresenceSummary {
-    const gh = normalizeGeohash(geohash)
-    const info = getPrecisionInfo(gh.length)
     const visiblePeers = peers.filter((p) => !p.isBlocked)
     const onlinePeers = visiblePeers.filter((p) => p.isOnline)
+    if (isTopicChannel(geohash)) {
+      return {
+        onlineCount: onlinePeers.length,
+        totalSeenCount: visiblePeers.length,
+        isUncertainCount: false,
+        isBroadcastingPresence: false,
+      }
+    }
+    const gh = normalizeGeohash(geohash)
+    const info = getPrecisionInfo(gh.length)
     const nonSelfOnline = onlinePeers.filter((p) => !p.isSelf)
     const isBroadcastingPresence = presenceBroadcastEnabled && info.allowsPresence
     // Per GeohashPresenceSpec.md: high precision (>=6) with 0 detected other peers shows uncertain "?"
@@ -208,7 +217,7 @@ export class PresenceTracker {
 }
 
 export function canBroadcastPresenceForGeohash(geohash: string, enabled: boolean): boolean {
-  if (!enabled) return false
+  if (!enabled || isTopicChannel(geohash)) return false
   const gh = normalizeGeohash(geohash)
   return gh.length >= 1 && getPrecisionInfo(gh.length).allowsPresence
 }

@@ -7,6 +7,11 @@ import { useMobileViewport } from './hooks/useMobileViewport'
 import { usePwa } from './hooks/usePwa'
 import { doesContentMentionUser } from './lib/bitchatProtocol'
 import {
+  formatRadioChannelLabel,
+  parseQuickTuneInput,
+  parseRadioChannelHash,
+} from './lib/radioChannel'
+import {
   clearLocationDmHash,
   extractPendingDmFromLocation,
   type ParsedShareTarget,
@@ -340,7 +345,7 @@ export function App() {
     ) {
       document.title = `${unreadPrefix}#${engine.servers.activeChannel.name} · ${engine.servers.activeServer.name} · Agnostr`
     } else {
-      document.title = `${unreadPrefix}#${engine.activeGeohash} · Agnostr`
+      document.title = `${unreadPrefix}${formatRadioChannelLabel(engine.activeGeohash)} · Agnostr`
     }
   }, [
     engine.activeView,
@@ -802,8 +807,9 @@ export function App() {
       : listTab
 
   const handleTuneChannel = useCallback(
-    (geohash: string): boolean => {
-      const ok = engine.tuneGeohash(geohash)
+    (channelInput: string): boolean => {
+      const resolved = parseQuickTuneInput(channelInput, 'geo')
+      const ok = engine.tuneGeohash(resolved?.key ?? channelInput)
       if (ok) {
         radioAudio.play('tune')
         setListTab('radio')
@@ -924,6 +930,21 @@ export function App() {
     window.addEventListener('hashchange', consumeLocationDm)
     return () => window.removeEventListener('hashchange', consumeLocationDm)
   }, [handleResolvedShareTarget])
+
+  // Navigate mobile shell cleanly to chat when a `#topic=<slug>` deep link is clicked in-app
+  useEffect(() => {
+    const onRadioHash = () => {
+      const key = parseRadioChannelHash(window.location.hash)
+      if (!key) return
+      setRadarExpanded(false)
+      setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+      setRoomInfoOpen(false)
+      setListTab('radio')
+      setMobileScreen('chat')
+    }
+    window.addEventListener('hashchange', onRadioHash)
+    return () => window.removeEventListener('hashchange', onRadioHash)
+  }, [])
 
   const handleLeftServer = useCallback(() => {
     setServerSettingsState({ serverId: null, tab: 'overview' })
@@ -1359,7 +1380,7 @@ export function App() {
                 title={
                   isActiveGeoCallFull
                     ? `Call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
-                    : `Join #${engine.activeGeohash} voice call`
+                    : `Join ${formatRadioChannelLabel(engine.activeGeohash)} voice call`
                 }
               >
                 <Phone size={13} />
@@ -1370,8 +1391,8 @@ export function App() {
                   type="button"
                   className="ag-geo-call-join-btn"
                   onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'video')}
-                  title={`Join #${engine.activeGeohash} video call`}
-                  aria-label={`Join #${engine.activeGeohash} video call`}
+                  title={`Join ${formatRadioChannelLabel(engine.activeGeohash)} video call`}
+                  aria-label={`Join ${formatRadioChannelLabel(engine.activeGeohash)} video call`}
                 >
                   <Video size={13} />
                   <span>Video</span>

@@ -393,12 +393,121 @@
   gap: 10px;
 }
 
-/* Radio Quick Jump Bar (compact 34px on desktop, 42px on mobile) */
+/* Radio Quick Jump & Geo | Topic Mode Controls */
+.ag-radio-tune-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ag-radio-tune-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 2px;
+}
+
+.ag-radio-mode-seg {
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ag-radio-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: calc(var(--radius-sm) - 2px);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-radio-mode-btn:hover:not(.active) {
+  color: var(--text-primary);
+}
+
+.ag-radio-mode-btn.active {
+  background-color: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.ag-radio-mode-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.ag-quick-tool-btn.compact {
+  width: 30px;
+  height: 30px;
+}
+
+.ag-quick-map-pill.compact {
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
 .ag-radio-quickbar {
   display: flex;
   align-items: center;
   gap: 5px;
   padding: 0 2px;
+}
+
+.ag-topic-quick-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 0 2px;
+}
+
+.ag-topic-quick-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-topic-quick-chip:hover {
+  background-color: var(--accent-secondary-soft);
+  border-color: var(--accent-secondary);
+  color: var(--accent-secondary);
+}
+
+.ag-topic-quick-chip.active {
+  background-color: var(--accent-secondary-soft);
+  border-color: var(--accent-secondary);
+  color: var(--accent-secondary);
+  font-weight: 600;
 }
 
 .ag-jump-form {
@@ -858,6 +967,27 @@
 .ag-chat-row-avatar.radio {
   background-color: var(--accent-soft);
   color: var(--accent);
+}
+
+.ag-chat-row-avatar.topic {
+  background-color: var(--accent-secondary-soft);
+  color: var(--accent-secondary);
+}
+
+.ag-topic-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-secondary-soft);
+  color: var(--accent-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  flex-shrink: 0;
 }
 
 .ag-chat-row-avatar.pinned {
@@ -1781,6 +1911,26 @@
 .ag-header-avatar.radio {
   background-color: var(--accent-soft);
   color: var(--accent);
+}
+
+.ag-header-avatar.topic {
+  background-color: var(--accent-secondary-soft);
+  color: var(--accent-secondary);
+}
+
+.ag-header-topic-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-secondary-soft);
+  color: var(--accent-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .ag-header-avatar.server {
@@ -4753,6 +4903,26 @@
   .ag-quick-tool-btn,
   .ag-quick-map-pill {
     height: 42px;
+  }
+
+  .ag-radio-mode-btn {
+    height: 32px;
+    font-size: 12.5px;
+  }
+
+  .ag-quick-tool-btn.compact,
+  .ag-quick-map-pill.compact {
+    height: 36px;
+  }
+
+  .ag-quick-tool-btn.compact {
+    width: 36px;
+  }
+
+  .ag-topic-quick-chip {
+    height: 28px;
+    padding: 0 10px;
+    font-size: 12px;
   }
 
   .ag-chat-row {

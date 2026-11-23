@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { LocationState } from '../types/protocol.ts'
 import { encodeGeohash, normalizeGeohash } from '../lib/geohash.ts'
+import { isTopicChannel } from '../lib/radioChannel.ts'
 
 const PRECISIONS = [1, 2, 3, 4, 5, 6, 7, 8] as const
 
@@ -20,6 +21,7 @@ export function useLocation(activeGeohash: string) {
   }, [coords])
 
   const isTeleported = useMemo(() => {
+    if (isTopicChannel(activeGeohash)) return false
     const gh = normalizeGeohash(activeGeohash)
     if (!coords) return true
     const expected = encodeGeohash(coords.lat, coords.lon, gh.length)

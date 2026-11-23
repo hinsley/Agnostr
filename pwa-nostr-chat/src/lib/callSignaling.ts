@@ -2,8 +2,13 @@ import { sha256 } from '@noble/hashes/sha256'
 import { nip44, type Event as NostrEvent, type EventTemplate } from 'nostr-tools'
 import type { CallMediaType } from '../types/calls.ts'
 import type { ServerSummary } from '../types/servers.ts'
-import { isValidGeohash, normalizeGeohash } from './geohash.ts'
+import { normalizeGeohash } from './geohash.ts'
 import { bytesToHex, type SigningKeyMaterial } from './identity.ts'
+import {
+  getTopicSlug,
+  isValidRadioChannelKey,
+  normalizeRadioChannelKey,
+} from './radioChannel.ts'
 
 /** Ephemeral Nostr event kind for WebRTC call signaling (live-verified on 5 relays) */
 export const KIND_CALL_SIGNAL = 25050
@@ -13,6 +18,9 @@ export const DM_CALL_SIGNAL_TAG = 'agnostr-call-v1'
 
 /** Isolated `#t` tag prefix for Geo Radio group call presence (keeps legacy kind:20000 #g clients clean) */
 export const GEO_CALL_TAG_PREFIX = 'agnostr-call-geo-'
+
+/** Isolated `#t` tag prefix for Named Topic Radio (`kind: 23333`) group call presence */
+export const TOPIC_CALL_TAG_PREFIX = 'agnostr-call-topic-'
 
 /** Prefix for AES-256-GCM encrypted signaling payloads inside E2EE Private Servers */
 export const E2EE_CALL_PAYLOAD_PREFIX = 'agnostr-call-e2ee-v1:'
@@ -172,11 +180,15 @@ export function getServerCallRoomTag(
 }
 
 export function getGeoCallRoomId(geohash: string): string {
+  const topicSlug = getTopicSlug(geohash)
+  if (topicSlug) return `topic:${topicSlug}`
   const gh = normalizeGeohash(geohash)
   return `geo:${gh}`
 }
 
 export function getGeoCallRoomTag(geohash: string): string {
+  const topicSlug = getTopicSlug(geohash)
+  if (topicSlug) return `${TOPIC_CALL_TAG_PREFIX}${topicSlug}`
   const gh = normalizeGeohash(geohash)
   return `${GEO_CALL_TAG_PREFIX}${gh}`
 }
@@ -351,8 +363,8 @@ export function validateDirectSignalPayload(
   if (!raw.action || !VALID_DIRECT_ACTIONS.has(raw.action)) return null
   if (typeof raw.callId !== 'string' || !raw.callId.trim()) return null
   const normalizedGeo =
-    typeof raw.geohash === 'string' && isValidGeohash(raw.geohash)
-      ? normalizeGeohash(raw.geohash)
+    typeof raw.geohash === 'string' && isValidRadioChannelKey(raw.geohash)
+      ? normalizeRadioChannelKey(raw.geohash) ?? undefined
       : undefined
   return {
     v: 1,
@@ -360,7 +372,7 @@ export function validateDirectSignalPayload(
     callId: raw.callId.trim().slice(0, 64),
     serverId: typeof raw.serverId === 'string' && raw.serverId.trim() ? raw.serverId.trim().slice(0, 96) : undefined,
     geohash: normalizedGeo,
-    roomId: typeof raw.roomId === 'string' && raw.roomId.trim() ? raw.roomId.trim().slice(0, 48) : undefined,
+    roomId: typeof raw.roomId === 'string' && raw.roomId.trim() ? raw.roomId.trim().slice(0, 64) : undefined,
     media: raw.media === 'audio' || raw.media === 'video' ? raw.media : undefined,
     nickname: typeof raw.nickname === 'string' ? raw.nickname.trim().slice(0, 32) : undefined,
     sdp: typeof raw.sdp === 'string' && raw.sdp.length <= 65_536 ? raw.sdp : undefined,
@@ -409,11 +421,12 @@ export function validateGeoSignalPayload(
 ): GeoCallSignalPayload | null {
   if (!raw || raw.v !== 1) return null
   if (!raw.action || !VALID_ROOM_ACTIONS.has(raw.action)) return null
-  if (typeof raw.geohash !== 'string' || !isValidGeohash(raw.geohash)) return null
-  const gh = normalizeGeohash(raw.geohash)
+  if (typeof raw.geohash !== 'string' || !isValidRadioChannelKey(raw.geohash)) return null
+  const gh = normalizeRadioChannelKey(raw.geohash)
+  if (!gh) return null
   const roomId =
     typeof raw.roomId === 'string' && raw.roomId.trim()
-      ? raw.roomId.trim().slice(0, 48)
+      ? raw.roomId.trim().slice(0, 64)
       : getGeoCallRoomId(gh)
   return {
     v: 1,
@@ -551,7 +564,7 @@ export function parseGeoCallSignalEvent(
   if (event.kind !== KIND_CALL_SIGNAL) return null
   const nowSec = Math.floor(Date.now() / 1000)
   if (Math.abs(nowSec - event.created_at) > MAX_SIGNAL_AGE_SEC) return null
-  const expected = normalizeGeohash(expectedGeohash)
+  const expected = normalizeRadioChannelKey(expectedGeohash) ?? normalizeGeohash(expectedGeohash)
   try {
     const parsed = JSON.parse(event.content) as Partial<GeoCallSignalPayload>
     const validated = validateGeoSignalPayload(parsed)

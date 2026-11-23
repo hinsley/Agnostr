@@ -39,6 +39,7 @@ import {
   verifyEventCached,
 } from '../lib/bitchatProtocol.ts'
 import { CORE_DM_RELAYS, normalizeRelayUrl } from '../lib/geoRelays.ts'
+import { formatRadioChannelHash } from '../lib/radioChannel.ts'
 import {
   decodePubkeyInput,
   encodeNpubSafe,
@@ -340,7 +341,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     setPendingInvite(null)
     try {
       if ((window.location.hash || '').toLowerCase().startsWith('#invite=')) {
-        window.history.replaceState(window.history.state, '', `#${activeGeohash}`)
+        window.history.replaceState(window.history.state, '', formatRadioChannelHash(activeGeohash))
       }
     } catch {
       // Ignore

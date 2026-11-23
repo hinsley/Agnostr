@@ -9,6 +9,13 @@ import type {
 } from '../types/protocol.ts'
 import { isValidGeohash, normalizeGeohash } from './geohash.ts'
 import { bytesToHex, formatDisplayHandle } from './identity.ts'
+import {
+  getTopicSlug,
+  isTopicChannel,
+  normalizeRadioChannelKey,
+  normalizeTopicSlug,
+  TOPIC_CHANNEL_PREFIX,
+} from './radioChannel.ts'
 
 export const KIND_LOCATION_NOTE = 1
 export const KIND_SEAL = 13
@@ -17,6 +24,7 @@ export const KIND_GIFT_WRAP = 1059
 export const KIND_GEOHASH_CHAT = 20000
 export const KIND_GEOHASH_PRESENCE = 20001
 export const KIND_EPHEMERAL_REACTION = 20007
+export const KIND_NAMED_RADIO_CHAT = 23333
 
 export const DEFAULT_POW_TARGET_BITS = 8
 const MAX_INBOUND_TAGS = 64
@@ -100,6 +108,15 @@ export function extractGeohashTag(tags: string[][]): string | null {
   if (!raw) return null
   const normalized = normalizeGeohash(raw)
   return isValidGeohash(normalized) ? normalized : null
+}
+
+/**
+ * Extracts a validated Nymchat/Bitchat `kind: 23333` topic channel slug from the `d` tag.
+ */
+export function extractTopicChannelTag(tags: string[][]): string | null {
+  const raw = getTagValue(tags, 'd')
+  if (!raw) return null
+  return normalizeTopicSlug(raw)
 }
 
 /**
@@ -504,6 +521,45 @@ export function buildGeohashChatTemplate(opts: {
   }
 }
 
+export function buildNamedRadioChatTemplate(opts: {
+  content: string
+  topic: string
+  nickname: string
+  replyTo?: GeoMessage | null
+  voiceMemo?: VoiceMemoAttachment
+  imageAttachment?: ImageAttachment
+  broadcastClientTag?: boolean
+}): EventTemplate {
+  const slug = getTopicSlug(opts.topic) ?? normalizeTopicSlug(opts.topic) ?? ''
+  const tags: string[][] = [['d', slug]]
+  const cleanNick = opts.nickname.trim()
+  if (cleanNick) {
+    tags.push(['n', cleanNick])
+  }
+  if (opts.broadcastClientTag) {
+    tags.push(['client', AGNOSTR_CLIENT_TAG])
+  }
+  if (opts.replyTo && !opts.replyTo.isSystem) {
+    tags.push(['e', opts.replyTo.id, '', 'reply'])
+    if (/^[0-9a-f]{64}$/i.test(opts.replyTo.pubkey)) {
+      tags.push(['p', opts.replyTo.pubkey.toLowerCase()])
+    }
+    tags.push(['k', String(KIND_NAMED_RADIO_CHAT)])
+  }
+  if (opts.voiceMemo) {
+    tags.push(buildImetaTag(opts.voiceMemo))
+  }
+  if (opts.imageAttachment) {
+    tags.push(buildImageImetaTag(opts.imageAttachment))
+  }
+  return {
+    kind: KIND_NAMED_RADIO_CHAT,
+    created_at: Math.floor(Date.now() / 1000),
+    tags,
+    content: opts.content,
+  }
+}
+
 export function buildPresenceTemplate(
   geohash: string,
   broadcastClientTag = false
@@ -527,14 +583,23 @@ export function buildReactionTemplate(opts: {
   targetPubkey: string
   emoji: string
 }): EventTemplate {
+  const topicSlug = getTopicSlug(opts.geohash)
+  const tags: string[][] = topicSlug
+    ? [
+        ['d', topicSlug],
+        ['e', opts.targetEventId],
+        ['p', opts.targetPubkey.toLowerCase()],
+        ['k', String(KIND_NAMED_RADIO_CHAT)],
+      ]
+    : [
+        ['g', normalizeGeohash(opts.geohash)],
+        ['e', opts.targetEventId],
+        ['p', opts.targetPubkey.toLowerCase()],
+      ]
   return {
     kind: KIND_EPHEMERAL_REACTION,
     created_at: Math.floor(Date.now() / 1000),
-    tags: [
-      ['g', normalizeGeohash(opts.geohash)],
-      ['e', opts.targetEventId],
-      ['p', opts.targetPubkey.toLowerCase()],
-    ],
+    tags,
     content: opts.emoji,
   }
 }
@@ -633,6 +698,75 @@ export function parseGeohashChatEvent(
   }
 }
 
+export function parseNamedRadioChatEvent(
+  event: NostrEvent,
+  expectedChannelKey: string,
+  ownPubkeys: Set<string>,
+  findMessageById?: (id: string) => GeoMessage | undefined
+): GeoMessage | null {
+  if (event.kind !== KIND_NAMED_RADIO_CHAT) return null
+  const slug = extractTopicChannelTag(event.tags)
+  const expectedSlug = getTopicSlug(expectedChannelKey) ?? normalizeTopicSlug(expectedChannelKey)
+  if (!slug || !expectedSlug || slug !== expectedSlug) return null
+
+  const content = (event.content ?? '').trim()
+  if (!content) return null
+
+  const channelKey = `${TOPIC_CHANNEL_PREFIX}${slug}`
+  const pubkey = event.pubkey.toLowerCase()
+  const rawNick = getTagValue(event.tags, 'n')?.trim() ?? ''
+  const nickname = rawNick || `anon${pubkey.slice(-4)}`
+  const displayHandle = formatDisplayHandle(nickname, pubkey)
+
+  const clientTag = parseClientTag(event.tags)
+  const isAgnostrClient = isAgnostrClientTag(event.tags)
+  const proxyTag = event.tags.find((t) => t[0] === 'proxy')
+  const isMeshBridge =
+    Boolean(proxyTag && proxyTag.some((v) => v.toLowerCase().includes('mesh'))) ||
+    Boolean(clientTag && clientTag.toLowerCase().includes('mesh')) ||
+    nickname.toLowerCase().endsWith('.mesh') ||
+    nickname.toLowerCase() === 'radio-bridge'
+
+  let replyTo: ReplyReference | undefined
+  const eTag = event.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16)
+  if (eTag) {
+    const parent = findMessageById?.(eTag[1])
+    replyTo = {
+      id: eTag[1],
+      pubkey: parent?.pubkey ?? getTagValue(event.tags, 'p') ?? undefined,
+      nickname: parent?.nickname,
+      preview: parent ? parent.content.slice(0, 120) : undefined,
+    }
+  }
+
+  const voiceMemo = parseVoiceMemoFromImeta(event.tags)
+  const imageAttachment = parseImageFromImeta(event.tags)
+
+  return {
+    id: event.id,
+    geohash: channelKey,
+    pubkey,
+    nickname,
+    displayHandle,
+    content,
+    createdAt: clampTimestamp(event.created_at),
+    tags: event.tags,
+    isOwn: ownPubkeys.has(pubkey),
+    isEmote: isEmoteContent(content),
+    isTeleported: false,
+    isMeshBridge,
+    bridgeClient: clientTag,
+    isAgnostrClient,
+    powBits: getValidatedPowBits(event.id, event.tags),
+    replyTo,
+    reactions: [],
+    mentions: extractMentions(content),
+    voiceMemo,
+    imageAttachment,
+    deliveryStatus: 'sent',
+  }
+}
+
 export interface ParsedReaction {
   id: string
   geohash: string
@@ -647,14 +781,23 @@ export function parseReactionEvent(
   expectedGeohash: string
 ): ParsedReaction | null {
   if (event.kind !== KIND_EPHEMERAL_REACTION) return null
-  const gh = extractGeohashTag(event.tags)
-  if (!gh || gh !== normalizeGeohash(expectedGeohash)) return null
+  let channelKey: string | null = null
+  if (isTopicChannel(expectedGeohash)) {
+    const expectedSlug = getTopicSlug(expectedGeohash)
+    const slug = extractTopicChannelTag(event.tags)
+    if (!slug || !expectedSlug || slug !== expectedSlug) return null
+    channelKey = `${TOPIC_CHANNEL_PREFIX}${slug}`
+  } else {
+    const gh = extractGeohashTag(event.tags)
+    if (!gh || gh !== normalizeGeohash(expectedGeohash)) return null
+    channelKey = gh
+  }
   const targetEventId = getTagValue(event.tags, 'e')
   const emoji = (event.content ?? '').trim()
   if (!targetEventId || !emoji || emoji.length > 16) return null
   return {
     id: event.id,
-    geohash: gh,
+    geohash: channelKey,
     targetEventId,
     pubkey: event.pubkey.toLowerCase(),
     emoji,
@@ -700,7 +843,7 @@ export function createSystemMessage(geohash: string, content: string): GeoMessag
   crypto.getRandomValues(randomBytes)
   return {
     id: `sys-${Date.now()}-${bytesToHex(randomBytes)}`,
-    geohash: normalizeGeohash(geohash),
+    geohash: normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash),
     pubkey: 'system',
     nickname: 'system',
     displayHandle: 'system',

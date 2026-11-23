@@ -24,6 +24,7 @@ import {
   revokeImagePreviewUrl,
 } from '../lib/imageProcessor'
 import { formatVoiceDuration, isVoiceRecordingSupported } from '../lib/voiceRecorder'
+import { formatRadioChannelLabel } from '../lib/radioChannel'
 import { useBackHandler } from '../hooks/useBackNavigation'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon'
 import { CameraCaptureModal } from './CameraCaptureModal'
@@ -667,7 +668,7 @@ export const Composer: React.FC<ComposerProps> = ({
         ? `Message ${dmThread.peerNickname}…`
         : isServer && activeChannel
           ? `Message #${activeChannel.name}…`
-          : `Message #${engine.activeGeohash}…`
+          : `Message ${formatRadioChannelLabel(engine.activeGeohash)}…`
 
   const hasContentToSend = draft.trim().length > 0 || pendingImage !== null
   const hasTopBanner = Boolean(activeReply)
@@ -750,7 +751,9 @@ export const Composer: React.FC<ComposerProps> = ({
           <div className="ag-autocomplete-popup" role="listbox" aria-label="Mention someone">
             <div className="ag-ac-head">
               <span>
-                {isServer && activeServer ? activeServer.name : `#${engine.activeGeohash}`}
+                {isServer && activeServer
+                  ? activeServer.name
+                  : formatRadioChannelLabel(engine.activeGeohash)}
               </span>
               <span>Tab or Enter</span>
             </div>

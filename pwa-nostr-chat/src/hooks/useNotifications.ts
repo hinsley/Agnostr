@@ -13,6 +13,11 @@ import type { ActiveView, DmThread, ToastLevel } from '../types/protocol.ts'
 import type { ServerMessage, ServerSummary } from '../types/servers.ts'
 import { doesContentMentionUser } from '../lib/bitchatProtocol.ts'
 import {
+  formatRadioChannelHash,
+  formatRadioChannelLabel,
+  isTopicChannel,
+} from '../lib/radioChannel.ts'
+import {
   closeCallNotificationsViaSw,
   getBrowserNotificationPermission,
   isWebPushSupported,
@@ -148,7 +153,7 @@ export function useNotifications(
       const parsed = parseNotifyHash(window.location.hash || '')
       if (parsed) {
         try {
-          window.history.replaceState(window.history.state, '', `#${activeGeohash}`)
+          window.history.replaceState(window.history.state, '', formatRadioChannelHash(activeGeohash))
         } catch {
           // Ignore
         }
@@ -301,7 +306,7 @@ export function useNotifications(
       if (parsed) {
         setPendingAction(parsed)
         try {
-          window.history.replaceState(window.history.state, '', `#${activeGeohash}`)
+          window.history.replaceState(window.history.state, '', formatRadioChannelHash(activeGeohash))
         } catch {
           // Ignore
         }
@@ -698,13 +703,17 @@ export function useNotifications(
         }
 
         if (canSendOsNotification()) {
+          const channelLabel = formatRadioChannelLabel(gh)
+          const isTopic = isTopicChannel(gh)
           void showOsNotification({
             title: cfg.showPreviews
-              ? `#${gh} · Geo Radio Call`
-              : 'Geo Radio Call Active',
+              ? `${channelLabel} · ${isTopic ? 'Topic Radio Call' : 'Geo Radio Call'}`
+              : isTopic
+                ? 'Topic Radio Call Active'
+                : 'Geo Radio Call Active',
             body: cfg.showPreviews
               ? `${member.displayHandle} started a ${member.hasVideo ? 'video' : 'voice'} call`
-              : 'A group call started in one of your Geo Radio channels',
+              : 'A group call started in one of your Radio channels',
             tag: `agnostr-geocall-${gh}`,
             requireInteraction: true,
             vibrate: cfg.vibrationEnabled ? [180, 90, 180] : undefined,
@@ -767,21 +776,27 @@ export function useNotifications(
             ? 'Sent a voice memo'
             : truncatePreview(input.content)
 
+        const channelLabel = formatRadioChannelLabel(input.geohash)
+        const isTopic = isTopicChannel(input.geohash)
         const title = cfg.showPreviews
           ? input.repliedToMe
-            ? `${input.senderHandle} replied to you in #${input.geohash}`
+            ? `${input.senderHandle} replied to you in ${channelLabel}`
             : input.mentionedMe
-              ? `${input.senderHandle} mentioned you in #${input.geohash}`
-              : `#${input.geohash}`
+              ? `${input.senderHandle} mentioned you in ${channelLabel}`
+              : channelLabel
           : isDirectPing
             ? 'New Direct Ping'
-            : 'Geo Radio Activity'
+            : isTopic
+              ? 'Topic Radio Activity'
+              : 'Geo Radio Activity'
 
         const body = cfg.showPreviews
           ? isDirectPing
             ? preview
             : `${input.senderHandle}: ${preview}`
-          : 'New message in Geo Radio'
+          : isTopic
+            ? 'New message in Topic Radio'
+            : 'New message in Geo Radio'
 
         void showOsNotification({
           title,

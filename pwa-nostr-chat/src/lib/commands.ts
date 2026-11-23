@@ -1,5 +1,6 @@
 import type { PeerInfo, SlashCommandDef, ThemeId, TrustedPeerEntry } from '../types/protocol.ts'
 import { decodePubkeyInput } from './identity.ts'
+import { formatRadioChannelLabel, isTopicChannel } from './radioChannel.ts'
 
 export const SLASH_COMMANDS: SlashCommandDef[] = [
   {
@@ -12,8 +13,15 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
   {
     name: 'j',
     aliases: ['join', 'geo'],
-    usage: '/j <geohash | city | lat,lon>',
-    description: 'Tune to a geohash channel or city (e.g. /j dr5r, /j tokyo)',
+    usage: '/j <geohash | city | topic:name>',
+    description: 'Tune to a geohash, city, or topic channel (e.g. /j dr5r, /j tokyo, /j bitcoin)',
+    category: 'nav',
+  },
+  {
+    name: 'topic',
+    aliases: ['t', 'chan'],
+    usage: '/topic <name>',
+    description: 'Join a global kind:23333 topic radio channel (e.g. /topic bitcoin, /topic nostr)',
     category: 'nav',
   },
   {
@@ -146,6 +154,7 @@ export interface CommandExecutionContext {
   strictWhitelistMode: boolean
   setNickname: (nick: string) => void
   tuneGeohash: (target: string) => boolean
+  tuneTopicChannel: (slug: string) => boolean
   openDmThread: (pubkey: string, nicknameHint?: string) => void
   sendDirectMessage: (pubkey: string, content: string) => Promise<boolean>
   sendPublicContent: (content: string) => Promise<boolean>
@@ -278,26 +287,43 @@ export async function executeSlashCommand(
     case 'join':
     case 'geo': {
       if (!args) {
-        ctx.addSystemMessage('Usage: /j <geohash | city | lat,lon> (e.g. /j dr5r, /j tokyo)')
+        ctx.addSystemMessage('Usage: /j <geohash | city | topic:name> (e.g. /j dr5r, /j tokyo, /j bitcoin)')
         return true
       }
       const ok = ctx.tuneGeohash(args)
       if (!ok) {
-        ctx.addSystemMessage(`Could not resolve "${args}" to a valid geohash or city.`)
+        ctx.addSystemMessage(`Could not resolve "${args}" to a valid geohash, city, or topic name.`)
+      }
+      return true
+    }
+
+    case 'topic':
+    case 't':
+    case 'chan': {
+      if (!args) {
+        ctx.addSystemMessage('Usage: /topic <name> — join a global kind:23333 radio channel (e.g. /topic bitcoin)')
+        return true
+      }
+      const ok = ctx.tuneTopicChannel(args)
+      if (!ok) {
+        ctx.addSystemMessage(
+          `Invalid topic name "${args}". Use 1–48 letters, numbers, hyphens, or underscores (e.g. /topic bitcoin).`
+        )
       }
       return true
     }
 
     case 'w':
     case 'who': {
+      const channelLabel = formatRadioChannelLabel(ctx.activeGeohash)
       const online = ctx.peers.filter((p) => p.isOnline && !p.isBlocked)
       if (online.length === 0) {
-        ctx.addSystemMessage(`No active peers detected in #${ctx.activeGeohash} yet.`)
+        ctx.addSystemMessage(`No active peers detected in ${channelLabel} yet.`)
       } else {
         const list = online
           .map((p) => `${p.displayHandle}${p.isSelf ? ' (you)' : p.isTeleported ? ' [teleport]' : ''}`)
           .join(', ')
-        ctx.addSystemMessage(`Online in #${ctx.activeGeohash} (${online.length}): ${list}`)
+        ctx.addSystemMessage(`Online in ${channelLabel} (${online.length}): ${list}`)
       }
       return true
     }
@@ -312,7 +338,9 @@ export async function executeSlashCommand(
       const { targetToken, body } = splitDmTargetAndBody(args, ctx.peers)
       const peer = resolvePeer(targetToken, ctx.peers)
       if (!peer) {
-        ctx.addSystemMessage(`Peer "${targetToken}" not found in #${ctx.activeGeohash} (or pass a full npub/hex).`)
+        ctx.addSystemMessage(
+          `Peer "${targetToken}" not found in ${formatRadioChannelLabel(ctx.activeGeohash)} (or pass a full npub/hex).`
+        )
         return true
       }
       ctx.openDmThread(peer.pubkey, peer.nickname)
@@ -352,20 +380,34 @@ export async function executeSlashCommand(
     }
 
     case 'drop': {
+      if (isTopicChannel(ctx.activeGeohash)) {
+        ctx.addSystemMessage(
+          '24h dead-drop notes (/drop) are only available in geohash channels. Switch to a geohash channel first.'
+        )
+        return true
+      }
       if (!args) {
         ctx.addSystemMessage('Usage: /drop <note> — pins a 24h location note to this geohash.')
         return true
       }
       const ok = await ctx.postLocationNote(args)
       if (ok) {
-        ctx.addSystemMessage(`📍 Dead-drop note pinned to #${ctx.activeGeohash} (expires in 24h).`)
+        ctx.addSystemMessage(`📍 Dead-drop note pinned to ${formatRadioChannelLabel(ctx.activeGeohash)} (expires in 24h).`)
       }
       return true
     }
 
     case 'notes': {
+      if (isTopicChannel(ctx.activeGeohash)) {
+        ctx.addSystemMessage(
+          '24h dead-drop notes (/notes) are only available in geohash channels. Switch to a geohash channel first.'
+        )
+        return true
+      }
       ctx.refreshLocationNotes()
-      ctx.addSystemMessage(`Scanning relays for 24h dead-drop notes in #${ctx.activeGeohash}… Check the Notes tab.`)
+      ctx.addSystemMessage(
+        `Scanning relays for 24h dead-drop notes in ${formatRadioChannelLabel(ctx.activeGeohash)}… Check the Notes tab.`
+      )
       return true
     }
 

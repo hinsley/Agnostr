@@ -45,12 +45,18 @@ import {
   type GeoCallSignalPayload,
   type RoomCallSignalPayload,
 } from '../lib/callSignaling.ts'
-import { isValidGeohash, normalizeGeohash } from '../lib/geohash.ts'
+import { normalizeGeohash } from '../lib/geohash.ts'
 import {
   formatDisplayHandle,
   type IdentityManager,
   type SigningKeyMaterial,
 } from '../lib/identity.ts'
+import {
+  formatRadioChannelLabel,
+  isTopicChannel,
+  isValidRadioChannelKey,
+  normalizeRadioChannelKey,
+} from '../lib/radioChannel.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 import {
   loadRecordingQuality,
@@ -244,7 +250,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         })
       }
     } else if (current.mode === 'geo' && current.geohash) {
-      const gh = normalizeGeohash(current.geohash)
+      const gh = normalizeRadioChannelKey(current.geohash) ?? normalizeGeohash(current.geohash)
       const roster = geoRostersRef.current[gh] ?? []
       for (const peer of roster) {
         if (now - peer.lastSeenAt >= ROOM_PEER_TTL_MS) continue
@@ -461,7 +467,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   }, [])
 
   const upsertGeoRosterMember = useCallback((entry: GeoCallPresence) => {
-    const gh = normalizeGeohash(entry.geohash)
+    const gh = normalizeRadioChannelKey(entry.geohash) ?? normalizeGeohash(entry.geohash)
     if (!gh) return
     const normalized: GeoCallPresence = { ...entry, geohash: gh }
     setGeoCallRosters((prev) => {
@@ -481,7 +487,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   }, [])
 
   const removeGeoRosterMember = useCallback((geohash: string, pubkey: string) => {
-    const gh = normalizeGeohash(geohash)
+    const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
     const pk = pubkey.toLowerCase()
     if (!gh) return
     setGeoCallRosters((prev) => {
@@ -549,7 +555,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             })
           }
         } else if (current.mode === 'geo' && current.geohash) {
-          const gh = normalizeGeohash(current.geohash)
+          const gh = normalizeRadioChannelKey(current.geohash) ?? normalizeGeohash(current.geohash)
           const geoMaterial =
             geoMaterialToUse ?? identityManager.getDerivedGeohashKeyMaterial(gh)
           const selfGeoPk = geoMaterial.pubkey.toLowerCase()
@@ -568,7 +574,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
           )
         }
       } else if (current?.mode === 'geo' && current.geohash) {
-        const gh = normalizeGeohash(current.geohash)
+        const gh = normalizeRadioChannelKey(current.geohash) ?? normalizeGeohash(current.geohash)
         const selfGeoPk = (
           geoMaterialToUse ?? identityManager.getDerivedGeohashKeyMaterial(gh)
         ).pubkey.toLowerCase()
@@ -1441,7 +1447,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       const currentPool = poolRef.current
       if (!currentPool) return
 
-      const gh = normalizeGeohash(geohash)
+      const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
       const selfGeoPk = geoMaterial.pubkey.toLowerCase()
       const subId = `call-geo-direct:${gh}:${selfGeoPk.slice(0, 8)}`
       const since = Math.floor(Date.now() / 1000) - 15
@@ -1530,14 +1536,17 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     [notifyRemoteRecordingChange]
   )
 
-  // Join a Geo Radio Group Voice/Video Call (hard cap: 6 participants; ALWAYS signed with HMAC-derived geohash identity)
+  // Join a Radio Group Voice/Video Call (geohash or kind:23333 topic; hard cap: 6 participants; ALWAYS signed with HMAC-derived per-channel identity)
   const joinGeoCall = useCallback(
     async (rawGeohash: string, media: CallMediaType): Promise<boolean> => {
-      if (!isValidGeohash(rawGeohash)) {
-        pushToastRef.current('warning', 'Invalid Geo Radio channel', 'Tune to a valid geohash channel first.')
+      if (!isValidRadioChannelKey(rawGeohash)) {
+        pushToastRef.current('warning', 'Invalid Radio channel', 'Tune to a valid geohash or topic channel first.')
         return false
       }
-      const gh = normalizeGeohash(rawGeohash)
+      const gh = normalizeRadioChannelKey(rawGeohash)
+      if (!gh) return false
+      const channelLabel = formatRadioChannelLabel(gh)
+      const isTopic = isTopicChannel(gh)
 
       if (
         activeCallRef.current?.mode === 'geo' &&
@@ -1555,7 +1564,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       if (currentRoster.length >= MAX_CALL_PARTICIPANTS) {
         pushToastRef.current(
           'warning',
-          `#${gh} radio call is full (${MAX_CALL_PARTICIPANTS}/${MAX_CALL_PARTICIPANTS})`,
+          `${channelLabel} radio call is full (${MAX_CALL_PARTICIPANTS}/${MAX_CALL_PARTICIPANTS})`,
           'P2P group calls are capped at 6 participants for low-latency stability.'
         )
         return false
@@ -1599,7 +1608,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         status: 'active',
         mediaType: mesh.getLocalCameraOn() ? 'video' : 'audio',
         encrypted: true,
-        title: `#${gh} · Geo Radio`,
+        title: isTopic ? `${channelLabel} · Topic Radio` : `${channelLabel} · Geo Radio`,
         geohash: gh,
         roomId,
         startedAt: now,
@@ -2232,18 +2241,19 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pool, serverRoomTagsKey, callSignalingRelays, identityManager, publishRoomSignal, removeRosterMember, upsertRosterMember])
 
-  // Passive Geo Radio call presence subscription (active geohash + pinned rooms + any active geo call).
+  // Passive Radio call presence subscription (active geohash/topic + pinned rooms + any active radio call).
   // Zero RTCPeerConnections or STUN/ICE traffic until user explicitly clicks Join.
   const activeGeoCallHash = activeCall?.mode === 'geo' ? activeCall.geohash ?? '' : ''
   const watchedGeoCallKey = useMemo(() => {
     const set = new Set<string>()
-    if (isValidGeohash(activeGeohash)) set.add(normalizeGeohash(activeGeohash))
+    const activeKey = normalizeRadioChannelKey(activeGeohash)
+    if (activeKey) set.add(activeKey)
     for (const gh of pinnedGeohashes) {
-      if (isValidGeohash(gh)) set.add(normalizeGeohash(gh))
+      const k = normalizeRadioChannelKey(gh)
+      if (k) set.add(k)
     }
-    if (activeGeoCallHash && isValidGeohash(activeGeoCallHash)) {
-      set.add(normalizeGeohash(activeGeoCallHash))
-    }
+    const callKey = normalizeRadioChannelKey(activeGeoCallHash)
+    if (callKey) set.add(callKey)
     return Array.from(set).sort().join('|')
   }, [activeGeohash, pinnedGeohashes, activeGeoCallHash])
 
@@ -2539,7 +2549,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         }
       }
     } else if (active.mode === 'geo' && active.geohash) {
-      const gh = normalizeGeohash(active.geohash)
+      const gh = normalizeRadioChannelKey(active.geohash) ?? normalizeGeohash(active.geohash)
       const roomId = active.roomId ?? getGeoCallRoomId(gh)
       const selfGeoPk = activeGeoMaterialRef.current?.pubkey.toLowerCase() ?? ''
       const roster = geoRostersRef.current[gh] ?? []
@@ -2860,7 +2870,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
   const getGeoCallPresence = useCallback(
     (geohash: string): GeoCallPresence[] => {
-      const gh = normalizeGeohash(geohash)
+      const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
       return gh ? (geoCallRosters[gh] ?? []) : []
     },
     [geoCallRosters]
@@ -2868,7 +2878,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
   const getGeoCallCount = useCallback(
     (geohash: string): number => {
-      const gh = normalizeGeohash(geohash)
+      const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
       return gh ? (geoCallRosters[gh]?.length ?? 0) : 0
     },
     [geoCallRosters]

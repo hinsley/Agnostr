@@ -38,6 +38,13 @@ import {
 } from 'lucide-react'
 import type { AgnostrEngine, ThemeId } from '../types/protocol'
 import type { PwaState } from '../hooks/usePwa'
+import {
+  formatRadioChannelLabel,
+  isTopicChannel,
+  makeTopicChannelKey,
+  normalizeTopicSlug,
+  POPULAR_TOPIC_CHANNELS,
+} from '../lib/radioChannel'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
 import { formatHandle } from '../utils/identicon'
 import type { QrShareTarget } from './QrShareModal'
@@ -153,21 +160,74 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       })
     }
 
-    // Direct jump whenever query looks like a valid geohash
-    if (cleanHash.length >= 1 && GEOHASH_REGEX.test(cleanHash)) {
-      list.push({
-        id: `direct-${cleanHash}`,
-        group: 'Jump to Room',
-        title: `Open #${cleanHash}`,
-        subtitle: `Join geohash room #${cleanHash}`,
-        keywords: cleanHash,
-        badge: 'DIRECT',
-        icon: <Hash size={15} />,
-        run: () => {
-          onTuneChannel(cleanHash)
-          onClose()
-        },
-      })
+    // Direct jump to Geohash or Named Topic Radio channel (`kind: 23333`)
+    if (q.length >= 1 && !parsedShare) {
+      const explicitTopic = /^#?topic:/i.test(q)
+      const topicSlug = normalizeTopicSlug(q)
+      const topicKey = topicSlug ? makeTopicChannelKey(topicSlug) : null
+
+      if (explicitTopic && topicSlug && topicKey) {
+        list.push({
+          id: `direct-topic-${topicSlug}`,
+          group: 'Jump to Room',
+          title: `Open #${topicSlug}`,
+          subtitle: `Join Named Topic Radio #${topicSlug} (kind 23333)`,
+          keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} 23333 radio`,
+          badge: 'TOPIC',
+          icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
+          run: () => {
+            onTuneChannel(topicKey)
+            onClose()
+          },
+        })
+      } else if (!q.startsWith('/')) {
+        const isGeo = cleanHash.length >= 1 && GEOHASH_REGEX.test(cleanHash)
+        if (isGeo) {
+          list.push({
+            id: `direct-geo-${cleanHash}`,
+            group: 'Jump to Room',
+            title: `Open #${cleanHash}`,
+            subtitle: `Join geohash room #${cleanHash}`,
+            keywords: `${q} ${cleanHash} #${cleanHash} geohash radio`,
+            badge: 'GEO',
+            icon: <Radio size={15} />,
+            run: () => {
+              onTuneChannel(cleanHash)
+              onClose()
+            },
+          })
+          // Also offer kind: 23333 Topic jump for words that happen to use base32 letters (e.g. tech, rust, news)
+          if (cleanHash.length >= 2 && topicSlug && topicKey) {
+            list.push({
+              id: `direct-topic-${topicSlug}`,
+              group: 'Jump to Room',
+              title: `Open #${topicSlug} (Topic Radio)`,
+              subtitle: `Join kind 23333 named channel #${topicSlug}`,
+              keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} 23333 topic`,
+              badge: 'TOPIC',
+              icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
+              run: () => {
+                onTuneChannel(topicKey)
+                onClose()
+              },
+            })
+          }
+        } else if (topicSlug && topicKey && cleanHash.length >= 2) {
+          list.push({
+            id: `direct-topic-${topicSlug}`,
+            group: 'Jump to Room',
+            title: `Open #${topicSlug}`,
+            subtitle: `Join Named Topic Radio #${topicSlug} (kind 23333)`,
+            keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} 23333 topic radio`,
+            badge: 'TOPIC',
+            icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
+            run: () => {
+              onTuneChannel(topicKey)
+              onClose()
+            },
+          })
+        }
+      }
     }
 
     // People (Active DMs + Trusted Friends)
@@ -249,18 +309,46 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       }
     }
 
-    // Live Active Rooms
+    // Active Rooms (Geohash + Named Topic Radio)
+    const activePulseKeys = new Set<string>()
     for (const room of engine.pulseRooms.slice(0, 8)) {
+      const keyLower = room.geohash.toLowerCase()
+      activePulseKeys.add(keyLower)
+      const isTopic = isTopicChannel(room.geohash)
+      const displayLabel = formatRadioChannelLabel(room.geohash)
       list.push({
         id: `pulse-${room.geohash}`,
-        group: 'Live Active Rooms',
-        title: `#${room.geohash}${room.nearestCity ? ` · ${room.nearestCity}` : ''}`,
-        subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'}${room.lastPreview ? ` · ${room.lastPreview}` : ''}`,
-        keywords: `live room radio ${room.geohash} ${room.nearestCity ?? ''}`,
-        badge: 'LIVE',
-        icon: <Radio size={15} style={{ color: 'var(--accent)' }} />,
+        group: 'Active Rooms',
+        title: `${displayLabel}${!isTopic && room.nearestCity ? ` · ${room.nearestCity}` : ''}`,
+        subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'}${room.lastPreview ? ` · ${room.lastPreview}` : isTopic ? ' · Topic 23333' : ''}`,
+        keywords: `active live room radio ${isTopic ? 'topic 23333' : 'geo'} ${room.geohash} ${displayLabel} ${room.nearestCity ?? ''}`,
+        badge: isTopic ? 'TOPIC' : 'LIVE',
+        icon: isTopic ? (
+          <Hash size={15} style={{ color: 'var(--accent)' }} />
+        ) : (
+          <Radio size={15} style={{ color: 'var(--accent)' }} />
+        ),
         run: () => {
           onTuneChannel(room.geohash)
+          onClose()
+        },
+      })
+    }
+
+    // Popular Named Topic Channels (kind: 23333)
+    for (const topic of POPULAR_TOPIC_CHANNELS) {
+      const topicKey = makeTopicChannelKey(topic.slug) ?? `topic:${topic.slug}`
+      if (activePulseKeys.has(topicKey)) continue
+      list.push({
+        id: `topic-popular-${topic.slug}`,
+        group: 'Topic Channels',
+        title: topic.label,
+        subtitle: `${topic.description} · kind 23333`,
+        keywords: `topic radio 23333 named channel ${topic.slug} ${topic.label} ${topic.description}`,
+        badge: '23333',
+        icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
+        run: () => {
+          onTuneChannel(topicKey)
           onClose()
         },
       })
@@ -396,6 +484,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       })
     } else if (engine.activeView.type === 'channel') {
       const gh = engine.activeGeohash
+      const isTopic = isTopicChannel(gh)
+      const radioLabel = formatRadioChannelLabel(gh)
+      const radioKindLabel = isTopic ? 'Topic Radio' : 'Geo Radio'
       const count = engine.calls.getGeoCallCount(gh)
       const isFull = count >= engine.calls.maxParticipants
       list.push(
@@ -403,11 +494,11 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           id: 'act-call-join-geo-voice',
           group: 'Actions',
           title:
-            count > 0 ? 'Join Geo Radio Voice Call' : 'Start Geo Radio Voice Call',
+            count > 0 ? `Join ${radioKindLabel} Voice Call` : `Start ${radioKindLabel} Voice Call`,
           subtitle: isFull
-            ? `#${gh} call is full (${count}/${engine.calls.maxParticipants})`
-            : `#${gh} · P2P group audio (${count}/${engine.calls.maxParticipants})`,
-          keywords: `start join geo radio voice call audio #${gh} webrtc p2p talk`,
+            ? `${radioLabel} call is full (${count}/${engine.calls.maxParticipants})`
+            : `${radioLabel} · P2P group audio (${count}/${engine.calls.maxParticipants})`,
+          keywords: `start join geo topic radio voice call audio ${radioLabel} ${gh} webrtc p2p talk`,
           badge: `${count}/${engine.calls.maxParticipants}`,
           icon: <Phone size={15} />,
           run: () => {
@@ -415,7 +506,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             if (isFull) {
               engine.pushToast(
                 'warning',
-                `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                `${radioKindLabel} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
               )
               return
             }
@@ -426,11 +517,11 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           id: 'act-call-join-geo-video',
           group: 'Actions',
           title:
-            count > 0 ? 'Join Geo Radio Video Call' : 'Start Geo Radio Video Call',
+            count > 0 ? `Join ${radioKindLabel} Video Call` : `Start ${radioKindLabel} Video Call`,
           subtitle: isFull
-            ? `#${gh} call is full (${count}/${engine.calls.maxParticipants})`
-            : `#${gh} · P2P group video (${count}/${engine.calls.maxParticipants})`,
-          keywords: `start join geo radio video call camera #${gh} webrtc p2p`,
+            ? `${radioLabel} call is full (${count}/${engine.calls.maxParticipants})`
+            : `${radioLabel} · P2P group video (${count}/${engine.calls.maxParticipants})`,
+          keywords: `start join geo topic radio video call camera ${radioLabel} ${gh} webrtc p2p`,
           badge: `${count}/${engine.calls.maxParticipants}`,
           icon: <Video size={15} />,
           run: () => {
@@ -438,7 +529,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             if (isFull) {
               engine.pushToast(
                 'warning',
-                `Geo Radio call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                `${radioKindLabel} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
               )
               return
             }
@@ -925,7 +1016,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 entries[clampedIdx]?.run()
               }
             }}
-            placeholder="Search rooms, servers, #geohash, or actions…"
+            placeholder="Search rooms, servers, #geohash, #topic, or actions…"
           />
           <kbd className="ag-kbd">ESC</kbd>
         </div>
@@ -934,7 +1025,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           {entries.length === 0 ? (
             <div className="ag-conv-empty" style={{ padding: '1.5rem' }}>
               <p>
-                No matches. Type any geohash (like <code>9q8y</code>) to jump right in.
+                No matches. Type any geohash (<code>9q8y</code>) or topic (<code>#bitcoin</code>, <code>topic:tech</code>) to jump right in.
               </p>
             </div>
           ) : (

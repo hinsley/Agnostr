@@ -10,6 +10,7 @@ import {
   Copy,
   Download,
   FileText,
+  Hash,
   HeadphoneOff,
   Headphones,
   Link2,
@@ -43,6 +44,7 @@ import {
   getRecordingQualitySpec,
 } from '../lib/callRecorder.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
+import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
@@ -805,8 +807,9 @@ export function CallStage({
   ) : null
 
   const isGeoCall = activeCall.mode === 'geo'
+  const isTopicCall = isGeoCall && isTopicChannel(activeCall.geohash ?? '')
   const isGroupCall = activeCall.mode === 'server' || isGeoCall
-  const geoTag = activeCall.geohash ? `#${activeCall.geohash}` : null
+  const geoTag = activeCall.geohash ? formatRadioChannelLabel(activeCall.geohash) : null
 
   const handleReturnToCall = () => {
     onPlaySound?.('click')
@@ -849,11 +852,11 @@ export function CallStage({
                 title={`Return to ${geoTag ?? activeCall.title}`}
               >
                 <span className="ag-badge ag-badge-accent mono">
-                  <Radio size={9} />
+                  {isTopicCall ? <Hash size={9} /> : <Radio size={9} />}
                   <span>{geoTag ?? activeCall.title}</span>
                 </span>
                 <span className="ag-badge ag-badge-muted ag-hide-xs">
-                  Public Radio · P2P
+                  {isTopicCall ? 'Topic Radio · P2P' : 'Public Radio · P2P'}
                 </span>
               </button>
             ) : (
@@ -1175,12 +1178,14 @@ export function CallStage({
           {isGeoCall ? (
             <>
               <span className="ag-badge ag-badge-accent mono">
-                <Radio size={10} />
+                {isTopicCall ? <Hash size={10} /> : <Radio size={10} />}
                 <span>{geoTag ?? activeCall.title}</span>
               </span>
-              <span className="ag-call-title truncate ag-hide-xs">Geo Radio</span>
+              <span className="ag-call-title truncate ag-hide-xs">
+                {isTopicCall ? 'Topic Radio' : 'Geo Radio'}
+              </span>
               <span className="ag-badge ag-badge-muted ag-hide-xs">
-                Public Radio · P2P
+                {isTopicCall ? 'Topic Radio · P2P' : 'Public Radio · P2P'}
               </span>
             </>
           ) : (

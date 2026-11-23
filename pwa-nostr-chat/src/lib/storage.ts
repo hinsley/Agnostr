@@ -17,8 +17,15 @@ import type { PersistedTranscriptionConfig, TranscriptionModelSpec } from '../ty
 import { DEFAULT_BLOSSOM_SERVERS, normalizeBlossomServerUrl } from './blossom.ts'
 import { DEFAULT_RECORDING_QUALITY, isValidRecordingQuality } from './callRecorder.ts'
 import type { GeoRelayEntry } from './geoRelays.ts'
-import { DEFAULT_GEOHASH, isValidGeohash, normalizeGeohash } from './geohash.ts'
+import { DEFAULT_GEOHASH, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe } from './identity.ts'
+import {
+  formatRadioChannelLabel,
+  getTopicSlug,
+  isTopicChannel,
+  isValidRadioChannelKey,
+  normalizeRadioChannelKey,
+} from './radioChannel.ts'
 import {
   DEFAULT_AUTO_TRANSCRIBE,
   DEFAULT_TRANSCRIPTION_MODEL_ID,
@@ -153,21 +160,23 @@ export function saveNickname(nickname: string): void {
 
 export function loadActiveGeohash(): string {
   const saved = safeGet(KEYS.activeGeohash)
-  if (saved && isValidGeohash(saved)) return normalizeGeohash(saved)
+  const normalized = normalizeRadioChannelKey(saved)
+  if (normalized) return normalized
   return DEFAULT_GEOHASH
 }
 
 export function saveActiveGeohash(geohash: string): void {
-  safeSet(KEYS.activeGeohash, normalizeGeohash(geohash))
+  const normalized = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+  safeSet(KEYS.activeGeohash, normalized)
 }
 
 export function loadPinnedChannels(): PinnedChannel[] {
   const parsed = safeJsonParse<PinnedChannel[]>(safeGet(KEYS.pinnedChannels), [])
   if (!Array.isArray(parsed)) return []
   return parsed
-    .filter((p) => p && typeof p.geohash === 'string' && isValidGeohash(p.geohash))
+    .filter((p) => p && typeof p.geohash === 'string' && isValidRadioChannelKey(p.geohash))
     .map((p) => ({
-      geohash: normalizeGeohash(p.geohash),
+      geohash: normalizeRadioChannelKey(p.geohash) ?? normalizeGeohash(p.geohash),
       label: typeof p.label === 'string' ? p.label : undefined,
       pinnedAt: typeof p.pinnedAt === 'number' ? p.pinnedAt : Date.now(),
       unreadCount: 0,
@@ -189,7 +198,17 @@ export function savePinnedChannels(channels: PinnedChannel[]): void {
 export function loadRecentChannels(): string[] {
   const parsed = safeJsonParse<string[]>(safeGet(KEYS.recentChannels), [])
   if (!Array.isArray(parsed)) return []
-  return parsed.filter((g) => typeof g === 'string' && isValidGeohash(g)).slice(0, 12)
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const g of parsed) {
+    if (typeof g !== 'string') continue
+    const normalized = normalizeRadioChannelKey(g)
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    out.push(normalized)
+    if (out.length >= 12) break
+  }
+  return out
 }
 
 export function saveRecentChannels(channels: string[]): void {
@@ -726,21 +745,33 @@ export function panicWipeStorage(): void {
 export function formatTranscriptExport(
   format: 'markdown' | 'json',
   cell: GeohashCell,
-  messages: GeoMessage[]
+  messages: GeoMessage[],
+  channelKey?: string
 ): { filename: string; content: string; mimeType: string } {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  const resolvedKey = channelKey ? (normalizeRadioChannelKey(channelKey) ?? cell.geohash) : cell.geohash
+  const isTopic = isTopicChannel(resolvedKey)
+  const topicSlug = getTopicSlug(resolvedKey)
+  const displayChannel = formatRadioChannelLabel(resolvedKey)
+  const fileSlug = isTopic && topicSlug ? `topic-${topicSlug}` : cell.geohash
+
   if (format === 'json') {
     return {
-      filename: `agnostr-${cell.geohash}-${stamp}.json`,
+      filename: `agnostr-${fileSlug}-${stamp}.json`,
       mimeType: 'application/json',
       content: JSON.stringify(
         {
           exportedAt: new Date().toISOString(),
-          channel: `#${cell.geohash}`,
-          precision: cell.precision,
-          level: cell.label,
-          center: cell.center,
-          nearestCity: cell.nearestCity,
+          channel: displayChannel,
+          channelType: isTopic ? 'topic' : 'geohash',
+          ...(isTopic
+            ? { topicSlug, kind: 23333 }
+            : {
+                precision: cell.precision,
+                level: cell.label,
+                center: cell.center,
+                nearestCity: cell.nearestCity,
+              }),
           messageCount: messages.length,
           messages: messages.map((m) => ({
             id: m.id,
@@ -764,11 +795,15 @@ export function formatTranscriptExport(
   }
 
   const lines: string[] = [
-    `# Agnostr Transcript — #${cell.geohash}`,
+    `# Agnostr Transcript — ${displayChannel}`,
     '',
     `- **Exported**: ${new Date().toISOString()}`,
-    `- **Scope**: ${cell.label} (${cell.approxSizeLabel})${cell.nearestCity ? ` · ${cell.nearestCity}` : ''}`,
-    `- **Coordinates**: ${cell.center.lat.toFixed(4)}, ${cell.center.lon.toFixed(4)}`,
+    ...(isTopic
+      ? [`- **Scope**: Named Topic Radio (kind 23333 · global)`]
+      : [
+          `- **Scope**: ${cell.label} (${cell.approxSizeLabel})${cell.nearestCity ? ` · ${cell.nearestCity}` : ''}`,
+          `- **Coordinates**: ${cell.center.lat.toFixed(4)}, ${cell.center.lon.toFixed(4)}`,
+        ]),
     `- **Messages**: ${messages.length}`,
     '',
     '---',
@@ -797,7 +832,7 @@ export function formatTranscriptExport(
   }
 
   return {
-    filename: `agnostr-${cell.geohash}-${stamp}.md`,
+    filename: `agnostr-${fileSlug}-${stamp}.md`,
     mimeType: 'text/markdown;charset=utf-8',
     content: lines.join('\n'),
   }
