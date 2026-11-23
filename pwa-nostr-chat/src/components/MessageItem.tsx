@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   AlertCircle,
   AtSign,
@@ -128,6 +129,7 @@ export interface MessageItemProps {
   onMentionAuthor?: (handle: string) => void
   onReply?: (message: GeoMessage) => void
   onReact?: (message: GeoMessage, emoji: string) => void
+  resolveReactorName?: (pubkey: string) => string
   onDelete?: (message: GeoMessage) => void
   onInspectAuthor?: (pubkey: string, nickname: string) => void
   onTuneGeohash?: (geohash: string) => void
@@ -184,6 +186,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onMentionAuthor,
     onReply,
     onReact,
+    resolveReactorName,
     onDelete,
     onInspectAuthor,
     onTuneGeohash,
@@ -205,7 +208,81 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
   }) => {
     const [pickerOpen, setPickerOpen] = useState(false)
     const [copied, setCopied] = useState(false)
+    const [hoveredReaction, setHoveredReaction] = useState<{
+      emoji: string
+      left: number
+      top: number
+      placement: 'above' | 'below'
+    } | null>(null)
     const { openContextMenu } = useContextMenu()
+
+    const hideReactionTooltip = useCallback(() => {
+      setHoveredReaction(null)
+    }, [])
+
+    const showReactionTooltip = useCallback((emoji: string, el: HTMLElement) => {
+      const rect = el.getBoundingClientRect()
+      const vw = window.innerWidth || 390
+      const vh = window.innerHeight || 800
+      const placement: 'above' | 'below' = rect.top < 110 ? 'below' : 'above'
+      const halfMax = 110
+      const rawCenter = rect.left + rect.width / 2
+      const left =
+        vw <= halfMax * 2 + 20
+          ? vw / 2
+          : Math.max(10 + halfMax, Math.min(vw - 10 - halfMax, rawCenter))
+      const top =
+        placement === 'above'
+          ? Math.max(10, rect.top - 8)
+          : Math.min(vh - 10, rect.bottom + 8)
+      setHoveredReaction({ emoji, left, top, placement })
+    }, [])
+
+    useEffect(() => {
+      if (!hoveredReaction) return
+      const onScroll = () => setHoveredReaction(null)
+      window.addEventListener('scroll', onScroll, { capture: true, passive: true })
+      return () => window.removeEventListener('scroll', onScroll, { capture: true })
+    }, [hoveredReaction])
+
+    const activeHoveredReaction = useMemo(() => {
+      if (!hoveredReaction) return null
+      return message.reactions.find((r) => r.emoji === hoveredReaction.emoji) ?? null
+    }, [hoveredReaction, message.reactions])
+
+    const reactionTooltipContent = useMemo(() => {
+      if (!activeHoveredReaction) return null
+      const seen = new Set<string>()
+      const resolvedNames: string[] = []
+      let hasYou = false
+
+      for (const rawPk of activeHoveredReaction.pubkeys ?? []) {
+        const pk = rawPk.trim().toLowerCase()
+        if (!pk || seen.has(pk)) continue
+        seen.add(pk)
+        const name = resolveReactorName ? resolveReactorName(pk) : `anon${pk.slice(-4)}`
+        if (name === 'You') {
+          hasYou = true
+        } else {
+          resolvedNames.push(name)
+        }
+      }
+
+      if (activeHoveredReaction.reactedByMe || hasYou) {
+        resolvedNames.unshift('You')
+      }
+
+      const totalCount = Math.max(activeHoveredReaction.count, resolvedNames.length)
+      const visibleNames = resolvedNames.slice(0, 5)
+      const extraCount = Math.max(0, totalCount - visibleNames.length)
+
+      return {
+        emoji: activeHoveredReaction.emoji,
+        visibleNames,
+        extraCount,
+        totalCount,
+      }
+    }, [activeHoveredReaction, resolveReactorName])
 
     const rawVisibleContent = useMemo(() => {
       if (message.isSystem) return message.content
@@ -930,8 +1007,15 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                     key={rx.emoji}
                     type="button"
                     className={`ag-reaction-pill ${rx.reactedByMe ? 'mine' : ''}`}
-                    onClick={() => onReact?.(message, rx.emoji)}
-                    title={`React with ${rx.emoji}`}
+                    onClick={() => {
+                      hideReactionTooltip()
+                      onReact?.(message, rx.emoji)
+                    }}
+                    onMouseEnter={(e) => showReactionTooltip(rx.emoji, e.currentTarget)}
+                    onMouseLeave={hideReactionTooltip}
+                    onFocus={(e) => showReactionTooltip(rx.emoji, e.currentTarget)}
+                    onBlur={hideReactionTooltip}
+                    aria-label={`React with ${rx.emoji} (${rx.count})`}
                   >
                     <span>{rx.emoji}</span>
                     <span className="ag-reaction-count tabular">{rx.count}</span>
@@ -940,6 +1024,46 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             </div>
           )}
         </div>
+
+        {/* Unclipped Floating Portal Tooltip Showing Who Reacted */}
+        {hoveredReaction &&
+          reactionTooltipContent &&
+          typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              className={`ag-reaction-tooltip is-${hoveredReaction.placement}`}
+              role="tooltip"
+              style={{
+                left: `${hoveredReaction.left}px`,
+                top: `${hoveredReaction.top}px`,
+              }}
+            >
+              <span className="ag-reaction-tooltip-emoji" aria-hidden="true">
+                {reactionTooltipContent.emoji}
+              </span>
+              <div className="ag-reaction-tooltip-body">
+                {reactionTooltipContent.visibleNames.length > 0 ? (
+                  <>
+                    <span className="ag-reaction-tooltip-names">
+                      {reactionTooltipContent.visibleNames.join(', ')}
+                    </span>
+                    {reactionTooltipContent.extraCount > 0 && (
+                      <span className="ag-reaction-tooltip-more">
+                        {' '}
+                        and {reactionTooltipContent.extraCount} more
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="ag-reaction-tooltip-more">
+                    {reactionTooltipContent.totalCount}{' '}
+                    {reactionTooltipContent.totalCount === 1 ? 'reaction' : 'reactions'}
+                  </span>
+                )}
+              </div>
+            </div>,
+            document.body
+          )}
 
         {/* Sleek Top-Right Floating Quick-Action Bar (Desktop Hover / Mobile Tap-to-Reveal) */}
         <div

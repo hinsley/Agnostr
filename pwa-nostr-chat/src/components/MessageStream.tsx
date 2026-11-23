@@ -579,6 +579,56 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const ownNick = engine.identity.nickname
   const ownPubkey = isServer ? engine.identity.masterPubkey : engine.identity.activePubkey
 
+  const reactorNameMap = useMemo(() => {
+    const map = new Map<string, string>()
+    const setPreferred = (pkRaw: string | undefined, nameRaw: string | undefined) => {
+      if (!pkRaw || !nameRaw) return
+      const pk = pkRaw.trim().toLowerCase()
+      const name = nameRaw.trim()
+      if (!pk || !name) return
+      const existing = map.get(pk)
+      const isGeneric = /^anon[0-9a-f]{0,4}$/i.test(name)
+      const existingIsGeneric = !existing || /^anon[0-9a-f]{0,4}$/i.test(existing)
+      if (!existing || !isGeneric || existingIsGeneric) {
+        map.set(pk, name)
+      }
+    }
+
+    for (const msg of displayMessages) {
+      if (msg.isSystem) continue
+      setPreferred(msg.pubkey, msg.nickname)
+    }
+    for (const entry of engine.trustedPubkeys) {
+      setPreferred(entry.pubkey, entry.label)
+    }
+    for (const peer of engine.peers) {
+      setPreferred(peer.pubkey, peer.nickname)
+    }
+    for (const member of engine.servers.members) {
+      setPreferred(member.pubkey, member.nickname)
+    }
+    return map
+  }, [displayMessages, engine.trustedPubkeys, engine.peers, engine.servers.members])
+
+  const resolveReactorName = useCallback(
+    (pubkey: string): string => {
+      const pk = pubkey.trim().toLowerCase()
+      if (!pk) return 'anon'
+      if (
+        pk === engine.identity.activePubkey.toLowerCase() ||
+        pk === engine.identity.masterPubkey.toLowerCase()
+      ) {
+        return 'You'
+      }
+      const mapped = reactorNameMap.get(pk)
+      if (mapped) return mapped
+      const lookedUp = engine.getPeerByPubkey(pk)?.nickname?.trim()
+      if (lookedUp) return lookedUp
+      return `anon${pk.slice(-4)}`
+    },
+    [engine, reactorNameMap]
+  )
+
   const hiddenCount = isServer
     ? engine.servers.hiddenByTrustCount
     : !isDm
@@ -1080,6 +1130,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     onMentionAuthor={onMentionPeer}
                     onReply={!isDm ? handleReplyUnified : undefined}
                     onReact={!isDm ? handleReactUnified : undefined}
+                    resolveReactorName={!isDm ? resolveReactorName : undefined}
                     onDelete={
                       isServer && !msg.isSystem && (engine.servers.canModerate || msg.isOwn)
                         ? handleDeleteServerMessage

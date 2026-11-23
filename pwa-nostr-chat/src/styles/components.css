@@ -2710,6 +2710,55 @@
   font-weight: 600;
 }
 
+/* Floating Portal Tooltip Showing Who Reacted (Unclipped) */
+.ag-reaction-tooltip {
+  position: fixed;
+  z-index: var(--z-popover);
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 7px;
+  max-width: 220px;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-md);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.35;
+  pointer-events: none;
+  animation: ag-fade-in var(--dur-fast) var(--ease-out);
+}
+
+.ag-reaction-tooltip.is-above {
+  transform: translate(-50%, -100%);
+}
+
+.ag-reaction-tooltip.is-below {
+  transform: translateX(-50%);
+}
+
+.ag-reaction-tooltip-emoji {
+  font-size: 14px;
+  line-height: 1.25;
+  flex-shrink: 0;
+}
+
+.ag-reaction-tooltip-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ag-reaction-tooltip-names {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.ag-reaction-tooltip-more {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
 /* Jump to Latest Floating Bar */
 .ag-jump-latest {
   position: absolute;
