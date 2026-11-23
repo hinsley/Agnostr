@@ -175,10 +175,21 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     if (recorderRef.current?.isRecording()) {
       recorderRef.current.syncParticipants(participants)
     }
+    const isDmConnected = current.mode === 'dm' && mesh.hasAnyConnectedPeer()
     const nextStatus =
-      current.mode === 'dm' && current.status === 'connecting' && mesh.hasAnyConnectedPeer()
+      isDmConnected && (current.status === 'connecting' || current.status === 'ringing-out')
         ? 'active'
         : current.status
+    if (nextStatus === 'active' && current.mode === 'dm') {
+      if (outgoingRingTimerRef.current !== null) {
+        window.clearTimeout(outgoingRingTimerRef.current)
+        outgoingRingTimerRef.current = null
+      }
+      if (outgoingRingInviteTimerRef.current !== null) {
+        window.clearInterval(outgoingRingInviteTimerRef.current)
+        outgoingRingInviteTimerRef.current = null
+      }
+    }
     const nextConnectedAt =
       nextStatus === 'active' && current.connectedAt === null ? Date.now() : current.connectedAt
 
@@ -253,7 +264,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
           payload,
         })
         const signed = await identityManager.signEvent(template)
-        await currentPool.publish(CALL_SIGNALING_RELAYS, signed)
+        await currentPool.publish(CALL_SIGNALING_RELAYS, signed, 2_000)
       } catch (err) {
         if (payload.action === 'call-invite' || payload.action === 'call-accept') {
           pushToastRef.current(
@@ -278,7 +289,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       try {
         const template = await buildRoomCallSignalTemplate({ server, roomId, payload })
         const signed = await identityManager.signEvent(template)
-        await currentPool.publish(getRelaysForServerCall(server), signed)
+        await currentPool.publish(getRelaysForServerCall(server), signed, 2_000)
       } catch {
         // Ignore transient publish failure
       }
@@ -527,6 +538,59 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               }
             }
           },
+          onSendIceBatch: (targetPk, candidates) => {
+            if (candidates.length === 0) return
+            const first = candidates[0]
+            if (sessionMeta.mode === 'dm') {
+              void publishDirectSignal(targetPk, {
+                v: 1,
+                action: 'ice',
+                callId: sessionMeta.callId,
+                candidate: first,
+                candidates,
+                ts: Date.now(),
+              })
+            } else if (sessionMeta.server) {
+              const roomId = sessionMeta.roomId ?? DEFAULT_SERVER_VOICE_ROOM_ID
+              if (sessionMeta.server.encrypted) {
+                void publishRoomSignal(sessionMeta.server, roomId, {
+                  v: 1,
+                  action: 'ice',
+                  serverId: sessionMeta.server.id,
+                  roomId,
+                  targetPubkey: targetPk,
+                  candidate: first,
+                  candidates,
+                  ts: Date.now(),
+                })
+              } else {
+                void publishDirectSignal(targetPk, {
+                  v: 1,
+                  action: 'ice',
+                  callId: sessionMeta.callId,
+                  serverId: sessionMeta.server.id,
+                  roomId,
+                  candidate: first,
+                  candidates,
+                  ts: Date.now(),
+                })
+              }
+            }
+          },
+          onRequestPeerSync: (targetPk) => {
+            const active = activeCallRef.current
+            if (sessionMeta.mode === 'dm' && active && active.mode === 'dm' && active.callId === sessionMeta.callId) {
+              poolRef.current?.ensureRelaysAlive(CALL_SIGNALING_RELAYS)
+              void publishDirectSignal(targetPk, {
+                v: 1,
+                action: 'call-accept',
+                callId: sessionMeta.callId,
+                media: active.mediaType,
+                nickname: identityManager.getNickname(),
+                ts: Date.now(),
+              })
+            }
+          },
           onBroadcastMediaState: (mediaState) => {
             const nick = identityManager.getNickname()
             if (sessionMeta.mode === 'dm' && sessionMeta.peerPubkey) {
@@ -696,7 +760,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       activeCallRef.current = session
       setActiveCall(session)
 
-      await publishDirectSignal(pk, {
+      // Wake any sleeping/backed-off signaling relays before sending call-invite (critical on mobile PWA)
+      poolRef.current?.ensureRelaysAlive(CALL_SIGNALING_RELAYS)
+
+      void publishDirectSignal(pk, {
         v: 1,
         action: 'call-invite',
         callId,
@@ -813,7 +880,22 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       activeCallRef.current = session
       setActiveCall(session)
 
-      await publishDirectSignal(offer.callerPubkey, {
+      // Wake any sleeping/backed-off signaling relays before publishing call-accept (mobile PWA wakeup)
+      poolRef.current?.ensureRelaysAlive(CALL_SIGNALING_RELAYS)
+
+      const selfPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const callerPk = offer.callerPubkey.toLowerCase()
+      const weInitiateOffer = selfPk < callerPk
+
+      // When caller is the offerer (selfPk > callerPk), create the peer entry SYNCHRONOUSLY
+      // BEFORE sending call-accept so incoming offer & early ICE candidates can never race
+      // ahead of connectToPeer or get dropped while publishDirectSignal awaits slow relays.
+      if (!weInitiateOffer) {
+        mesh.connectToPeer(callerPk, offer.callerNickname, false)
+      }
+
+      // Fire call-accept without blocking connectToPeer on slow relay OK timeouts
+      void publishDirectSignal(callerPk, {
         v: 1,
         action: 'call-accept',
         callId: offer.callId,
@@ -822,8 +904,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         ts: Date.now(),
       })
 
-      // Connect deterministically (lower pubkey sends SDP offer; higher waits)
-      mesh.connectToPeer(offer.callerPubkey, offer.callerNickname)
+      if (weInitiateOffer) {
+        mesh.connectToPeer(callerPk, offer.callerNickname, true)
+      }
+
       syncActiveCallFromMesh()
       return true
     },
@@ -908,6 +992,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       }
 
       meshRef.current = mesh
+      poolRef.current?.ensureRelaysAlive(getRelaysForServerCall(server))
       const now = Date.now()
       const selfNick = identityManager.getNickname()
 
@@ -1112,8 +1197,16 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 await mesh.handleRemoteOffer(sender, payload.sdp, payload.nickname)
               } else if (payload.action === 'answer' && payload.sdp) {
                 await mesh.handleRemoteAnswer(sender, payload.sdp)
-              } else if (payload.action === 'ice' && payload.candidate) {
-                await mesh.handleRemoteIce(sender, payload.candidate)
+              } else if (payload.action === 'ice') {
+                const iceList =
+                  payload.candidates && payload.candidates.length > 0
+                    ? payload.candidates
+                    : payload.candidate
+                      ? [payload.candidate]
+                      : []
+                if (iceList.length > 0) {
+                  await mesh.handleRemoteIceBatch(sender, iceList)
+                }
               } else if (payload.action === 'media-state') {
                 mesh.updatePeerMetadata(sender, {
                   nickname: payload.nickname,
@@ -1190,11 +1283,19 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 window.clearInterval(outgoingRingInviteTimerRef.current)
                 outgoingRingInviteTimerRef.current = null
               }
-              const nextSession: ActiveCallSession = { ...active, status: 'connecting' }
-              activeCallRef.current = nextSession
-              setActiveCall(nextSession)
+              // Only transition ringing-out -> connecting (never downgrade an already active call)
+              if (active.status === 'ringing-out') {
+                const nextSession: ActiveCallSession = { ...active, status: 'connecting' }
+                activeCallRef.current = nextSession
+                setActiveCall(nextSession)
+              }
 
+              const alreadyTracked = mesh.hasPeer(sender)
               mesh.connectToPeer(sender, payload.nickname)
+              if (alreadyTracked) {
+                // Callee re-sent call-accept after missing our initial offer/ICE — re-emit immediately
+                mesh.resendOfferIfPending(sender)
+              }
               syncActiveCallFromMesh()
               return
             }
@@ -1247,12 +1348,36 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             if (!active || !mesh || active.mode !== 'dm' || active.callId !== payload.callId) return
             if (active.peerPubkey !== sender) return
 
+            // If callee's offer/ice/media-state overtakes call-accept across relays,
+            // treat it as implicit acceptance so caller exits ringing-out and clears ring timers!
+            if (active.status === 'ringing-out') {
+              if (outgoingRingTimerRef.current !== null) {
+                window.clearTimeout(outgoingRingTimerRef.current)
+                outgoingRingTimerRef.current = null
+              }
+              if (outgoingRingInviteTimerRef.current !== null) {
+                window.clearInterval(outgoingRingInviteTimerRef.current)
+                outgoingRingInviteTimerRef.current = null
+              }
+              const nextSession: ActiveCallSession = { ...active, status: 'connecting' }
+              activeCallRef.current = nextSession
+              setActiveCall(nextSession)
+            }
+
             if (payload.action === 'offer' && payload.sdp) {
               await mesh.handleRemoteOffer(sender, payload.sdp, payload.nickname)
             } else if (payload.action === 'answer' && payload.sdp) {
               await mesh.handleRemoteAnswer(sender, payload.sdp)
-            } else if (payload.action === 'ice' && payload.candidate) {
-              await mesh.handleRemoteIce(sender, payload.candidate)
+            } else if (payload.action === 'ice') {
+              const iceList =
+                payload.candidates && payload.candidates.length > 0
+                  ? payload.candidates
+                  : payload.candidate
+                    ? [payload.candidate]
+                    : []
+              if (iceList.length > 0) {
+                await mesh.handleRemoteIceBatch(sender, iceList)
+              }
             } else if (payload.action === 'media-state') {
               mesh.updatePeerMetadata(sender, {
                 nickname: payload.nickname,
@@ -1484,8 +1609,16 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               await mesh.handleRemoteOffer(sender, payload.sdp, payload.nickname)
             } else if (payload.action === 'answer' && payload.sdp) {
               await mesh.handleRemoteAnswer(sender, payload.sdp)
-            } else if (payload.action === 'ice' && payload.candidate) {
-              await mesh.handleRemoteIce(sender, payload.candidate)
+            } else if (payload.action === 'ice') {
+              const iceList =
+                payload.candidates && payload.candidates.length > 0
+                  ? payload.candidates
+                  : payload.candidate
+                    ? [payload.candidate]
+                    : []
+              if (iceList.length > 0) {
+                await mesh.handleRemoteIceBatch(sender, iceList)
+              }
             }
           })()
         },

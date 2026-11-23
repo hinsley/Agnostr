@@ -91,6 +91,7 @@ function iceLedClass(state: PeerIceConnectionState): string {
 /**
  * Persistent remote audio sink so audio playback never interrupts when switching
  * between docked, full-screen expanded, and compact floating call bar modes.
+ * Hardened for iOS Safari / Android PWA async remote-track arrival & autoplay unlock.
  */
 function RemoteAudioTrack({
   stream,
@@ -100,20 +101,115 @@ function RemoteAudioTrack({
   deafened: boolean
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const liveAudioTrack =
+    stream?.getAudioTracks().find((t) => t.readyState === 'live') ?? null
+  const audioTrackId = liveAudioTrack?.id ?? null
 
   useEffect(() => {
     const el = audioRef.current
     if (!el) return
-    if (el.srcObject !== stream) {
-      el.srcObject = stream
+
+    let cancelled = false
+    let unlockListener: (() => void) | null = null
+
+    const cleanupUnlock = () => {
+      if (!unlockListener) return
+      window.removeEventListener('pointerdown', unlockListener, true)
+      window.removeEventListener('touchend', unlockListener, true)
+      window.removeEventListener('click', unlockListener, true)
+      unlockListener = null
     }
+
+    const attemptPlay = () => {
+      if (cancelled || el.muted || !el.srcObject) return
+      const playResult = el.play()
+      if (!playResult || typeof playResult.then !== 'function') return
+      playResult
+        .then(() => {
+          cleanupUnlock()
+        })
+        .catch(() => {
+          // iOS Safari / Android PWA may reject async remote audio with NotAllowedError;
+          // retry synchronously on the next user gesture anywhere in the window.
+          if (cancelled || unlockListener) return
+          unlockListener = () => {
+            cleanupUnlock()
+            attemptPlay()
+          }
+          window.addEventListener('pointerdown', unlockListener, {
+            capture: true,
+            once: true,
+          })
+          window.addEventListener('touchend', unlockListener, {
+            capture: true,
+            once: true,
+          })
+          window.addEventListener('click', unlockListener, {
+            capture: true,
+            once: true,
+          })
+        })
+    }
+
+    const syncAudioSource = () => {
+      const activeTrack =
+        stream?.getAudioTracks().find((t) => t.readyState === 'live') ?? null
+      const activeId = activeTrack?.id ?? null
+
+      if (!stream || !activeId) {
+        if (el.srcObject) {
+          el.srcObject = null
+        }
+        cleanupUnlock()
+        return
+      }
+
+      const currentSrc = el.srcObject
+      const alreadyAttached =
+        currentSrc instanceof MediaStream &&
+        currentSrc
+          .getAudioTracks()
+          .some((t) => t.id === activeId && t.readyState === 'live')
+
+      // Do not reset srcObject when only a peer video track changes
+      if (!alreadyAttached) {
+        el.srcObject = stream
+      }
+
+      el.muted = deafened
+      if (!deafened && (!alreadyAttached || el.paused)) {
+        attemptPlay()
+      }
+    }
+
     el.muted = deafened
-    if (stream && !deafened) {
-      el.play().catch(() => {
-        // Ignore autoplay restriction; user gesture already initiated call
-      })
+    if (deafened) {
+      cleanupUnlock()
     }
-  }, [stream, deafened])
+    syncAudioSource()
+
+    const handleTrackAdded = (ev: MediaStreamTrackEvent) => {
+      if (ev.track.kind === 'audio') {
+        syncAudioSource()
+      }
+    }
+
+    const handleTrackUnmute = () => {
+      if (!deafened && el.paused) {
+        attemptPlay()
+      }
+    }
+
+    stream?.addEventListener('addtrack', handleTrackAdded)
+    liveAudioTrack?.addEventListener('unmute', handleTrackUnmute)
+
+    return () => {
+      cancelled = true
+      cleanupUnlock()
+      stream?.removeEventListener('addtrack', handleTrackAdded)
+      liveAudioTrack?.removeEventListener('unmute', handleTrackUnmute)
+    }
+  }, [stream, audioTrackId, liveAudioTrack, deafened])
 
   return <audio ref={audioRef} autoPlay playsInline className="sr-only" />
 }
@@ -137,17 +233,82 @@ function ParticipantTile({
   useEffect(() => {
     const el = videoRef.current
     if (!el) return
-    if (hasLiveVideo && participant.stream) {
-      if (el.srcObject !== participant.stream) {
+
+    let cancelled = false
+    let unlockListener: (() => void) | null = null
+
+    const cleanupUnlock = () => {
+      if (!unlockListener) return
+      window.removeEventListener('pointerdown', unlockListener, true)
+      window.removeEventListener('touchend', unlockListener, true)
+      window.removeEventListener('click', unlockListener, true)
+      unlockListener = null
+    }
+
+    const attemptPlay = () => {
+      if (cancelled || !el.srcObject) return
+      el.muted = true
+      el.playsInline = true
+      const playResult = el.play()
+      if (!playResult || typeof playResult.then !== 'function') return
+      playResult
+        .then(() => {
+          cleanupUnlock()
+        })
+        .catch(() => {
+          if (cancelled || unlockListener) return
+          unlockListener = () => {
+            cleanupUnlock()
+            attemptPlay()
+          }
+          window.addEventListener('pointerdown', unlockListener, {
+            capture: true,
+            once: true,
+          })
+          window.addEventListener('touchend', unlockListener, {
+            capture: true,
+            once: true,
+          })
+          window.addEventListener('click', unlockListener, {
+            capture: true,
+            once: true,
+          })
+        })
+    }
+
+    if (hasLiveVideo && participant.stream && liveVideoTrackId) {
+      const currentSrc = el.srcObject
+      const alreadyAttached =
+        currentSrc instanceof MediaStream &&
+        currentSrc
+          .getVideoTracks()
+          .some((t) => t.id === liveVideoTrackId && t.readyState === 'live')
+
+      if (!alreadyAttached) {
         el.srcObject = participant.stream
       }
-      el.play().catch(() => {
-        // Ignore play interruption on track swap
-      })
+      if (!alreadyAttached || el.paused) {
+        attemptPlay()
+      }
     } else if (el.srcObject) {
       el.srcObject = null
+      cleanupUnlock()
     }
-  }, [hasLiveVideo, participant.stream, liveVideoTrackId])
+
+    const handleTrackUnmute = () => {
+      if (el.paused) {
+        attemptPlay()
+      }
+    }
+
+    liveVideoTrack?.addEventListener('unmute', handleTrackUnmute)
+
+    return () => {
+      cancelled = true
+      cleanupUnlock()
+      liveVideoTrack?.removeEventListener('unmute', handleTrackUnmute)
+    }
+  }, [hasLiveVideo, participant.stream, liveVideoTrackId, liveVideoTrack])
 
   const handleColor = pubkeyToColor(participant.pubkey)
   const avatarSize = compact ? 44 : 60

@@ -76,7 +76,35 @@ export class RelayPool {
   private telemetryListeners = new Set<(telemetry: RelayTelemetry[]) => void>()
   private authSigner: Nip42AuthSigner | null = null
   private emitTimer: number | null = null
+  private lastHiddenAt: number | null = null
   private disposed = false
+
+  private readonly handleVisibilityChange = (): void => {
+    if (this.disposed || typeof document === 'undefined') return
+    if (document.visibilityState === 'hidden') {
+      this.lastHiddenAt = Date.now()
+      return
+    }
+    const hiddenMs = this.lastHiddenAt !== null ? Date.now() - this.lastHiddenAt : 0
+    this.lastHiddenAt = null
+    // After mobile background suspension (>15s), WebSockets may be half-open TCP zombies.
+    // Refresh sockets that have had no traffic for >30s and wake any backed-off sockets.
+    this.ensureRelaysAlive(undefined, { staleMs: hiddenMs >= 15_000 ? 30_000 : undefined })
+  }
+
+  private readonly handleOnline = (): void => {
+    if (this.disposed) return
+    this.ensureRelaysAlive(undefined, { staleMs: 15_000 })
+  }
+
+  constructor() {
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange)
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', this.handleOnline)
+    }
+  }
 
   setAuthSigner(signer: Nip42AuthSigner | null): void {
     this.authSigner = signer
@@ -267,6 +295,63 @@ export class RelayPool {
     }
   }
 
+  /**
+   * Ensures target relays (or all tracked relays) are actively connected, bypassing backoff
+   * and refreshing stale half-open mobile sockets when requested.
+   */
+  ensureRelaysAlive(relayUrls?: readonly string[], opts?: { staleMs?: number }): void {
+    if (this.disposed) return
+    const now = Date.now()
+    const staleMs = opts?.staleMs
+    const targets: RelayConnection[] = []
+
+    if (relayUrls && relayUrls.length > 0) {
+      for (const url of new Set(relayUrls)) {
+        targets.push(this.ensureConnection(url))
+      }
+    } else {
+      for (const conn of this.connections.values()) {
+        targets.push(conn)
+      }
+    }
+
+    let touched = false
+    for (const conn of targets) {
+      if (conn.manuallyClosed) continue
+      const readyState = conn.ws?.readyState
+      const isOpen = readyState === WebSocket.OPEN
+      const isConnecting = readyState === WebSocket.CONNECTING
+      const lastTraffic = conn.lastActivityAt ?? conn.connectedAt ?? 0
+      const isStaleOpen =
+        isOpen &&
+        typeof staleMs === 'number' &&
+        staleMs > 0 &&
+        lastTraffic > 0 &&
+        now - lastTraffic > staleMs
+
+      if (!isOpen && !isConnecting) {
+        conn.reconnectAttempts = 0
+        conn.handshakeFailures = 0
+        conn.nextRetryAt = null
+        conn.lastError = null
+        this.closeSocketOnly(conn)
+        this.openConnection(conn)
+        touched = true
+      } else if (isStaleOpen) {
+        conn.reconnectAttempts = 0
+        conn.handshakeFailures = 0
+        conn.nextRetryAt = null
+        this.closeSocketOnly(conn)
+        this.openConnection(conn)
+        touched = true
+      }
+    }
+
+    if (touched) {
+      this.scheduleTelemetryEmit()
+    }
+  }
+
   reconnectAll(): void {
     if (this.disposed) return
     for (const conn of this.connections.values()) {
@@ -294,6 +379,12 @@ export class RelayPool {
 
   dispose(): void {
     this.disposed = true
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChange)
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('online', this.handleOnline)
+    }
     if (this.emitTimer !== null) {
       window.clearTimeout(this.emitTimer)
       this.emitTimer = null

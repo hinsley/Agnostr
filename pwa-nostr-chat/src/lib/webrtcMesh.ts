@@ -16,10 +16,23 @@ export const DEFAULT_STUN_SERVERS: readonly string[] = [
 
 const MAX_REMOTE_PEERS = MAX_CALL_PARTICIPANTS - 1
 const VAD_POLL_INTERVAL_MS = 120
-const STATS_POLL_INTERVAL_MS = 3_000
+const STATS_POLL_INTERVAL_MS = 2_500
 const VAD_SPEAKING_THRESHOLD = 0.055
 const VAD_HANGOVER_MS = 380
-const MAX_PENDING_ICE = 64
+const MAX_PENDING_ICE = 96
+const ICE_BATCH_DELAY_MS = 70
+const ICE_BATCH_MAX_SIZE = 6
+const OFFER_RETRY_INTERVAL_MS = 3_200
+const MAX_OFFER_RETRIES = 4
+const PEER_SYNC_INITIAL_DELAY_MS = 2_500
+const PEER_SYNC_INTERVAL_MS = 3_000
+const MAX_PEER_SYNC_REQUESTS = 3
+const POLITE_FALLBACK_OFFER_DELAY_MS = 5_500
+const ICE_CHECKING_STALL_MS = 8_500
+const ICE_DISCONNECTED_RESTART_MS = 4_500
+const ICE_RESTART_COOLDOWN_MS = 6_000
+const MAX_ICE_RESTARTS = 3
+const RENEGOTIATE_AFTER_ANSWER_DELAY_MS = 320
 
 export interface AdaptiveVideoProfile {
   width: number
@@ -61,6 +74,8 @@ export interface WebRtcMeshCallbacks {
   onSendOffer: (peerPubkey: string, sdp: string) => void
   onSendAnswer: (peerPubkey: string, sdp: string) => void
   onSendIce: (peerPubkey: string, candidate: RTCIceCandidateInit) => void
+  onSendIceBatch?: (peerPubkey: string, candidates: RTCIceCandidateInit[]) => void
+  onRequestPeerSync?: (peerPubkey: string) => void
   onBroadcastMediaState: (state: {
     audioMuted: boolean
     videoEnabled: boolean
@@ -71,6 +86,14 @@ export interface WebRtcMeshCallbacks {
   onPeerConnected?: (peerPubkey: string) => void
   onPeerFailed?: (peerPubkey: string) => void
   onNotice?: (level: 'info' | 'warning' | 'error', title: string, detail?: string) => void
+}
+
+interface PeerMetadataPatch {
+  nickname?: string
+  audioMuted?: boolean
+  videoEnabled?: boolean
+  screenSharing?: boolean
+  isRecording?: boolean
 }
 
 interface VadChannel {
@@ -86,6 +109,11 @@ interface RemotePeerEntry {
   pc: RTCPeerConnection
   remoteStream: MediaStream
   pendingIce: RTCIceCandidateInit[]
+  outboundIceBatch: RTCIceCandidateInit[]
+  sentLocalIce: RTCIceCandidateInit[]
+  iceBatchTimer: number | null
+  renegotiateTimer: number | null
+  lastAppliedRemoteOfferSdp: string | null
   audioMuted: boolean
   videoEnabled: boolean
   screenSharing: boolean
@@ -96,6 +124,15 @@ interface RemotePeerEntry {
   iceState: PeerIceConnectionState
   rttMs: number | null
   joinedAt: number
+  negotiatedAt: number | null
+  lastOfferSentAt: number
+  offerRetryCount: number
+  lastSyncRequestAt: number
+  syncRequestCount: number
+  iceRestartCount: number
+  lastIceRestartAt: number
+  disconnectedAt: number | null
+  failedToastNotified: boolean
   makingOffer: boolean
   negotiating: boolean
   renegotiateQueued: boolean
@@ -116,6 +153,18 @@ function normalizeIceState(state: RTCIceConnectionState): PeerIceConnectionState
     default:
       return 'new'
   }
+}
+
+function computeEffectivePeerState(pc: RTCPeerConnection): PeerIceConnectionState {
+  const ice = normalizeIceState(pc.iceConnectionState)
+  const conn = pc.connectionState
+  if (ice === 'completed') return 'completed'
+  if (ice === 'connected' || conn === 'connected') return 'connected'
+  if (ice === 'failed' || conn === 'failed') return 'failed'
+  if (ice === 'closed' || conn === 'closed') return 'closed'
+  if (ice === 'disconnected' || conn === 'disconnected') return 'disconnected'
+  if (ice === 'checking' || conn === 'connecting') return 'checking'
+  return 'new'
 }
 
 function friendlyMediaError(err: unknown): string {
@@ -155,6 +204,9 @@ export class WebRtcMesh {
   private joinedAt = Date.now()
 
   private peers = new Map<string, RemotePeerEntry>()
+  private prePeerIce = new Map<string, RTCIceCandidateInit[]>()
+  private prePeerMetadata = new Map<string, PeerMetadataPatch>()
+  private signalQueues = new Map<string, Promise<void>>()
 
   private audioCtx: AudioContext | null = null
   private vadChannels = new Map<string, VadChannel>()
@@ -334,6 +386,9 @@ export class WebRtcMesh {
         existing.nickname = nicknameHint.trim()
         this.emitState()
       }
+      if (forceInitiate === true && existing.pc.signalingState === 'stable' && !existing.pc.remoteDescription) {
+        void this.enqueuePeerSignal(pk, () => this.initiateOfferInternal(existing, false))
+      }
       return true
     }
 
@@ -347,22 +402,41 @@ export class WebRtcMesh {
     })
 
     const remoteStream = new MediaStream()
+    const bufferedIce = this.prePeerIce.get(pk) ?? []
+    this.prePeerIce.delete(pk)
+    const bufferedMeta = this.prePeerMetadata.get(pk)
+    this.prePeerMetadata.delete(pk)
+
     const entry: RemotePeerEntry = {
       pubkey: pk,
-      nickname: nicknameHint?.trim() || `anon${pk.slice(-4)}`,
+      nickname: bufferedMeta?.nickname?.trim() || nicknameHint?.trim() || `anon${pk.slice(-4)}`,
       pc,
       remoteStream,
-      pendingIce: [],
-      audioMuted: false,
-      videoEnabled: false,
-      screenSharing: false,
-      isRecording: false,
+      pendingIce: bufferedIce.slice(0, MAX_PENDING_ICE),
+      outboundIceBatch: [],
+      sentLocalIce: [],
+      iceBatchTimer: null,
+      renegotiateTimer: null,
+      lastAppliedRemoteOfferSdp: null,
+      audioMuted: bufferedMeta?.audioMuted ?? false,
+      videoEnabled: bufferedMeta?.videoEnabled ?? false,
+      screenSharing: bufferedMeta?.screenSharing ?? false,
+      isRecording: bufferedMeta?.isRecording ?? false,
       isSpeaking: false,
       audioLevel: 0,
       lastSpokeAt: 0,
       iceState: 'new',
       rttMs: null,
       joinedAt: Date.now(),
+      negotiatedAt: null,
+      lastOfferSentAt: 0,
+      offerRetryCount: 0,
+      lastSyncRequestAt: 0,
+      syncRequestCount: 0,
+      iceRestartCount: 0,
+      lastIceRestartAt: 0,
+      disconnectedAt: null,
+      failedToastNotified: false,
       makingOffer: false,
       negotiating: false,
       renegotiateQueued: false,
@@ -380,29 +454,47 @@ export class WebRtcMesh {
     }
 
     pc.onicecandidate = (event) => {
-      if (this.disposed || !event.candidate) return
-      this.callbacks.onSendIce(pk, event.candidate.toJSON())
+      if (this.disposed) return
+      if (!event.candidate) {
+        this.flushOutboundIceBatch(entry)
+        return
+      }
+      const candJson = event.candidate.toJSON()
+      if (entry.sentLocalIce.length < MAX_PENDING_ICE) {
+        entry.sentLocalIce.push(candJson)
+      }
+      entry.outboundIceBatch.push(candJson)
+      if (entry.outboundIceBatch.length >= ICE_BATCH_MAX_SIZE) {
+        this.flushOutboundIceBatch(entry)
+      } else if (entry.iceBatchTimer === null) {
+        entry.iceBatchTimer = window.setTimeout(() => {
+          entry.iceBatchTimer = null
+          this.flushOutboundIceBatch(entry)
+        }, ICE_BATCH_DELAY_MS)
+      }
     }
 
     pc.ontrack = (event) => {
       if (this.disposed) return
       const track = event.track
-      const keptTracks = entry.remoteStream.getTracks().filter((t) => {
-        if (t.id === track.id) return false
-        // Replace any stale/previous video track with the newly negotiated track
-        if (track.kind === 'video' && t.kind === 'video') return false
-        return t.readyState === 'live'
-      })
-      keptTracks.push(track)
-      entry.remoteStream = new MediaStream(keptTracks)
+      // Mutate entry.remoteStream in place so <audio> srcObject stays stable on iOS Safari PWA
+      // when a video track arrives right after an audio track.
+      for (const existingTrack of entry.remoteStream.getTracks()) {
+        if (
+          existingTrack.id === track.id ||
+          existingTrack.readyState !== 'live' ||
+          (track.kind === 'video' && existingTrack.kind === 'video') ||
+          (track.kind === 'audio' && existingTrack.kind === 'audio')
+        ) {
+          entry.remoteStream.removeTrack(existingTrack)
+        }
+      }
+      entry.remoteStream.addTrack(track)
 
       if (track.kind === 'video') {
         entry.videoEnabled = true
         track.onended = () => {
-          const remaining = entry.remoteStream
-            .getTracks()
-            .filter((t) => t.id !== track.id && t.readyState === 'live')
-          entry.remoteStream = new MediaStream(remaining)
+          entry.remoteStream.removeTrack(track)
           entry.videoEnabled = entry.remoteStream
             .getVideoTracks()
             .some((t) => t.readyState === 'live' && t.enabled)
@@ -416,24 +508,25 @@ export class WebRtcMesh {
           this.emitState()
         }
       } else if (track.kind === 'audio') {
+        track.onended = () => {
+          entry.remoteStream.removeTrack(track)
+          this.emitState()
+        }
+        track.onunmute = () => {
+          this.attachVadStream(pk, entry.remoteStream)
+          this.emitState()
+        }
         this.attachVadStream(pk, entry.remoteStream)
       }
       this.emitState()
     }
 
-    pc.oniceconnectionstatechange = () => {
+    const onStateChange = () => {
       if (this.disposed) return
-      const nextState = normalizeIceState(pc.iceConnectionState)
-      if (entry.iceState === nextState) return
-      entry.iceState = nextState
-      if (nextState === 'connected' || nextState === 'completed') {
-        void this.applyAdaptiveVideoScaling()
-        this.callbacks.onPeerConnected?.(pk)
-      } else if (nextState === 'failed') {
-        this.callbacks.onPeerFailed?.(pk)
-      }
-      this.emitState()
+      this.handlePeerConnectionStateChange(entry)
     }
+    pc.oniceconnectionstatechange = onStateChange
+    pc.onconnectionstatechange = onStateChange
 
     this.peers.set(pk, entry)
     void this.applyAdaptiveVideoScaling()
@@ -441,21 +534,51 @@ export class WebRtcMesh {
 
     const shouldOffer = forceInitiate !== undefined ? forceInitiate : this.selfPubkey < pk
     if (shouldOffer) {
-      void this.initiateOffer(entry)
+      void this.enqueuePeerSignal(pk, () => this.initiateOfferInternal(entry, false))
     }
     return true
   }
 
-  removePeer(peerPubkey: string): void {
+  /**
+   * Re-emits the current local SDP offer + gathered local ICE candidates if we are still
+   * waiting in `have-local-offer` (e.g., when callee re-sends `call-accept` after missing
+   * our initial offer on a waking mobile socket).
+   */
+  resendOfferIfPending(peerPubkey: string): void {
+    if (this.disposed) return
     const pk = peerPubkey.toLowerCase()
     const entry = this.peers.get(pk)
     if (!entry) return
+    if (entry.pc.signalingState !== 'have-local-offer' || !entry.pc.localDescription?.sdp) return
+    const now = Date.now()
+    if (now - entry.lastOfferSentAt < 1_000) return
+    entry.lastOfferSentAt = now
+    this.callbacks.onSendOffer(pk, entry.pc.localDescription.sdp)
+    this.reemitSentLocalIce(entry)
+  }
+
+  removePeer(peerPubkey: string): void {
+    const pk = peerPubkey.toLowerCase()
+    this.prePeerIce.delete(pk)
+    this.prePeerMetadata.delete(pk)
+    this.signalQueues.delete(pk)
+    const entry = this.peers.get(pk)
+    if (!entry) return
     this.peers.delete(pk)
+    if (entry.iceBatchTimer !== null) {
+      window.clearTimeout(entry.iceBatchTimer)
+      entry.iceBatchTimer = null
+    }
+    if (entry.renegotiateTimer !== null) {
+      window.clearTimeout(entry.renegotiateTimer)
+      entry.renegotiateTimer = null
+    }
     this.detachVadChannel(pk)
     try {
       entry.pc.onicecandidate = null
       entry.pc.ontrack = null
       entry.pc.oniceconnectionstatechange = null
+      entry.pc.onconnectionstatechange = null
       entry.pc.close()
     } catch {
       // Ignore close errors
@@ -466,16 +589,21 @@ export class WebRtcMesh {
 
   updatePeerMetadata(
     peerPubkey: string,
-    patch: {
-      nickname?: string
-      audioMuted?: boolean
-      videoEnabled?: boolean
-      screenSharing?: boolean
-      isRecording?: boolean
-    }
+    patch: PeerMetadataPatch
   ): void {
-    const entry = this.peers.get(peerPubkey.toLowerCase())
-    if (!entry) return
+    const pk = peerPubkey.toLowerCase()
+    const entry = this.peers.get(pk)
+    if (!entry) {
+      const prev = this.prePeerMetadata.get(pk) ?? {}
+      this.prePeerMetadata.set(pk, {
+        nickname: patch.nickname?.trim() || prev.nickname,
+        audioMuted: typeof patch.audioMuted === 'boolean' ? patch.audioMuted : prev.audioMuted,
+        videoEnabled: typeof patch.videoEnabled === 'boolean' ? patch.videoEnabled : prev.videoEnabled,
+        screenSharing: typeof patch.screenSharing === 'boolean' ? patch.screenSharing : prev.screenSharing,
+        isRecording: typeof patch.isRecording === 'boolean' ? patch.isRecording : prev.isRecording,
+      })
+      return
+    }
     let changed = false
     if (patch.nickname && patch.nickname.trim() && entry.nickname !== patch.nickname.trim()) {
       entry.nickname = patch.nickname.trim()
@@ -500,89 +628,159 @@ export class WebRtcMesh {
     if (changed) this.emitState()
   }
 
-  async handleRemoteOffer(peerPubkey: string, sdp: string, nicknameHint?: string): Promise<boolean> {
-    if (this.disposed) return false
+  handleRemoteOffer(peerPubkey: string, sdp: string, nicknameHint?: string): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false)
     const pk = peerPubkey.toLowerCase()
     if (!this.peers.has(pk)) {
       if (!this.canAddPeer(pk)) {
         // Hard cap reached (6 participants) — reject cleanly without creating RTCPeerConnection
-        return false
+        return Promise.resolve(false)
       }
       this.connectToPeer(pk, nicknameHint, false)
     }
 
-    const entry = this.peers.get(pk)
-    if (!entry) return false
-    if (nicknameHint && nicknameHint.trim()) {
-      entry.nickname = nicknameHint.trim()
-    }
-
-    const pc = entry.pc
-    const isPolite = this.selfPubkey > pk
-    const offerCollision = entry.makingOffer || pc.signalingState !== 'stable'
-
-    if (offerCollision && !isPolite) {
-      // Deterministic glare resolution: impolite (lower pubkey) wins collision
-      return true
-    }
-
-    try {
-      if (offerCollision && isPolite) {
-        await pc.setLocalDescription({ type: 'rollback' })
+    return this.enqueuePeerSignal(pk, async () => {
+      if (this.disposed) return false
+      const entry = this.peers.get(pk)
+      if (!entry) return false
+      if (nicknameHint && nicknameHint.trim()) {
+        entry.nickname = nicknameHint.trim()
       }
-      await pc.setRemoteDescription({ type: 'offer', sdp })
-      await this.flushPendingIce(entry)
 
-      const answer = await pc.createAnswer()
-      const optimizedSdp = answer.sdp ? optimizeOpusSdp(answer.sdp) : answer.sdp
-      await pc.setLocalDescription({ type: 'answer', sdp: optimizedSdp })
-      if (pc.localDescription?.sdp) {
-        this.callbacks.onSendAnswer(pk, pc.localDescription.sdp)
+      const pc = entry.pc
+      const isPolite = this.selfPubkey > pk
+
+      // Deduplicate re-emitted copies of an offer we already applied & answered
+      if (entry.lastAppliedRemoteOfferSdp === sdp) {
+        if (
+          pc.signalingState === 'stable' &&
+          pc.localDescription?.type === 'answer' &&
+          pc.localDescription.sdp
+        ) {
+          this.callbacks.onSendAnswer(pk, pc.localDescription.sdp)
+        }
+        return true
       }
-      if (entry.renegotiateQueued && pc.signalingState === 'stable') {
-        entry.renegotiateQueued = false
-        void this.initiateOffer(entry)
+
+      const offerCollision = entry.makingOffer || pc.signalingState !== 'stable'
+
+      if (offerCollision && !isPolite) {
+        // Deterministic glare resolution: impolite (lower pubkey) wins collision.
+        // Only re-emit our active offer if >= 1.2s old so we don't bounce stale offers
+        // right as the polite peer's answer is already in flight.
+        const now = Date.now()
+        if (
+          pc.signalingState === 'have-local-offer' &&
+          pc.localDescription?.sdp &&
+          now - entry.lastOfferSentAt >= 1_200
+        ) {
+          entry.lastOfferSentAt = now
+          this.callbacks.onSendOffer(pk, pc.localDescription.sdp)
+          const isConnected = entry.iceState === 'connected' || entry.iceState === 'completed'
+          if (!isConnected) {
+            this.reemitSentLocalIce(entry)
+          }
+        }
+        return true
       }
-      this.emitState()
-      return true
-    } catch {
-      return false
-    }
+
+      try {
+        if (offerCollision && isPolite) {
+          await pc.setLocalDescription({ type: 'rollback' })
+        }
+        await pc.setRemoteDescription({ type: 'offer', sdp })
+        entry.lastAppliedRemoteOfferSdp = sdp
+        entry.negotiatedAt = Date.now()
+        await this.flushPendingIce(entry)
+
+        const answer = await pc.createAnswer()
+        await this.applyLocalDescription(pc, answer)
+        if (pc.localDescription?.sdp) {
+          this.callbacks.onSendAnswer(pk, pc.localDescription.sdp)
+        }
+
+        // Check if we have a live local video track whose transceiver was not included in the
+        // remote audio-only offer (mid === null) — defer renegotiation briefly so our answer
+        // settles the remote peer into 'stable' before our follow-up offer arrives across relays.
+        const hasUnnegotiatedLocalVideo = Boolean(
+          this.getActiveLocalVideoTrack() &&
+            entry.videoSender &&
+            pc.getTransceivers().some((t) => t.sender === entry.videoSender && t.mid === null)
+        )
+        if ((entry.renegotiateQueued || hasUnnegotiatedLocalVideo) && pc.signalingState === 'stable') {
+          entry.renegotiateQueued = false
+          this.scheduleDeferredRenegotiation(entry)
+        }
+        this.emitState()
+        return true
+      } catch (err) {
+        console.warn('[WebRtcMesh] handleRemoteOffer failed:', err)
+        return false
+      }
+    })
   }
 
-  async handleRemoteAnswer(peerPubkey: string, sdp: string): Promise<void> {
-    if (this.disposed) return
-    const entry = this.peers.get(peerPubkey.toLowerCase())
-    if (!entry) return
-    if (entry.pc.signalingState !== 'have-local-offer') return
-    try {
-      await entry.pc.setRemoteDescription({ type: 'answer', sdp })
-      await this.flushPendingIce(entry)
-      void this.applyAdaptiveVideoScaling()
-      if (entry.renegotiateQueued) {
-        entry.renegotiateQueued = false
-        void this.initiateOffer(entry)
+  handleRemoteAnswer(peerPubkey: string, sdp: string): Promise<void> {
+    if (this.disposed) return Promise.resolve()
+    const pk = peerPubkey.toLowerCase()
+    return this.enqueuePeerSignal(pk, async () => {
+      if (this.disposed) return
+      const entry = this.peers.get(pk)
+      if (!entry) return
+      if (entry.pc.signalingState !== 'have-local-offer') return
+      try {
+        await entry.pc.setRemoteDescription({ type: 'answer', sdp })
+        entry.negotiatedAt = Date.now()
+        entry.offerRetryCount = 0
+        await this.flushPendingIce(entry)
+        void this.applyAdaptiveVideoScaling()
+        if (entry.renegotiateQueued) {
+          entry.renegotiateQueued = false
+          await this.initiateOfferInternal(entry, false)
+        }
+      } catch (err) {
+        console.warn('[WebRtcMesh] handleRemoteAnswer failed:', err)
       }
-    } catch {
-      // Ignore stale answer
-    }
+    })
   }
 
-  async handleRemoteIce(peerPubkey: string, candidate: RTCIceCandidateInit): Promise<void> {
-    if (this.disposed) return
-    const entry = this.peers.get(peerPubkey.toLowerCase())
-    if (!entry) return
-    if (!entry.pc.remoteDescription) {
-      if (entry.pendingIce.length < MAX_PENDING_ICE) {
-        entry.pendingIce.push(candidate)
+  handleRemoteIce(peerPubkey: string, candidate: RTCIceCandidateInit): Promise<void> {
+    return this.handleRemoteIceBatch(peerPubkey, [candidate])
+  }
+
+  handleRemoteIceBatch(peerPubkey: string, candidates: readonly RTCIceCandidateInit[]): Promise<void> {
+    if (this.disposed || candidates.length === 0) return Promise.resolve()
+    const pk = peerPubkey.toLowerCase()
+    if (!this.peers.has(pk)) {
+      // Buffer early ICE candidates that arrive before connectToPeer / offer!
+      const list = this.prePeerIce.get(pk) ?? []
+      for (const cand of candidates) {
+        if (list.length >= MAX_PENDING_ICE) break
+        list.push(cand)
       }
-      return
+      this.prePeerIce.set(pk, list)
+      return Promise.resolve()
     }
-    try {
-      await entry.pc.addIceCandidate(candidate)
-    } catch {
-      // Ignore stale/invalid ICE candidate
-    }
+
+    return this.enqueuePeerSignal(pk, async () => {
+      if (this.disposed) return
+      const entry = this.peers.get(pk)
+      if (!entry) return
+      if (!entry.pc.remoteDescription) {
+        for (const cand of candidates) {
+          if (entry.pendingIce.length >= MAX_PENDING_ICE) break
+          entry.pendingIce.push(cand)
+        }
+        return
+      }
+      for (const cand of candidates) {
+        try {
+          await entry.pc.addIceCandidate(cand)
+        } catch {
+          // Ignore stale/invalid ICE candidate
+        }
+      }
+    })
   }
 
   toggleMute(): void {
@@ -794,16 +992,28 @@ export class WebRtcMesh {
     }
 
     for (const entry of this.peers.values()) {
+      if (entry.iceBatchTimer !== null) {
+        window.clearTimeout(entry.iceBatchTimer)
+        entry.iceBatchTimer = null
+      }
+      if (entry.renegotiateTimer !== null) {
+        window.clearTimeout(entry.renegotiateTimer)
+        entry.renegotiateTimer = null
+      }
       try {
         entry.pc.onicecandidate = null
         entry.pc.ontrack = null
         entry.pc.oniceconnectionstatechange = null
+        entry.pc.onconnectionstatechange = null
         entry.pc.close()
       } catch {
         // Ignore close errors
       }
     }
     this.peers.clear()
+    this.prePeerIce.clear()
+    this.prePeerMetadata.clear()
+    this.signalQueues.clear()
 
     if (this.localScreenTrack) {
       this.localScreenTrack.onended = null
@@ -891,7 +1101,7 @@ export class WebRtcMesh {
             transceiver.direction !== 'sendonly'
           ) {
             transceiver.direction = 'sendrecv'
-            await this.initiateOffer(entry)
+            await this.enqueuePeerSignal(entry.pubkey, () => this.initiateOfferInternal(entry, false))
           }
         }
         return
@@ -911,20 +1121,143 @@ export class WebRtcMesh {
           await reusableTransceiver.sender.replaceTrack(nextTrack)
           reusableTransceiver.direction = 'sendrecv'
           entry.videoSender = reusableTransceiver.sender
-          await this.initiateOffer(entry)
+          await this.enqueuePeerSignal(entry.pubkey, () => this.initiateOfferInternal(entry, false))
           return
         }
         entry.videoSender = entry.pc.addTrack(nextTrack, this.localStream)
-        await this.initiateOffer(entry)
+        await this.enqueuePeerSignal(entry.pubkey, () => this.initiateOfferInternal(entry, false))
       }
     } catch {
       // Peer might have closed mid-transition
     }
   }
 
-  private async initiateOffer(entry: RemotePeerEntry): Promise<void> {
+  private enqueuePeerSignal<T>(pk: string, task: () => Promise<T>): Promise<T> {
+    const prev = this.signalQueues.get(pk) ?? Promise.resolve()
+    const next = prev.catch(() => undefined).then(() => task())
+    const tracked = next.then(
+      () => undefined,
+      () => undefined
+    )
+    this.signalQueues.set(pk, tracked)
+    return next
+  }
+
+  private async applyLocalDescription(
+    pc: RTCPeerConnection,
+    desc: RTCSessionDescriptionInit
+  ): Promise<void> {
+    const optimizedSdp = desc.sdp ? optimizeOpusSdp(desc.sdp) : desc.sdp
+    try {
+      await pc.setLocalDescription({ type: desc.type, sdp: optimizedSdp })
+    } catch (err) {
+      if (optimizedSdp !== desc.sdp) {
+        console.warn('[WebRtcMesh] Optimized SDP rejected; retrying unmodified SDP:', err)
+        await pc.setLocalDescription({ type: desc.type, sdp: desc.sdp })
+      } else {
+        throw err
+      }
+    }
+  }
+
+  private emitIceBatch(pk: string, batch: RTCIceCandidateInit[]): void {
+    if (this.disposed || batch.length === 0) return
+    if (this.callbacks.onSendIceBatch) {
+      this.callbacks.onSendIceBatch(pk, batch)
+      return
+    }
+    for (const cand of batch) {
+      this.callbacks.onSendIce(pk, cand)
+    }
+  }
+
+  private flushOutboundIceBatch(entry: RemotePeerEntry): void {
+    if (entry.iceBatchTimer !== null) {
+      window.clearTimeout(entry.iceBatchTimer)
+      entry.iceBatchTimer = null
+    }
+    if (entry.outboundIceBatch.length === 0) return
+    const batch = entry.outboundIceBatch.splice(0, entry.outboundIceBatch.length)
+    this.emitIceBatch(entry.pubkey, batch)
+  }
+
+  private reemitSentLocalIce(entry: RemotePeerEntry): void {
+    if (this.disposed || entry.sentLocalIce.length === 0) return
+    for (let i = 0; i < entry.sentLocalIce.length; i += ICE_BATCH_MAX_SIZE) {
+      this.emitIceBatch(entry.pubkey, entry.sentLocalIce.slice(i, i + ICE_BATCH_MAX_SIZE))
+    }
+  }
+
+  private handlePeerConnectionStateChange(entry: RemotePeerEntry): void {
+    const nextState = computeEffectivePeerState(entry.pc)
+    if (entry.iceState === nextState) return
+    entry.iceState = nextState
+
+    if (nextState === 'connected' || nextState === 'completed') {
+      entry.disconnectedAt = null
+      entry.failedToastNotified = false
+      entry.offerRetryCount = 0
+      void this.applyAdaptiveVideoScaling()
+      this.callbacks.onPeerConnected?.(entry.pubkey)
+    } else if (nextState === 'disconnected') {
+      if (entry.disconnectedAt === null) {
+        entry.disconnectedAt = Date.now()
+      }
+    } else if (nextState === 'failed') {
+      entry.disconnectedAt = entry.disconnectedAt ?? Date.now()
+      const now = Date.now()
+      const canRestart =
+        entry.iceRestartCount < MAX_ICE_RESTARTS &&
+        now - entry.lastIceRestartAt >= ICE_RESTART_COOLDOWN_MS
+      if (canRestart) {
+        const isPolite = this.selfPubkey > entry.pubkey
+        const delay = isPolite ? 1_200 : 150
+        window.setTimeout(() => {
+          if (this.disposed || this.peers.get(entry.pubkey) !== entry) return
+          const curState = computeEffectivePeerState(entry.pc)
+          if (curState === 'failed' || curState === 'disconnected') {
+            void this.enqueuePeerSignal(entry.pubkey, () => this.initiateOfferInternal(entry, true))
+          }
+        }, delay)
+      } else if (!entry.failedToastNotified) {
+        entry.failedToastNotified = true
+        this.callbacks.onPeerFailed?.(entry.pubkey)
+      }
+    }
+    this.emitState()
+  }
+
+  private scheduleDeferredRenegotiation(
+    entry: RemotePeerEntry,
+    delayMs = RENEGOTIATE_AFTER_ANSWER_DELAY_MS
+  ): void {
+    if (entry.renegotiateTimer !== null) {
+      window.clearTimeout(entry.renegotiateTimer)
+      entry.renegotiateTimer = null
+    }
+    entry.renegotiateTimer = window.setTimeout(() => {
+      entry.renegotiateTimer = null
+      if (this.disposed || this.peers.get(entry.pubkey) !== entry) return
+      void this.enqueuePeerSignal(entry.pubkey, async () => {
+        if (this.disposed || this.peers.get(entry.pubkey) !== entry) return
+        if (entry.pc.signalingState === 'stable') {
+          await this.initiateOfferInternal(entry, false)
+        } else {
+          entry.renegotiateQueued = true
+        }
+      })
+    }, delayMs)
+  }
+
+  private async initiateOfferInternal(entry: RemotePeerEntry, iceRestart: boolean): Promise<void> {
     if (this.disposed) return
-    if (entry.pc.signalingState !== 'stable') {
+    if (this.peers.get(entry.pubkey) !== entry) return
+    if (entry.renegotiateTimer !== null) {
+      window.clearTimeout(entry.renegotiateTimer)
+      entry.renegotiateTimer = null
+    }
+    const pc = entry.pc
+    if (!iceRestart && pc.signalingState !== 'stable') {
       entry.renegotiateQueued = true
       return
     }
@@ -934,14 +1267,26 @@ export class WebRtcMesh {
     }
     entry.makingOffer = true
     try {
-      const offer = await entry.pc.createOffer()
-      const optimizedSdp = offer.sdp ? optimizeOpusSdp(offer.sdp) : offer.sdp
-      await entry.pc.setLocalDescription({ type: 'offer', sdp: optimizedSdp })
-      if (entry.pc.localDescription?.sdp) {
-        this.callbacks.onSendOffer(entry.pubkey, entry.pc.localDescription.sdp)
+      if (iceRestart) {
+        if (pc.signalingState === 'have-local-offer') {
+          await pc.setLocalDescription({ type: 'rollback' })
+        } else if (pc.signalingState !== 'stable') {
+          entry.renegotiateQueued = true
+          return
+        }
+        entry.iceRestartCount += 1
+        entry.lastIceRestartAt = Date.now()
+        entry.sentLocalIce = []
       }
-    } catch {
-      // Ignore if peer closed during offer
+      const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined)
+      await this.applyLocalDescription(pc, offer)
+      if (pc.localDescription?.sdp) {
+        entry.lastOfferSentAt = Date.now()
+        entry.offerRetryCount = 0
+        this.callbacks.onSendOffer(entry.pubkey, pc.localDescription.sdp)
+      }
+    } catch (err) {
+      console.warn('[WebRtcMesh] initiateOffer failed:', err)
     } finally {
       entry.makingOffer = false
     }
@@ -1129,13 +1474,80 @@ export class WebRtcMesh {
 
   private async pollPeerStats(): Promise<void> {
     if (this.disposed || this.peers.size === 0) return
+    const now = Date.now()
     let changed = false
     for (const entry of this.peers.values()) {
-      const nextIce = normalizeIceState(entry.pc.iceConnectionState)
-      if (entry.iceState !== nextIce) {
-        entry.iceState = nextIce
+      const prevState = entry.iceState
+      this.handlePeerConnectionStateChange(entry)
+      if (entry.iceState !== prevState) {
         changed = true
       }
+
+      const pc = entry.pc
+      const isConnected = entry.iceState === 'connected' || entry.iceState === 'completed'
+
+      // Watchdog 1: Offerer waiting on answer (initial OR mid-call renegotiation while connected)
+      // Re-emit offer if lost to glare/relay drop; also re-emit gathered ICE when not yet connected.
+      if (
+        pc.signalingState === 'have-local-offer' &&
+        pc.localDescription?.sdp &&
+        entry.offerRetryCount < MAX_OFFER_RETRIES &&
+        now - entry.lastOfferSentAt >= OFFER_RETRY_INTERVAL_MS
+      ) {
+        entry.lastOfferSentAt = now
+        entry.offerRetryCount += 1
+        this.callbacks.onSendOffer(entry.pubkey, pc.localDescription.sdp)
+        if (!isConnected) {
+          this.reemitSentLocalIce(entry)
+        }
+      }
+
+      // Watchdog 2: Waiting peer never received remote SDP — nudge sync, then send polite fallback offer
+      if (!isConnected && pc.signalingState === 'stable' && !pc.remoteDescription && !entry.makingOffer) {
+        if (
+          now - entry.joinedAt >= PEER_SYNC_INITIAL_DELAY_MS &&
+          now - entry.lastSyncRequestAt >= PEER_SYNC_INTERVAL_MS &&
+          entry.syncRequestCount < MAX_PEER_SYNC_REQUESTS
+        ) {
+          entry.lastSyncRequestAt = now
+          entry.syncRequestCount += 1
+          this.callbacks.onRequestPeerSync?.(entry.pubkey)
+        }
+        if (
+          now - entry.joinedAt >= POLITE_FALLBACK_OFFER_DELAY_MS &&
+          entry.offerRetryCount < 2 &&
+          now - entry.lastOfferSentAt >= OFFER_RETRY_INTERVAL_MS
+        ) {
+          entry.offerRetryCount += 1
+          void this.enqueuePeerSignal(entry.pubkey, () => this.initiateOfferInternal(entry, false))
+        }
+      }
+
+      // Watchdog 3: SDP negotiated but ICE stalled/disconnected/failed — trigger automatic ICE restart
+      if (
+        !isConnected &&
+        pc.remoteDescription &&
+        !entry.makingOffer &&
+        entry.iceRestartCount < MAX_ICE_RESTARTS &&
+        now - entry.lastIceRestartAt >= ICE_RESTART_COOLDOWN_MS
+      ) {
+        const isPolite = this.selfPubkey > entry.pubkey
+        const stallAllowance = isPolite ? ICE_CHECKING_STALL_MS + 2_000 : ICE_CHECKING_STALL_MS
+        const negotiatedSince = entry.negotiatedAt ?? entry.joinedAt
+        const stalledChecking =
+          (entry.iceState === 'checking' || entry.iceState === 'new') &&
+          now - negotiatedSince >= stallAllowance
+        const stalledDisconnected =
+          entry.iceState === 'disconnected' &&
+          entry.disconnectedAt !== null &&
+          now - entry.disconnectedAt >= ICE_DISCONNECTED_RESTART_MS
+        const failed = entry.iceState === 'failed'
+
+        if (stalledChecking || stalledDisconnected || failed) {
+          void this.enqueuePeerSignal(entry.pubkey, () => this.initiateOfferInternal(entry, true))
+        }
+      }
+
       try {
         const report = await entry.pc.getStats()
         let foundRtt: number | null = null

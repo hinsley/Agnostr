@@ -21,14 +21,15 @@ export const ROOM_PEER_TTL_MS = 30_000
 export const MAX_SIGNAL_AGE_SEC = 60
 
 /**
- * Live-verified public Nostr relays supporting ephemeral kind:25050 with `#p` & `#t` echo.
+ * Live-verified public Nostr relays supporting ephemeral kind:25050 with `#p` & `#t` echo
+ * without web-of-trust burst rejection for auto-generated keys.
  */
 export const CALL_SIGNALING_RELAYS: readonly string[] = [
-  'wss://nostr.bitcoiner.social',
   'wss://relay.primal.net',
-  'wss://offchain.pub',
   'wss://nos.lol',
   'wss://nostr.mom',
+  'wss://relay.fundstr.me',
+  'wss://relay.angor.io',
 ]
 
 export type DirectCallAction =
@@ -62,6 +63,7 @@ export interface DirectCallSignalPayload {
   nickname?: string
   sdp?: string
   candidate?: RTCIceCandidateInit
+  candidates?: RTCIceCandidateInit[]
   audioMuted?: boolean
   videoEnabled?: boolean
   screenSharing?: boolean
@@ -81,6 +83,7 @@ export interface RoomCallSignalPayload {
   media?: CallMediaType
   sdp?: string
   candidate?: RTCIceCandidateInit
+  candidates?: RTCIceCandidateInit[]
   audioMuted?: boolean
   videoEnabled?: boolean
   screenSharing?: boolean
@@ -299,6 +302,18 @@ const VALID_ROOM_ACTIONS = new Set<RoomCallAction>([
   'media-state',
 ])
 
+function sanitizeCandidateList(raw: unknown): RTCIceCandidateInit[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: RTCIceCandidateInit[] = []
+  for (const item of raw) {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      out.push(item as RTCIceCandidateInit)
+      if (out.length >= 32) break
+    }
+  }
+  return out.length > 0 ? out : undefined
+}
+
 export function validateDirectSignalPayload(
   raw: Partial<DirectCallSignalPayload> | null | undefined
 ): DirectCallSignalPayload | null {
@@ -314,7 +329,8 @@ export function validateDirectSignalPayload(
     media: raw.media === 'audio' || raw.media === 'video' ? raw.media : undefined,
     nickname: typeof raw.nickname === 'string' ? raw.nickname.trim().slice(0, 32) : undefined,
     sdp: typeof raw.sdp === 'string' && raw.sdp.length <= 65_536 ? raw.sdp : undefined,
-    candidate: raw.candidate && typeof raw.candidate === 'object' ? raw.candidate : undefined,
+    candidate: raw.candidate && typeof raw.candidate === 'object' && !Array.isArray(raw.candidate) ? raw.candidate : undefined,
+    candidates: sanitizeCandidateList(raw.candidates),
     audioMuted: typeof raw.audioMuted === 'boolean' ? raw.audioMuted : undefined,
     videoEnabled: typeof raw.videoEnabled === 'boolean' ? raw.videoEnabled : undefined,
     screenSharing: typeof raw.screenSharing === 'boolean' ? raw.screenSharing : undefined,
@@ -343,7 +359,8 @@ export function validateRoomSignalPayload(
     nickname: typeof raw.nickname === 'string' ? raw.nickname.trim().slice(0, 32) : undefined,
     media: raw.media === 'audio' || raw.media === 'video' ? raw.media : undefined,
     sdp: typeof raw.sdp === 'string' && raw.sdp.length <= 65_536 ? raw.sdp : undefined,
-    candidate: raw.candidate && typeof raw.candidate === 'object' ? raw.candidate : undefined,
+    candidate: raw.candidate && typeof raw.candidate === 'object' && !Array.isArray(raw.candidate) ? raw.candidate : undefined,
+    candidates: sanitizeCandidateList(raw.candidates),
     audioMuted: typeof raw.audioMuted === 'boolean' ? raw.audioMuted : undefined,
     videoEnabled: typeof raw.videoEnabled === 'boolean' ? raw.videoEnabled : undefined,
     screenSharing: typeof raw.screenSharing === 'boolean' ? raw.screenSharing : undefined,
