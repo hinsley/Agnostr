@@ -16,7 +16,6 @@ import type {
   PreparedImage,
   RecordedVoiceMemo,
   SlashCommandDef,
-  VoiceSendPhase,
 } from '../types/protocol'
 import {
   formatImageBytes,
@@ -24,21 +23,17 @@ import {
   prepareImageFile,
   revokeImagePreviewUrl,
 } from '../lib/imageProcessor'
-import { formatVoiceDuration, isVoiceRecordingSupported } from '../lib/voiceRecorder'
+import {
+  formatVoiceDuration,
+  isVoiceRecordingSupported,
+  revokeVoicePreviewUrl,
+} from '../lib/voiceRecorder'
 import { formatRadioChannelLabel } from '../lib/radioChannel'
 import { KeyedFifoQueue } from '../lib/sendQueue'
 import { useBackHandler } from '../hooks/useBackNavigation'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon'
 import { CameraCaptureModal } from './CameraCaptureModal'
 import { VoiceRecorderBar, type VoicePreviewTranscript } from './VoiceRecorderBar'
-
-const MEDIA_PHASE_LABEL: Record<VoiceSendPhase, string> = {
-  idle: 'Send',
-  encrypting: 'Encrypting…',
-  uploading: 'Uploading…',
-  signing: 'Signing…',
-  publishing: 'Publishing…',
-}
 
 function dataTransferHasFiles(dt: DataTransfer | null): boolean {
   if (!dt) return false
@@ -95,6 +90,7 @@ export const Composer: React.FC<ComposerProps> = ({
   const pendingImageRef = useRef<PreparedImage | null>(null)
   const composerQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
   const translatingCountRef = useRef<number>(0)
+  const submitSeqRef = useRef(0)
   const contextEpochRef = useRef(0)
   const dragDepthRef = useRef(0)
 
@@ -144,7 +140,6 @@ export const Composer: React.FC<ComposerProps> = ({
   const activeChannel = engine.servers.activeChannel
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
   const isViolet = isDm || isServerE2ee
-  const isSending = (isServer ? engine.servers.sending : engine.sending) || translatingOutgoing
   const activeReply = isServer ? engine.servers.replyingTo : !isDm ? engine.replyingTo : null
   const activeTargetKey = isDm
     ? `dm:${dmThread?.peerPubkey ?? ''}`
@@ -466,10 +461,10 @@ export const Composer: React.FC<ComposerProps> = ({
     e.preventDefault()
   }
 
-  const handleSubmit = async (keepFocus = false) => {
+  const handleSubmit = (keepFocus = false) => {
     const trimmed = draft.trim()
     const stagedSnapshot = pendingImageRef.current ?? pendingImage
-    if ((!trimmed && !stagedSnapshot) || preparingImage || !canSign) return
+    if ((!trimmed && !stagedSnapshot) || !canSign) return
 
     const textarea = textareaRef.current
     const shouldKeepFocus =
@@ -494,12 +489,23 @@ export const Composer: React.FC<ComposerProps> = ({
     }
 
     // Snapshot target context synchronously at submit time
+    const submitSeq = ++submitSeqRef.current
     const submitTargetKey = activeTargetKey
     const submitIsServer = isServer
     const submitIsDm = isDm
     const submitDmThread = dmThread
     const submitIsViolet = isViolet
     const submitTargetLang = outgoingTargetLang
+
+    const restoreDraftIfSafe = () => {
+      if (
+        trimmed &&
+        activeTargetKeyRef.current === submitTargetKey &&
+        submitSeqRef.current === submitSeq
+      ) {
+        setDraft((curr) => (curr ? curr : trimmed))
+      }
+    }
 
     if (stagedSnapshot) {
       const staged = detachPendingImage() ?? stagedSnapshot
@@ -519,26 +525,34 @@ export const Composer: React.FC<ComposerProps> = ({
 
       let sendPromise: Promise<boolean>
       if (composerQueueRef.current.getPendingCount(submitTargetKey) > 0) {
-        // Wait behind any in-flight outgoing translation for this conversation so image stays in exact order
-        sendPromise = composerQueueRef.current.enqueue(
-          submitTargetKey,
-          async () => dispatchImage(),
-          () => {
-            revokeImagePreviewUrl(staged)
-            return false
-          }
-        )
+        // Wait behind any in-flight outgoing translation for this conversation so image stays in exact order,
+        // handing off immediately into the engine's inner FIFO queue without blocking subsequent items.
+        let innerImagePromise: Promise<boolean> | null = null
+        sendPromise = composerQueueRef.current
+          .enqueue(
+            submitTargetKey,
+            async () => {
+              innerImagePromise = dispatchImage()
+              return true
+            },
+            () => {
+              revokeImagePreviewUrl(staged)
+              return false
+            }
+          )
+          .then((handedOff) => (handedOff && innerImagePromise ? innerImagePromise : false))
       } else {
-        // Fast path: 0ms optimistic bubble + inner per-conversation FIFO queue
+        // Fast path: 0ms handoff into engine's per-conversation FIFO queue
         sendPromise = dispatchImage()
       }
 
-      const ok = await sendPromise
-      if (ok) {
-        onSent?.(submitIsViolet)
-      } else if (trimmed) {
-        setDraft((curr) => (curr ? curr : trimmed))
-      }
+      void sendPromise.then((ok) => {
+        if (ok) {
+          onSent?.(submitIsViolet)
+        } else {
+          restoreDraftIfSafe()
+        }
+      })
       return
     }
 
@@ -597,77 +611,81 @@ export const Composer: React.FC<ComposerProps> = ({
 
     // Slash commands execute immediately without waiting behind queued message publishes
     if (isSlashCmd) {
-      const ok = await dispatchText(trimmed)
-      if (ok) {
-        onSent?.(submitIsViolet)
-      } else {
-        setDraft((curr) => (curr ? curr : trimmed))
-      }
+      void dispatchText(trimmed).then((ok) => {
+        if (ok) {
+          onSent?.(submitIsViolet)
+        } else {
+          restoreDraftIfSafe()
+        }
+      })
       return
     }
 
     // Fast path: no outgoing translation active or pending -> dispatch synchronously (0ms optimistic bubble!)
     // Engine's own per-conversation KeyedFifoQueue guarantees strict 1 -> 2 -> 3 wire order.
     if (!shouldTranslate && composerQueueRef.current.getPendingCount(submitTargetKey) === 0) {
-      const ok = await dispatchText(trimmed)
-      if (ok) {
-        onSent?.(submitIsViolet)
-      } else {
-        setDraft((curr) => (curr ? curr : trimmed))
-      }
+      void dispatchText(trimmed).then((ok) => {
+        if (ok) {
+          onSent?.(submitIsViolet)
+        } else {
+          restoreDraftIfSafe()
+        }
+      })
       return
     }
 
     // Queued path: serialize translation + handoff strictly FIFO per conversation (zero deadlock:
     // handoff returns as soon as the message enters the engine's inner FIFO queue!)
     let innerSendPromise: Promise<boolean> | null = null
-    const handoffOk = await composerQueueRef.current.enqueue(
-      submitTargetKey,
-      async (): Promise<boolean> => {
-        let outgoingBody = trimmed
-        let translatedMeta: { originalText: string; translatedToLang: string } | undefined
+    void composerQueueRef.current
+      .enqueue(
+        submitTargetKey,
+        async (): Promise<boolean> => {
+          let outgoingBody = trimmed
+          let translatedMeta: { originalText: string; translatedToLang: string } | undefined
 
-        if (shouldTranslate) {
-          adjustTranslating(1)
-          try {
-            const translated = (
-              await engine.translator.translateOutgoingText(trimmed, submitTargetLang)
-            ).trim()
-            if (!translated) {
-              throw new Error('Translator returned an empty message.')
+          if (shouldTranslate) {
+            adjustTranslating(1)
+            try {
+              const translated = (
+                await engine.translator.translateOutgoingText(trimmed, submitTargetLang)
+              ).trim()
+              if (!translated) {
+                throw new Error('Translator returned an empty message.')
+              }
+              outgoingBody = translated
+              translatedMeta = {
+                originalText: trimmed,
+                translatedToLang: submitTargetLang,
+              }
+            } catch (err) {
+              pushToast(
+                'warning',
+                'Outgoing translation failed',
+                err instanceof Error ? err.message : 'Unable to translate message before sending.'
+              )
+              restoreDraftIfSafe()
+              return false
+            } finally {
+              adjustTranslating(-1)
             }
-            outgoingBody = translated
-            translatedMeta = {
-              originalText: trimmed,
-              translatedToLang: submitTargetLang,
-            }
-          } catch (err) {
-            pushToast(
-              'warning',
-              'Outgoing translation failed',
-              err instanceof Error ? err.message : 'Unable to translate message before sending.'
-            )
-            setDraft((curr) => (curr ? curr : trimmed))
-            return false
-          } finally {
-            adjustTranslating(-1)
           }
+
+          // Synchronously appends optimistic UI & enqueues publish in the engine's inner FIFO queue
+          innerSendPromise = dispatchText(outgoingBody, translatedMeta)
+          return true
+        },
+        () => false
+      )
+      .then((handoffOk) => (handoffOk && innerSendPromise ? innerSendPromise : null))
+      .then((ok) => {
+        if (ok === null) return
+        if (ok) {
+          onSent?.(submitIsViolet)
+        } else {
+          restoreDraftIfSafe()
         }
-
-        // Synchronously appends optimistic UI & enqueues publish in the engine's inner FIFO queue
-        innerSendPromise = dispatchText(outgoingBody, translatedMeta)
-        return true
-      },
-      () => false
-    )
-
-    if (!handoffOk || !innerSendPromise) return
-    const ok = await innerSendPromise
-    if (ok) {
-      onSent?.(submitIsViolet)
-    } else {
-      setDraft((curr) => (curr ? curr : trimmed))
-    }
+      })
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -691,7 +709,7 @@ export const Composer: React.FC<ComposerProps> = ({
           draft.trim() === `/${autocomplete.items[selectedIndex].name}`
         ) {
           e.preventDefault()
-          void handleSubmit()
+          handleSubmit()
           return
         }
         e.preventDefault()
@@ -713,7 +731,7 @@ export const Composer: React.FC<ComposerProps> = ({
 
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      void handleSubmit()
+      handleSubmit()
       return
     }
 
@@ -754,11 +772,16 @@ export const Composer: React.FC<ComposerProps> = ({
     [pushToast]
   )
 
-  const handleSendVoiceMemo = async (
+  const handleSendVoiceMemo = (
     recorded: RecordedVoiceMemo,
     caption: string,
     previewTranscript?: VoicePreviewTranscript
   ): Promise<boolean> => {
+    submitSeqRef.current += 1
+    const submitTargetKey = activeTargetKey
+    const submitIsServer = isServer
+    const submitIsViolet = isViolet
+
     const cleanTranscript = previewTranscript?.text.trim()
     const payload: RecordedVoiceMemo = cleanTranscript
       ? {
@@ -767,19 +790,48 @@ export const Composer: React.FC<ComposerProps> = ({
           previewTranscriptModel: previewTranscript?.modelLabel,
         }
       : recorded
-    const ok = isServer
-      ? await engine.servers.sendVoiceMemo(payload, caption)
-      : await engine.sendVoiceMemo(payload, caption)
-    if (ok) {
-      onSent?.(isViolet)
+
+    const dispatchVoice = (): Promise<boolean> =>
+      submitIsServer
+        ? engine.servers.sendVoiceMemo(payload, caption)
+        : engine.sendVoiceMemo(payload, caption)
+
+    let sendPromise: Promise<boolean>
+    if (composerQueueRef.current.getPendingCount(submitTargetKey) > 0) {
+      // Preserve strict FIFO order behind any in-flight outgoing translation in this conversation,
+      // handing off immediately into the engine's inner FIFO queue without blocking subsequent items.
+      let innerVoicePromise: Promise<boolean> | null = null
+      sendPromise = composerQueueRef.current
+        .enqueue(
+          submitTargetKey,
+          async () => {
+            innerVoicePromise = dispatchVoice()
+            return true
+          },
+          () => {
+            revokeVoicePreviewUrl(payload)
+            return false
+          }
+        )
+        .then((handedOff) => (handedOff && innerVoicePromise ? innerVoicePromise : false))
+    } else {
+      sendPromise = dispatchVoice()
     }
-    return ok
+
+    void sendPromise.then((ok) => {
+      if (ok) {
+        onSent?.(submitIsViolet)
+      }
+    })
+
+    return Promise.resolve(true)
   }
 
-  const handleSendTranscribedText = async (text: string): Promise<boolean> => {
+  const handleSendTranscribedText = (text: string): Promise<boolean> => {
     const trimmed = text.trim()
-    if (!trimmed || !canSign) return false
+    if (!trimmed || !canSign) return Promise.resolve(false)
 
+    submitSeqRef.current += 1
     const submitTargetKey = activeTargetKey
     const submitIsServer = isServer
     const submitIsDm = isDm
@@ -822,54 +874,58 @@ export const Composer: React.FC<ComposerProps> = ({
       return engine.sendInput(outgoingBody, translatedMeta)
     }
 
-    let ok = false
+    let sendPromise: Promise<boolean>
     if (!shouldTranslate && composerQueueRef.current.getPendingCount(submitTargetKey) === 0) {
-      ok = await dispatchText(trimmed)
+      sendPromise = dispatchText(trimmed)
     } else {
       let innerSendPromise: Promise<boolean> | null = null
-      const handoffOk = await composerQueueRef.current.enqueue(
-        submitTargetKey,
-        async () => {
-          let outgoingBody = trimmed
-          let translatedMeta: { originalText: string; translatedToLang: string } | undefined
-          if (shouldTranslate) {
-            adjustTranslating(1)
-            try {
-              const translated = (
-                await engine.translator.translateOutgoingText(trimmed, submitTargetLang)
-              ).trim()
-              if (translated) {
-                outgoingBody = translated
-                translatedMeta = {
-                  originalText: trimmed,
-                  translatedToLang: submitTargetLang,
+      sendPromise = composerQueueRef.current
+        .enqueue(
+          submitTargetKey,
+          async () => {
+            let outgoingBody = trimmed
+            let translatedMeta: { originalText: string; translatedToLang: string } | undefined
+            if (shouldTranslate) {
+              adjustTranslating(1)
+              try {
+                const translated = (
+                  await engine.translator.translateOutgoingText(trimmed, submitTargetLang)
+                ).trim()
+                if (translated) {
+                  outgoingBody = translated
+                  translatedMeta = {
+                    originalText: trimmed,
+                    translatedToLang: submitTargetLang,
+                  }
                 }
+              } catch (err) {
+                pushToast(
+                  'warning',
+                  'Outgoing translation failed',
+                  err instanceof Error ? err.message : 'Unable to translate message before sending.'
+                )
+                return false
+              } finally {
+                adjustTranslating(-1)
               }
-            } catch (err) {
-              pushToast(
-                'warning',
-                'Outgoing translation failed',
-                err instanceof Error ? err.message : 'Unable to translate message before sending.'
-              )
-              return false
-            } finally {
-              adjustTranslating(-1)
             }
-          }
-          innerSendPromise = dispatchText(outgoingBody, translatedMeta)
-          return true
-        },
-        () => false
-      )
-      ok = handoffOk && innerSendPromise ? await innerSendPromise : false
+            innerSendPromise = dispatchText(outgoingBody, translatedMeta)
+            return true
+          },
+          () => false
+        )
+        .then((handoffOk) => (handoffOk && innerSendPromise ? innerSendPromise : false))
     }
 
-    if (ok) {
-      setHistory((prev) => [trimmed, ...prev.filter((x) => x !== trimmed)].slice(0, 30))
-      setHistoryIdx(-1)
-      onSent?.(submitIsViolet)
-    }
-    return ok
+    void sendPromise.then((ok) => {
+      if (ok) {
+        setHistory((prev) => [trimmed, ...prev.filter((x) => x !== trimmed)].slice(0, 30))
+        setHistoryIdx(-1)
+        onSent?.(submitIsViolet)
+      }
+    })
+
+    return Promise.resolve(true)
   }
 
   const replyPreviewText = useMemo(() => {
@@ -902,10 +958,6 @@ export const Composer: React.FC<ComposerProps> = ({
 
   const hasContentToSend = draft.trim().length > 0 || pendingImage !== null
   const hasTopBanner = Boolean(activeReply)
-  const imagePhaseText =
-    pendingImage && isSending && engine.voiceSendPhase !== 'idle'
-      ? MEDIA_PHASE_LABEL[engine.voiceSendPhase]
-      : null
 
   return (
     <div className="ag-composer-dock">
@@ -1108,12 +1160,6 @@ export const Composer: React.FC<ComposerProps> = ({
                   <span>
                     {pendingImage.width}×{pendingImage.height} · {formatImageBytes(pendingImage.size)} · EXIF stripped
                   </span>
-                  {imagePhaseText && (
-                    <span className="ag-composer-img-phase">
-                      <Loader2 size={11} className="ag-spin" />
-                      {imagePhaseText}
-                    </span>
-                  )}
                 </div>
               </div>
             </div>
@@ -1136,8 +1182,6 @@ export const Composer: React.FC<ComposerProps> = ({
           <VoiceRecorderBar
             isDm={isViolet}
             hasBanner={Boolean(activeReply)}
-            sending={isSending}
-            voiceSendPhase={engine.voiceSendPhase}
             transcription={engine.transcription}
             onSend={handleSendVoiceMemo}
             onSendText={handleSendTranscribedText}
@@ -1149,7 +1193,7 @@ export const Composer: React.FC<ComposerProps> = ({
             className={`ag-composer-bar ${isViolet ? 'dm' : ''} ${activeReply || pendingImage || outgoingTranslateActive ? 'with-strip' : ''}`}
             onSubmit={(e) => {
               e.preventDefault()
-              void handleSubmit(true)
+              handleSubmit(true)
             }}
           >
             {/* Left Compact Attach-Media Button + Upward Popover Menu */}
@@ -1245,10 +1289,11 @@ export const Composer: React.FC<ComposerProps> = ({
               <button
                 type="button"
                 className={`ag-composer-icon-btn ${isViolet ? 'dm' : ''}`}
-                disabled={!voiceSupported || !canSign || preparingImage}
+                disabled={!voiceSupported || !canSign}
                 onClick={() => {
                   setAttachMenuOpen(false)
                   clearPendingImage()
+                  setPreparingImage(false)
                   setVoiceMode(true)
                 }}
                 title={
@@ -1268,10 +1313,10 @@ export const Composer: React.FC<ComposerProps> = ({
               <button
                 type="submit"
                 className={`ag-composer-send-btn ${isViolet ? 'dm' : ''} ${hasContentToSend ? 'ready' : ''}`}
-                disabled={!hasContentToSend || preparingImage || !canSign}
+                disabled={!hasContentToSend || !canSign}
                 onPointerDown={keepTextareaFocused}
                 onMouseDown={keepTextareaFocused}
-                title={imagePhaseText ?? 'Send message'}
+                title="Send message"
                 aria-label="Send message"
               >
                 <ArrowUp size={17} strokeWidth={2.4} />

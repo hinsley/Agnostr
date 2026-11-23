@@ -30,6 +30,8 @@ interface NavigatorPwaExtensions extends Navigator {
 
 const VISIBILITY_CHECK_THROTTLE_MS = 5 * 60 * 1000
 const PERIODIC_UPDATE_INTERVAL_MS = 30 * 60 * 1000
+const SW_RELOAD_GUARD_KEY = 'agnostr:sw_controller_reload_at'
+const SW_RELOAD_COOLDOWN_MS = 15_000
 
 interface PwaStoreSnapshot {
   canPromptInstall: boolean
@@ -43,6 +45,7 @@ let deferredPrompt: BeforeInstallPromptEvent | null = null
 let swRegistration: ServiceWorkerRegistration | null = null
 let updateSwFn: ((reloadPage?: boolean) => Promise<void>) | null = null
 let swInitialized = false
+let reloadingForSwUpdate = false
 let lastAutoCheckAt = 0
 
 const storeListeners = new Set<() => void>()
@@ -187,6 +190,26 @@ function ensureSwRegistered(): void {
   swInitialized = true
 
   if (!('serviceWorker' in navigator)) return
+
+  // Only auto-reload on controllerchange when an older SW was already controlling
+  // this page (never on first-ever SW install), with a sessionStorage cooldown guard
+  // so mobile PWAs pick up newly activated updates seamlessly without reload loops.
+  const hadControllerAtBoot = Boolean(navigator.serviceWorker.controller)
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadControllerAtBoot || reloadingForSwUpdate) return
+    try {
+      const lastRaw = window.sessionStorage.getItem(SW_RELOAD_GUARD_KEY)
+      const lastAt = lastRaw ? Number(lastRaw) : 0
+      if (Number.isFinite(lastAt) && Date.now() - lastAt < SW_RELOAD_COOLDOWN_MS) {
+        return
+      }
+      window.sessionStorage.setItem(SW_RELOAD_GUARD_KEY, String(Date.now()))
+    } catch {
+      // Ignore restricted sessionStorage contexts
+    }
+    reloadingForSwUpdate = true
+    window.location.reload()
+  })
 
   updateSwFn = registerSW({
     immediate: true,
@@ -340,6 +363,7 @@ export function usePwa(badgeCount?: number): PwaState {
 
   const applyUpdate = useCallback(async (): Promise<void> => {
     patchStore({ updateAvailable: false })
+    reloadingForSwUpdate = true
     try {
       if (updateSwFn) {
         await updateSwFn(true)

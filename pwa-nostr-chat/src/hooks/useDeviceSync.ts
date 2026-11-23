@@ -55,6 +55,8 @@ import type { IdentityManager } from '../lib/identity.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 import {
   clearDeviceSyncState,
+  isEphemeralPendingMessage,
+  isStuckMediaPlaceholder,
   loadChannelMessages,
   loadDeviceSyncState,
   loadOrCreateDeviceId,
@@ -100,6 +102,7 @@ export interface UseDeviceSyncOptions {
   activeGeohash: string
   activeRadioMessages: GeoMessage[]
   activeServerMessages: ServerMessage[]
+  initialHealCheckpoint?: boolean
   onApplyServers: (servers: ServerSummary[]) => void
   onApplyTrusted: (trusted: TrustedPeerEntry[]) => void
   onApplyBlocked: (blocked: string[]) => void
@@ -152,6 +155,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     activeGeohash,
     activeRadioMessages,
     activeServerMessages,
+    initialHealCheckpoint = false,
     onApplyServers,
     onApplyTrusted,
     onApplyBlocked,
@@ -205,7 +209,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   const lastSyncedAtRef = useRef<number | null>(lastSyncedAt)
   const isApplyingRemoteRef = useRef<boolean>(false)
   const checkpointHydratedRef = useRef<boolean>(false)
-  const checkpointDirtyRef = useRef<boolean>(false)
+  const checkpointDirtyRef = useRef<boolean>(Boolean(initialHealCheckpoint))
   const checkpointTimerRef = useRef<number | null>(null)
   const msgSyncNotifyTimerRef = useRef<number | null>(null)
   const lastHelloSentAtRef = useRef<number>(0)
@@ -399,7 +403,12 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       const pk = thread.peerPubkey.toLowerCase()
       if (blocked.has(pk)) continue
       const cutoff = cleared[pk] ?? 0
-      const msgs = thread.messages.filter((m) => (cutoff > 0 ? m.createdAt > cutoff : true))
+      const msgs = thread.messages.filter(
+        (m) =>
+          !isStuckMediaPlaceholder(m) &&
+          !isEphemeralPendingMessage(m) &&
+          (cutoff > 0 ? m.createdAt > cutoff : true)
+      )
       if (msgs.length > 0) {
         dmMap.set(pk, {
           peerNickname: thread.peerNickname,
@@ -415,7 +424,12 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       for (const ch of server.channels.slice(0, 8)) {
         const key = encodeServerScopeKey(server.id, ch.id)
         const cached = loadServerChannelMessages(server.id, ch.id).filter(
-          (m) => !m.isSystem && !blocked.has(m.pubkey.toLowerCase()) && !banned.has(m.pubkey.toLowerCase())
+          (m) =>
+            !m.isSystem &&
+            !isStuckMediaPlaceholder(m) &&
+            !isEphemeralPendingMessage(m) &&
+            !blocked.has(m.pubkey.toLowerCase()) &&
+            !banned.has(m.pubkey.toLowerCase())
         )
         if (cached.length > 0) {
           serverMap.set(key, cached.slice(-150))
@@ -436,7 +450,12 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           ? activeRadioMessagesRef.current
           : loadChannelMessages(gh)
       const clean = source.filter(
-        (m) => !m.isSystem && m.geohash === gh && !blocked.has(m.pubkey.toLowerCase())
+        (m) =>
+          !m.isSystem &&
+          !isStuckMediaPlaceholder(m) &&
+          !isEphemeralPendingMessage(m) &&
+          m.geohash === gh &&
+          !blocked.has(m.pubkey.toLowerCase())
       )
       if (clean.length > 0) {
         radioMap.set(gh, clean.slice(-150))
@@ -655,40 +674,65 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     [deviceLabel, getAmailExportInfo, publishEphemeralPacket]
   )
 
-  const applyRecentMessagesTail = useCallback((tail: SyncedRecentMessagesTail | undefined): number => {
-    if (!tail) return 0
-    let added = 0
-    if (tail.dm) {
-      for (const [pk, entry] of Object.entries(tail.dm)) {
-        if (entry && Array.isArray(entry.messages) && entry.messages.length > 0) {
-          added += callbacksRef.current.onMergeDmMessages(pk, entry.messages, {
-            peerNickname: entry.peerNickname,
-            protocol: entry.protocol,
-          })
+  const applyRecentMessagesTail = useCallback(
+    (tail: SyncedRecentMessagesTail | undefined): number => {
+      if (!tail) return 0
+      let added = 0
+      let sawRemotePollution = false
+      if (tail.dm) {
+        for (const [pk, entry] of Object.entries(tail.dm)) {
+          if (entry && Array.isArray(entry.messages) && entry.messages.length > 0) {
+            const clean = entry.messages.filter(
+              (m) => !isStuckMediaPlaceholder(m) && !isEphemeralPendingMessage(m)
+            )
+            if (clean.length < entry.messages.length) sawRemotePollution = true
+            if (clean.length > 0) {
+              added += callbacksRef.current.onMergeDmMessages(pk, clean, {
+                peerNickname: entry.peerNickname,
+                protocol: entry.protocol,
+              })
+            }
+          }
         }
       }
-    }
-    if (tail.server) {
-      for (const [scopeKey, msgs] of Object.entries(tail.server)) {
-        const decoded = decodeServerScopeKey(scopeKey)
-        if (decoded && Array.isArray(msgs) && msgs.length > 0) {
-          added += callbacksRef.current.onMergeServerMessages(
-            decoded.serverId,
-            decoded.channelId,
-            msgs
-          )
+      if (tail.server) {
+        for (const [scopeKey, msgs] of Object.entries(tail.server)) {
+          const decoded = decodeServerScopeKey(scopeKey)
+          if (decoded && Array.isArray(msgs) && msgs.length > 0) {
+            const clean = msgs.filter(
+              (m) => !isStuckMediaPlaceholder(m) && !isEphemeralPendingMessage(m)
+            )
+            if (clean.length < msgs.length) sawRemotePollution = true
+            if (clean.length > 0) {
+              added += callbacksRef.current.onMergeServerMessages(
+                decoded.serverId,
+                decoded.channelId,
+                clean
+              )
+            }
+          }
         }
       }
-    }
-    if (tail.radio) {
-      for (const [gh, msgs] of Object.entries(tail.radio)) {
-        if (gh && Array.isArray(msgs) && msgs.length > 0) {
-          added += callbacksRef.current.onMergeRadioMessages(gh, msgs)
+      if (tail.radio) {
+        for (const [gh, msgs] of Object.entries(tail.radio)) {
+          if (gh && Array.isArray(msgs) && msgs.length > 0) {
+            const clean = msgs.filter(
+              (m) => !isStuckMediaPlaceholder(m) && !isEphemeralPendingMessage(m)
+            )
+            if (clean.length < msgs.length) sawRemotePollution = true
+            if (clean.length > 0) {
+              added += callbacksRef.current.onMergeRadioMessages(gh, clean)
+            }
+          }
         }
       }
-    }
-    return added
-  }, [])
+      if (sawRemotePollution) {
+        scheduleCheckpointPublish()
+      }
+      return added
+    },
+    [scheduleCheckpointPublish]
+  )
 
   const applyMergedRemoteCrdt = useCallback(
     async (remoteState: DeviceSyncCrdtState): Promise<{ changed: boolean; itemsApplied: number }> => {
@@ -949,10 +993,14 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
 
       if (packet.type === 'sync-msg-chunk') {
         let added = 0
+        const cleanChunk = packet.messages.filter(
+          (m) => !isStuckMediaPlaceholder(m) && !isEphemeralPendingMessage(m)
+        )
+        if (cleanChunk.length === 0) return
         if (packet.scopeKind === 'dm') {
           added = callbacksRef.current.onMergeDmMessages(
             packet.scopeKey,
-            packet.messages as DmMessage[],
+            cleanChunk as DmMessage[],
             packet.peerMeta
           )
         } else if (packet.scopeKind === 'server') {
@@ -961,13 +1009,13 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
             added = callbacksRef.current.onMergeServerMessages(
               decoded.serverId,
               decoded.channelId,
-              packet.messages as ServerMessage[]
+              cleanChunk as ServerMessage[]
             )
           }
         } else if (packet.scopeKind === 'radio') {
           added = callbacksRef.current.onMergeRadioMessages(
             packet.scopeKey,
-            packet.messages as GeoMessage[]
+            cleanChunk as GeoMessage[]
           )
         }
         if (added > 0) {

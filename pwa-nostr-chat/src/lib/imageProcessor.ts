@@ -1,4 +1,5 @@
 import type { PreparedImage } from '../types/protocol.ts'
+import { isOffMainThreadWorkerSupported, processImageOffMainThread } from './offMainThread.ts'
 
 export const MAX_RAW_IMAGE_BYTES = 20 * 1024 * 1024 // 20 MiB raw input cap
 export const MAX_IMAGE_DIMENSION = 1920
@@ -105,6 +106,9 @@ function encodeCanvasToBlob(
  * Decodes, auto-orients, scales down to <= 1920px max side, re-renders onto an offscreen
  * canvas (guaranteeing 100% EXIF / GPS / camera metadata stripping), and compresses to
  * WebP (quality 0.85, falling back to JPEG 0.86 on browsers lacking WebP canvas encode).
+ *
+ * Runs completely off the main thread in `mediaCrypto.worker.ts` (OffscreenCanvas +
+ * transferable ArrayBuffer) when supported, falling back cleanly to DOM <canvas>.
  */
 export async function prepareImageFile(file: File): Promise<PreparedImage> {
   if (!file || file.size <= 0) {
@@ -116,6 +120,27 @@ export async function prepareImageFile(file: File): Promise<PreparedImage> {
   if (!isSupportedImageFile(file)) {
     throw new Error('Unsupported image format. Use PNG, JPEG, WebP, or GIF.')
   }
+
+  // Primary path: 100% off-main-thread decode, scale, EXIF strip, and WebP/JPEG encode
+  if (isOffMainThreadWorkerSupported()) {
+    try {
+      const workerResult = await processImageOffMainThread(file, MAX_IMAGE_DIMENSION)
+      const blob = new Blob([workerResult.buffer], { type: workerResult.mime })
+      const previewUrl = URL.createObjectURL(blob)
+      return {
+        blob,
+        mime: workerResult.mime,
+        size: workerResult.size,
+        width: workerResult.width,
+        height: workerResult.height,
+        previewUrl,
+        fileName: workerResult.fileName,
+      }
+    } catch {
+      // Fall back cleanly to DOM <canvas> if OffscreenCanvas or worker decode is unavailable
+    }
+  }
+
   if (typeof document === 'undefined') {
     throw new Error('Canvas image processing requires a browser environment.')
   }

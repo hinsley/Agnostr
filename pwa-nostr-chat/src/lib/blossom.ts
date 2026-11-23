@@ -2,6 +2,13 @@ import { sha256 } from '@noble/hashes/sha256'
 import type { Event as NostrEvent, EventTemplate } from 'nostr-tools'
 import type { VoiceMemoAttachment, VoiceMemoEncryption } from '../types/protocol.ts'
 import { bytesToHex } from './identity.ts'
+import {
+  decryptAesGcmOffMainThread,
+  encryptAesGcmOffMainThread,
+  isOffMainThreadWorkerSupported,
+  OffMainThreadUnavailableError,
+  sha256HexOffMainThread,
+} from './offMainThread.ts'
 
 export const KIND_BLOSSOM_AUTH = 24242
 export const MAX_MEDIA_BLOB_BYTES = 15 * 1024 * 1024 // 15 MiB safety bound
@@ -55,6 +62,30 @@ export function computeSha256Hex(bytes: Uint8Array): string {
   return bytesToHex(sha256(bytes))
 }
 
+/**
+ * Off-main-thread hardware-accelerated SHA-256 hex digest.
+ * Runs in `mediaCrypto.worker.ts` (SubtleCrypto with @noble/hashes fallback),
+ * falling back to main-thread SubtleCrypto or sync `computeSha256Hex` only if unavailable.
+ */
+export async function computeSha256HexAsync(bytes: Uint8Array): Promise<string> {
+  if (isOffMainThreadWorkerSupported()) {
+    try {
+      return await sha256HexOffMainThread(bytes)
+    } catch {
+      // Fall back cleanly to main-thread SubtleCrypto / pure JS
+    }
+  }
+  if (typeof crypto !== 'undefined' && crypto.subtle) {
+    try {
+      const digest = await crypto.subtle.digest('SHA-256', toArrayBuffer(bytes))
+      return bytesToHex(new Uint8Array(digest))
+    } catch {
+      // Fall back to pure JS
+    }
+  }
+  return computeSha256Hex(bytes)
+}
+
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
   const chunkSize = 0x8000
@@ -83,14 +114,26 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 /**
- * Encrypts DM audio bytes client-side with AES-256-GCM before uploading opaque
- * ciphertext to Blossom. Blossom servers never see plaintext audio.
+ * Encrypts DM/server media bytes client-side with AES-256-GCM before uploading opaque
+ * ciphertext to Blossom. Blossom servers never see plaintext media.
+ * Runs off the main thread in `mediaCrypto.worker.ts` when supported.
  */
 export async function encryptVoiceBytesAesGcm(plaintext: Uint8Array): Promise<{
   ciphertext: Uint8Array
   ciphertextSha256: string
   encryption: VoiceMemoEncryption
 }> {
+  if (isOffMainThreadWorkerSupported()) {
+    try {
+      return await encryptAesGcmOffMainThread(plaintext)
+    } catch (err) {
+      if (!(err instanceof OffMainThreadUnavailableError)) {
+        throw err
+      }
+      // Fall back cleanly to main-thread Web Crypto
+    }
+  }
+
   if (typeof crypto === 'undefined' || !crypto.subtle) {
     throw new Error('Web Crypto API (SubtleCrypto) is unavailable in this browser context.')
   }
@@ -99,7 +142,8 @@ export async function encryptVoiceBytesAesGcm(plaintext: Uint8Array): Promise<{
   crypto.getRandomValues(keyBytes)
   crypto.getRandomValues(ivBytes)
 
-  const plaintextSha256 = computeSha256Hex(plaintext)
+  const plaintextBuf = toArrayBuffer(plaintext)
+  const plaintextSha256 = bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', plaintextBuf)))
   const cryptoKey = await crypto.subtle.importKey(
     'raw',
     toArrayBuffer(keyBytes),
@@ -110,10 +154,10 @@ export async function encryptVoiceBytesAesGcm(plaintext: Uint8Array): Promise<{
   const encryptedBuf = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: toArrayBuffer(ivBytes) },
     cryptoKey,
-    toArrayBuffer(plaintext)
+    plaintextBuf
   )
   const ciphertext = new Uint8Array(encryptedBuf)
-  const ciphertextSha256 = computeSha256Hex(ciphertext)
+  const ciphertextSha256 = bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', encryptedBuf)))
 
   return {
     ciphertext,
@@ -134,6 +178,18 @@ export async function decryptVoiceBytesAesGcm(
   if (encryption.alg !== 'aes-gcm-256') {
     throw new Error(`Unsupported voice encryption algorithm: ${String(encryption.alg)}`)
   }
+
+  if (isOffMainThreadWorkerSupported()) {
+    try {
+      return await decryptAesGcmOffMainThread(ciphertext, encryption)
+    } catch (err) {
+      if (!(err instanceof OffMainThreadUnavailableError)) {
+        throw err
+      }
+      // Fall back cleanly to main-thread Web Crypto
+    }
+  }
+
   if (typeof crypto === 'undefined' || !crypto.subtle) {
     throw new Error('Web Crypto API (SubtleCrypto) is unavailable in this browser context.')
   }
@@ -157,7 +213,7 @@ export async function decryptVoiceBytesAesGcm(
   )
   const plaintext = new Uint8Array(decryptedBuf)
   if (encryption.plaintextSha256) {
-    const actualPlainHash = computeSha256Hex(plaintext)
+    const actualPlainHash = bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', decryptedBuf)))
     if (actualPlainHash !== encryption.plaintextSha256.toLowerCase()) {
       throw new Error('Decrypted voice memo SHA-256 integrity check failed.')
     }
@@ -217,7 +273,7 @@ export async function uploadBlobToBlossom(opts: {
   }
 
   const cleanMime = cleanMimeType(opts.mime)
-  const hashHex = computeSha256Hex(bytes)
+  const hashHex = await computeSha256HexAsync(bytes)
   const nowSec = Math.floor(Date.now() / 1000)
 
   const authTemplate: EventTemplate = {
@@ -338,7 +394,7 @@ export async function downloadAndVerifyMediaBlob(
   const rawBytes = new Uint8Array(rawBuf)
 
   if (media.sha256 && /^[0-9a-f]{64}$/i.test(media.sha256)) {
-    const actualHash = computeSha256Hex(rawBytes)
+    const actualHash = await computeSha256HexAsync(rawBytes)
     if (actualHash !== media.sha256.toLowerCase()) {
       throw new Error('Media SHA-256 hash mismatch — refusing corrupted or tampered content.')
     }

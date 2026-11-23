@@ -31,6 +31,7 @@ import type { LightboxImagePayload } from './ImageLightboxModal'
 import { MessageItem } from './MessageItem'
 import { doesContentMentionUser } from '../lib/bitchatProtocol'
 import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel'
+import { isStuckMediaPlaceholder } from '../lib/storage'
 import { identiconDataUrl, formatHandle, pubkeyToColor } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
 
@@ -217,6 +218,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       return engine.servers.messages
         .filter(
           (sm) =>
+            !isStuckMediaPlaceholder(sm) &&
             (sm.isSystem ||
               (sm.serverId === activeServer.id && sm.channelId === activeChannel.id)) &&
             (sm.isOwn || sm.isSystem || !engine.isPeerBlocked(sm.pubkey))
@@ -251,39 +253,42 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       const activeKey = engine.activeGeohash.toLowerCase()
       return engine.messages.filter(
         (m) =>
+          !isStuckMediaPlaceholder(m) &&
           (m.isSystem || m.geohash.toLowerCase() === activeKey) &&
           (m.isOwn || m.isSystem || !engine.isPeerBlocked(m.pubkey))
       )
     }
-    return dmThread.messages.map((dm) => {
-      const isOwn = dm.isOwn
-      const nick = isOwn ? engine.identity.nickname : dmThread.peerNickname
-      const h = formatHandle(nick, dm.senderPubkey)
-      return {
-        id: dm.id,
-        geohash: engine.activeGeohash,
-        pubkey: dm.senderPubkey,
-        nickname: h.base,
-        displayHandle: h.full,
-        content: dm.content,
-        createdAt: dm.createdAt,
-        tags: [],
-        isOwn,
-        isTeleported: false,
-        isMeshBridge: false,
-        powBits: 0,
-        reactions: [],
-        mentions: [],
-        voiceMemo: dm.voiceMemo,
-        imageAttachment: dm.imageAttachment,
-        deliveryStatus:
-          dm.deliveryStatus === 'failed'
-            ? 'failed'
-            : dm.deliveryStatus === 'sending'
-              ? 'sending'
-              : 'sent',
-      }
-    })
+    return dmThread.messages
+      .filter((dm) => !isStuckMediaPlaceholder(dm))
+      .map((dm) => {
+        const isOwn = dm.isOwn
+        const nick = isOwn ? engine.identity.nickname : dmThread.peerNickname
+        const h = formatHandle(nick, dm.senderPubkey)
+        return {
+          id: dm.id,
+          geohash: engine.activeGeohash,
+          pubkey: dm.senderPubkey,
+          nickname: h.base,
+          displayHandle: h.full,
+          content: dm.content,
+          createdAt: dm.createdAt,
+          tags: [],
+          isOwn,
+          isTeleported: false,
+          isMeshBridge: false,
+          powBits: 0,
+          reactions: [],
+          mentions: [],
+          voiceMemo: dm.voiceMemo,
+          imageAttachment: dm.imageAttachment,
+          deliveryStatus:
+            dm.deliveryStatus === 'failed'
+              ? 'failed'
+              : dm.deliveryStatus === 'sending'
+                ? 'sending'
+                : 'sent',
+        }
+      })
   }, [
     isServer,
     activeServer,

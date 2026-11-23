@@ -26,7 +26,8 @@ import type { PresenceTracker } from '../lib/presenceService.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 import { KeyedFifoQueue } from '../lib/sendQueue.ts'
 import {
-  isStuckVoiceMemoPlaceholder,
+  isEphemeralPendingMessage,
+  isStuckMediaPlaceholder,
   loadDmClearedAt,
   loadDmThreads,
   saveDmClearedAt,
@@ -763,8 +764,6 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       if (!pool) return false
       const pk = peerPubkey.toLowerCase()
       const cleanCaption = caption?.trim() ?? ''
-      const initialAttachment =
-        typeof imageOrLoader === 'function' ? undefined : imageOrLoader
 
       const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
@@ -776,89 +775,74 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         (signer.mode === 'extension' ? 'nip17' : 'bitchat')
 
       const localMsgId = bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
-      const nowMs = Date.now()
-      const nowSec = Math.floor(nowMs / 1000)
-
-      const optimisticBase: DmMessage = {
-        id: localMsgId,
-        peerPubkey: pk,
-        senderPubkey: signer.pubkey,
-        content: initialAttachment ? cleanCaption : cleanCaption || 'Sending image…',
-        createdAt: nowSec,
-        orderMs: nowMs,
-        isOwn: true,
-        protocol: chosenProtocol,
-        imageAttachment: initialAttachment,
-        deliveryStatus: 'sending',
-      }
-
-      const nick =
-        existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
-      const handle = formatDisplayHandle(nick, pk)
-
-      setThreads((prev) => {
-        const idx = prev.findIndex((t) => t.peerPubkey === pk)
-        if (idx !== -1) {
-          const lastOrder = getMaxOrderMs(prev[idx].messages)
-          const optimistic: DmMessage = {
-            ...optimisticBase,
-            orderMs: Math.max(nowMs, lastOrder + 1),
-          }
-          const nextMsgs = [...prev[idx].messages, optimistic].sort(compareDmMessages)
-          const tail = nextMsgs[nextMsgs.length - 1]
-          const updated: DmThread = {
-            ...prev[idx],
-            messages: nextMsgs,
-            lastMessageAt: tail.createdAt,
-            lastPreview: formatDmPreview(tail),
-            unreadCount: 0,
-          }
-          const copy = [...prev]
-          copy[idx] = updated
-          copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
-          return copy
-        }
-        const created: DmThread = {
-          peerPubkey: pk,
-          peerNpub: encodeNpubSafe(pk),
-          peerNickname: nick,
-          peerDisplayHandle: handle,
-          protocol: chosenProtocol,
-          messages: [optimisticBase],
-          unreadCount: 0,
-          lastMessageAt: nowSec,
-          lastPreview: formatDmPreview(optimisticBase),
-        }
-        return [created, ...prev]
-      })
 
       return await dmSendQueueRef.current.enqueue(
         `dm:${pk}`,
         async () => {
           if (identityManager.getWipeGeneration() !== wipeGen) return false
+          let inserted = false
           try {
             const imageAttachment =
               typeof imageOrLoader === 'function' ? await imageOrLoader() : imageOrLoader
             if (identityManager.getWipeGeneration() !== wipeGen) return false
 
-            if (!initialAttachment) {
-              setThreads((prev) =>
-                prev.map((t) => {
-                  if (t.peerPubkey !== pk) return t
-                  const nextMsgs = t.messages.map((m) =>
-                    m.id === localMsgId
-                      ? { ...m, content: cleanCaption, imageAttachment }
-                      : m
-                  )
-                  const tail = nextMsgs[nextMsgs.length - 1]
-                  return {
-                    ...t,
-                    messages: nextMsgs,
-                    lastPreview: tail ? formatDmPreview(tail) : t.lastPreview,
-                  }
-                })
-              )
+            const nowMs = Date.now()
+            const nowSec = Math.floor(nowMs / 1000)
+            const msgBase: DmMessage = {
+              id: localMsgId,
+              peerPubkey: pk,
+              senderPubkey: signer.pubkey,
+              content: cleanCaption,
+              createdAt: nowSec,
+              orderMs: nowMs,
+              isOwn: true,
+              protocol: chosenProtocol,
+              imageAttachment,
+              deliveryStatus: 'sending',
             }
+            const currentThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+            const nick =
+              currentThread?.peerNickname ||
+              presenceTracker.getNickname(pk) ||
+              `anon${pk.slice(-4)}`
+            const handle = formatDisplayHandle(nick, pk)
+
+            inserted = true
+            setThreads((prev) => {
+              const idx = prev.findIndex((t) => t.peerPubkey === pk)
+              if (idx !== -1) {
+                const lastOrder = getMaxOrderMs(prev[idx].messages)
+                const placed: DmMessage = {
+                  ...msgBase,
+                  orderMs: Math.max(nowMs, lastOrder + 1),
+                }
+                const nextMsgs = [...prev[idx].messages, placed].sort(compareDmMessages)
+                const tail = nextMsgs[nextMsgs.length - 1]
+                const updated: DmThread = {
+                  ...prev[idx],
+                  messages: nextMsgs,
+                  lastMessageAt: tail.createdAt,
+                  lastPreview: formatDmPreview(tail),
+                  unreadCount: 0,
+                }
+                const copy = [...prev]
+                copy[idx] = updated
+                copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+                return copy
+              }
+              const created: DmThread = {
+                peerPubkey: pk,
+                peerNpub: encodeNpubSafe(pk),
+                peerNickname: nick,
+                peerDisplayHandle: handle,
+                protocol: chosenProtocol,
+                messages: [msgBase],
+                unreadCount: 0,
+                lastMessageAt: nowSec,
+                lastPreview: formatDmPreview(msgBase),
+              }
+              return [created, ...prev]
+            })
 
             const wireContent = encodeDmImagePayload(imageAttachment, cleanCaption)
             const { event, protocol } = await createEncryptedDmEvent({
@@ -904,17 +888,19 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             return ok
           } catch (err) {
             if (identityManager.getWipeGeneration() !== wipeGen) return false
-            setThreads((prev) =>
-              prev.map((t) => {
-                if (t.peerPubkey !== pk) return t
-                return {
-                  ...t,
-                  messages: t.messages.map((m) =>
-                    m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
-                  ),
-                }
-              })
-            )
+            if (inserted) {
+              setThreads((prev) =>
+                prev.map((t) => {
+                  if (t.peerPubkey !== pk) return t
+                  return {
+                    ...t,
+                    messages: t.messages.map((m) =>
+                      m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
+                    ),
+                  }
+                })
+              )
+            }
             onErrorRef.current?.(
               'Encrypted image DM error',
               err instanceof Error ? err.message : 'Unable to send encrypted image'
@@ -1021,7 +1007,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         if (!raw || typeof raw.id !== 'string' || !raw.id || typeof raw.createdAt !== 'number') {
           continue
         }
-        if (isStuckVoiceMemoPlaceholder(raw)) continue
+        if (isStuckMediaPlaceholder(raw) || isEphemeralPendingMessage(raw)) continue
         if (cutoffSec > 0 && raw.createdAt <= cutoffSec) continue
         const senderPk = (raw.senderPubkey || '').toLowerCase()
         if (!/^[0-9a-f]{64}$/.test(senderPk)) continue

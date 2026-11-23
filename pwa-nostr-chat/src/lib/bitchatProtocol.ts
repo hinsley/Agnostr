@@ -9,6 +9,7 @@ import type {
 } from '../types/protocol.ts'
 import { isValidGeohash, normalizeGeohash } from './geohash.ts'
 import { bytesToHex, formatDisplayHandle } from './identity.ts'
+import { isOffMainThreadWorkerSupported, mineNip13OffMainThread } from './offMainThread.ts'
 import {
   getTopicSlug,
   isTopicChannel,
@@ -177,7 +178,8 @@ function leadingZeroBitsBytes(bytes: Uint8Array): number {
 
 /**
  * Non-blocking NIP-13 proof-of-work miner matching Bitchat's `["nonce", 16-hex, target]` tag.
- * 8 bits takes ~256 hashes (<5ms in JS). Bounded by timeCapMs so sending is never blocked.
+ * Runs completely off the main thread in `mediaCrypto.worker.ts` when Web Workers are available,
+ * falling back to a yielding main-thread loop only when Workers are unavailable.
  */
 export async function mineNip13NonceTag(
   template: EventTemplate,
@@ -187,6 +189,14 @@ export async function mineNip13NonceTag(
 ): Promise<string[] | null> {
   const target = Math.max(0, Math.min(20, Math.floor(targetBits)))
   if (target === 0) return null
+
+  if (isOffMainThreadWorkerSupported()) {
+    try {
+      return await mineNip13OffMainThread(template, pubkeyHex, target, timeCapMs)
+    } catch {
+      // Fall back cleanly to yielding main-thread PoW loop
+    }
+  }
 
   const targetStr = String(target)
   const deadline = performance.now() + timeCapMs
@@ -211,7 +221,7 @@ export async function mineNip13NonceTag(
     nonce += 1
     attempts += 1
     if (attempts % 512 === 0) {
-      await new Promise<void>((r) => window.setTimeout(r, 0))
+      await new Promise<void>((r) => globalThis.setTimeout(r, 0))
     }
   }
 

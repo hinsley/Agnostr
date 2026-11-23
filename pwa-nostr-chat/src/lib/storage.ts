@@ -616,14 +616,33 @@ export function saveJoinedServers(servers: ServerSummary[]): void {
   safeSet(KEYS.servers, JSON.stringify(clean))
 }
 
-export function isStuckVoiceMemoPlaceholder(msg: {
+const STUCK_MEDIA_PLACEHOLDER_RE = /^sending\s+(voice\s+memo|image|photo)(\.{3}|…)?$/i
+
+export function isStuckMediaPlaceholder(msg: {
+  id?: unknown
   content?: unknown
   voiceMemo?: unknown
+  imageAttachment?: unknown
+  deliveryStatus?: unknown
 }): boolean {
-  if (msg.voiceMemo) return false
+  if (msg.voiceMemo || msg.imageAttachment) return false
   if (typeof msg.content !== 'string') return false
-  const trimmed = msg.content.trim()
-  return trimmed === 'Sending voice memo…' || trimmed === 'Sending voice memo...'
+  return STUCK_MEDIA_PLACEHOLDER_RE.test(msg.content.trim())
+}
+
+export const isStuckVoiceMemoPlaceholder = isStuckMediaPlaceholder
+
+export function isEphemeralPendingMessage(msg: {
+  id?: unknown
+  deliveryStatus?: unknown
+}): boolean {
+  if (
+    typeof msg.id === 'string' &&
+    (msg.id.startsWith('pending-radio-') || msg.id.startsWith('pending-srv-'))
+  ) {
+    return true
+  }
+  return msg.deliveryStatus === 'sending'
 }
 
 function formatDmPreviewForStorage(msg: DmMessage): string {
@@ -649,7 +668,7 @@ export function loadServerChannelMessages(serverId: string, channelId: string): 
   let needsRewrite = false
   for (const m of parsed) {
     if (!m || typeof m.id !== 'string' || typeof m.content !== 'string') continue
-    if (isStuckVoiceMemoPlaceholder(m)) {
+    if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) {
       needsRewrite = true
       continue
     }
@@ -671,7 +690,14 @@ export function saveServerChannelMessages(
   messages: ServerMessage[]
 ): void {
   const trimmed = messages
-    .filter((m) => !m.isSystem && m.serverId === serverId && m.channelId === channelId)
+    .filter(
+      (m) =>
+        !m.isSystem &&
+        m.serverId === serverId &&
+        m.channelId === channelId &&
+        !isStuckMediaPlaceholder(m) &&
+        !isEphemeralPendingMessage(m)
+    )
     .slice(-MAX_MESSAGES_PER_CHANNEL)
   safeSet(KEYS.serverMsgChannel(serverId, channelId), JSON.stringify(trimmed))
 }
@@ -729,7 +755,7 @@ export function loadChannelMessages(geohash: string): GeoMessage[] {
   let needsRewrite = false
   for (const m of parsed) {
     if (!m || typeof m.id !== 'string' || typeof m.content !== 'string') continue
-    if (isStuckVoiceMemoPlaceholder(m)) {
+    if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) {
       needsRewrite = true
       continue
     }
@@ -753,6 +779,7 @@ export function saveChannelMessages(geohash: string, messages: GeoMessage[]): vo
   const trimmed = messages
     .filter((m) => {
       if (m.isSystem) return false
+      if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) return false
       const msgKey = normalizeRadioChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
       return msgKey === gh
     })
@@ -784,7 +811,7 @@ export function loadDmThreads(): DmThread[] {
       const validMessages: DmMessage[] = []
       for (const m of t.messages) {
         if (!m || typeof m.id !== 'string' || typeof m.createdAt !== 'number') continue
-        if (isStuckVoiceMemoPlaceholder(m)) {
+        if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) {
           threadScrubbed = true
           needsRewrite = true
           continue
@@ -795,7 +822,7 @@ export function loadDmThreads(): DmThread[] {
             typeof m.orderMs === 'number' && Number.isFinite(m.orderMs) ? m.orderMs : undefined,
         })
       }
-      const previewWasStuck = isStuckVoiceMemoPlaceholder({ content: t.lastPreview })
+      const previewWasStuck = isStuckMediaPlaceholder({ content: t.lastPreview })
       if (previewWasStuck) {
         needsRewrite = true
       }
@@ -820,11 +847,114 @@ export function loadDmThreads(): DmThread[] {
 }
 
 export function saveDmThreads(threads: DmThread[]): void {
-  const capped = threads.slice(0, 30).map((t) => ({
-    ...t,
-    messages: t.messages.slice(-150),
-  }))
+  const capped = threads.slice(0, 30).map((t) => {
+    const persistedMsgs = t.messages
+      .filter((m) => !isStuckMediaPlaceholder(m) && !isEphemeralPendingMessage(m))
+      .slice(-150)
+    const stripped = persistedMsgs.length !== t.messages.length
+    const previewWasStuck = isStuckMediaPlaceholder({ content: t.lastPreview })
+    if (stripped || previewWasStuck) {
+      const tail = persistedMsgs[persistedMsgs.length - 1]
+      return {
+        ...t,
+        messages: persistedMsgs,
+        lastPreview: tail ? formatDmPreviewForStorage(tail) : '',
+        lastMessageAt: tail ? tail.createdAt : t.lastMessageAt,
+      }
+    }
+    return {
+      ...t,
+      messages: persistedMsgs,
+    }
+  })
   safeSet(KEYS.dmThreads, JSON.stringify(capped))
+}
+
+/**
+ * Cold-boot sweep across EVERY persisted Radio, Server, and DM message bucket in
+ * localStorage (including unopened rooms/servers/threads) so legacy stuck
+ * media placeholders and orphaned `pending-*` / `deliveryStatus: 'sending'`
+ * zombies are eradicated immediately.
+ */
+export function scrubAllPersistedStuckPlaceholders(): number {
+  if (typeof localStorage === 'undefined') return 0
+  let totalRemoved = 0
+  try {
+    const allKeys: string[] = []
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i)
+      if (key) allKeys.push(key)
+    }
+
+    const radioPrefix = `${PREFIX}msgs:`
+    const serverPrefix = `${PREFIX}smsgs:`
+
+    for (const key of allKeys) {
+      if (key.startsWith(radioPrefix) || key.startsWith(serverPrefix)) {
+        const parsed = safeJsonParse<Array<Record<string, unknown>>>(safeGet(key), [])
+        if (!Array.isArray(parsed) || parsed.length === 0) continue
+        let removedInBucket = 0
+        const clean: Array<Record<string, unknown>> = []
+        for (const item of parsed) {
+          if (!item || typeof item !== 'object') {
+            removedInBucket += 1
+            continue
+          }
+          if (isStuckMediaPlaceholder(item) || isEphemeralPendingMessage(item)) {
+            removedInBucket += 1
+            continue
+          }
+          clean.push(item)
+        }
+        if (removedInBucket > 0) {
+          totalRemoved += removedInBucket
+          safeSet(key, JSON.stringify(clean.slice(-MAX_MESSAGES_PER_CHANNEL)))
+        }
+      }
+    }
+
+    // Sweep DM threads bucket (including unopened threads & stale lastPreview)
+    const rawThreads = safeJsonParse<DmThread[]>(safeGet(KEYS.dmThreads), [])
+    if (Array.isArray(rawThreads) && rawThreads.length > 0) {
+      let dmChanged = false
+      const cleanedThreads = rawThreads
+        .filter((t) => t && typeof t.peerPubkey === 'string' && Array.isArray(t.messages))
+        .map((t) => {
+          let removedHere = 0
+          const surviving: DmMessage[] = []
+          for (const m of t.messages) {
+            if (!m || typeof m.id !== 'string' || typeof m.createdAt !== 'number') {
+              removedHere += 1
+              continue
+            }
+            if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) {
+              removedHere += 1
+              continue
+            }
+            surviving.push(m)
+          }
+          const previewWasStuck = isStuckMediaPlaceholder({ content: t.lastPreview })
+          if (removedHere > 0 || previewWasStuck) {
+            dmChanged = true
+            totalRemoved += removedHere + (removedHere === 0 && previewWasStuck ? 1 : 0)
+            const tail = surviving[surviving.length - 1]
+            return {
+              ...t,
+              messages: surviving,
+              lastPreview: tail ? formatDmPreviewForStorage(tail) : '',
+              lastMessageAt: tail ? tail.createdAt : t.lastMessageAt,
+            }
+          }
+          return t
+        })
+      if (dmChanged) {
+        saveDmThreads(cleanedThreads)
+      }
+    }
+  } catch {
+    // Ignore restricted storage contexts
+  }
+  return totalRemoved
 }
 
 const MAX_DM_CLEARED_ENTRIES = 500

@@ -32,15 +32,15 @@ export interface VoicePreviewTranscript {
 export interface VoiceRecorderBarProps {
   isDm: boolean
   hasBanner: boolean
-  sending: boolean
-  voiceSendPhase: VoiceSendPhase
+  sending?: boolean
+  voiceSendPhase?: VoiceSendPhase
   transcription: TranscriptionEngine
   onSend: (
     recorded: RecordedVoiceMemo,
     caption: string,
     previewTranscript?: VoicePreviewTranscript
-  ) => Promise<boolean>
-  onSendText: (text: string) => Promise<boolean>
+  ) => Promise<boolean> | void
+  onSendText: (text: string) => Promise<boolean> | void
   onCancel: () => void
   onErrorToast?: (title: string, detail?: string) => void
 }
@@ -49,14 +49,6 @@ type RecorderStage = 'starting' | 'recording' | 'preview' | 'error'
 type PreviewTranscriptStatus = 'idle' | 'transcribing' | 'done' | 'error'
 
 const INITIAL_LIVE_BARS: number[] = Array.from({ length: WAVEFORM_BARS }, () => 8)
-
-const SEND_PHASE_LABEL: Record<VoiceSendPhase, string> = {
-  idle: 'Send Voice',
-  encrypting: 'Encrypting…',
-  uploading: 'Uploading…',
-  signing: 'Signing…',
-  publishing: 'Publishing…',
-}
 
 function formatByteSize(bytes: number): string {
   if (bytes <= 0) return '0 B'
@@ -79,8 +71,6 @@ function normalizeBars(bars: readonly number[]): number[] {
 export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
   isDm,
   hasBanner,
-  sending,
-  voiceSendPhase,
   transcription,
   onSend,
   onSendText,
@@ -105,7 +95,6 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
   const [transcriptModelLabel, setTranscriptModelLabel] = useState('')
   const [transcriptError, setTranscriptError] = useState<string | null>(null)
   const [transcriptEmpty, setTranscriptEmpty] = useState(false)
-  const [sendingText, setSendingText] = useState(false)
 
   const controllerRef = useRef<VoiceRecorderController | null>(null)
   const recordedRef = useRef<RecordedVoiceMemo | null>(null)
@@ -119,6 +108,7 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
   const transcriptJobRef = useRef(0)
   const sessionIdRef = useRef(0)
   const stoppingRef = useRef(false)
+  const submittedRef = useRef(false)
   const draggingRef = useRef(false)
 
   useEffect(() => {
@@ -196,6 +186,7 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
   const beginRecording = useCallback(() => {
     const sid = ++sessionIdRef.current
     stoppingRef.current = false
+    submittedRef.current = false
 
     controllerRef.current?.cancel()
     controllerRef.current = null
@@ -309,29 +300,25 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
     }
   }, [recorded])
 
-  const isUploading = sending || voiceSendPhase !== 'idle'
-  const isBusy = isUploading || sendingText
-
   const handleCancel = useCallback(() => {
-    if (sending || sendingText) return
     sessionIdRef.current += 1
     controllerRef.current?.cancel()
     controllerRef.current = null
     discardRecordedMemo()
     onCancel()
-  }, [sending, sendingText, discardRecordedMemo, onCancel])
+  }, [discardRecordedMemo, onCancel])
 
-  // Escape key cancels when not actively uploading/sending
+  // Escape key cancels immediately without waiting for background uploads
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !sending && !sendingText) {
+      if (e.key === 'Escape') {
         e.preventDefault()
         handleCancel()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [sending, sendingText, handleCancel])
+  }, [handleCancel])
 
   const handleStopToPreview = async () => {
     if (stoppingRef.current || stage !== 'recording') return
@@ -391,13 +378,17 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
     }
   }
 
-  const handleSend = async () => {
-    if (!recorded || isBusy) return
+  const handleSend = () => {
+    const memo = recordedRef.current ?? recorded
+    if (!memo || submittedRef.current) return
+    submittedRef.current = true
+
     const audio = previewAudioRef.current
     if (audio && !audio.paused) {
       audio.pause()
       setPreviewPlaying(false)
     }
+
     const cleanTranscript = transcriptText.trim()
     const previewTranscript: VoicePreviewTranscript | undefined =
       transcriptStatus === 'done' && cleanTranscript.length > 0
@@ -406,41 +397,37 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
             modelLabel: transcriptModelLabel || transcription.activeModel.label,
           }
         : undefined
-    const ok = await onSend(recorded, caption, previewTranscript)
-    if (ok) {
-      sessionIdRef.current += 1
-      discardRecordedMemo()
-      onCancel()
-    }
+    const sendCaption = caption
+
+    // Transfer ownership of the recorded memo (and its previewUrl) to the engine's
+    // background FIFO queue — do NOT call revokeVoicePreviewUrl here.
+    recordedRef.current = null
+    setRecorded(null)
+    stopPreviewAudio()
+    resetTranscriptState()
+    setPreviewDuration(0)
+    sessionIdRef.current += 1
+
+    void onSend(memo, sendCaption, previewTranscript)
+    onCancel()
   }
 
-  const handleSendText = async () => {
+  const handleSendText = () => {
     const cleanText = transcriptText.trim()
-    if (!cleanText || isBusy) return
+    if (!cleanText || submittedRef.current) return
+    submittedRef.current = true
+
     const audio = previewAudioRef.current
     if (audio && !audio.paused) {
       audio.pause()
       setPreviewPlaying(false)
     }
-    setSendingText(true)
-    try {
-      const ok = await onSendText(cleanText)
-      if (ok) {
-        sessionIdRef.current += 1
-        discardRecordedMemo()
-        onCancel()
-      }
-    } finally {
-      setSendingText(false)
-    }
-  }
 
-  const sendLabel =
-    voiceSendPhase !== 'idle'
-      ? SEND_PHASE_LABEL[voiceSendPhase]
-      : sending
-        ? 'Sending…'
-        : 'Send Voice'
+    sessionIdRef.current += 1
+    discardRecordedMemo()
+    onCancel()
+    void onSendText(cleanText)
+  }
 
   const activeModelLabel = transcription.activeModel.label
   const shownModelLabel = transcriptModelLabel || activeModelLabel
@@ -582,7 +569,6 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
               type="button"
               className={`ag-voice-play-btn ${isDm ? 'dm' : ''}`}
               onClick={togglePreviewPlayback}
-              disabled={isBusy}
               aria-label={previewPlaying ? 'Pause preview' : 'Play preview'}
               title={previewPlaying ? 'Pause preview' : 'Listen to preview'}
             >
@@ -658,7 +644,6 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
               type="button"
               className="ag-icon-btn"
               onClick={() => beginRecording()}
-              disabled={isBusy}
               title="Re-record voice memo"
               aria-label="Re-record voice memo"
             >
@@ -683,7 +668,6 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
                   type="button"
                   className={`ag-vrec-preview-btn ${isDm ? 'dm' : ''}`}
                   onClick={() => void runPreviewTranscription(recorded.blob)}
-                  disabled={isBusy}
                 >
                   <Captions size={13} />
                   <span>Preview Transcript</span>
@@ -729,7 +713,6 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
                   type="button"
                   className="ag-vrec-mini-btn"
                   onClick={() => void runPreviewTranscription(recorded.blob)}
-                  disabled={isBusy}
                 >
                   <RefreshCw size={12} />
                   <span>Retry</span>
@@ -748,7 +731,6 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
                   type="button"
                   className="ag-vrec-mini-btn"
                   onClick={() => void runPreviewTranscription(recorded.blob)}
-                  disabled={isBusy}
                   title={`Re-transcribe with ${activeModelLabel}`}
                 >
                   <RefreshCw size={12} />
@@ -771,7 +753,6 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
                     type="button"
                     className="ag-vrec-mini-btn"
                     onClick={() => void runPreviewTranscription(recorded.blob)}
-                    disabled={isBusy}
                     title={`Re-transcribe with ${activeModelLabel}`}
                     aria-label={`Re-transcribe with ${activeModelLabel}`}
                   >
@@ -784,12 +765,11 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
                   rows={2}
                   className="ag-vrec-transcript-input"
                   value={transcriptText}
-                  disabled={isBusy}
                   onChange={(e) => setTranscriptText(e.target.value)}
                   onKeyDown={(e) => {
                     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                       e.preventDefault()
-                      void handleSendText()
+                      handleSendText()
                     }
                   }}
                   placeholder="Edit transcript to send as text…"
@@ -806,12 +786,11 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
               maxLength={240}
               className="ag-vrec-caption-input"
               value={caption}
-              disabled={isBusy}
               onChange={(e) => setCaption(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
-                  void handleSend()
+                  handleSend()
                 }
               }}
               placeholder={
@@ -827,7 +806,6 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
                 type="button"
                 className="ag-vrec-btn discard"
                 onClick={handleCancel}
-                disabled={isBusy}
                 title="Discard voice memo"
                 aria-label="Discard voice memo"
               >
@@ -835,37 +813,28 @@ export const VoiceRecorderBar: React.FC<VoiceRecorderBarProps> = ({
                 <span className="ag-desktop-only">Discard</span>
               </button>
 
-              {(hasEditableTranscript || sendingText) && (
+              {hasEditableTranscript && (
                 <button
                   type="button"
                   className={`ag-vrec-send-text-btn ${isDm ? 'dm' : ''}`}
-                  onClick={() => void handleSendText()}
-                  disabled={isBusy || !canSendText}
+                  onClick={handleSendText}
+                  disabled={!canSendText}
                   title="Send transcript as text only (skips voice upload · ⌘↵)"
                   aria-label="Send transcript as text"
                 >
-                  {sendingText ? (
-                    <Loader2 size={14} className="ag-spin" />
-                  ) : (
-                    <MessageSquareText size={14} />
-                  )}
-                  <span>{sendingText ? 'Sending…' : 'Send Text'}</span>
+                  <MessageSquareText size={14} />
+                  <span>Send Text</span>
                 </button>
               )}
 
               <button
                 type="button"
                 className={`ag-send-btn ${isDm ? 'dm' : ''}`}
-                onClick={() => void handleSend()}
-                disabled={isBusy}
-                aria-label={sendLabel}
+                onClick={handleSend}
+                aria-label="Send Voice"
               >
-                {isUploading ? (
-                  <Loader2 size={14} className="ag-spin" />
-                ) : (
-                  <Send size={14} />
-                )}
-                <span>{sendLabel}</span>
+                <Send size={14} />
+                <span>Send Voice</span>
               </button>
             </div>
           </div>

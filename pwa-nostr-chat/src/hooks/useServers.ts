@@ -79,6 +79,8 @@ import {
 } from '../lib/sendQueue.ts'
 import {
   clearServerChannelMessagesStorage,
+  isEphemeralPendingMessage,
+  isStuckMediaPlaceholder,
   loadJoinedServers,
   loadServerChannelMessages,
   saveJoinedServers,
@@ -2277,9 +2279,6 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 powTargetBits,
                 lightningAddr,
               })
-              if (ok) {
-                revokeVoicePreviewUrl(recorded)
-              }
               return ok
             } catch (err) {
               if (identityManager.getWipeGeneration() === wipeGen) {
@@ -2291,10 +2290,14 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               }
               return false
             } finally {
+              revokeVoicePreviewUrl(recorded)
               setVoiceSendPhase('idle')
             }
           },
-          () => false
+          () => {
+            revokeVoicePreviewUrl(recorded)
+            return false
+          }
         )
       } finally {
         adjustInFlightSend(-1)
@@ -2340,45 +2343,6 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       const powTargetBits = settings.powTargetBits
       const lightningAddr = lightningAddressRef.current
       const uploadServers = [...blossomServers]
-
-      const tempId = `pending-srv-${Date.now()}-${++optimisticSeqRef.current}`
-      const nowSec = clampTimestamp(Math.floor(Date.now() / 1000))
-      const optimistic: ServerMessage = {
-        id: tempId,
-        serverId: server.id,
-        channelId: chanId,
-        pubkey: masterPk,
-        nickname: nick,
-        displayHandle: formatDisplayHandle(nick, masterPk),
-        content: cleanCaption || 'Sending image…',
-        createdAt: nowSec,
-        tags: [],
-        isOwn: true,
-        encrypted: server.encrypted,
-        powBits: 0,
-        replyTo:
-          replyTarget && !replyTarget.isSystem
-            ? {
-                id: replyTarget.id,
-                pubkey: replyTarget.pubkey,
-                nickname: replyTarget.nickname,
-                preview: replyTarget.content.slice(0, 120),
-              }
-            : undefined,
-        reactions: [],
-        mentions: extractMentions(cleanCaption),
-        deliveryStatus: 'sending',
-      }
-
-      updateServerChannelMessages(
-        server.id,
-        chanId,
-        (prev) => {
-          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
-          return [...prev, { ...optimistic, createdAt: Math.max(nowSec, lastSec) }]
-        },
-        { allowBackgroundPersist: true }
-      )
 
       adjustInFlightSend(1)
       try {
@@ -2444,7 +2408,6 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               return await publishServerMessageDirect({
                 server,
                 channel,
-                tempId,
                 body,
                 replyTarget,
                 imageAttachment: attachment,
@@ -2457,20 +2420,6 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               })
             } catch (err) {
               if (identityManager.getWipeGeneration() === wipeGen) {
-                updateServerChannelMessages(
-                  server.id,
-                  chanId,
-                  (prev) => {
-                    let changed = false
-                    const next = prev.map((m) => {
-                      if (m.id !== tempId) return m
-                      changed = true
-                      return { ...m, deliveryStatus: 'failed' as ServerMessage['deliveryStatus'] }
-                    })
-                    return changed ? next : null
-                  },
-                  { allowBackgroundPersist: true }
-                )
                 pushToast(
                   'error',
                   'Server image upload failed',
@@ -2501,7 +2450,6 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       settings.powEnabled,
       settings.powTargetBits,
       setVoiceSendPhase,
-      updateServerChannelMessages,
       adjustInFlightSend,
       publishServerMessageDirect,
       pushToast,
@@ -2975,6 +2923,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         ) {
           continue
         }
+        if (isStuckMediaPlaceholder(raw) || isEphemeralPendingMessage(raw)) continue
         const pk = (raw.pubkey || '').toLowerCase()
         if (!/^[0-9a-f]{64}$/.test(pk)) continue
         if (blockedSetRef.current.has(pk) || bannedSet.has(pk)) continue

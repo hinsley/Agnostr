@@ -112,7 +112,8 @@ import {
   clearChannelMessagesStorage,
   DEFAULT_SETTINGS,
   formatTranscriptExport,
-  isStuckVoiceMemoPlaceholder,
+  isEphemeralPendingMessage,
+  isStuckMediaPlaceholder,
   loadActiveGeohash,
   loadBlockedPubkeys,
   loadBlossomServers,
@@ -144,6 +145,7 @@ import {
   saveSettings,
   saveSignMode,
   saveTrustedPubkeys,
+  scrubAllPersistedStuckPlaceholders,
 } from '../lib/storage.ts'
 import { buildNip42AuthTemplate } from '../lib/nip29.ts'
 import { CALL_SIGNALING_RELAYS } from '../lib/callSignaling.ts'
@@ -274,6 +276,12 @@ function readInitialGeohash(): string {
 }
 
 export function useAgnostrEngine(): AgnostrEngine {
+  // Cold-boot storage sweep BEFORE any channel/DM/server state hydrates from localStorage
+  const bootScrubbedCountRef = useRef<number | null>(null)
+  if (bootScrubbedCountRef.current === null) {
+    bootScrubbedCountRef.current = scrubAllPersistedStuckPlaceholders()
+  }
+
   const { toasts, pushToast, dismissToast, clearToasts } = useToasts()
 
   // Persistent app settings
@@ -561,12 +569,34 @@ export function useAgnostrEngine(): AgnostrEngine {
   const zapsIngestEventTagsRef = useRef<(pubkey: string, tags: string[][]) => void>(() => {})
   const radioSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
   const inFlightSendCountRef = useRef<number>(0)
+  const inFlightMediaCountRef = useRef<number>(0)
   const optimisticRadioSeqRef = useRef<number>(0)
   const replyingToRef = useRef<GeoMessage | null>(replyingTo)
 
   const adjustInFlightSend = useCallback((delta: number) => {
     inFlightSendCountRef.current = Math.max(0, inFlightSendCountRef.current + delta)
     setSending(inFlightSendCountRef.current > 0)
+  }, [])
+
+  const beginMediaSend = useCallback(() => {
+    inFlightMediaCountRef.current += 1
+  }, [])
+
+  const endMediaSend = useCallback(() => {
+    inFlightMediaCountRef.current = Math.max(0, inFlightMediaCountRef.current - 1)
+    if (inFlightMediaCountRef.current === 0) {
+      setVoiceSendPhase('idle')
+    }
+  }, [])
+
+  const setServerVoiceSendPhase = useCallback((phase: VoiceSendPhase) => {
+    if (phase === 'idle') {
+      if (inFlightMediaCountRef.current === 0) {
+        setVoiceSendPhase('idle')
+      }
+    } else {
+      setVoiceSendPhase(phase)
+    }
   }, [])
 
   useLayoutEffect(() => {
@@ -1834,7 +1864,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     blossomServers,
     lightningAddress: zapsEngine.lightningAddress,
     onIngestEventTags: zapsEngine.ingestEventTags,
-    setVoiceSendPhase,
+    setVoiceSendPhase: setServerVoiceSendPhase,
     onSeedMemoTranscript: handleSeedMemoTranscript,
     sendDirectMessage,
     pushToast,
@@ -2025,7 +2055,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       const validIncoming: GeoMessage[] = []
       for (const raw of incoming) {
         if (!raw || raw.isSystem || typeof raw.id !== 'string' || !raw.id) continue
-        if (isStuckVoiceMemoPlaceholder(raw)) continue
+        if (isStuckMediaPlaceholder(raw) || isEphemeralPendingMessage(raw)) continue
         const msgKey = normalizeRadioChannelKey(raw.geohash)
         if (msgKey !== gh) continue
         const pk = (raw.pubkey || '').toLowerCase()
@@ -2136,6 +2166,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     activeGeohash,
     activeRadioMessages: messages,
     activeServerMessages: serversEngine.messages,
+    initialHealCheckpoint: (bootScrubbedCountRef.current ?? 0) > 0,
     onApplyServers: applySyncedJoinedServers,
     onApplyTrusted: handleApplySyncedTrusted,
     onApplyBlocked: handleApplySyncedBlocked,
@@ -3055,10 +3086,19 @@ export function useAgnostrEngine(): AgnostrEngine {
     async (recorded: RecordedVoiceMemo, caption?: string): Promise<boolean> => {
       const view = activeViewRef.current
       if (view.type === 'server') {
-        return await serversEngine.sendVoiceMemo(recorded, caption)
+        beginMediaSend()
+        try {
+          return await serversEngine.sendVoiceMemo(recorded, caption)
+        } finally {
+          endMediaSend()
+        }
       }
-      if (!pool) return false
+      if (!pool) {
+        revokeVoicePreviewUrl(recorded)
+        return false
+      }
       if (recorded.size <= 0) {
+        revokeVoicePreviewUrl(recorded)
         pushToast('warning', 'Empty recording', 'Hold or record for at least a second before sending.')
         return false
       }
@@ -3074,6 +3114,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
       if (isDm && targetDmPeer) {
         adjustInFlightSend(1)
+        beginMediaSend()
         try {
           const ok = await sendDirectVoiceMemo(
             targetDmPeer,
@@ -3115,7 +3156,6 @@ export function useAgnostrEngine(): AgnostrEngine {
             cleanCaption
           )
           if (ok) {
-            revokeVoicePreviewUrl(recorded)
             pushToast(
               'success',
               'Encrypted voice memo sent',
@@ -3124,7 +3164,8 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
           return ok
         } finally {
-          setVoiceSendPhase('idle')
+          revokeVoicePreviewUrl(recorded)
+          endMediaSend()
           adjustInFlightSend(-1)
         }
       }
@@ -3145,11 +3186,15 @@ export function useAgnostrEngine(): AgnostrEngine {
       const powTargetBits = settings.powTargetBits
 
       adjustInFlightSend(1)
+      beginMediaSend()
       try {
         return await radioSendQueueRef.current.enqueue(
           `radio:${gh}`,
           async () => {
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            if (identityManager.getWipeGeneration() !== wipeGen) {
+              revokeVoicePreviewUrl(recorded)
+              return false
+            }
             let signedMsgId: string | null = null
             try {
               const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
@@ -3293,9 +3338,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                 { allowBackgroundPersist: true }
               )
 
-              if (ok) {
-                revokeVoicePreviewUrl(recorded)
-              } else {
+              if (!ok) {
                 pushToast(
                   'error',
                   'Voice memo publish failed',
@@ -3331,12 +3374,16 @@ export function useAgnostrEngine(): AgnostrEngine {
               }
               return false
             } finally {
-              setVoiceSendPhase('idle')
+              revokeVoicePreviewUrl(recorded)
             }
           },
-          () => false
+          () => {
+            revokeVoicePreviewUrl(recorded)
+            return false
+          }
         )
       } finally {
+        endMediaSend()
         adjustInFlightSend(-1)
       }
     },
@@ -3355,6 +3402,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       upsertChannelPreview,
       recordRoomMessage,
       adjustInFlightSend,
+      beginMediaSend,
+      endMediaSend,
       pushToast,
     ]
   )
@@ -3494,7 +3543,12 @@ export function useAgnostrEngine(): AgnostrEngine {
 
       const view = activeViewRef.current
       if (view.type === 'server') {
-        return await serversEngine.sendImageAttachment(image, caption)
+        beginMediaSend()
+        try {
+          return await serversEngine.sendImageAttachment(image, caption)
+        } finally {
+          endMediaSend()
+        }
       }
 
       const gh = activeGeohashRef.current
@@ -3508,6 +3562,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
       if (isDm && targetDmPeer) {
         adjustInFlightSend(1)
+        beginMediaSend()
         try {
           const ok = await sendDirectImageAttachment(
             targetDmPeer,
@@ -3551,7 +3606,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           return ok
         } finally {
           revokeImagePreviewUrl(image)
-          setVoiceSendPhase('idle')
+          endMediaSend()
           adjustInFlightSend(-1)
         }
       }
@@ -3565,78 +3620,14 @@ export function useAgnostrEngine(): AgnostrEngine {
       const isTopic = isTopicChannel(gh)
       const nick = identityManager.getNickname()
       const activeKey = identityManager.getKeyMaterialForGeohash(gh)
-      const activePk = activeKey.pubkey.toLowerCase()
       const isTeleported = location.isTeleported
       const broadcastClientTag = settings.broadcastClientTag
       const lightningAddr = zapsEngine.lightningAddress
       const powEnabled = settings.powEnabled
       const powTargetBits = settings.powTargetBits
 
-      const tempId = `pending-radio-${Date.now()}-${++optimisticRadioSeqRef.current}`
-      const nowSec = Math.floor(Date.now() / 1000)
-      const optimisticBase: GeoMessage = {
-        id: tempId,
-        geohash: gh,
-        pubkey: activePk,
-        nickname: nick,
-        displayHandle: formatDisplayHandle(nick, activePk),
-        content: cleanCaption || 'Sending image…',
-        createdAt: nowSec,
-        tags: [],
-        isOwn: true,
-        isTeleported: !isTopic && isTeleported,
-        isMeshBridge: false,
-        clientName: broadcastClientTag ? AGNOSTR_CLIENT_TAG : undefined,
-        isAgnostrClient: broadcastClientTag,
-        powBits: 0,
-        replyTo:
-          replyTarget && !replyTarget.isSystem
-            ? {
-                id: replyTarget.id,
-                pubkey: replyTarget.pubkey,
-                nickname: replyTarget.nickname,
-                preview: replyTarget.content.slice(0, 120),
-              }
-            : undefined,
-        reactions: [],
-        mentions: extractMentions(cleanCaption),
-        deliveryStatus: 'sending',
-      }
-
-      updateChannelMessages(
-        gh,
-        (prev) => {
-          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
-          return [...prev, { ...optimisticBase, createdAt: Math.max(nowSec, lastSec) }]
-        },
-        { allowBackgroundPersist: true }
-      )
-      const optimisticImagePreview = formatRadioPreviewText({
-        content: cleanCaption,
-        hasImage: true,
-      })
-      upsertChannelPreview(
-        gh,
-        {
-          id: tempId,
-          preview: optimisticImagePreview,
-          sender: nick,
-          senderPubkey: activePk,
-          createdAt: nowSec,
-        },
-        { force: true }
-      )
-      recordRoomMessage({
-        id: tempId,
-        geohash: gh,
-        pubkey: activePk,
-        sender: nick,
-        preview: optimisticImagePreview,
-        createdAtSec: nowSec,
-        isAuthoritative: activeGeohashRef.current === gh,
-      })
-
       adjustInFlightSend(1)
+      beginMediaSend()
       try {
         return await radioSendQueueRef.current.enqueue(
           `radio:${gh}`,
@@ -3645,7 +3636,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               revokeImagePreviewUrl(image)
               return false
             }
-            let activeMsgId = tempId
+            let signedMsgId: string | null = null
             try {
               const rawBytes = new Uint8Array(await image.blob.arrayBuffer())
 
@@ -3708,7 +3699,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               const signed = await identityManager.signEvent(template, gh)
               if (identityManager.getWipeGeneration() !== wipeGen) return false
 
-              activeMsgId = signed.id
+              signedMsgId = signed.id
               const findParent = (id: string) =>
                 messagesChannelRef.current === gh
                   ? messagesRef.current.find((m) => m.id === id)
@@ -3721,7 +3712,13 @@ export function useAgnostrEngine(): AgnostrEngine {
                 parsed.isOwn = true
                 updateChannelMessages(
                   gh,
-                  (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-radio-'),
+                  (prev) => {
+                    if (prev.some((m) => m.id === parsed.id)) return null
+                    return sortChannelMessagesWithPending(
+                      [...prev, parsed],
+                      'pending-radio-'
+                    ).slice(-350)
+                  },
                   { allowBackgroundPersist: true }
                 )
                 const signedImagePreview = formatRadioPreviewText({
@@ -3734,7 +3731,6 @@ export function useAgnostrEngine(): AgnostrEngine {
                   gh,
                   {
                     id: parsed.id,
-                    replaceId: tempId,
                     preview: signedImagePreview,
                     sender: parsed.nickname || nick,
                     senderPubkey: parsed.pubkey,
@@ -3744,7 +3740,6 @@ export function useAgnostrEngine(): AgnostrEngine {
                 )
                 recordRoomMessage({
                   id: parsed.id,
-                  replaceId: tempId,
                   geohash: gh,
                   pubkey: parsed.pubkey,
                   sender: parsed.nickname || nick,
@@ -3787,22 +3782,24 @@ export function useAgnostrEngine(): AgnostrEngine {
               return ok
             } catch (err) {
               if (identityManager.getWipeGeneration() === wipeGen) {
-                updateChannelMessages(
-                  gh,
-                  (prev) => {
-                    let changed = false
-                    const next = prev.map((m) => {
-                      if (m.id !== activeMsgId && m.id !== tempId) return m
-                      changed = true
-                      return {
-                        ...m,
-                        deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
-                      }
-                    })
-                    return changed ? next : null
-                  },
-                  { allowBackgroundPersist: true }
-                )
+                if (signedMsgId) {
+                  updateChannelMessages(
+                    gh,
+                    (prev) => {
+                      let changed = false
+                      const next = prev.map((m) => {
+                        if (m.id !== signedMsgId) return m
+                        changed = true
+                        return {
+                          ...m,
+                          deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
+                        }
+                      })
+                      return changed ? next : null
+                    },
+                    { allowBackgroundPersist: true }
+                  )
+                }
                 pushToast(
                   'error',
                   'Image upload failed',
@@ -3812,7 +3809,6 @@ export function useAgnostrEngine(): AgnostrEngine {
               return false
             } finally {
               revokeImagePreviewUrl(image)
-              setVoiceSendPhase('idle')
             }
           },
           () => {
@@ -3821,6 +3817,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
         )
       } finally {
+        endMediaSend()
         adjustInFlightSend(-1)
       }
     },
@@ -3839,6 +3836,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       upsertChannelPreview,
       recordRoomMessage,
       adjustInFlightSend,
+      beginMediaSend,
+      endMediaSend,
       pushToast,
     ]
   )
@@ -3994,6 +3993,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     resetAllTranscription()
     radioSendQueueRef.current.clearAll()
     inFlightSendCountRef.current = 0
+    inFlightMediaCountRef.current = 0
     setSending(false)
     replyingToRef.current = null
     contentFilterEngine.resetAll()

@@ -163,7 +163,11 @@ async function setBadgeSafe(count?: number): Promise<void> {
   }
 }
 
-// 2. Service Worker lifecycle & client messaging (update flow + call notification cleanup)
+// 2. Service Worker lifecycle & client messaging (instant update activation + call notification cleanup)
+swSelf.addEventListener('install', () => {
+  void swSelf.skipWaiting()
+})
+
 swSelf.addEventListener('activate', (event) => {
   event.waitUntil(swSelf.clients.claim())
 })
