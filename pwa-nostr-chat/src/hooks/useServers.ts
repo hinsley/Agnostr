@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   ActiveView,
   AppSettings,
@@ -109,6 +109,16 @@ interface PendingServerReaction {
   emoji: string
 }
 
+interface ServerUnreadItem {
+  id: string
+  pubkey: string
+  isDirectPing: boolean
+}
+
+function makeServerChanKey(serverId: string, channelId: string): string {
+  return `${serverId}:${channelId}`
+}
+
 function applyReaction(
   msg: ServerMessage,
   reaction: PendingServerReaction,
@@ -208,7 +218,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   } = opts
 
   const [joinedServers, setJoinedServers] = useState<ServerSummary[]>(() => loadJoinedServers())
-  const [rawMessages, setRawMessages] = useState<ServerMessage[]>([])
+  const [serverMessagesState, setServerMessagesState] = useState<{
+    key: string
+    items: ServerMessage[]
+  }>({ key: '', items: [] })
   const [sending, setSending] = useState(false)
   const [creating, setCreating] = useState(false)
   const [replyingTo, setReplyingTo] = useState<ServerMessage | null>(null)
@@ -224,7 +237,44 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const [exploreError, setExploreError] = useState<string | null>(null)
   const exploreUnsubRef = useRef<(() => void) | null>(null)
 
+  const activeServer = useMemo(() => {
+    if (activeView.type !== 'server') return null
+    return joinedServers.find((s) => s.id === activeView.serverId) ?? null
+  }, [activeView, joinedServers])
+
+  const activeChannel = useMemo<ServerChannel | null>(() => {
+    if (!activeServer || activeView.type !== 'server') return null
+    return (
+      activeServer.channels.find((c) => c.id === activeView.channelId) ??
+      activeServer.channels[0] ??
+      null
+    )
+  }, [activeServer, activeView])
+
+  const activeServerChanKey =
+    activeServer && activeChannel ? makeServerChanKey(activeServer.id, activeChannel.id) : ''
+
+  // Synchronously derive current server channel slice on render frame 0 (zero 1-frame stale bleed)
+  const rawMessages = useMemo(() => {
+    if (!activeServer || !activeChannel || !activeServerChanKey) return []
+    if (serverMessagesState.key === activeServerChanKey) {
+      return serverMessagesState.items
+    }
+    const bannedSet = new Set(activeServer.bannedPubkeys.map((p) => p.toLowerCase()))
+    return backfillServerReplies(
+      loadServerChannelMessages(activeServer.id, activeChannel.id).filter(
+        (m) =>
+          m.isSystem ||
+          (!blockedSet.has(m.pubkey.toLowerCase()) && !bannedSet.has(m.pubkey.toLowerCase()))
+      )
+    )
+  }, [activeServer, activeChannel, activeServerChanKey, serverMessagesState, blockedSet])
+
+  const activeServerChanKeyRef = useRef<string>(activeServerChanKey)
   const rawMessagesRef = useRef<ServerMessage[]>(rawMessages)
+  const rawMessagesKeyRef = useRef<string>(activeServerChanKey)
+  const serverSubGenRef = useRef<number>(0)
+  const serverSubSeqRef = useRef<number>(0)
   const joinedServersRef = useRef<ServerSummary[]>(joinedServers)
   const ownPubkeysRef = useRef<Set<string>>(ownPubkeys)
   const blockedSetRef = useRef<Set<string>>(blockedSet)
@@ -232,90 +282,155 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const strictWhitelistRef = useRef<boolean>(settings.strictWhitelistMode)
   const activeViewRef = useRef<ActiveView>(activeView)
   const bgSeenIdsRef = useRef<Set<string>>(new Set())
+  const serverUnreadItemsRef = useRef<Map<string, ServerUnreadItem[]>>(new Map())
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    activeServerChanKeyRef.current = activeServerChanKey
     rawMessagesRef.current = rawMessages
-  }, [rawMessages])
+    rawMessagesKeyRef.current = activeServerChanKey
+  }, [activeServerChanKey, rawMessages])
 
   useEffect(() => {
     joinedServersRef.current = joinedServers
     saveJoinedServers(joinedServers)
   }, [joinedServers])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     ownPubkeysRef.current = ownPubkeys
   }, [ownPubkeys])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     blockedSetRef.current = blockedSet
   }, [blockedSet])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     trustedSetRef.current = trustedSet
   }, [trustedSet])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     strictWhitelistRef.current = settings.strictWhitelistMode
   }, [settings.strictWhitelistMode])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeViewRef.current = activeView
   }, [activeView])
 
-  const incrementServerChannelUnread = useCallback(
-    (serverId: string, channelId: string, isDirectPing: boolean) => {
-      setJoinedServers((prev) =>
-        prev.map((s) => {
-          if (s.id !== serverId) return s
-          let matched = false
-          const nextChannels = s.channels.map((c) => {
-            if (c.id !== channelId) return c
-            matched = true
-            return {
-              ...c,
-              unreadCount: (c.unreadCount ?? 0) + 1,
-              mentionCount: (c.mentionCount ?? 0) + (isDirectPing ? 1 : 0),
-            }
-          })
-          if (!matched) {
-            return {
-              ...s,
-              unreadCount: s.unreadCount + 1,
-              mentionCount: s.mentionCount + (isDirectPing ? 1 : 0),
+  /**
+   * Channel-safe state + storage mutator for servers:
+   * - Never mixes messages from another server/channel into live state or localStorage.
+   * - If the user switched away while an async send/upload/reaction/delete was in flight
+   *   and `allowBackgroundPersist` is true, updates ONLY the origin channel's storage bucket.
+   */
+  const updateServerChannelMessages = useCallback(
+    (
+      serverId: string,
+      chanId: string,
+      updater: (prevItems: ServerMessage[]) => ServerMessage[] | null,
+      opts?: { persist?: boolean; allowBackgroundPersist?: boolean }
+    ) => {
+      const targetKey = makeServerChanKey(serverId, chanId)
+      const shouldPersist = opts?.persist !== false
+      const allowBg = opts?.allowBackgroundPersist === true
+      const keepForTarget = (list: ServerMessage[]): ServerMessage[] =>
+        list.filter((m) => m.isSystem || (m.serverId === serverId && m.channelId === chanId))
+
+      if (activeServerChanKeyRef.current !== targetKey) {
+        if (allowBg && shouldPersist) {
+          const cached = loadServerChannelMessages(serverId, chanId)
+          const updated = updater(cached)
+          if (updated && updated !== cached) {
+            saveServerChannelMessages(serverId, chanId, keepForTarget(updated))
+          }
+        }
+        return
+      }
+
+      setServerMessagesState((prev) => {
+        if (activeServerChanKeyRef.current !== targetKey) {
+          if (allowBg && shouldPersist) {
+            const cached = loadServerChannelMessages(serverId, chanId)
+            const updated = updater(cached)
+            if (updated && updated !== cached) {
+              saveServerChannelMessages(serverId, chanId, keepForTarget(updated))
             }
           }
-          const totalUnread = nextChannels.reduce((acc, c) => acc + (c.unreadCount ?? 0), 0)
-          const totalMentions = nextChannels.reduce((acc, c) => acc + (c.mentionCount ?? 0), 0)
-          return {
-            ...s,
-            channels: nextChannels,
-            unreadCount: totalUnread,
-            mentionCount: totalMentions,
-          }
-        })
-      )
+          return prev
+        }
+
+        const baseItems =
+          prev.key === targetKey
+            ? prev.items
+            : backfillServerReplies(
+                loadServerChannelMessages(serverId, chanId).filter(
+                  (m) => m.isSystem || !blockedSetRef.current.has(m.pubkey.toLowerCase())
+                )
+              )
+        const updated = updater(baseItems)
+        if (!updated || updated === baseItems) {
+          return prev.key === targetKey ? prev : { key: targetKey, items: baseItems }
+        }
+        const safeItems = keepForTarget(updated)
+        if (shouldPersist) {
+          saveServerChannelMessages(serverId, chanId, safeItems)
+        }
+        return { key: targetKey, items: safeItems }
+      })
     },
     []
   )
 
-  const clearServerChannelUnread = useCallback((serverId: string, channelId: string) => {
+  const recomputeServerUnreads = useCallback(() => {
+    const blocked = blockedSetRef.current
+    const trusted = trustedSetRef.current
+    const own = ownPubkeysRef.current
+    const strict = strictWhitelistRef.current
+
+    // Scrub permanently blocked senders from unread ledger
+    for (const [key, items] of Array.from(serverUnreadItemsRef.current.entries())) {
+      const unblocked = items.filter((item) => !blocked.has(item.pubkey))
+      if (unblocked.length === 0) {
+        serverUnreadItemsRef.current.delete(key)
+      } else if (unblocked.length !== items.length) {
+        serverUnreadItemsRef.current.set(key, unblocked)
+      }
+    }
+
     setJoinedServers((prev) => {
-      let changed = false
+      let anyChanged = false
       const next = prev.map((s) => {
-        if (s.id !== serverId) return s
-        const target = s.channels.find((c) => c.id === channelId)
-        const hasTargetUnread = Boolean(
-          target && ((target.unreadCount ?? 0) > 0 || (target.mentionCount ?? 0) > 0)
-        )
-        const hasServerDrift =
-          !target && (s.unreadCount > 0 || s.mentionCount > 0)
-        if (!hasTargetUnread && !hasServerDrift) return s
-        changed = true
-        const nextChannels = s.channels.map((c) =>
-          c.id === channelId ? { ...c, unreadCount: 0, mentionCount: 0 } : c
-        )
+        const banned = new Set(s.bannedPubkeys.map((p) => p.toLowerCase()))
+        let serverChanged = false
+        const nextChannels = s.channels.map((c) => {
+          const key = makeServerChanKey(s.id, c.id)
+          const rawItems = serverUnreadItemsRef.current.get(key)
+          let unread = 0
+          let mentions = 0
+          if (rawItems && rawItems.length > 0) {
+            const cleaned = rawItems.filter((item) => !banned.has(item.pubkey))
+            if (cleaned.length !== rawItems.length) {
+              if (cleaned.length === 0) serverUnreadItemsRef.current.delete(key)
+              else serverUnreadItemsRef.current.set(key, cleaned)
+            }
+            for (const item of cleaned) {
+              if (blocked.has(item.pubkey)) continue
+              if (strict && !own.has(item.pubkey) && !trusted.has(item.pubkey)) continue
+              unread += 1
+              if (item.isDirectPing) mentions += 1
+            }
+          }
+          if ((c.unreadCount ?? 0) === unread && (c.mentionCount ?? 0) === mentions) {
+            return c
+          }
+          serverChanged = true
+          return { ...c, unreadCount: unread, mentionCount: mentions }
+        })
+
         const totalUnread = nextChannels.reduce((acc, c) => acc + (c.unreadCount ?? 0), 0)
         const totalMentions = nextChannels.reduce((acc, c) => acc + (c.mentionCount ?? 0), 0)
+        if (!serverChanged && s.unreadCount === totalUnread && s.mentionCount === totalMentions) {
+          return s
+        }
+        anyChanged = true
         return {
           ...s,
           channels: nextChannels,
@@ -323,9 +438,51 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           mentionCount: totalMentions,
         }
       })
-      return changed ? next : prev
+      return anyChanged ? next : prev
     })
   }, [])
+
+  const incrementServerChannelUnread = useCallback(
+    (
+      serverId: string,
+      channelId: string,
+      isDirectPing: boolean,
+      meta?: { id: string; pubkey: string }
+    ) => {
+      const pk = meta?.pubkey.toLowerCase() ?? ''
+      if (pk) {
+        if (blockedSetRef.current.has(pk) || ownPubkeysRef.current.has(pk)) return
+        if (strictWhitelistRef.current && !trustedSetRef.current.has(pk)) return
+        const srv = joinedServersRef.current.find((s) => s.id === serverId)
+        if (srv?.bannedPubkeys.some((b) => b.toLowerCase() === pk)) return
+      }
+
+      const key = makeServerChanKey(serverId, channelId)
+      const itemId = meta?.id ?? `srv-unread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const list = serverUnreadItemsRef.current.get(key) ?? []
+      if (list.some((item) => item.id === itemId)) return
+      list.push({ id: itemId, pubkey: pk, isDirectPing })
+      if (list.length > 400) {
+        list.splice(0, list.length - 400)
+      }
+      serverUnreadItemsRef.current.set(key, list)
+      recomputeServerUnreads()
+    },
+    [recomputeServerUnreads]
+  )
+
+  const clearServerChannelUnread = useCallback(
+    (serverId: string, channelId: string) => {
+      serverUnreadItemsRef.current.delete(makeServerChanKey(serverId, channelId))
+      recomputeServerUnreads()
+    },
+    [recomputeServerUnreads]
+  )
+
+  // Immediately recompute server & channel unread/mention counts when mute/block or whitelist changes
+  useEffect(() => {
+    recomputeServerUnreads()
+  }, [blockedSet, trustedSet, ownPubkeys, settings.strictWhitelistMode, recomputeServerUnreads])
 
   // Watch window.location.hash for `#invite=...` deep links (never silently auto-join!)
   useEffect(() => {
@@ -347,20 +504,6 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       // Ignore
     }
   }, [activeGeohash])
-
-  const activeServer = useMemo(() => {
-    if (activeView.type !== 'server') return null
-    return joinedServers.find((s) => s.id === activeView.serverId) ?? null
-  }, [activeView, joinedServers])
-
-  const activeChannel = useMemo<ServerChannel | null>(() => {
-    if (!activeServer || activeView.type !== 'server') return null
-    return (
-      activeServer.channels.find((c) => c.id === activeView.channelId) ??
-      activeServer.channels[0] ??
-      null
-    )
-  }, [activeServer, activeView])
 
   const activeServerRelays = useMemo(() => {
     const set = new Set<string>()
@@ -385,6 +528,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
   useEffect(() => {
     if (!pool || !activeServer) return
+    let cancelled = false
 
     if (activeServer.kind === 'virtual') {
       const targetRelays = activeServer.relays.length > 0 ? activeServer.relays : [...CORE_DM_RELAYS]
@@ -392,48 +536,59 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         ? { kinds: [KIND_VIRTUAL_MANIFEST], authors: [activeServer.founderPubkey], '#d': [manifestDTag(activeServer.id)], limit: 5 }
         : { kinds: [KIND_VIRTUAL_MANIFEST], '#d': [manifestDTag(activeServer.id)], limit: 5 }
 
-      return pool.subscribe(`agnostr-srv-meta-${activeServer.id}`, targetRelays, [filter], {
-        onEvent: (ev) => {
-          if (!verifyEventCached(ev)) return
-          const manifest = parseVirtualManifestEvent(
-            ev,
-            activeServer.id,
-            activeServer.founderPubkey || undefined
-          )
-          if (!manifest) return
+      const unsub = pool.subscribe(
+        `agnostr-srv-meta-${++serverSubSeqRef.current}`,
+        targetRelays,
+        [filter],
+        {
+          onEvent: (ev) => {
+            if (cancelled) return
+            if (!verifyEventCached(ev)) return
+            if (cancelled) return
+            const manifest = parseVirtualManifestEvent(
+              ev,
+              activeServer.id,
+              activeServer.founderPubkey || undefined
+            )
+            if (!manifest) return
 
-          setJoinedServers((prev) =>
-            prev.map((s) => {
-              if (s.id !== activeServer.id) return s
-              if (manifest.rev < s.rev) return s
-              const existingById = new Map(s.channels.map((c) => [c.id, c]))
-              const mergedChannels = manifest.channels.map((c) => {
-                const prevChan = existingById.get(c.id)
+            setJoinedServers((prev) =>
+              prev.map((s) => {
+                if (s.id !== activeServer.id) return s
+                if (manifest.rev < s.rev) return s
+                const existingById = new Map(s.channels.map((c) => [c.id, c]))
+                const mergedChannels = manifest.channels.map((c) => {
+                  const prevChan = existingById.get(c.id)
+                  return {
+                    ...c,
+                    unreadCount: prevChan?.unreadCount ?? 0,
+                    mentionCount: prevChan?.mentionCount ?? 0,
+                  }
+                })
                 return {
-                  ...c,
-                  unreadCount: prevChan?.unreadCount ?? 0,
-                  mentionCount: prevChan?.mentionCount ?? 0,
+                  ...s,
+                  name: manifest.name,
+                  description: manifest.description,
+                  icon: manifest.icon,
+                  accentColor: manifest.accentColor,
+                  founderPubkey: manifest.founderPubkey,
+                  channels: mergedChannels,
+                  moderators: manifest.moderators,
+                  bannedPubkeys: manifest.bannedPubkeys,
+                  relays: manifest.relays,
+                  rev: manifest.rev,
+                  unreadCount: mergedChannels.reduce((acc, c) => acc + (c.unreadCount ?? 0), 0),
+                  mentionCount: mergedChannels.reduce((acc, c) => acc + (c.mentionCount ?? 0), 0),
                 }
               })
-              return {
-                ...s,
-                name: manifest.name,
-                description: manifest.description,
-                icon: manifest.icon,
-                accentColor: manifest.accentColor,
-                founderPubkey: manifest.founderPubkey,
-                channels: mergedChannels,
-                moderators: manifest.moderators,
-                bannedPubkeys: manifest.bannedPubkeys,
-                relays: manifest.relays,
-                rev: manifest.rev,
-                unreadCount: mergedChannels.reduce((acc, c) => acc + (c.unreadCount ?? 0), 0),
-                mentionCount: mergedChannels.reduce((acc, c) => acc + (c.mentionCount ?? 0), 0),
-              }
-            })
-          )
-        },
-      })
+            )
+          },
+        }
+      )
+      return () => {
+        cancelled = true
+        unsub()
+      }
     }
 
     if (activeServer.kind === 'nip29' && activeServer.relayUrl && activeServer.groupId) {
@@ -441,8 +596,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       const groupId = activeServer.groupId
       const serverId = activeServer.id
 
-      return pool.subscribe(
-        `agnostr-nip29-state-${groupId}`,
+      const unsub = pool.subscribe(
+        `agnostr-nip29-state-${++serverSubSeqRef.current}`,
         [relayUrl],
         [
           {
@@ -453,7 +608,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         ],
         {
           onEvent: (ev) => {
+            if (cancelled) return
             if (!verifyEventCached(ev)) return
+            if (cancelled) return
             if (ev.kind === KIND_NIP29_GROUP_META) {
               const meta = parseNip29GroupMeta(ev, relayUrl)
               if (!meta) return
@@ -503,6 +660,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           },
         }
       )
+      return () => {
+        cancelled = true
+        unsub()
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pool, activeServerKey])
@@ -513,22 +674,40 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const activeBannedKey = (activeServer?.bannedPubkeys ?? []).join(',')
 
   useEffect(() => {
+    let cancelled = false
+    const myGen = ++serverSubGenRef.current
+
     if (!activeServer || !activeChannelId) {
-      setRawMessages([])
+      setServerMessagesState({ key: '', items: [] })
       setReplyingTo(null)
       return
     }
 
     const serverSnapshot = activeServer
     const chanId = activeChannelId
+    const targetKey = makeServerChanKey(serverSnapshot.id, chanId)
     const bannedSet = new Set(serverSnapshot.bannedPubkeys.map((p) => p.toLowerCase()))
 
     const cached = backfillServerReplies(
       loadServerChannelMessages(serverSnapshot.id, chanId).filter(
-        (m) => !blockedSetRef.current.has(m.pubkey.toLowerCase()) && !bannedSet.has(m.pubkey.toLowerCase())
+        (m) =>
+          m.isSystem ||
+          (!blockedSetRef.current.has(m.pubkey.toLowerCase()) &&
+            !bannedSet.has(m.pubkey.toLowerCase()))
       )
     )
-    setRawMessages(cached)
+    setServerMessagesState((prev) => {
+      if (prev.key === targetKey && prev.items.length > 0) {
+        const filtered = prev.items.filter(
+          (m) =>
+            m.isSystem ||
+            (!blockedSetRef.current.has(m.pubkey.toLowerCase()) &&
+              !bannedSet.has(m.pubkey.toLowerCase()))
+        )
+        return filtered.length === prev.items.length ? prev : { key: targetKey, items: filtered }
+      }
+      return { key: targetKey, items: cached }
+    })
     setReplyingTo(null)
 
     if (!pool) return
@@ -569,21 +748,35 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         ]
 
     const wipeGen = identityManager.getWipeGeneration()
-    const subId = `agnostr-srv-chat-${serverSnapshot.id.slice(0, 14)}-${chanId.slice(0, 12)}`
+    const subId = `agnostr-srv-chat-${++serverSubSeqRef.current}`
     const subStartSec = Math.floor(Date.now() / 1000)
     let backfillDone = false
     const eoseFallback = window.setTimeout(() => {
+      if (cancelled) return
       backfillDone = true
     }, 2500)
 
+    const isStale = () =>
+      cancelled ||
+      serverSubGenRef.current !== myGen ||
+      activeServerChanKeyRef.current !== targetKey
+
+    const matchesChannelTag = (tags: string[][]): boolean =>
+      isVirtual
+        ? tags.some((t) => t[0] === 't' && t[1] === chanTag)
+        : getTagValue(tags, 'h') === groupId
+
     const unsub = pool.subscribe(subId, targetRelays, filters, {
       onEose: () => {
+        if (isStale()) return
         backfillDone = true
         window.clearTimeout(eoseFallback)
       },
       onEvent: (ev) => {
+        if (isStale()) return
         if (seenIds.has(ev.id)) return
         if (!verifyEventCached(ev)) return
+        if (isStale()) return
         seenIds.add(ev.id)
         const alreadyCountedUnread = bgSeenIdsRef.current.has(ev.id)
         bgSeenIdsRef.current.add(ev.id)
@@ -595,34 +788,34 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
         const pk = ev.pubkey.toLowerCase()
 
-        // Deletion event (NIP-09 kind 5 or NIP-29 kind 9005)
+        // Deletion event (NIP-09 kind 5 or NIP-29 kind 9005) — verify channel tag ownership
         if (ev.kind === KIND_EVENT_DELETE || ev.kind === KIND_NIP29_DELETE_EVENT) {
+          if (!matchesChannelTag(ev.tags)) return
           const targetId = getTagValue(ev.tags, 'e')
           if (!targetId) return
           const isMod =
             pk === serverSnapshot.founderPubkey ||
             serverSnapshot.moderators.includes(pk) ||
             Boolean(serverSnapshot.admins?.some((a) => a.pubkey === pk))
-          setRawMessages((prev) => {
+          updateServerChannelMessages(serverSnapshot.id, chanId, (prev) => {
             const target = prev.find((m) => m.id === targetId)
-            if (!target) return prev
-            if (target.pubkey !== pk && !isMod) return prev
-            const next = prev.filter((m) => m.id !== targetId)
-            saveServerChannelMessages(serverSnapshot.id, chanId, next)
-            return next
+            if (!target) return null
+            if (target.pubkey !== pk && !isMod) return null
+            return prev.filter((m) => m.id !== targetId)
           })
           return
         }
 
         if (blockedSetRef.current.has(pk) || bannedSet.has(pk)) return
 
-        // Ephemeral reaction (kind 20007)
+        // Ephemeral reaction (kind 20007) — verify channel tag ownership
         if (ev.kind === KIND_EPHEMERAL_REACTION) {
+          if (!matchesChannelTag(ev.tags)) return
           const targetEventId = getTagValue(ev.tags, 'e')
           const emoji = (ev.content ?? '').trim()
           if (!targetEventId || !emoji || emoji.length > 16) return
           const parsedReaction: PendingServerReaction = { id: ev.id, targetEventId, pubkey: pk, emoji }
-          setRawMessages((prev) => {
+          updateServerChannelMessages(serverSnapshot.id, chanId, (prev) => {
             let found = false
             let changed = false
             const next = prev.map((m) => {
@@ -638,22 +831,24 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 queue.push(parsedReaction)
                 pendingReactions.set(targetEventId, queue)
               }
-              return prev
+              return null
             }
-            if (changed) saveServerChannelMessages(serverSnapshot.id, chanId, next)
-            return changed ? next : prev
+            return changed ? next : null
           })
           return
         }
 
         // Chat message (kind 9)
         if (ev.kind === KIND_VIRTUAL_CHAT) {
+          if (!matchesChannelTag(ev.tags)) return
           const ingest = (parsed: ServerMessage | null) => {
-            if (!parsed) return
+            if (!parsed || isStale()) return
             if (identityManager.getWipeGeneration() !== wipeGen) return
+            if (parsed.serverId !== serverSnapshot.id || parsed.channelId !== chanId) return
+            if (blockedSetRef.current.has(pk) || bannedSet.has(pk)) return
 
-            setRawMessages((prev) => {
-              if (prev.some((m) => m.id === parsed.id)) return prev
+            updateServerChannelMessages(serverSnapshot.id, chanId, (prev) => {
+              if (prev.some((m) => m.id === parsed.id)) return null
 
               let hydrated: ServerMessage = parsed
               if (hydrated.replyTo && (!hydrated.replyTo.preview || !hydrated.replyTo.nickname)) {
@@ -694,11 +889,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 return m
               })
 
-              const next = [...backfilledPrev, hydrated]
+              return [...backfilledPrev, hydrated]
                 .sort((a, b) => a.createdAt - b.createdAt)
                 .slice(-350)
-              saveServerChannelMessages(serverSnapshot.id, chanId, next)
-              return next
             })
 
             if (!isHistoryReplay && !alreadyCountedUnread && !parsed.isOwn && !parsed.isSystem) {
@@ -709,6 +902,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 view.channelId === chanId
               if (
                 !isViewingThisChan &&
+                !blockedSetRef.current.has(pk) &&
                 (!strictWhitelistRef.current || trustedSetRef.current.has(pk))
               ) {
                 const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
@@ -722,25 +916,30 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                   parsed.replyTo &&
                     ((parsed.replyTo.pubkey &&
                       ownPubkeysRef.current.has(parsed.replyTo.pubkey.toLowerCase())) ||
-                      rawMessagesRef.current.some(
-                        (m) =>
-                          m.id === parsed.replyTo?.id &&
-                          (m.isOwn || ownPubkeysRef.current.has(m.pubkey.toLowerCase()))
-                      ))
+                      (rawMessagesKeyRef.current === targetKey &&
+                        rawMessagesRef.current.some(
+                          (m) =>
+                            m.id === parsed.replyTo?.id &&
+                            (m.isOwn || ownPubkeysRef.current.has(m.pubkey.toLowerCase()))
+                        )))
                 )
                 incrementServerChannelUnread(
                   serverSnapshot.id,
                   chanId,
-                  mentionedMe || repliedToMe
+                  mentionedMe || repliedToMe,
+                  { id: parsed.id, pubkey: pk }
                 )
               }
             }
           }
 
+          const findParent = (id: string) =>
+            rawMessagesKeyRef.current === targetKey
+              ? rawMessagesRef.current.find((m) => m.id === id)
+              : undefined
+
           if (isVirtual) {
-            void parseVirtualChatEvent(ev, serverSnapshot, chanId, ownPubkeysRef.current, (id) =>
-              rawMessagesRef.current.find((m) => m.id === id)
-            ).then(ingest)
+            void parseVirtualChatEvent(ev, serverSnapshot, chanId, ownPubkeysRef.current, findParent).then(ingest)
           } else {
             ingest(
               parseNip29ChatEvent(
@@ -748,7 +947,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 serverSnapshot.id,
                 groupId,
                 ownPubkeysRef.current,
-                (id) => rawMessagesRef.current.find((m) => m.id === id),
+                findParent,
                 (p) => presenceTracker.getNickname(p)
               )
             )
@@ -758,11 +957,12 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     })
 
     return () => {
+      cancelled = true
       window.clearTimeout(eoseFallback)
       unsub()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pool, activeServerKey, activeChannelId, activeEncKey, activeBannedKey, identityManager, presenceTracker, incrementServerChannelUnread])
+  }, [pool, activeServerKey, activeChannelId, activeEncKey, activeBannedKey, identityManager, presenceTracker, updateServerChannelMessages, incrementServerChannelUnread])
 
   // Clear active server channel unread & mention badges whenever user focuses that channel
   useEffect(() => {
@@ -788,6 +988,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     const currentServers = joinedServersRef.current
     if (currentServers.length === 0) return
 
+    let cancelled = false
     const unsubs: Array<() => void> = []
     const timers: number[] = []
     const wipeGen = identityManager.getWipeGeneration()
@@ -798,7 +999,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       chanId: string,
       parsed: ServerMessage | null
     ) => {
-      if (!parsed || parsed.isOwn || parsed.isSystem) return
+      if (cancelled || !parsed || parsed.isOwn || parsed.isSystem) return
       if (identityManager.getWipeGeneration() !== wipeGen) return
 
       const pk = parsed.pubkey.toLowerCase()
@@ -835,7 +1036,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         )
       }
 
-      incrementServerChannelUnread(srv.id, chanId, mentionedMe || repliedToMe)
+      incrementServerChannelUnread(srv.id, chanId, mentionedMe || repliedToMe, {
+        id: parsed.id,
+        pubkey: pk,
+      })
     }
 
     // 1. Virtual servers (public + E2EE)
@@ -856,24 +1060,30 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     if (virtualTags.length > 0 && virtualRelaySet.size > 0) {
       let virtualBackfillDone = false
       const virtualEoseTimer = window.setTimeout(() => {
+        if (cancelled) return
         virtualBackfillDone = true
       }, 2500)
       timers.push(virtualEoseTimer)
 
       const unsubVirtual = pool.subscribe(
-        `agnostr-srv-bg-virtual-${virtualTags.length}`,
+        `agnostr-srv-bg-v-${++serverSubSeqRef.current}`,
         Array.from(virtualRelaySet).slice(0, 8),
         [{ kinds: [KIND_VIRTUAL_CHAT], '#t': virtualTags, since }],
         {
           onEose: () => {
+            if (cancelled) return
             virtualBackfillDone = true
             window.clearTimeout(virtualEoseTimer)
           },
           onEvent: (ev) => {
+            if (cancelled) return
             if (ev.kind !== KIND_VIRTUAL_CHAT) return
             if (!virtualBackfillDone && ev.created_at < since - 2) return
             if (bgSeenIdsRef.current.has(ev.id)) return
+            const pk = ev.pubkey.toLowerCase()
+            if (blockedSetRef.current.has(pk) || ownPubkeysRef.current.has(pk)) return
             if (!verifyEventCached(ev)) return
+            if (cancelled) return
 
             let matched: { server: ServerSummary; channelId: string } | null = null
             for (const tag of ev.tags) {
@@ -936,24 +1146,30 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
       let nip29BackfillDone = false
       const nip29EoseTimer = window.setTimeout(() => {
+        if (cancelled) return
         nip29BackfillDone = true
       }, 2500)
       timers.push(nip29EoseTimer)
 
       const unsubNip29 = pool.subscribe(
-        `agnostr-srv-bg-nip29-${relayUrl.slice(-14)}-${groupIds.length}`,
+        `agnostr-srv-bg-n-${++serverSubSeqRef.current}`,
         [relayUrl],
         [{ kinds: [KIND_NIP29_CHAT], '#h': groupIds, since }],
         {
           onEose: () => {
+            if (cancelled) return
             nip29BackfillDone = true
             window.clearTimeout(nip29EoseTimer)
           },
           onEvent: (ev) => {
+            if (cancelled) return
             if (ev.kind !== KIND_NIP29_CHAT) return
             if (!nip29BackfillDone && ev.created_at < since - 2) return
             if (bgSeenIdsRef.current.has(ev.id)) return
+            const pk = ev.pubkey.toLowerCase()
+            if (blockedSetRef.current.has(pk) || ownPubkeysRef.current.has(pk)) return
             if (!verifyEventCached(ev)) return
+            if (cancelled) return
 
             const gid = getTagValue(ev.tags, 'h')
             if (!gid) return
@@ -993,6 +1209,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     }
 
     return () => {
+      cancelled = true
       for (const t of timers) window.clearTimeout(t)
       for (const u of unsubs) u()
     }
@@ -1101,6 +1318,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         channelId && target.channels.some((c) => c.id === channelId)
           ? channelId
           : target.lastActiveChannelId || target.channels[0]?.id || target.groupId || 'general'
+
+      activeServerChanKeyRef.current = makeServerChanKey(serverId, nextChan)
+      serverUnreadItemsRef.current.delete(makeServerChanKey(serverId, nextChan))
 
       setJoinedServers((prev) =>
         prev.map((s) => {
@@ -1578,6 +1798,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
       for (const ch of target.channels) {
         clearServerChannelMessagesStorage(target.id, ch.id)
+        serverUnreadItemsRef.current.delete(makeServerChanKey(target.id, ch.id))
       }
 
       setJoinedServers((prev) => prev.filter((s) => s.id !== serverId))
@@ -1590,18 +1811,22 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   )
 
   // Messaging (text + voice + image + reactions + delete)
-  const sendMessage = useCallback(
+  const sendMessageInternal = useCallback(
     async (
       rawText: string,
       voiceAttachment?: VoiceMemoAttachment,
-      imageAttachment?: ImageAttachment
+      imageAttachment?: ImageAttachment,
+      targetOverride?: { server: ServerSummary; channel: ServerChannel; replyTarget?: ServerMessage | null }
     ): Promise<boolean> => {
       const text = rawText.trim()
-      if (!activeServer || !activeChannel || !pool) return false
+      const server = targetOverride?.server ?? activeServer
+      const channel = targetOverride?.channel ?? activeChannel
+      if (!server || !channel || !pool) return false
       if (!text && !voiceAttachment && !imageAttachment) return false
 
-      const server = activeServer
-      const chanId = activeChannel.id
+      const chanId = channel.id
+      const targetKey = makeServerChanKey(server.id, chanId)
+      const replyTarget = targetOverride !== undefined ? (targetOverride.replyTarget ?? null) : replyingTo
       const isVirtual = server.kind === 'virtual'
       const targetRelays = isVirtual
         ? server.relays.length > 0
@@ -1616,6 +1841,12 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       try {
         const nick = identityManager.getNickname()
         const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+        const previousIds =
+          rawMessagesKeyRef.current === targetKey
+            ? rawMessagesRef.current.filter((m) => !m.isSystem).map((m) => m.id)
+            : loadServerChannelMessages(server.id, chanId)
+                .filter((m) => !m.isSystem)
+                .map((m) => m.id)
 
         const tmpl = isVirtual
           ? await buildVirtualChatTemplate({
@@ -1623,7 +1854,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               channelId: chanId,
               content: text,
               nickname: nick,
-              replyTo: replyingTo,
+              replyTo: replyTarget,
               voiceMemo: voiceAttachment,
               imageAttachment,
             })
@@ -1631,8 +1862,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               groupId: server.groupId || chanId,
               content: text,
               nickname: nick,
-              previousIds: rawMessagesRef.current.filter((m) => !m.isSystem).map((m) => m.id),
-              replyTo: replyingTo,
+              previousIds,
+              replyTo: replyTarget,
               voiceMemo: voiceAttachment,
               imageAttachment,
             })
@@ -1658,12 +1889,12 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           encrypted: server.encrypted,
           powBits: 0,
           replyTo:
-            replyingTo && !replyingTo.isSystem
+            replyTarget && !replyTarget.isSystem
               ? {
-                  id: replyingTo.id,
-                  pubkey: replyingTo.pubkey,
-                  nickname: replyingTo.nickname,
-                  preview: replyingTo.content.slice(0, 120),
+                  id: replyTarget.id,
+                  pubkey: replyTarget.pubkey,
+                  nickname: replyTarget.nickname,
+                  preview: replyTarget.content.slice(0, 120),
                 }
               : undefined,
           reactions: [],
@@ -1673,30 +1904,40 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           deliveryStatus: 'sending',
         }
 
-        setRawMessages((prev) => {
-          if (prev.some((m) => m.id === optimistic.id)) return prev
-          const next = [...prev, optimistic].sort((a, b) => a.createdAt - b.createdAt)
-          saveServerChannelMessages(server.id, chanId, next)
-          return next
-        })
-        setReplyingTo(null)
+        updateServerChannelMessages(
+          server.id,
+          chanId,
+          (prev) => {
+            if (prev.some((m) => m.id === optimistic.id)) return null
+            return [...prev, optimistic].sort((a, b) => a.createdAt - b.createdAt)
+          },
+          { allowBackgroundPersist: true }
+        )
+        if (activeServerChanKeyRef.current === targetKey) {
+          setReplyingTo(null)
+        }
 
         const res = await pool.publish(targetRelays, signed)
         const ok = res.acceptedRelays.length > 0
 
-        setRawMessages((prev) => {
-          const next = prev.map((m) =>
-            m.id === signed.id
-              ? {
-                  ...m,
-                  deliveryStatus: (ok ? 'sent' : 'failed') as ServerMessage['deliveryStatus'],
-                  relayCount: res.acceptedRelays.length,
-                }
-              : m
-          )
-          saveServerChannelMessages(server.id, chanId, next)
-          return next
-        })
+        updateServerChannelMessages(
+          server.id,
+          chanId,
+          (prev) => {
+            let changed = false
+            const next = prev.map((m) => {
+              if (m.id !== signed.id) return m
+              changed = true
+              return {
+                ...m,
+                deliveryStatus: (ok ? 'sent' : 'failed') as ServerMessage['deliveryStatus'],
+                relayCount: res.acceptedRelays.length,
+              }
+            })
+            return changed ? next : null
+          },
+          { allowBackgroundPersist: true }
+        )
 
         if (!ok) {
           const reason = res.rejectedRelays[0]?.reason || 'No connected server relay accepted the message.'
@@ -1718,8 +1959,14 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       replyingTo,
       settings.powEnabled,
       settings.powTargetBits,
+      updateServerChannelMessages,
       pushToast,
     ]
+  )
+
+  const sendMessage = useCallback(
+    async (rawText: string): Promise<boolean> => sendMessageInternal(rawText),
+    [sendMessageInternal]
   )
 
   const sendVoiceMemo = useCallback(
@@ -1728,6 +1975,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       if (recorded.size <= 0) return false
 
       const server = activeServer
+      const channel = activeChannel
+      const replyTarget = replyingTo
       const cleanMime = cleanMimeType(recorded.mime)
       const cleanCaption = caption?.trim() ?? ''
 
@@ -1791,7 +2040,11 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               ? `${cleanCaption}\n${attachment.url}`
               : attachment.url
 
-        const ok = await sendMessage(body, attachment)
+        const ok = await sendMessageInternal(body, attachment, undefined, {
+          server,
+          channel,
+          replyTarget,
+        })
         if (ok) {
           revokeVoicePreviewUrl(recorded)
         }
@@ -1804,7 +2057,18 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         setSending(false)
       }
     },
-    [activeServer, activeChannel, pool, blossomServers, identityManager, setVoiceSendPhase, onSeedMemoTranscript, sendMessage, pushToast]
+    [
+      activeServer,
+      activeChannel,
+      replyingTo,
+      pool,
+      blossomServers,
+      identityManager,
+      setVoiceSendPhase,
+      onSeedMemoTranscript,
+      sendMessageInternal,
+      pushToast,
+    ]
   )
 
   const sendImageAttachment = useCallback(
@@ -1813,6 +2077,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       if (image.size <= 0) return false
 
       const server = activeServer
+      const channel = activeChannel
+      const replyTarget = replyingTo
       const cleanMime = cleanMimeType(image.mime, 'image/webp')
       const cleanCaption = caption?.trim() ?? ''
 
@@ -1869,7 +2135,11 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             ? `${cleanCaption}\n${attachment.url}`
             : attachment.url
 
-        const ok = await sendMessage(body, undefined, attachment)
+        const ok = await sendMessageInternal(body, undefined, attachment, {
+          server,
+          channel,
+          replyTarget,
+        })
         if (ok) {
           revokeImagePreviewUrl(image)
         }
@@ -1882,35 +2152,50 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         setSending(false)
       }
     },
-    [activeServer, activeChannel, pool, blossomServers, identityManager, setVoiceSendPhase, sendMessage, pushToast]
+    [
+      activeServer,
+      activeChannel,
+      replyingTo,
+      pool,
+      blossomServers,
+      identityManager,
+      setVoiceSendPhase,
+      sendMessageInternal,
+      pushToast,
+    ]
   )
 
   const sendReaction = useCallback(
     async (message: ServerMessage, emoji: string): Promise<void> => {
-      if (!activeServer || !activeChannel || !pool || message.isSystem) return
+      if (!pool || message.isSystem) return
       const cleanEmoji = emoji.trim()
       if (!cleanEmoji) return
 
-      const isVirtual = activeServer.kind === 'virtual'
+      const server =
+        joinedServersRef.current.find((s) => s.id === message.serverId) ?? activeServer
+      const chanId = message.channelId || activeChannel?.id
+      if (!server || !chanId) return
+
+      const isVirtual = server.kind === 'virtual'
       const targetRelays = isVirtual
-        ? activeServer.relays.length > 0
-          ? activeServer.relays
+        ? server.relays.length > 0
+          ? server.relays
           : [...CORE_DM_RELAYS]
-        : activeServer.relayUrl
-          ? [activeServer.relayUrl]
+        : server.relayUrl
+          ? [server.relayUrl]
           : []
       if (targetRelays.length === 0) return
 
       const tmpl = isVirtual
         ? buildVirtualReactionTemplate({
-            server: activeServer,
-            channelId: activeChannel.id,
+            server,
+            channelId: chanId,
             targetEventId: message.id,
             targetPubkey: message.pubkey,
             emoji: cleanEmoji,
           })
         : buildNip29ReactionTemplate({
-            groupId: activeServer.groupId || activeChannel.id,
+            groupId: server.groupId || chanId,
             targetEventId: message.id,
             targetPubkey: message.pubkey,
             emoji: cleanEmoji,
@@ -1919,62 +2204,82 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       try {
         const signed = await identityManager.signEvent(tmpl)
         const myPk = signed.pubkey.toLowerCase()
-        setRawMessages((prev) => {
-          const next = prev.map((m) =>
-            m.id === message.id
-              ? applyReaction(m, { id: signed.id, targetEventId: message.id, pubkey: myPk, emoji: cleanEmoji }, ownPubkeysRef.current)
-              : m
-          )
-          saveServerChannelMessages(activeServer.id, activeChannel.id, next)
-          return next
-        })
+        updateServerChannelMessages(
+          server.id,
+          chanId,
+          (prev) => {
+            let changed = false
+            const next = prev.map((m) => {
+              if (m.id !== message.id) return m
+              const updated = applyReaction(
+                m,
+                { id: signed.id, targetEventId: message.id, pubkey: myPk, emoji: cleanEmoji },
+                ownPubkeysRef.current
+              )
+              if (updated !== m) changed = true
+              return updated
+            })
+            return changed ? next : null
+          },
+          { allowBackgroundPersist: true }
+        )
         await pool.publish(targetRelays, signed, 3500)
       } catch (err) {
         pushToast('error', 'Reaction failed', err instanceof Error ? err.message : 'Unable to react')
       }
     },
-    [activeServer, activeChannel, pool, identityManager, pushToast]
+    [activeServer, activeChannel, pool, identityManager, updateServerChannelMessages, pushToast]
   )
 
   const deleteMessage = useCallback(
     async (message: ServerMessage): Promise<boolean> => {
-      if (!activeServer || !activeChannel || !pool) return false
-      const isVirtual = activeServer.kind === 'virtual'
+      if (!pool) return false
+      const server =
+        joinedServersRef.current.find((s) => s.id === message.serverId) ?? activeServer
+      const chanId = message.channelId || activeChannel?.id
+      if (!server || !chanId) return false
+
+      const isVirtual = server.kind === 'virtual'
       const targetRelays = isVirtual
-        ? activeServer.relays.length > 0
-          ? activeServer.relays
+        ? server.relays.length > 0
+          ? server.relays
           : [...CORE_DM_RELAYS]
-        : activeServer.relayUrl
-          ? [activeServer.relayUrl]
+        : server.relayUrl
+          ? [server.relayUrl]
           : []
       if (targetRelays.length === 0) return false
 
       try {
         const tmpl =
           !isVirtual && canModerate
-            ? buildNip29DeleteEventTemplate(activeServer.groupId || activeChannel.id, message.id)
+            ? buildNip29DeleteEventTemplate(server.groupId || chanId, message.id)
             : buildEventDeleteTemplate(message.id)
         if (isVirtual) {
-          tmpl.tags.push(['t', getVirtualChannelTag(activeServer, activeChannel.id)])
+          tmpl.tags.push(['t', getVirtualChannelTag(server, chanId)])
         }
         const signed = await identityManager.signEvent(tmpl)
         const res = await pool.publish(targetRelays, signed, 4000)
-        setRawMessages((prev) => {
-          const next = prev.filter((m) => m.id !== message.id)
-          saveServerChannelMessages(activeServer.id, activeChannel.id, next)
-          return next
-        })
+        updateServerChannelMessages(
+          server.id,
+          chanId,
+          (prev) => {
+            const next = prev.filter((m) => m.id !== message.id)
+            return next.length === prev.length ? null : next
+          },
+          { allowBackgroundPersist: true }
+        )
         return res.acceptedRelays.length > 0
       } catch {
         return false
       }
     },
-    [activeServer, activeChannel, pool, canModerate, identityManager]
+    [activeServer, activeChannel, pool, canModerate, identityManager, updateServerChannelMessages]
   )
 
   const clearChannelCache = useCallback(() => {
     if (!activeServer || !activeChannel) return
-    setRawMessages([])
+    const key = makeServerChanKey(activeServer.id, activeChannel.id)
+    setServerMessagesState({ key, items: [] })
     clearServerChannelMessagesStorage(activeServer.id, activeChannel.id)
   }, [activeServer, activeChannel])
 
@@ -2089,6 +2394,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       }
       const nextChannels = target.channels.filter((c) => c.id !== channelId)
       clearServerChannelMessagesStorage(serverId, channelId)
+      serverUnreadItemsRef.current.delete(makeServerChanKey(serverId, channelId))
       if (activeView.type === 'server' && activeView.serverId === serverId && activeView.channelId === channelId) {
         setActiveView({ type: 'server', serverId, channelId: nextChannels[0].id })
       }
@@ -2181,8 +2487,15 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       if (!target) return false
 
       if (target.kind === 'virtual') {
-        setRawMessages((prev) => prev.filter((m) => m.pubkey.toLowerCase() !== pk))
-        return await mutateVirtualServer(
+        setServerMessagesState((curr) => {
+          if (!curr.key.startsWith(`${serverId}:`)) return curr
+          const filtered = curr.items.filter((m) => m.isSystem || m.pubkey.toLowerCase() !== pk)
+          if (filtered.length === curr.items.length) return curr
+          const chanId = curr.key.slice(serverId.length + 1)
+          if (chanId) saveServerChannelMessages(serverId, chanId, filtered)
+          return { key: curr.key, items: filtered }
+        })
+        const ok = await mutateVirtualServer(
           serverId,
           (s) => ({
             ...s,
@@ -2191,6 +2504,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           }),
           `Banned #${pk.slice(-6)} from server`
         )
+        recomputeServerUnreads()
+        return ok
       }
 
       if (target.relayUrl && target.groupId && pool) {
@@ -2204,7 +2519,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       }
       return false
     },
-    [mutateVirtualServer, pool, identityManager, pushToast]
+    [mutateVirtualServer, recomputeServerUnreads, pool, identityManager, pushToast]
   )
 
   const unbanMember = useCallback(
@@ -2239,8 +2554,11 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     exploreUnsubRef.current?.()
     exploreUnsubRef.current = null
     bgSeenIdsRef.current.clear()
+    serverUnreadItemsRef.current.clear()
+    serverSubGenRef.current += 1
+    activeServerChanKeyRef.current = ''
     setJoinedServers([])
-    setRawMessages([])
+    setServerMessagesState({ key: '', items: [] })
     setReplyingTo(null)
     setPendingInvite(null)
     setExploredGroups([])

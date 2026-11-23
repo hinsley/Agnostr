@@ -563,7 +563,20 @@ export function saveJoinedServers(servers: ServerSummary[]): void {
 export function loadServerChannelMessages(serverId: string, channelId: string): ServerMessage[] {
   const parsed = safeJsonParse<ServerMessage[]>(safeGet(KEYS.serverMsgChannel(serverId, channelId)), [])
   if (!Array.isArray(parsed)) return []
-  return parsed.filter((m) => m && typeof m.id === 'string' && typeof m.content === 'string')
+  const clean: ServerMessage[] = []
+  let hadForeign = false
+  for (const m of parsed) {
+    if (!m || typeof m.id !== 'string' || typeof m.content !== 'string') continue
+    if (!m.isSystem && (m.serverId !== serverId || m.channelId !== channelId)) {
+      hadForeign = true
+      continue
+    }
+    clean.push(m)
+  }
+  if (hadForeign) {
+    safeSet(KEYS.serverMsgChannel(serverId, channelId), JSON.stringify(clean.slice(-MAX_MESSAGES_PER_CHANNEL)))
+  }
+  return clean
 }
 
 export function saveServerChannelMessages(
@@ -571,7 +584,9 @@ export function saveServerChannelMessages(
   channelId: string,
   messages: ServerMessage[]
 ): void {
-  const trimmed = messages.filter((m) => !m.isSystem).slice(-MAX_MESSAGES_PER_CHANNEL)
+  const trimmed = messages
+    .filter((m) => !m.isSystem && m.serverId === serverId && m.channelId === channelId)
+    .slice(-MAX_MESSAGES_PER_CHANNEL)
   safeSet(KEYS.serverMsgChannel(serverId, channelId), JSON.stringify(trimmed))
 }
 
@@ -621,15 +636,37 @@ export function saveLocalSecret(secret: string): void {
 }
 
 export function loadChannelMessages(geohash: string): GeoMessage[] {
-  const gh = normalizeGeohash(geohash)
+  const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
   const parsed = safeJsonParse<GeoMessage[]>(safeGet(KEYS.msgChannel(gh)), [])
   if (!Array.isArray(parsed)) return []
-  return parsed.filter((m) => m && typeof m.id === 'string' && typeof m.content === 'string')
+  const clean: GeoMessage[] = []
+  let hadForeign = false
+  for (const m of parsed) {
+    if (!m || typeof m.id !== 'string' || typeof m.content !== 'string') continue
+    if (!m.isSystem) {
+      const msgKey = normalizeRadioChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
+      if (msgKey !== gh) {
+        hadForeign = true
+        continue
+      }
+    }
+    clean.push(m)
+  }
+  if (hadForeign) {
+    safeSet(KEYS.msgChannel(gh), JSON.stringify(clean.slice(-MAX_MESSAGES_PER_CHANNEL)))
+  }
+  return clean
 }
 
 export function saveChannelMessages(geohash: string, messages: GeoMessage[]): void {
-  const gh = normalizeGeohash(geohash)
-  const trimmed = messages.filter((m) => !m.isSystem).slice(-MAX_MESSAGES_PER_CHANNEL)
+  const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+  const trimmed = messages
+    .filter((m) => {
+      if (m.isSystem) return false
+      const msgKey = normalizeRadioChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
+      return msgKey === gh
+    })
+    .slice(-MAX_MESSAGES_PER_CHANNEL)
   safeSet(KEYS.msgChannel(gh), JSON.stringify(trimmed))
 
   const index = safeJsonParse<string[]>(safeGet(KEYS.msgIndex), []).filter((g) => g !== gh)
@@ -642,7 +679,8 @@ export function saveChannelMessages(geohash: string, messages: GeoMessage[]): vo
 }
 
 export function clearChannelMessagesStorage(geohash: string): void {
-  safeRemove(KEYS.msgChannel(normalizeGeohash(geohash)))
+  const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+  safeRemove(KEYS.msgChannel(gh))
 }
 
 export function loadDmThreads(): DmThread[] {

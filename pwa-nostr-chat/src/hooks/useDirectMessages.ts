@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   DmMessage,
   DmProtocol,
@@ -105,16 +105,33 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   const dmClearedAtRef = useRef<Record<string, number>>(loadDmClearedAt())
   const processedWrapIdsRef = useRef<Set<string>>(new Set())
   const dmBacklogSettledRef = useRef<boolean>(false)
+  const dmSubSeqRef = useRef<number>(0)
   const activeDmPeerRef = useRef<string | null>(activeDmPeer)
   const blockedRef = useRef<Set<string>>(blockedPubkeys)
   const onIncomingRef = useRef(onIncomingDm)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeDmPeerRef.current = activeDmPeer
   }, [activeDmPeer])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     blockedRef.current = blockedPubkeys
+  }, [blockedPubkeys])
+
+  // Immediately clear persisted unread counts on any DM thread whose peer is muted/blocked
+  useEffect(() => {
+    if (blockedPubkeys.size === 0) return
+    setThreads((prev) => {
+      let changed = false
+      const next = prev.map((t) => {
+        if (t.unreadCount > 0 && blockedPubkeys.has(t.peerPubkey.toLowerCase())) {
+          changed = true
+          return { ...t, unreadCount: 0 }
+        }
+        return t
+      })
+      return changed ? next : prev
+    })
   }, [blockedPubkeys])
 
   useEffect(() => {
@@ -158,10 +175,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     const pTags = Array.from(recipientByPubkey.keys())
     if (pTags.length === 0) return
 
+    let cancelled = false
     dmBacklogSettledRef.current = false
     const eoseRelays = new Set<string>()
     let eoseGraceTimer: number | null = null
     const settleBacklog = () => {
+      if (cancelled) return
       dmBacklogSettledRef.current = true
       if (eoseGraceTimer !== null) {
         window.clearTimeout(eoseGraceTimer)
@@ -173,11 +192,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
     const since = Math.floor(Date.now() / 1000) - DM_LOOKBACK_SEC
     const unsub = pool.subscribe(
-      `agnostr-dm-${pTags.join('-').slice(0, 24)}`,
+      `agnostr-dm-${++dmSubSeqRef.current}`,
       dmRelays,
       [{ kinds: [KIND_GIFT_WRAP], '#p': pTags, since, limit: 150 }],
       {
         onEose: (relayUrl) => {
+          if (cancelled) return
           eoseRelays.add(relayUrl)
           if (eoseRelays.size >= dmRelays.length) {
             settleBacklog()
@@ -186,9 +206,11 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           }
         },
         onEvent: (ev) => {
+          if (cancelled) return
           if (ev.kind !== KIND_GIFT_WRAP) return
           if (processedWrapIdsRef.current.has(ev.id)) return
           if (!verifyEventCached(ev)) return
+          if (cancelled) return
           processedWrapIdsRef.current.add(ev.id)
           if (processedWrapIdsRef.current.size > 2000) {
             const first = processedWrapIdsRef.current.values().next().value
@@ -204,7 +226,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           const receivedAtMs = Date.now()
           const wipeGen = identityManager.getWipeGeneration()
           void decryptGiftWrapEvent(ev, recipient).then((decrypted) => {
-            if (!decrypted) return
+            if (cancelled || !decrypted) return
             // Drop plaintext if a panic wipe occurred during async decryption
             if (identityManager.getWipeGeneration() !== wipeGen) return
 
@@ -331,7 +353,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               return [created, ...prev].sort((a, b) => b.lastMessageAt - a.lastMessageAt)
             })
 
-            if (added && !isViewing) {
+            if (added && !isViewing && !blockedRef.current.has(senderPk)) {
               onIncomingRef.current?.(handle, previewText.slice(0, 80), senderPk)
             }
           })
@@ -340,6 +362,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     )
 
     return () => {
+      cancelled = true
       window.clearTimeout(fallbackTimer)
       if (eoseGraceTimer !== null) window.clearTimeout(eoseGraceTimer)
       unsub()
@@ -800,13 +823,23 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     setThreads([])
   }, [])
 
+  const sanitizedThreads = useMemo(
+    () =>
+      threads.map((t) =>
+        blockedPubkeys.has(t.peerPubkey.toLowerCase())
+          ? { ...t, unreadCount: 0, lastPreview: '' }
+          : t
+      ),
+    [threads, blockedPubkeys]
+  )
+
   const totalDmUnread = useMemo(
-    () => threads.reduce((sum, t) => sum + t.unreadCount, 0),
-    [threads]
+    () => sanitizedThreads.reduce((sum, t) => sum + t.unreadCount, 0),
+    [sanitizedThreads]
   )
 
   return {
-    dmThreads: threads,
+    dmThreads: sanitizedThreads,
     totalDmUnread,
     ensureThread,
     sendDirectMessage,

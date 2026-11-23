@@ -676,6 +676,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     }
   }
 
+  const isPulsePreviewHidden = (senderPubkey?: string): boolean => {
+    if (!senderPubkey) return false
+    if (engine.isPeerBlocked(senderPubkey)) return true
+    if (engine.strictWhitelistMode && !engine.isTrusted(senderPubkey)) return true
+    return false
+  }
+
   const pulseByHash = new Map(
     engine.pulseRooms.map((room) => [room.geohash.toLowerCase(), room])
   )
@@ -1064,8 +1071,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     dropPinTarget.position === 'after' &&
                     dragPinIndex !== null &&
                     dragPinIndex !== idx
-                  const subtitle = livePulse?.lastPreview
-                    ? livePulse.lastPreview
+                  const safePulsePreview =
+                    livePulse?.lastPreview && !isPulsePreviewHidden(livePulse.lastSenderPubkey)
+                      ? livePulse.lastPreview
+                      : ''
+                  const subtitle = safePulsePreview
+                    ? safePulsePreview
                     : livePulse && livePulse.peerCount > 0
                       ? `${livePulse.peerCount} ${livePulse.peerCount === 1 ? 'person' : 'people'} active`
                       : livePulse && livePulse.messageCount > 0
@@ -1330,8 +1341,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   const inCall =
                     activeCall?.mode === 'geo' &&
                     (activeCall.geohash ?? '').toLowerCase() === ghKey
-                  const subtitle = room.lastPreview
-                    ? room.lastPreview
+                  const safeRoomPreview =
+                    room.lastPreview && !isPulsePreviewHidden(room.lastSenderPubkey)
+                      ? room.lastPreview
+                      : ''
+                  const subtitle = safeRoomPreview
+                    ? safeRoomPreview
                     : room.peerCount > 0
                       ? `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'} active`
                       : `${room.messageCount} recent ${room.messageCount === 1 ? 'message' : 'messages'}`
@@ -1419,8 +1434,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
           const sortedThreads = [...engine.dmThreads]
             .sort((a, b) => {
-              if ((b.unreadCount > 0 ? 1 : 0) !== (a.unreadCount > 0 ? 1 : 0)) {
-                return (b.unreadCount > 0 ? 1 : 0) - (a.unreadCount > 0 ? 1 : 0)
+              const aUnread = engine.isPeerBlocked(a.peerPubkey) ? 0 : a.unreadCount
+              const bUnread = engine.isPeerBlocked(b.peerPubkey) ? 0 : b.unreadCount
+              if ((bUnread > 0 ? 1 : 0) !== (aUnread > 0 ? 1 : 0)) {
+                return (bUnread > 0 ? 1 : 0) - (aUnread > 0 ? 1 : 0)
               }
               return b.lastMessageAt - a.lastMessageAt
             })
@@ -1545,7 +1562,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     {sortedThreads.map((thread) => {
                       const active = isDmActive(thread.peerPubkey)
                       const trusted = engine.isExplicitlyTrusted(thread.peerPubkey)
-                      const hasUnread = thread.unreadCount > 0
+                      const blocked = engine.isPeerBlocked(thread.peerPubkey)
+                      const visibleUnread = blocked ? 0 : thread.unreadCount
+                      const hasUnread = visibleUnread > 0
                       return (
                         <div
                           key={thread.peerPubkey}
@@ -1582,14 +1601,16 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                               </div>
                               <div className="ag-chat-row-bottom">
                                 <span className="ag-chat-row-preview truncate">
-                                  {thread.lastPreview || 'Encrypted conversation'}
+                                  {blocked
+                                    ? 'Muted user'
+                                    : thread.lastPreview || 'Encrypted conversation'}
                                 </span>
-                                {thread.unreadCount > 0 && (
+                                {visibleUnread > 0 && (
                                   <span
                                     className="ag-ping-badge tabular"
-                                    title={`${thread.unreadCount} unread`}
+                                    title={`${visibleUnread} unread`}
                                   >
-                                    {formatBadgeCount(thread.unreadCount)}
+                                    {formatBadgeCount(visibleUnread)}
                                   </span>
                                 )}
                               </div>

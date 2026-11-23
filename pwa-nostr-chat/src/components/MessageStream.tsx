@@ -172,34 +172,48 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
   // Normalize DM & Server messages into GeoMessage shape for unified bubble rendering
   const displayMessages: GeoMessage[] = useMemo(() => {
-    if (isServer && activeChannel) {
-      return engine.servers.messages.map((sm) => ({
-        id: sm.id,
-        geohash: activeChannel.id,
-        pubkey: sm.pubkey,
-        nickname: sm.nickname,
-        displayHandle: sm.displayHandle,
-        content: sm.decryptFailed
-          ? 'Unable to decrypt message — verify you have the latest server invite key.'
-          : sm.content,
-        createdAt: sm.createdAt,
-        tags: sm.tags,
-        isOwn: sm.isOwn,
-        isSystem: sm.isSystem,
-        isEmote: sm.isEmote,
-        isTeleported: false,
-        isMeshBridge: false,
-        powBits: sm.powBits,
-        replyTo: sm.replyTo,
-        reactions: sm.reactions,
-        mentions: sm.mentions,
-        voiceMemo: sm.voiceMemo,
-        imageAttachment: sm.imageAttachment,
-        deliveryStatus: sm.deliveryStatus,
-        relayCount: sm.relayCount,
-      }))
+    if (isServer && activeServer && activeChannel) {
+      return engine.servers.messages
+        .filter(
+          (sm) =>
+            (sm.isSystem ||
+              (sm.serverId === activeServer.id && sm.channelId === activeChannel.id)) &&
+            (sm.isOwn || sm.isSystem || !engine.isPeerBlocked(sm.pubkey))
+        )
+        .map((sm) => ({
+          id: sm.id,
+          geohash: activeChannel.id,
+          pubkey: sm.pubkey,
+          nickname: sm.nickname,
+          displayHandle: sm.displayHandle,
+          content: sm.decryptFailed
+            ? 'Unable to decrypt message — verify you have the latest server invite key.'
+            : sm.content,
+          createdAt: sm.createdAt,
+          tags: sm.tags,
+          isOwn: sm.isOwn,
+          isSystem: sm.isSystem,
+          isEmote: sm.isEmote,
+          isTeleported: false,
+          isMeshBridge: false,
+          powBits: sm.powBits,
+          replyTo: sm.replyTo,
+          reactions: sm.reactions,
+          mentions: sm.mentions,
+          voiceMemo: sm.voiceMemo,
+          imageAttachment: sm.imageAttachment,
+          deliveryStatus: sm.deliveryStatus,
+          relayCount: sm.relayCount,
+        }))
     }
-    if (!isDm || !dmThread) return engine.messages
+    if (!isDm || !dmThread) {
+      const activeKey = engine.activeGeohash.toLowerCase()
+      return engine.messages.filter(
+        (m) =>
+          (m.isSystem || m.geohash.toLowerCase() === activeKey) &&
+          (m.isOwn || m.isSystem || !engine.isPeerBlocked(m.pubkey))
+      )
+    }
     return dmThread.messages.map((dm) => {
       const isOwn = dm.isOwn
       const nick = isOwn ? engine.identity.nickname : dmThread.peerNickname
@@ -231,13 +245,11 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     })
   }, [
     isServer,
+    activeServer,
     activeChannel,
-    engine.servers.messages,
+    engine,
     isDm,
     dmThread,
-    engine.messages,
-    engine.identity.nickname,
-    engine.activeGeohash,
   ])
 
   // Snapshot existing IDs on channel/DM switch & snap to bottom

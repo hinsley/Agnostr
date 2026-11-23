@@ -24,11 +24,13 @@ interface PendingOk {
 }
 
 interface ActiveSub {
-  id: string
+  logicalId: string
+  wireId: string
   relays: Set<string>
   filters: Filter[]
   handlers: SubscriptionHandlers
   eoseReceived: Set<string>
+  closed: boolean
 }
 
 interface RelayConnection {
@@ -72,7 +74,11 @@ const MAX_HANDSHAKE_FAILURES = 3
 
 export class RelayPool {
   private connections = new Map<string, RelayConnection>()
+  /** Keyed by strictly unique monotonic wireId so late in-flight frames can NEVER collide across rapid resubscribes */
   private subscriptions = new Map<string, ActiveSub>()
+  /** Maps caller logical subId -> current active wireId */
+  private logicalToWire = new Map<string, string>()
+  private nextSubSeq = 0
   private telemetryListeners = new Set<(telemetry: RelayTelemetry[]) => void>()
   private authSigner: Nip42AuthSigner | null = null
   private emitTimer: number | null = null
@@ -187,45 +193,66 @@ export class RelayPool {
   ): () => void {
     if (this.disposed) return () => {}
 
-    // Replace existing subscription with same ID cleanly
-    if (this.subscriptions.has(subId)) {
-      this.unsubscribe(subId)
+    // Replace existing subscription under the same logical ID synchronously before minting a new wireId
+    const existingWireId = this.logicalToWire.get(subId)
+    if (existingWireId) {
+      this.unsubscribeByWireId(existingWireId)
     }
+
+    const seq = ++this.nextSubSeq
+    const seqStr = String(seq)
+    const maxPrefixLen = Math.max(1, 56 - seqStr.length)
+    const wireId = `${subId.slice(0, maxPrefixLen)}-${seqStr}`
 
     const relaySet = new Set(relayUrls)
     const sub: ActiveSub = {
-      id: subId,
+      logicalId: subId,
+      wireId,
       relays: relaySet,
       filters,
       handlers,
       eoseReceived: new Set(),
+      closed: false,
     }
-    this.subscriptions.set(subId, sub)
+    this.subscriptions.set(wireId, sub)
+    this.logicalToWire.set(subId, wireId)
 
     for (const url of relaySet) {
       const conn = this.ensureConnection(url)
-      conn.activeSubIds.add(subId)
+      conn.activeSubIds.add(wireId)
       if (conn.ws && conn.ws.readyState === WebSocket.OPEN) {
         this.sendReq(conn, sub)
       }
     }
 
     this.scheduleTelemetryEmit()
-    return () => this.unsubscribe(subId)
+    return () => this.unsubscribeByWireId(wireId)
   }
 
   unsubscribe(subId: string): void {
-    const sub = this.subscriptions.get(subId)
+    const wireId = this.logicalToWire.get(subId) ?? (this.subscriptions.has(subId) ? subId : null)
+    if (wireId) {
+      this.unsubscribeByWireId(wireId)
+    }
+  }
+
+  private unsubscribeByWireId(wireId: string): void {
+    const sub = this.subscriptions.get(wireId)
     if (!sub) return
-    this.subscriptions.delete(subId)
+    // Synchronously mark closed & remove from callback map BEFORE sending CLOSE so in-flight frames drop immediately
+    sub.closed = true
+    this.subscriptions.delete(wireId)
+    if (this.logicalToWire.get(sub.logicalId) === wireId) {
+      this.logicalToWire.delete(sub.logicalId)
+    }
 
     for (const url of sub.relays) {
       const conn = this.connections.get(url)
       if (!conn) continue
-      conn.activeSubIds.delete(subId)
+      conn.activeSubIds.delete(wireId)
       if (conn.ws && conn.ws.readyState === WebSocket.OPEN) {
         try {
-          conn.ws.send(JSON.stringify(['CLOSE', subId]))
+          conn.ws.send(JSON.stringify(['CLOSE', wireId]))
           conn.txCount += 1
         } catch {
           // Ignore close send error
@@ -367,9 +394,10 @@ export class RelayPool {
   }
 
   closeAll(): void {
-    for (const subId of Array.from(this.subscriptions.keys())) {
-      this.unsubscribe(subId)
+    for (const wireId of Array.from(this.subscriptions.keys())) {
+      this.unsubscribeByWireId(wireId)
     }
+    this.logicalToWire.clear()
     for (const conn of this.connections.values()) {
       this.closeConnection(conn)
     }
@@ -552,9 +580,9 @@ export class RelayPool {
   }
 
   private sendReq(conn: RelayConnection, sub: ActiveSub): void {
-    if (!conn.ws || conn.ws.readyState !== WebSocket.OPEN) return
+    if (sub.closed || !conn.ws || conn.ws.readyState !== WebSocket.OPEN) return
     try {
-      conn.ws.send(JSON.stringify(['REQ', sub.id, ...sub.filters]))
+      conn.ws.send(JSON.stringify(['REQ', sub.wireId, ...sub.filters]))
       conn.txCount += 1
     } catch {
       // Ignore send failure
@@ -572,11 +600,11 @@ export class RelayPool {
 
     const frameType = parsed[0]
     if (frameType === 'EVENT' && parsed.length >= 3) {
-      const subId = typeof parsed[1] === 'string' ? parsed[1] : null
+      const wireSubId = typeof parsed[1] === 'string' ? parsed[1] : null
       const ev = parsed[2] as NostrEvent | null
-      if (!subId || !ev || typeof ev !== 'object') return
-      const sub = this.subscriptions.get(subId)
-      if (!sub) return
+      if (!wireSubId || !ev || typeof ev !== 'object') return
+      const sub = this.subscriptions.get(wireSubId)
+      if (!sub || sub.closed) return
       sub.handlers.onEvent(ev, conn.url)
       this.scheduleTelemetryEmit()
       return
@@ -584,7 +612,7 @@ export class RelayPool {
 
     if (frameType === 'EOSE' && typeof parsed[1] === 'string') {
       const sub = this.subscriptions.get(parsed[1])
-      if (sub && !sub.eoseReceived.has(conn.url)) {
+      if (sub && !sub.closed && !sub.eoseReceived.has(conn.url)) {
         sub.eoseReceived.add(conn.url)
         sub.handlers.onEose?.(conn.url)
       }

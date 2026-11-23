@@ -252,6 +252,7 @@ export interface PulseRoom {
   lastActivityAt: number // unix ms
   lastPreview: string
   lastSender: string
+  lastSenderPubkey?: string
   messagesPerMin: number
   nearestCity: string | null
 }

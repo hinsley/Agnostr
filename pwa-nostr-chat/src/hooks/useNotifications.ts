@@ -46,6 +46,7 @@ const LIVE_RECENCY_WINDOW_SEC = 20
 export interface NotifyGeoMessageInput {
   id: string
   geohash: string
+  senderPubkey?: string
   senderHandle: string
   content: string
   mentionedMe: boolean
@@ -57,6 +58,7 @@ export interface NotifyGeoMessageInput {
 export interface NotifyLocationNoteInput {
   id: string
   geohash: string
+  senderPubkey?: string
   senderHandle: string
   content: string
 }
@@ -65,6 +67,9 @@ export interface UseNotificationsParams {
   activeView: ActiveView
   activeGeohash: string
   ownPubkeys: Set<string>
+  blockedSet: Set<string>
+  trustedSet: Set<string>
+  strictWhitelistMode: boolean
   masterPubkey: string
   nickname: string
   dmThreads: DmThread[]
@@ -114,6 +119,9 @@ export function useNotifications(
     activeView,
     activeGeohash,
     ownPubkeys,
+    blockedSet,
+    trustedSet,
+    strictWhitelistMode,
     masterPubkey,
     nickname,
     dmThreads,
@@ -185,6 +193,12 @@ export function useNotifications(
   activeViewRef.current = activeView
   const ownPubkeysRef = useRef(ownPubkeys)
   ownPubkeysRef.current = ownPubkeys
+  const blockedSetRef = useRef(blockedSet)
+  blockedSetRef.current = blockedSet
+  const trustedSetRef = useRef(trustedSet)
+  trustedSetRef.current = trustedSet
+  const strictWhitelistRef = useRef(strictWhitelistMode)
+  strictWhitelistRef.current = strictWhitelistMode
   const ownGeoCallPubkeysRef = useRef(ownGeoCallPubkeys)
   ownGeoCallPubkeysRef.current = ownGeoCallPubkeys
   const masterPubkeyRef = useRef(masterPubkey)
@@ -329,8 +343,11 @@ export function useNotifications(
   // 1. Incoming 1-on-1 DM Call Ringing (Trusted peers only — strict Trust gate already enforced in useCallEngine)
   useEffect(() => {
     const prevCallId = activeRingingCallIdRef.current
+    const callerBlocked = Boolean(
+      incomingCall && blockedSetRef.current.has(incomingCall.callerPubkey.toLowerCase())
+    )
 
-    if (!incomingCall) {
+    if (!incomingCall || callerBlocked) {
       if (prevCallId) {
         activeRingingCallIdRef.current = null
         soundEngine.stopIncomingRing()
@@ -421,11 +438,19 @@ export function useNotifications(
     const view = activeViewRef.current
 
     for (const thread of dmThreads) {
+      const peerPk = thread.peerPubkey.toLowerCase()
+      const peerBlocked = blockedSetRef.current.has(peerPk)
       for (const msg of thread.messages) {
         if (seen.has(msg.id)) continue
         seen.add(msg.id)
 
-        if (msg.isOwn || ownPubkeysRef.current.has(msg.senderPubkey.toLowerCase())) {
+        const senderPk = msg.senderPubkey.toLowerCase()
+        if (
+          peerBlocked ||
+          blockedSetRef.current.has(senderPk) ||
+          msg.isOwn ||
+          ownPubkeysRef.current.has(senderPk)
+        ) {
           continue
         }
         if (msg.createdAt < sessionBootSecRef.current - LIVE_RECENCY_WINDOW_SEC) {
@@ -503,11 +528,16 @@ export function useNotifications(
       if (seen.has(msg.id)) continue
       seen.add(msg.id)
 
+      const msgPk = msg.pubkey.toLowerCase()
       if (
         msg.isSystem ||
         msg.isOwn ||
-        ownPubkeysRef.current.has(msg.pubkey.toLowerCase())
+        ownPubkeysRef.current.has(msgPk) ||
+        blockedSetRef.current.has(msgPk)
       ) {
+        continue
+      }
+      if (strictWhitelistRef.current && !trustedSetRef.current.has(msgPk)) {
         continue
       }
       if (msg.createdAt < sessionBootSecRef.current - LIVE_RECENCY_WINDOW_SEC) {
@@ -618,9 +648,11 @@ export function useNotifications(
         const key = `${serverId}:${member.roomId}:${member.pubkey}`
         nextKeys.add(key)
 
+        const memberPk = member.pubkey.toLowerCase()
         if (!rosterBootedRef.current) continue
         if (seenRosterKeysRef.current.has(key)) continue
-        if (ownPubkeysRef.current.has(member.pubkey.toLowerCase())) continue
+        if (ownPubkeysRef.current.has(memberPk) || blockedSetRef.current.has(memberPk)) continue
+        if (strictWhitelistRef.current && !trustedSetRef.current.has(memberPk)) continue
         if (activeCallServerId === serverId) continue
         if (!cfg.serverCalls) continue
         if (!rememberNotified(`srvcall:${key}:${Math.floor(Date.now() / 60_000)}`)) {
@@ -682,9 +714,14 @@ export function useNotifications(
 
         if (!rosterBootedRef.current) continue
         if (seenGeoRosterKeysRef.current.has(key)) continue
-        if (ownPubkeysRef.current.has(memberPk) || ownGeoCallPubkeysRef.current.has(memberPk)) {
+        if (
+          ownPubkeysRef.current.has(memberPk) ||
+          ownGeoCallPubkeysRef.current.has(memberPk) ||
+          blockedSetRef.current.has(memberPk)
+        ) {
           continue
         }
+        if (strictWhitelistRef.current && !trustedSetRef.current.has(memberPk)) continue
         if (activeCallGeohash === gh) continue
         if (!cfg.serverCalls) continue
         if (!rememberNotified(`geocall:${key}:${Math.floor(Date.now() / 60_000)}`)) {
@@ -744,6 +781,17 @@ export function useNotifications(
   // 6. Live Geo Radio Messages & /drop Location Notes (invoked directly from live relay callbacks in useAgnostrEngine)
   const notifyGeoMessage = useCallback(
     (input: NotifyGeoMessageInput) => {
+      if (input.senderPubkey) {
+        const pk = input.senderPubkey.toLowerCase()
+        if (blockedSetRef.current.has(pk)) return
+        if (
+          strictWhitelistRef.current &&
+          !ownPubkeysRef.current.has(pk) &&
+          !trustedSetRef.current.has(pk)
+        ) {
+          return
+        }
+      }
       const cfg = settingsRef.current
       const isDirectPing = Boolean(input.mentionedMe || input.repliedToMe)
       const allowByDirectPing = isDirectPing && cfg.directPings
@@ -816,6 +864,17 @@ export function useNotifications(
 
   const notifyLocationNote = useCallback(
     (input: NotifyLocationNoteInput) => {
+      if (input.senderPubkey) {
+        const pk = input.senderPubkey.toLowerCase()
+        if (blockedSetRef.current.has(pk)) return
+        if (
+          strictWhitelistRef.current &&
+          !ownPubkeysRef.current.has(pk) &&
+          !trustedSetRef.current.has(pk)
+        ) {
+          return
+        }
+      }
       const cfg = settingsRef.current
       if (cfg.geoMessages === 'off') return
       if (!rememberNotified(`note:${input.id}`)) return

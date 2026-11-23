@@ -236,13 +236,23 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       const pk = dm.peerPubkey.toLowerCase()
       seenPeople.add(pk)
       const isTrusted = engine.isExplicitlyTrusted(dm.peerPubkey)
+      const isBlocked = engine.isPeerBlocked(dm.peerPubkey)
+      const visibleUnread = isBlocked ? 0 : dm.unreadCount
       list.push({
         id: `person-dm-${pk}`,
         group: 'People',
         title: dm.peerDisplayHandle,
-        subtitle: dm.lastPreview || (isTrusted ? 'Trusted friend · Encrypted DM' : 'Encrypted DM'),
+        subtitle: isBlocked
+          ? 'Muted user'
+          : dm.lastPreview || (isTrusted ? 'Trusted friend · Encrypted DM' : 'Encrypted DM'),
         keywords: `people dm friend message ${dm.peerNickname} ${dm.peerDisplayHandle} ${dm.peerNpub}`,
-        badge: dm.unreadCount > 0 ? `${dm.unreadCount}` : isTrusted ? 'FRIEND' : 'DM',
+        badge: isBlocked
+          ? 'MUTED'
+          : visibleUnread > 0
+            ? `${visibleUnread}`
+            : isTrusted
+              ? 'FRIEND'
+              : 'DM',
         icon: <MessageCircle size={15} style={{ color: 'var(--dm-accent)' }} />,
         run: () => {
           if (onOpenDm) onOpenDm(dm.peerPubkey, dm.peerNickname)
@@ -316,11 +326,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       activePulseKeys.add(keyLower)
       const isTopic = isTopicChannel(room.geohash)
       const displayLabel = formatRadioChannelLabel(room.geohash)
+      const previewHidden = Boolean(
+        room.lastSenderPubkey &&
+          (engine.isPeerBlocked(room.lastSenderPubkey) ||
+            (engine.strictWhitelistMode && !engine.isTrusted(room.lastSenderPubkey)))
+      )
+      const safePreview = previewHidden ? '' : room.lastPreview
       list.push({
         id: `pulse-${room.geohash}`,
         group: 'Active Rooms',
         title: `${displayLabel}${!isTopic && room.nearestCity ? ` · ${room.nearestCity}` : ''}`,
-        subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'}${room.lastPreview ? ` · ${room.lastPreview}` : isTopic ? ' · Topic 23333' : ''}`,
+        subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'}${safePreview ? ` · ${safePreview}` : isTopic ? ' · Topic 23333' : ''}`,
         keywords: `active live room radio ${isTopic ? 'topic 23333' : 'geo'} ${room.geohash} ${displayLabel} ${room.nearestCity ?? ''}`,
         badge: isTopic ? 'TOPIC' : 'LIVE',
         icon: isTopic ? (

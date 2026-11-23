@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PulseRoom } from '../types/protocol.ts'
 import {
   extractGeohashTag,
@@ -16,50 +16,147 @@ import type { RelayPool } from '../lib/relayPool.ts'
 
 const PULSE_WINDOW_MS = 15 * 60 * 1000
 const MAX_PULSE_ROOMS = 48
+const MAX_ROOM_MESSAGES = 48
+
+interface PulseMessageRecord {
+  id: string
+  pubkey: string
+  sender: string
+  preview: string
+  tsMs: number
+}
 
 interface MutablePulseRoom {
   geohash: string
   center: { lat: number; lon: number }
   precision: number
   nearestCity: string | null
-  messageTimestamps: number[]
+  messages: PulseMessageRecord[]
   peers: Map<string, number> // pubkey -> lastSeenMs
   lastActivityAt: number
-  lastPreview: string
-  lastSender: string
 }
 
-export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
+export interface UseGlobalPulseOptions {
+  blockedSet?: Set<string>
+  trustedSet?: Set<string>
+  ownPubkeys?: Set<string>
+  strictWhitelistMode?: boolean
+}
+
+const EMPTY_SET = new Set<string>()
+let pulseSubSeq = 0
+
+export function useGlobalPulse(
+  pool: RelayPool | null,
+  enabled = true,
+  options: UseGlobalPulseOptions = {}
+) {
+  const {
+    blockedSet = EMPTY_SET,
+    trustedSet = EMPTY_SET,
+    ownPubkeys = EMPTY_SET,
+    strictWhitelistMode = false,
+  } = options
+
   const [pulseRooms, setPulseRooms] = useState<PulseRoom[]>([])
   const roomsRef = useRef<Map<string, MutablePulseRoom>>(new Map())
   const seenIdsRef = useRef<Set<string>>(new Set())
   const dirtyRef = useRef(false)
 
+  const blockedSetRef = useRef<Set<string>>(blockedSet)
+  const trustedSetRef = useRef<Set<string>>(trustedSet)
+  const ownPubkeysRef = useRef<Set<string>>(ownPubkeys)
+  const strictWhitelistRef = useRef<boolean>(strictWhitelistMode)
+
+  useLayoutEffect(() => {
+    blockedSetRef.current = blockedSet
+  }, [blockedSet])
+
+  useLayoutEffect(() => {
+    trustedSetRef.current = trustedSet
+  }, [trustedSet])
+
+  useLayoutEffect(() => {
+    ownPubkeysRef.current = ownPubkeys
+  }, [ownPubkeys])
+
+  useLayoutEffect(() => {
+    strictWhitelistRef.current = strictWhitelistMode
+  }, [strictWhitelistMode])
+
   const flushRooms = useCallback(() => {
     const now = Date.now()
     const cutoff = now - PULSE_WINDOW_MS
     const oneMinAgo = now - 60_000
+    const blocked = blockedSetRef.current
+    const trusted = trustedSetRef.current
+    const own = ownPubkeysRef.current
+    const strict = strictWhitelistRef.current
     const next: PulseRoom[] = []
 
     for (const [gh, room] of Array.from(roomsRef.current.entries())) {
-      room.messageTimestamps = room.messageTimestamps.filter((ts) => ts >= cutoff)
+      // Permanently scrub expired & blocked/muted messages and peers
+      room.messages = room.messages.filter(
+        (m) => m.tsMs >= cutoff && !blocked.has(m.pubkey)
+      )
       for (const [pk, seenMs] of Array.from(room.peers.entries())) {
-        if (seenMs < cutoff) room.peers.delete(pk)
+        if (seenMs < cutoff || blocked.has(pk)) {
+          room.peers.delete(pk)
+        }
       }
-      if (room.lastActivityAt < cutoff && room.peers.size === 0) {
+
+      if (room.messages.length === 0 && room.peers.size === 0) {
         roomsRef.current.delete(gh)
         continue
       }
-      const recentMin = room.messageTimestamps.filter((ts) => ts >= oneMinAgo).length
+
+      const isAllowedPubkey = (pk: string): boolean => {
+        if (blocked.has(pk)) return false
+        if (!strict) return true
+        return own.has(pk) || trusted.has(pk)
+      }
+
+      const visibleMessages = strict
+        ? room.messages.filter((m) => isAllowedPubkey(m.pubkey))
+        : room.messages
+
+      let visiblePeerCount = 0
+      let latestPeerMs = 0
+      for (const [pk, seenMs] of room.peers.entries()) {
+        if (!isAllowedPubkey(pk)) continue
+        visiblePeerCount += 1
+        if (seenMs > latestPeerMs) latestPeerMs = seenMs
+      }
+
+      if (visibleMessages.length === 0 && visiblePeerCount === 0) {
+        continue
+      }
+
+      let latestMsg: PulseMessageRecord | null = null
+      let recentMin = 0
+      for (const m of visibleMessages) {
+        if (m.tsMs >= oneMinAgo) recentMin += 1
+        if (!latestMsg || m.tsMs >= latestMsg.tsMs) {
+          latestMsg = m
+        }
+      }
+
+      const lastActivityAt = Math.max(latestPeerMs, latestMsg?.tsMs ?? 0)
+      room.lastActivityAt = Math.max(
+        latestPeerMs,
+        room.messages.reduce((max, m) => (m.tsMs > max ? m.tsMs : max), 0)
+      )
+
       next.push({
         geohash: room.geohash,
         center: room.center,
         precision: room.precision,
-        messageCount: room.messageTimestamps.length,
-        peerCount: Math.max(1, room.peers.size),
-        lastActivityAt: room.lastActivityAt,
-        lastPreview: room.lastPreview,
-        lastSender: room.lastSender,
+        messageCount: visibleMessages.length,
+        peerCount: Math.max(visiblePeerCount, visibleMessages.length > 0 ? 1 : 0),
+        lastActivityAt,
+        lastPreview: latestMsg?.preview ?? '',
+        lastSender: latestMsg?.sender ?? '',
+        lastSenderPubkey: latestMsg?.pubkey,
         messagesPerMin: recentMin,
         nearestCity: room.nearestCity,
       })
@@ -77,16 +174,23 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
     dirtyRef.current = false
   }, [])
 
+  // Immediately scrub/recompute Active Rooms & Pinned previews when mute/block or whitelist changes
+  useEffect(() => {
+    flushRooms()
+  }, [blockedSet, trustedSet, ownPubkeys, strictWhitelistMode, flushRooms])
+
   useEffect(() => {
     if (!pool || !enabled) return
 
+    let cancelled = false
     const since = Math.floor(Date.now() / 1000) - 600
     const unsub = pool.subscribe(
-      'agnostr-global-pulse',
+      `agnostr-global-pulse-${++pulseSubSeq}`,
       PULSE_RELAYS,
       [{ kinds: [KIND_GEOHASH_CHAT, KIND_GEOHASH_PRESENCE, KIND_NAMED_RADIO_CHAT], since, limit: 100 }],
       {
         onEvent: (ev) => {
+          if (cancelled) return
           if (
             ev.kind !== KIND_GEOHASH_CHAT &&
             ev.kind !== KIND_GEOHASH_PRESENCE &&
@@ -95,6 +199,9 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
             return
           }
           if (seenIdsRef.current.has(ev.id)) return
+
+          const pk = ev.pubkey.toLowerCase()
+          if (blockedSetRef.current.has(pk)) return
 
           const isTopic = ev.kind === KIND_NAMED_RADIO_CHAT
           let roomKey: string | null = null
@@ -107,6 +214,7 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
             if (!roomKey) return
           }
           if (!verifyEventCached(ev)) return
+          if (cancelled || blockedSetRef.current.has(pk)) return
 
           seenIdsRef.current.add(ev.id)
           if (seenIdsRef.current.size > 3000) {
@@ -116,7 +224,6 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
 
           const now = Date.now()
           const evMs = Math.min(ev.created_at * 1000, now)
-          const pk = ev.pubkey.toLowerCase()
 
           let room = roomsRef.current.get(roomKey)
           if (!room) {
@@ -126,11 +233,9 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
                 center: { lat: 0, lon: 0 },
                 precision: 0,
                 nearestCity: null,
-                messageTimestamps: [],
+                messages: [],
                 peers: new Map(),
                 lastActivityAt: evMs,
-                lastPreview: '',
-                lastSender: '',
               }
             } else {
               const center = decodeCenter(roomKey)
@@ -139,11 +244,9 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
                 center,
                 precision: roomKey.length,
                 nearestCity: findNearestCityLabel(center.lat, center.lon, roomKey),
-                messageTimestamps: [],
+                messages: [],
                 peers: new Map(),
                 lastActivityAt: evMs,
-                lastPreview: '',
-                lastSender: '',
               }
             }
             roomsRef.current.set(roomKey, room)
@@ -156,11 +259,18 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
 
           if (ev.kind === KIND_GEOHASH_CHAT || ev.kind === KIND_NAMED_RADIO_CHAT) {
             const text = (ev.content ?? '').trim()
-            if (text) {
-              room.messageTimestamps.push(evMs)
-              if (evMs >= room.lastActivityAt - 1000 || !room.lastPreview) {
-                room.lastPreview = text.slice(0, 96)
-                room.lastSender = getTagValue(ev.tags, 'n')?.trim() || `anon${pk.slice(-4)}`
+            if (text && !room.messages.some((m) => m.id === ev.id)) {
+              const sender = getTagValue(ev.tags, 'n')?.trim() || `anon${pk.slice(-4)}`
+              room.messages.push({
+                id: ev.id,
+                pubkey: pk,
+                sender,
+                preview: text.slice(0, 96),
+                tsMs: evMs,
+              })
+              if (room.messages.length > MAX_ROOM_MESSAGES) {
+                room.messages.sort((a, b) => a.tsMs - b.tsMs)
+                room.messages = room.messages.slice(-MAX_ROOM_MESSAGES)
               }
             }
           }
@@ -179,6 +289,7 @@ export function useGlobalPulse(pool: RelayPool | null, enabled = true) {
     }, 20_000)
 
     return () => {
+      cancelled = true
       unsub()
       window.clearInterval(flushInterval)
       window.clearInterval(pruneInterval)
