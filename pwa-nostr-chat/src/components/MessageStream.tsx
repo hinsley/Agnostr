@@ -77,6 +77,8 @@ export interface MessageStreamProps {
   onReplyServer?: (message: ServerMessage) => void
   onReactServer?: (message: ServerMessage, emoji: string) => void
   onInspectPeer: (peer: PeerInfo) => void
+  onStartDm?: (pubkey: string, nickname?: string) => void
+  onMentionPeer?: (handle: string) => void
   onTuneChannel: (geohash: string) => void
   onClickMention: (mention: string) => void
   onLocateMe: () => void
@@ -94,6 +96,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   onReplyServer,
   onReactServer,
   onInspectPeer,
+  onStartDm,
+  onMentionPeer,
   onTuneChannel,
   onClickMention,
   onLocateMe,
@@ -441,6 +445,20 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     [engine]
   )
 
+  const handleUntrustSender = useCallback(
+    (pubkey: string) => {
+      engine.untrustPubkey(pubkey)
+    },
+    [engine]
+  )
+
+  const handleStartCallSender = useCallback(
+    (pubkey: string, mediaType: 'audio' | 'video', nickname?: string) => {
+      void engine.calls.startDmCall(pubkey, mediaType, nickname)
+    },
+    [engine.calls]
+  )
+
   const handleBlockSender = useCallback(
     (pubkey: string, displayHandle: string) => {
       engine.toggleBlockPeer(pubkey, displayHandle)
@@ -752,7 +770,11 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     onOpenLightbox={onOpenLightbox}
                     onToggleActions={setActiveActionMsgId}
                     onTrustSender={handleTrustSender}
+                    onUntrustSender={handleUntrustSender}
                     onBlockSender={handleBlockSender}
+                    onStartDm={onStartDm}
+                    onStartCall={handleStartCallSender}
+                    onMentionAuthor={onMentionPeer}
                     onReply={!isDm ? handleReplyUnified : undefined}
                     onReact={!isDm ? handleReactUnified : undefined}
                     onDelete={
@@ -765,6 +787,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     onClickMention={onClickMention}
                     onJumpToMessage={handleJumpToMessage}
                     onCopyText={() => engine.pushToast('info', 'Copied to clipboard')}
+                    onNotify={(title) => engine.pushToast('info', title)}
                   />
                 </React.Fragment>
               )

@@ -44,6 +44,7 @@ export interface NotifyGeoMessageInput {
   senderHandle: string
   content: string
   mentionedMe: boolean
+  repliedToMe?: boolean
   hasVoice?: boolean
   hasImage?: boolean
 }
@@ -362,7 +363,7 @@ export function useNotifications(
             ? [380, 180, 380, 1000, 380, 180, 380]
             : undefined,
           actions: [
-            { action: 'answer', title: 'Answer' },
+            { action: 'answer', title: 'Accept' },
             { action: 'decline', title: 'Decline' },
           ],
           data: {
@@ -477,6 +478,12 @@ export function useNotifications(
     const seen = seenServerMsgIdsRef.current
     const cfg = settingsRef.current
     const view = activeViewRef.current
+    const ownServerMsgIds = new Set<string>()
+    for (const existing of activeServerMessages) {
+      if (existing.isOwn || ownPubkeysRef.current.has(existing.pubkey.toLowerCase())) {
+        ownServerMsgIds.add(existing.id)
+      }
+    }
 
     for (const msg of activeServerMessages) {
       if (seen.has(msg.id)) continue
@@ -492,7 +499,6 @@ export function useNotifications(
       if (msg.createdAt < sessionBootSecRef.current - LIVE_RECENCY_WINDOW_SEC) {
         continue
       }
-      if (cfg.serverMessages === 'off') continue
 
       const mentionedMe = doesContentMentionUser(
         msg.content,
@@ -500,7 +506,19 @@ export function useNotifications(
         nicknameRef.current,
         masterPubkeyRef.current
       )
-      if (cfg.serverMessages === 'mentions' && !mentionedMe) continue
+      const repliedToMe = Boolean(
+        msg.replyTo &&
+          ((msg.replyTo.pubkey &&
+            ownPubkeysRef.current.has(msg.replyTo.pubkey.toLowerCase())) ||
+            ownServerMsgIds.has(msg.replyTo.id))
+      )
+      const isDirectPing = mentionedMe || repliedToMe
+      const allowByDirectPing = isDirectPing && cfg.directPings
+      const allowByChannelFilter =
+        cfg.serverMessages === 'all' ||
+        (cfg.serverMessages === 'mentions' && isDirectPing)
+
+      if (!allowByDirectPing && !allowByChannelFilter) continue
       if (!rememberNotified(`srv:${msg.id}`)) continue
 
       const isViewingChannel =
@@ -511,7 +529,7 @@ export function useNotifications(
       if (docActive && isViewingChannel) continue
 
       if (cfg.soundEnabled) {
-        soundEngine.playNotificationChime(mentionedMe ? 'mention' : 'message', {
+        soundEngine.playNotificationChime(isDirectPing ? 'mention' : 'message', {
           vibrate: cfg.vibrationEnabled,
         })
       }
@@ -529,13 +547,25 @@ export function useNotifications(
             ? `Voice memo (${Math.max(1, Math.round(msg.voiceMemo.durationSec))}s)`
             : truncatePreview(msg.content)
 
+        const title = cfg.showPreviews
+          ? repliedToMe
+            ? `${msg.displayHandle} replied to you in ${activeServer.name} · ${chanLabel}`
+            : mentionedMe
+              ? `${msg.displayHandle} mentioned you in ${activeServer.name} · ${chanLabel}`
+              : `${activeServer.name} · ${chanLabel}`
+          : isDirectPing
+            ? 'New Direct Ping'
+            : 'New Server Message'
+
+        const body = cfg.showPreviews
+          ? isDirectPing
+            ? preview
+            : `${msg.displayHandle}: ${preview}`
+          : 'New activity in one of your servers'
+
         void showOsNotification({
-          title: cfg.showPreviews
-            ? `${activeServer.name} · ${chanLabel}`
-            : 'New Server Message',
-          body: cfg.showPreviews
-            ? `${msg.displayHandle}: ${preview}`
-            : 'New activity in one of your servers',
+          title,
+          body,
           tag: `agnostr-srv-${activeServer.id.slice(0, 12)}-${activeChannelId}`,
           vibrate: cfg.vibrationEnabled ? [120, 70, 120] : undefined,
           data: {
@@ -599,7 +629,12 @@ export function useNotifications(
               ? `${member.displayHandle} started a ${member.hasVideo ? 'video' : 'voice'} call`
               : 'A group call started in one of your servers',
             tag: `agnostr-srvcall-${serverId.slice(0, 12)}`,
+            requireInteraction: true,
             vibrate: cfg.vibrationEnabled ? [180, 90, 180] : undefined,
+            actions: [
+              { action: 'open', title: 'Accept' },
+              { action: 'decline', title: 'Decline' },
+            ],
             data: {
               category: 'server-call',
               serverId,
@@ -624,8 +659,13 @@ export function useNotifications(
   const notifyGeoMessage = useCallback(
     (input: NotifyGeoMessageInput) => {
       const cfg = settingsRef.current
-      if (cfg.geoMessages === 'off') return
-      if (cfg.geoMessages === 'mentions' && !input.mentionedMe) return
+      const isDirectPing = Boolean(input.mentionedMe || input.repliedToMe)
+      const allowByDirectPing = isDirectPing && cfg.directPings
+      const allowByChannelFilter =
+        cfg.geoMessages === 'all' ||
+        (cfg.geoMessages === 'mentions' && isDirectPing)
+
+      if (!allowByDirectPing && !allowByChannelFilter) return
       if (!rememberNotified(`geo:${input.id}`)) return
 
       const view = activeViewRef.current
@@ -636,7 +676,7 @@ export function useNotifications(
 
       if (cfg.soundEnabled) {
         soundEngine.playNotificationChime(
-          input.mentionedMe ? 'mention' : 'message',
+          isDirectPing ? 'mention' : 'message',
           { vibrate: cfg.vibrationEnabled }
         )
       }
@@ -650,15 +690,25 @@ export function useNotifications(
             ? 'Sent a voice memo'
             : truncatePreview(input.content)
 
-        void showOsNotification({
-          title: cfg.showPreviews
-            ? input.mentionedMe
-              ? `Mention in #${input.geohash}`
+        const title = cfg.showPreviews
+          ? input.repliedToMe
+            ? `${input.senderHandle} replied to you in #${input.geohash}`
+            : input.mentionedMe
+              ? `${input.senderHandle} mentioned you in #${input.geohash}`
               : `#${input.geohash}`
-            : 'Geo Radio Activity',
-          body: cfg.showPreviews
-            ? `${input.senderHandle}: ${preview}`
-            : 'New message in Geo Radio',
+          : isDirectPing
+            ? 'New Direct Ping'
+            : 'Geo Radio Activity'
+
+        const body = cfg.showPreviews
+          ? isDirectPing
+            ? preview
+            : `${input.senderHandle}: ${preview}`
+          : 'New message in Geo Radio'
+
+        void showOsNotification({
+          title,
+          body,
           tag: `agnostr-geo-${input.geohash}`,
           vibrate: cfg.vibrationEnabled ? [120] : undefined,
           data: {

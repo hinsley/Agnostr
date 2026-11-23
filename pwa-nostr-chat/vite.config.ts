@@ -1,10 +1,43 @@
+import { createRequire } from 'node:module'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
+const require = createRequire(import.meta.url)
+const mathjaxPkg = require('mathjax-full/package.json') as { version: string }
+const mathjaxVersion = mathjaxPkg.version
+
 // https://vite.dev/config/
 export default defineConfig({
-  base: '/Agnostr/',
+  base: '/',
+  define: {
+    PACKAGE_VERSION: JSON.stringify(mathjaxVersion),
+  },
+  optimizeDeps: {
+    esbuildOptions: {
+      define: {
+        PACKAGE_VERSION: JSON.stringify(mathjaxVersion),
+      },
+    },
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('/node_modules/mathjax-full/')) {
+            return 'mathjax'
+          }
+          if (id.includes('/node_modules/jsqr/')) {
+            return 'jsqr'
+          }
+          if (id.includes('/node_modules/qrcode/')) {
+            return 'qrcode'
+          }
+          return undefined
+        },
+      },
+    },
+  },
   worker: {
     format: 'es',
     rollupOptions: {
@@ -19,6 +52,16 @@ export default defineConfig({
     },
   },
   plugins: [
+    {
+      name: 'mathjax-version-browser-shim',
+      enforce: 'pre',
+      load(id) {
+        if (id.replace(/\\/g, '/').endsWith('/mathjax-full/js/components/version.js')) {
+          return `export const VERSION = ${JSON.stringify(mathjaxVersion)};\n`
+        }
+        return null
+      },
+    },
     react(),
     VitePWA({
       strategies: 'injectManifest',
@@ -35,12 +78,12 @@ export default defineConfig({
         'screenshot-narrow.png',
       ],
       manifest: {
-        id: '/Agnostr/',
+        id: '/',
         name: 'Agnostr',
         short_name: 'Agnostr',
         description: 'Geohash radio, encrypted DMs, and Nostr servers.',
-        start_url: '/Agnostr/',
-        scope: '/Agnostr/',
+        start_url: '/',
+        scope: '/',
         display: 'standalone',
         display_override: ['window-controls-overlay', 'standalone'],
         orientation: 'any',
@@ -77,13 +120,13 @@ export default defineConfig({
           {
             name: 'Geohash Radar',
             short_name: 'Radar',
-            url: '/Agnostr/#9q',
+            url: '/#9q',
             icons: [{ src: 'icon-192.png', sizes: '192x192', type: 'image/png' }],
           },
           {
             name: 'Agnostr Lounge',
             short_name: 'Lounge',
-            url: '/Agnostr/#4gn0str',
+            url: '/#4gn0str',
             icons: [{ src: 'icon-192.png', sizes: '192x192', type: 'image/png' }],
           },
         ],
@@ -111,6 +154,8 @@ export default defineConfig({
           '**/parakeet-*.js',
           '**/ort.bundle*.js',
           '**/ort-wasm-*.wasm',
+          '**/mathjax-*.js',
+          '**/jsqr-*.js',
         ],
       },
     }),

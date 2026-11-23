@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
 import {
   ArrowLeft,
   Ban,
   Check,
   Copy,
   Download,
+  Link2,
   Lock,
   LogOut,
   Map as MapIcon,
@@ -14,11 +15,13 @@ import {
   Pin,
   PinOff,
   Plus,
+  QrCode,
   Radio,
   Server,
   Settings,
   ShieldCheck,
   Trash2,
+  User,
   Users,
   Video,
   X,
@@ -27,7 +30,10 @@ import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { Nip29Member } from '../types/servers.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import type { ServerSettingsTab } from './ServerSettingsModal.tsx'
+import type { QrShareTarget } from './QrShareModal.tsx'
+import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 import { encodeGeohash } from '../lib/geohash.ts'
+import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 
 export interface RoomInfoSheetProps {
@@ -42,6 +48,8 @@ export interface RoomInfoSheetProps {
   onExportTranscript: (format: 'md' | 'json') => void
   onLeftServer: () => void
   onPlaySound?: (cue: SoundCue) => void
+  onShowQr?: (target: QrShareTarget) => void
+  onOpenScanner?: () => void
   /** 0..1 open progress when swiping on mobile (defaults to open ? 1 : 0). */
   swipeProgress?: number
   /** True while finger is actively dragging so CSS disables transition for 1:1 60fps tracking. */
@@ -69,13 +77,15 @@ export function RoomInfoSheet({
   onExportTranscript,
   onLeftServer,
   onPlaySound,
+  onShowQr,
   swipeProgress,
   isSwiping = false,
   inShell = false,
 }: RoomInfoSheetProps) {
-  const [copiedId, setCopiedId] = useState<'npub' | 'invite' | null>(null)
+  const [copiedId, setCopiedId] = useState<'npub' | 'invite' | 'dm-link' | null>(null)
   const [confirmLeave, setConfirmLeave] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
+  const { openContextMenu } = useContextMenu()
 
   useEffect(() => {
     if (!open) return
@@ -109,7 +119,12 @@ export function RoomInfoSheet({
 
   const { activeView, activeGeohash, cell, presence, location, servers, calls } = engine
 
-  const copyText = async (key: 'npub' | 'invite', value: string, toastTitle: string, detail?: string) => {
+  const copyText = async (
+    key: 'npub' | 'invite' | 'dm-link',
+    value: string,
+    toastTitle: string,
+    detail?: string,
+  ) => {
     try {
       await navigator.clipboard.writeText(value)
       setCopiedId(key)
@@ -178,6 +193,145 @@ export function RoomInfoSheet({
       isTrusted: m.isTrusted,
       messageCount: 0,
       channels: [],
+    })
+  }
+
+  const openPeerContextMenu = (
+    e: ReactMouseEvent,
+    target: {
+      pubkey: string
+      npub: string
+      nickname: string
+      displayHandle: string
+      isSelf: boolean
+      peerInfo?: PeerInfo
+      serverMember?: Nip29Member
+    },
+  ) => {
+    const trusted = !target.isSelf && engine.isExplicitlyTrusted(target.pubkey)
+    const blocked = !target.isSelf && engine.isPeerBlocked(target.pubkey)
+    const dmUrl = buildDmShareUrl(target.pubkey, target.nickname)
+    const items: ContextMenuItem[] = []
+
+    if (!target.isSelf) {
+      items.push(
+        {
+          id: 'dm',
+          label: 'Direct Message',
+          icon: <MessageCircle size={14} />,
+          onSelect: () => {
+            onPlaySound?.('click')
+            onClose()
+            onStartDm(target.pubkey, target.nickname)
+          },
+        },
+        {
+          id: 'profile',
+          label: 'View Profile',
+          icon: <User size={14} />,
+          onSelect: () => {
+            onPlaySound?.('click')
+            if (target.peerInfo) {
+              onInspectPeer(target.peerInfo)
+            } else if (target.serverMember) {
+              handleInspectServerMember(target.serverMember)
+            } else {
+              const known = engine.getPeerByPubkey(target.pubkey)
+              if (known) {
+                onInspectPeer(known)
+              } else {
+                onInspectPeer({
+                  pubkey: target.pubkey,
+                  npub: target.npub,
+                  nickname: target.nickname,
+                  displayHandle: target.displayHandle,
+                  lastSeenAt: Math.floor(Date.now() / 1000),
+                  isOnline: true,
+                  isSelf: false,
+                  isTeleported: false,
+                  isMeshBridge: false,
+                  isBlocked: blocked,
+                  isTrusted: trusted,
+                  messageCount: 0,
+                  channels: [],
+                })
+              }
+            }
+          },
+        },
+      )
+    }
+
+    items.push({
+      id: 'copy-dm-link',
+      label: 'Copy DM Link',
+      icon: <Link2 size={14} />,
+      dividerBefore: items.length > 0,
+      onSelect: () => {
+        void copyText('dm-link', dmUrl, 'Copied DM link')
+      },
+    })
+
+    if (onShowQr) {
+      items.push({
+        id: 'show-dm-qr',
+        label: 'Show DM QR',
+        icon: <QrCode size={14} />,
+        onSelect: () => {
+          onPlaySound?.('click')
+          onShowQr({
+            kind: 'dm',
+            title: target.displayHandle,
+            subtitle: 'Direct message link',
+            url: dmUrl,
+            codeLabel: 'Public key (npub)',
+            codeValue: target.npub,
+          })
+        },
+      })
+    }
+
+    items.push({
+      id: 'copy-npub',
+      label: 'Copy npub',
+      icon: <Copy size={14} />,
+      onSelect: () => {
+        void copyText('npub', target.npub, 'Copied public key')
+      },
+    })
+
+    if (!target.isSelf) {
+      items.push(
+        {
+          id: 'trust',
+          label: trusted ? 'Remove Trust' : 'Trust Peer',
+          icon: <ShieldCheck size={14} />,
+          dividerBefore: true,
+          onSelect: () => {
+            onPlaySound?.('click')
+            if (trusted) {
+              engine.untrustPubkey(target.pubkey)
+            } else {
+              engine.trustPubkey(target.pubkey, target.nickname)
+            }
+          },
+        },
+        {
+          id: 'block',
+          label: blocked ? 'Unblock Peer' : 'Block Peer',
+          icon: <Ban size={14} />,
+          danger: !blocked,
+          onSelect: () => {
+            onPlaySound?.('click')
+            engine.toggleBlockPeer(target.pubkey, target.displayHandle)
+          },
+        },
+      )
+    }
+
+    openContextMenu(e, {
+      header: target.displayHandle,
+      items,
     })
   }
 
@@ -296,7 +450,21 @@ export function RoomInfoSheet({
               {sortedGeoPeers.map((peer) => {
                 const trusted = !peer.isSelf && engine.isExplicitlyTrusted(peer.pubkey)
                 return (
-                  <div key={peer.pubkey} role="listitem" className="ag-sheet-person-row">
+                  <div
+                    key={peer.pubkey}
+                    role="listitem"
+                    className="ag-sheet-person-row"
+                    onContextMenu={(e) =>
+                      openPeerContextMenu(e, {
+                        pubkey: peer.pubkey,
+                        npub: peer.npub,
+                        nickname: peer.nickname,
+                        displayHandle: peer.displayHandle,
+                        isSelf: peer.isSelf,
+                        peerInfo: peer,
+                      })
+                    }
+                  >
                     <button
                       type="button"
                       className="ag-sheet-person-main"
@@ -438,7 +606,18 @@ export function RoomInfoSheet({
     return (
       <>
         {/* Hero */}
-        <div className="ag-sheet-hero">
+        <div
+          className="ag-sheet-hero"
+          onContextMenu={(e) =>
+            openPeerContextMenu(e, {
+              pubkey: thread.peerPubkey,
+              npub: thread.peerNpub,
+              nickname: thread.peerNickname,
+              displayHandle: thread.peerDisplayHandle,
+              isSelf: false,
+            })
+          }
+        >
           <img
             src={identiconDataUrl(thread.peerPubkey)}
             alt=""
@@ -486,6 +665,40 @@ export function RoomInfoSheet({
             <Video size={17} />
             <span>Video Call</span>
           </button>
+          <button
+            type="button"
+            className="ag-sheet-action-btn"
+            onClick={() =>
+              void copyText(
+                'dm-link',
+                buildDmShareUrl(thread.peerPubkey, thread.peerNickname),
+                'Copied DM link',
+              )
+            }
+          >
+            {copiedId === 'dm-link' ? <Check size={16} /> : <Link2 size={16} />}
+            <span>{copiedId === 'dm-link' ? 'Copied Link' : 'Copy DM Link'}</span>
+          </button>
+          {onShowQr && (
+            <button
+              type="button"
+              className="ag-sheet-action-btn"
+              onClick={() => {
+                onPlaySound?.('click')
+                onShowQr({
+                  kind: 'dm',
+                  title: thread.peerDisplayHandle,
+                  subtitle: 'Direct message link',
+                  url: buildDmShareUrl(thread.peerPubkey, thread.peerNickname),
+                  codeLabel: 'Public key (npub)',
+                  codeValue: thread.peerNpub,
+                })
+              }}
+            >
+              <QrCode size={16} />
+              <span>Show QR</span>
+            </button>
+          )}
         </div>
 
         {/* Trust Toggle */}
@@ -588,6 +801,24 @@ export function RoomInfoSheet({
       )
     }
 
+    const handleShowInviteQr = () => {
+      if (!onShowQr) return
+      const built = servers.buildInviteLink(activeServer.id)
+      if (!built) {
+        engine.pushToast('warning', 'Invite link unavailable for this server')
+        return
+      }
+      onPlaySound?.('click')
+      onShowQr({
+        kind: 'server',
+        title: activeServer.name,
+        subtitle: activeServer.encrypted ? 'Encrypted community invite' : 'Community invite link',
+        url: built.url,
+        codeLabel: 'Invite code',
+        codeValue: built.code,
+      })
+    }
+
     const handleLeave = async () => {
       if (!confirmLeave) {
         setConfirmLeave(true)
@@ -639,9 +870,19 @@ export function RoomInfoSheet({
             {copiedId === 'invite' ? <Check size={17} /> : <Copy size={17} />}
             <span>{copiedId === 'invite' ? 'Copied' : 'Copy Invite'}</span>
           </button>
+          {onShowQr && (
+            <button
+              type="button"
+              className="ag-sheet-action-btn"
+              onClick={handleShowInviteQr}
+            >
+              <QrCode size={17} />
+              <span>Show Invite QR</span>
+            </button>
+          )}
           <button
             type="button"
-            className="ag-sheet-action-btn"
+            className={`ag-sheet-action-btn ${onShowQr ? 'span-full' : ''}`}
             onClick={() => {
               onPlaySound?.('click')
               onClose()
@@ -678,7 +919,21 @@ export function RoomInfoSheet({
                       : null
 
                 return (
-                  <div key={m.pubkey} role="listitem" className="ag-sheet-person-row">
+                  <div
+                    key={m.pubkey}
+                    role="listitem"
+                    className="ag-sheet-person-row"
+                    onContextMenu={(e) =>
+                      openPeerContextMenu(e, {
+                        pubkey: m.pubkey,
+                        npub: m.npub,
+                        nickname: m.nickname,
+                        displayHandle: m.displayHandle,
+                        isSelf: m.isSelf,
+                        serverMember: m,
+                      })
+                    }
+                  >
                     <button
                       type="button"
                       className="ag-sheet-person-main"

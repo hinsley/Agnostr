@@ -6,6 +6,11 @@ import { useMobileSwipeDrawers } from './hooks/useMobileSwipeDrawers'
 import { useMobileViewport } from './hooks/useMobileViewport'
 import { usePwa } from './hooks/usePwa'
 import { doesContentMentionUser } from './lib/bitchatProtocol'
+import {
+  clearLocationDmHash,
+  extractPendingDmFromLocation,
+  type ParsedShareTarget,
+} from './lib/shareLinks'
 import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
 import type { ServerMessage, ServerSummary } from './types/servers'
 import { radioAudio, type SoundCue } from './utils/sound'
@@ -27,6 +32,9 @@ import PwaInstallModal from './components/PwaInstallModal'
 import CallStage from './components/CallStage'
 import IncomingCallBanner from './components/IncomingCallBanner'
 import ImageLightboxModal, { type LightboxImagePayload } from './components/ImageLightboxModal'
+import QrShareModal, { type QrShareTarget } from './components/QrShareModal'
+import QrScannerModal from './components/QrScannerModal'
+import { ContextMenuProvider } from './components/ContextMenu'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#0B0C0F',
@@ -80,6 +88,8 @@ export function App() {
   const [installModalOpen, setInstallModalOpen] = useState(false)
   const [callExpanded, setCallExpanded] = useState(false)
   const [lightboxImage, setLightboxImage] = useState<LightboxImagePayload | null>(null)
+  const [qrShareTarget, setQrShareTarget] = useState<QrShareTarget | null>(null)
+  const [qrScannerOpen, setQrScannerOpen] = useState(false)
   const [serverHubState, setServerHubState] = useState<{ open: boolean; tab: ServerHubTab }>({
     open: false,
     tab: 'create',
@@ -377,6 +387,8 @@ export function App() {
       setInstallModalOpen(false)
       setCallExpanded(false)
       setLightboxImage(null)
+      setQrShareTarget(null)
+      setQrScannerOpen(false)
       setPanicFlash(true)
       const t = window.setTimeout(() => setPanicFlash(false), 700)
       prevMasterPkRef.current = engine.identity.masterPubkey
@@ -469,7 +481,11 @@ export function App() {
         return
       }
       if (e.key === 'Escape') {
-        if (cmdkOpen) {
+        if (qrScannerOpen) {
+          setQrScannerOpen(false)
+        } else if (qrShareTarget) {
+          setQrShareTarget(null)
+        } else if (cmdkOpen) {
           setCmdkOpen(false)
         } else if (lightboxImage) {
           setLightboxImage(null)
@@ -498,6 +514,8 @@ export function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [
+    qrScannerOpen,
+    qrShareTarget,
     cmdkOpen,
     lightboxImage,
     settingsState.open,
@@ -517,6 +535,8 @@ export function App() {
   }, [])
 
   const handleOpenSettings = useCallback((tab?: SettingsTab) => {
+    setRadarExpanded(false)
+    setRoomInfoOpen(false)
     setSettingsState({ open: true, tab })
   }, [])
 
@@ -546,6 +566,8 @@ export function App() {
     Boolean(serverSettingsState.serverId) ||
     Boolean(inspectedPeer) ||
     Boolean(lightboxImage) ||
+    Boolean(qrShareTarget) ||
+    qrScannerOpen ||
     cmdkOpen ||
     installModalOpen ||
     Boolean(engine.calls.incomingCall) ||
@@ -574,14 +596,40 @@ export function App() {
   }, [engine.activeView.type])
 
   const handleMobileSelectTab = useCallback((tab: ListTab) => {
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setRoomInfoOpen(false)
     setListTab(tab)
     setMobileScreen('list')
+  }, [])
+
+  const handleMobileTabMap = useCallback(() => {
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRoomInfoOpen(false)
+    setRadarExpanded((open) => !open)
+    radioAudio.play('click')
+  }, [])
+
+  const handleMobileTabSettings = useCallback(() => {
+    setRadarExpanded(false)
+    setRoomInfoOpen(false)
+    setSettingsState((prev) =>
+      prev.open ? { ...prev, open: false } : { open: true, tab: undefined }
+    )
+    radioAudio.play('click')
   }, [])
 
   const { pushToast } = engine
 
   const handleBackNavigation = useCallback((): boolean => {
+    if (qrScannerOpen) {
+      setQrScannerOpen(false)
+      return true
+    }
+    if (qrShareTarget) {
+      setQrShareTarget(null)
+      return true
+    }
     if (lightboxImage) {
       setLightboxImage(null)
       return true
@@ -633,6 +681,8 @@ export function App() {
     }
     return false
   }, [
+    qrScannerOpen,
+    qrShareTarget,
     lightboxImage,
     cmdkOpen,
     inspectedPeer,
@@ -661,7 +711,11 @@ export function App() {
   })
 
   const hasActiveBackTarget =
+    qrScannerOpen ||
+    Boolean(qrShareTarget) ||
     Boolean(lightboxImage) ||
+    Boolean(qrShareTarget) ||
+    qrScannerOpen ||
     cmdkOpen ||
     Boolean(inspectedPeer) ||
     Boolean(serverSettingsState.serverId) ||
@@ -697,6 +751,7 @@ export function App() {
         setListTab('radio')
         setMobileScreen('chat')
         setRoomInfoOpen(false)
+        setRadarExpanded(false)
       }
       return ok
     },
@@ -735,6 +790,82 @@ export function App() {
     },
     [engine.servers, closeServerHub]
   )
+
+  const handleOpenScanner = useCallback(() => {
+    setQrScannerOpen(true)
+  }, [])
+
+  const handleResolvedShareTarget = useCallback(
+    (target: ParsedShareTarget) => {
+      setQrScannerOpen(false)
+      if (target.kind === 'dm') {
+        const myMaster = engine.identity.masterPubkey.toLowerCase()
+        const myActive = engine.identity.activePubkey.toLowerCase()
+        if (
+          target.pubkey.toLowerCase() === myMaster ||
+          target.pubkey.toLowerCase() === myActive
+        ) {
+          engine.pushToast(
+            'info',
+            "That's your own DM link!",
+            'Share this link or QR code with someone else to start an encrypted DM.'
+          )
+          return
+        }
+        setRadarExpanded(false)
+        setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+        setRoomInfoOpen(false)
+        setInspectedPeer(null)
+        engine.openDmThread(target.pubkey, target.nickname)
+        radioAudio.play('tune')
+        setListTab('dms')
+        setMobileScreen('chat')
+        engine.pushToast(
+          'success',
+          `Opened DM with ${target.nickname || `${target.npub.slice(0, 12)}…`}`
+        )
+        return
+      }
+
+      const parsed = engine.servers.parseInviteInput(target.inviteCode)
+      if (!parsed) {
+        engine.pushToast(
+          'warning',
+          'Invalid community invite',
+          'Could not decode that community invite link or QR code.'
+        )
+        return
+      }
+      setRadarExpanded(false)
+      setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+      setRoomInfoOpen(false)
+      void engine.servers.joinFromInvite(parsed).then((joined) => {
+        if (joined) {
+          radioAudio.play('tune')
+          handleJoinedServer(joined)
+        }
+      })
+    },
+    [engine, handleJoinedServer]
+  )
+
+  // Listen on mount + hashchange for `#dm=npub1...(&name=...)` deep links
+  useEffect(() => {
+    const consumeLocationDm = () => {
+      const pending = extractPendingDmFromLocation()
+      if (!pending) return
+      clearLocationDmHash()
+      handleResolvedShareTarget({
+        kind: 'dm',
+        pubkey: pending.pubkey,
+        npub: pending.npub,
+        nickname: pending.nickname,
+      })
+    }
+    consumeLocationDm()
+    window.addEventListener('hashchange', consumeLocationDm)
+    return () => window.removeEventListener('hashchange', consumeLocationDm)
+  }, [handleResolvedShareTarget])
 
   const handleLeftServer = useCallback(() => {
     setServerSettingsState({ serverId: null, tab: 'overview' })
@@ -841,6 +972,7 @@ export function App() {
   )
 
   const handleExpandRadar = useCallback(() => {
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRadarExpanded(true)
     setRoomInfoOpen(false)
     radioAudio.play('click')
@@ -996,6 +1128,7 @@ export function App() {
   )
 
   return (
+    <ContextMenuProvider>
     <div
       className={`ag-app ag-shell ${panicFlash ? 'ag-panic-active' : ''}`}
       data-mobile-screen={mobileScreen}
@@ -1038,6 +1171,10 @@ export function App() {
               setMobileScreen('chat')
               setCallExpanded(true)
             }}
+            onInspectPeer={setInspectedPeer}
+            onShowQr={setQrShareTarget}
+            onOpenScanner={handleOpenScanner}
+            onResolvedShareTarget={handleResolvedShareTarget}
             pwa={pwa}
             onOpenInstall={handleOpenInstall}
             onPlaySound={playSound}
@@ -1113,6 +1250,8 @@ export function App() {
             expanded={callExpanded}
             compactFloating={callCompactFloating}
             onToggleExpand={() => setCallExpanded((v) => !v)}
+            onInspectPeer={setInspectedPeer}
+            onOpenDm={handleOpenDm}
             onPlaySound={playSound}
           />
         )}
@@ -1148,6 +1287,8 @@ export function App() {
           onReplyServer={handleReplyServer}
           onReactServer={handleReactServer}
           onInspectPeer={setInspectedPeer}
+          onStartDm={handleOpenDm}
+          onMentionPeer={handleMentionPeer}
           onTuneChannel={handleTuneChannel}
           onClickMention={handleClickInlineMention}
           onLocateMe={() => void handleLocateMe()}
@@ -1178,30 +1319,65 @@ export function App() {
           onOpenServerSettings={handleOpenServerSettings}
           onExportTranscript={handleExport}
           onLeftServer={handleLeftServer}
+          onShowQr={setQrShareTarget}
+          onOpenScanner={handleOpenScanner}
           onPlaySound={playSound}
         />
+
+        {/* Mobile In-Shell Map & Settings Tabs (Sit above Always-Present Bottom Tab Bar) */}
+        {isMobileViewport && (
+          <ExpandedRadarModal
+            open={radarExpanded}
+            inShell={true}
+            engine={engine}
+            onClose={() => setRadarExpanded(false)}
+            onTuneChannel={handleTuneChannel}
+            onPlaySound={playSound}
+          />
+        )}
+        {isMobileViewport && (
+          <SettingsModal
+            open={settingsState.open}
+            inShell={true}
+            engine={engine}
+            pwa={pwa}
+            initialTab={settingsState.tab}
+            onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
+            onOpenInstall={handleOpenInstall}
+            onShowQr={setQrShareTarget}
+            onOpenScanner={handleOpenScanner}
+            onPlaySound={playSound}
+          />
+        )}
       </div>
 
       {/* Always-Present Native Mobile Bottom Tab Bar (< 868px, Flex Flow) */}
       <MobileTabBar
         activeTab={mobileNavActiveTab}
+        mapActive={radarExpanded}
+        settingsActive={settingsState.open}
         dmUnread={engine.totalDmUnread}
         serverUnread={engine.servers.totalServerUnread}
         onSelectTab={handleMobileSelectTab}
-        onOpenMap={handleExpandRadar}
-        onOpenSettings={() => handleOpenSettings()}
+        onOpenMap={handleMobileTabMap}
+        onOpenSettings={handleMobileTabSettings}
       />
 
-      {/* Unified Calm Settings Modal (Profile · Privacy & Trust · Appearance · Calls · Network) */}
-      <SettingsModal
-        open={settingsState.open}
-        engine={engine}
-        pwa={pwa}
-        initialTab={settingsState.tab}
-        onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
-        onOpenInstall={handleOpenInstall}
-        onPlaySound={playSound}
-      />
+      {/* Desktop Unified Calm Settings Modal (Profile · Privacy & Trust · Appearance · Calls · Network) */}
+      {!isMobileViewport && (
+        <SettingsModal
+          open={settingsState.open}
+          inShell={false}
+          engine={engine}
+          pwa={pwa}
+          initialTab={settingsState.tab}
+          onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
+          onOpenInstall={handleOpenInstall}
+          onShowQr={setQrShareTarget}
+          onOpenScanner={handleOpenScanner}
+          onPlaySound={playSound}
+        />
+      )}
 
       {/* Peer Profile & Moderation Modal */}
       <PeerInspectorModal
@@ -1212,14 +1388,17 @@ export function App() {
         onMentionPeer={handleMentionPeer}
       />
 
-      {/* Full-Screen Expandable Geohash Map Modal */}
-      <ExpandedRadarModal
-        open={radarExpanded}
-        engine={engine}
-        onClose={() => setRadarExpanded(false)}
-        onTuneChannel={handleTuneChannel}
-        onPlaySound={playSound}
-      />
+      {/* Desktop Full-Screen Expandable Geohash Map Modal */}
+      {!isMobileViewport && (
+        <ExpandedRadarModal
+          open={radarExpanded}
+          inShell={false}
+          engine={engine}
+          onClose={() => setRadarExpanded(false)}
+          onTuneChannel={handleTuneChannel}
+          onPlaySound={playSound}
+        />
+      )}
 
       {/* PWA Install Guide / Native Install Modal */}
       <PwaInstallModal
@@ -1236,6 +1415,8 @@ export function App() {
         servers={engine.servers}
         onClose={closeServerHub}
         onJoinedServer={handleJoinedServer}
+        onShowQr={setQrShareTarget}
+        onOpenScanner={handleOpenScanner}
         onPlaySound={playSound}
       />
 
@@ -1247,6 +1428,8 @@ export function App() {
         servers={engine.servers}
         onClose={() => setServerSettingsState({ serverId: null, tab: 'overview' })}
         onLeftServer={handleLeftServer}
+        onShowQr={setQrShareTarget}
+        onOpenScanner={handleOpenScanner}
         onPlaySound={playSound}
       />
 
@@ -1265,6 +1448,9 @@ export function App() {
         onToggleSound={handleToggleSound}
         onRunCommand={handleRunCommand}
         onExport={handleExport}
+        onShowQr={setQrShareTarget}
+        onOpenScanner={handleOpenScanner}
+        onResolvedShareTarget={handleResolvedShareTarget}
         pwa={pwa}
         onOpenInstall={handleOpenInstall}
       />
@@ -1273,6 +1459,16 @@ export function App() {
       <ImageLightboxModal
         payload={lightboxImage}
         onClose={() => setLightboxImage(null)}
+      />
+
+      {/* Shareable QR Code Modal (DMs & Community Invites) */}
+      <QrShareModal target={qrShareTarget} onClose={() => setQrShareTarget(null)} />
+
+      {/* Camera / Image QR Code Scanner Modal (DMs & Community Invites) */}
+      <QrScannerModal
+        open={qrScannerOpen}
+        onClose={() => setQrScannerOpen(false)}
+        onResolved={handleResolvedShareTarget}
       />
 
       {/* Incoming Encrypted P2P Call Offer Takeover / Card */}
@@ -1312,6 +1508,7 @@ export function App() {
       {/* Non-Blocking Notifications */}
       <ToastStack toasts={engine.toasts} onDismiss={engine.dismissToast} />
     </div>
+    </ContextMenuProvider>
   )
 }
 

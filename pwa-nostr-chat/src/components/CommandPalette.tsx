@@ -10,17 +10,21 @@ import {
   Hash,
   Info,
   Key,
+  Link2,
   Lock,
   Map as MapIcon,
+  MessageCircle,
   Mic,
   MicOff,
   Palette,
   Phone,
   PhoneOff,
   Plus,
+  QrCode,
   Radio,
   RefreshCw,
   RotateCw,
+  ScanLine,
   Search,
   Server,
   Settings,
@@ -33,6 +37,8 @@ import {
 } from 'lucide-react'
 import type { AgnostrEngine, ThemeId } from '../types/protocol'
 import type { PwaState } from '../hooks/usePwa'
+import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
+import type { QrShareTarget } from './QrShareModal'
 import type { ServerHubTab } from './ServerHubModal'
 import type { SettingsTab } from './SettingsModal'
 
@@ -70,6 +76,9 @@ export interface CommandPaletteProps {
   onToggleSound: () => void
   onRunCommand: (cmdLine: string) => void
   onExport: (format: 'md' | 'json') => void
+  onShowQr?: (target: QrShareTarget) => void
+  onOpenScanner?: () => void
+  onResolvedShareTarget?: (target: ParsedShareTarget) => void
   pwa?: PwaState
   onOpenInstall?: () => void
 }
@@ -88,6 +97,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onToggleSound,
   onRunCommand,
   onExport,
+  onShowQr,
+  onOpenScanner,
+  onResolvedShareTarget,
   pwa,
   onOpenInstall,
 }) => {
@@ -107,6 +119,35 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     const q = query.trim().toLowerCase()
     const cleanHash = q.replace(/^#/, '')
     const list: PaletteEntry[] = []
+
+    // Direct jump whenever query is a DM link / npub / community invite
+    const parsedShare = query.trim().length >= 8 ? parseShareTarget(query.trim()) : null
+    if (parsedShare && onResolvedShareTarget) {
+      list.push({
+        id: `direct-share-${parsedShare.kind}`,
+        group: parsedShare.kind === 'dm' ? 'Direct Message' : 'Community Invite',
+        title:
+          parsedShare.kind === 'dm'
+            ? `Start DM with ${parsedShare.nickname || `${parsedShare.npub.slice(0, 14)}…`}`
+            : 'Join Community from Invite',
+        subtitle:
+          parsedShare.kind === 'dm'
+            ? parsedShare.npub
+            : 'Open & join this community invite immediately',
+        keywords: query.trim().toLowerCase(),
+        badge: parsedShare.kind === 'dm' ? 'DM' : 'INVITE',
+        icon:
+          parsedShare.kind === 'dm' ? (
+            <MessageCircle size={15} style={{ color: 'var(--dm-accent)' }} />
+          ) : (
+            <Server size={15} style={{ color: 'var(--accent)' }} />
+          ),
+        run: () => {
+          onClose()
+          onResolvedShareTarget(parsedShare)
+        },
+      })
+    }
 
     // Direct jump whenever query looks like a valid geohash
     if (cleanHash.length >= 1 && GEOHASH_REGEX.test(cleanHash)) {
@@ -306,6 +347,66 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     }
 
     list.push(
+      ...(onShowQr
+        ? [
+            {
+              id: 'act-share-dm-qr',
+              group: 'Actions',
+              title: 'Share My DM Link & QR Code',
+              subtitle: 'Show a scannable QR code and shareable link for direct messages',
+              keywords: 'share my dm link qr code npub contact invite profile',
+              badge: 'DM',
+              icon: <QrCode size={15} style={{ color: 'var(--dm-accent)' }} />,
+              run: () => {
+                onClose()
+                onShowQr({
+                  kind: 'dm',
+                  title: 'My DM QR Code',
+                  subtitle: engine.identity.nickname || 'Scan to start an encrypted DM',
+                  url: buildDmShareUrl(engine.identity.masterPubkey, engine.identity.nickname),
+                  codeLabel: 'Public Key (npub)',
+                  codeValue: engine.identity.masterNpub,
+                })
+              },
+            },
+          ]
+        : []),
+      {
+        id: 'act-copy-dm-link',
+        group: 'Actions',
+        title: 'Copy My DM Link',
+        subtitle: 'Copy your direct message invite link (#dm=npub1…) to clipboard',
+        keywords: 'copy my dm link url share npub direct message',
+        icon: <Link2 size={15} style={{ color: 'var(--dm-accent)' }} />,
+        run: () => {
+          const url = buildDmShareUrl(engine.identity.masterPubkey, engine.identity.nickname)
+          onClose()
+          navigator.clipboard
+            ?.writeText(url)
+            .then(() => {
+              engine.pushToast('success', 'DM link copied', 'Anyone with this link can DM you directly.')
+            })
+            .catch(() => {
+              engine.pushToast('error', 'Could not copy DM link')
+            })
+        },
+      },
+      ...(onOpenScanner
+        ? [
+            {
+              id: 'act-scan-qr',
+              group: 'Actions',
+              title: 'Scan QR Code (DM or Community)',
+              subtitle: 'Scan a QR code with your camera or pick a screenshot image',
+              keywords: 'scan qr code camera dm community server invite join',
+              icon: <ScanLine size={15} />,
+              run: () => {
+                onClose()
+                onOpenScanner()
+              },
+            },
+          ]
+        : []),
       {
         id: 'act-expand-radar',
         group: 'Actions',
@@ -657,6 +758,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     onToggleSound,
     onExport,
     onRunCommand,
+    onShowQr,
+    onOpenScanner,
+    onResolvedShareTarget,
     pwa,
     onOpenInstall,
   ])

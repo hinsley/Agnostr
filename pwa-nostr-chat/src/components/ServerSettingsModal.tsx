@@ -10,6 +10,7 @@ import {
   Lock,
   LogOut,
   Plus,
+  QrCode,
   Search,
   Send,
   Server,
@@ -25,6 +26,7 @@ import type { AgnostrEngine } from '../types/protocol.ts'
 import type { ServersEngine, ServerSummary } from '../types/servers.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import type { QrShareTarget } from './QrShareModal.tsx'
 
 export type ServerSettingsTab = 'overview' | 'channels' | 'members' | 'bans'
 
@@ -36,6 +38,8 @@ export interface ServerSettingsModalProps {
   onClose: () => void
   onLeftServer?: () => void
   onPlaySound?: (cue: SoundCue) => void
+  onShowQr?: (target: QrShareTarget) => void
+  onOpenScanner?: () => void
 }
 
 const ACCENT_CHOICES = [
@@ -61,6 +65,7 @@ export function ServerSettingsModal({
   onClose,
   onLeftServer,
   onPlaySound,
+  onShowQr,
 }: ServerSettingsModalProps) {
   const [tab, setTab] = useState<ServerSettingsTab>(initialTab)
   const [copiedMode, setCopiedMode] = useState<'url' | 'code' | null>(null)
@@ -397,6 +402,29 @@ export function ServerSettingsModal({
                         {copiedMode === 'url' ? <Check size={12} /> : <Copy size={12} />}
                         <span>{copiedMode === 'url' ? 'Copied' : 'Copy Link'}</span>
                       </button>
+                      {onShowQr && (
+                        <button
+                          type="button"
+                          className="ag-btn ag-btn-secondary ag-btn-xs"
+                          onClick={() => {
+                            onPlaySound?.('click')
+                            onShowQr({
+                              kind: 'server',
+                              title: liveServer.name,
+                              subtitle: liveServer.encrypted
+                                ? 'Encrypted community invite'
+                                : 'Community invite link',
+                              url: inviteData.url,
+                              codeLabel: 'Invite code',
+                              codeValue: inviteData.code,
+                            })
+                          }}
+                          title="Show invite QR code"
+                        >
+                          <QrCode size={12} />
+                          <span>Show QR</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="ag-btn ag-btn-secondary ag-btn-xs"

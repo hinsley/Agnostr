@@ -15,8 +15,12 @@ import {
   type CapturedSpeechSegment,
 } from '../lib/audioResample.ts'
 import {
+  clearMemoTranscriptCache,
+  loadMemoTranscriptCache,
   loadTranscriptionConfig,
+  saveMemoTranscriptCache,
   saveTranscriptionConfig,
+  type PersistedMemoTranscriptEntry,
 } from '../lib/storage.ts'
 import type {
   WorkerInMessage,
@@ -56,6 +60,7 @@ interface PendingLoadRequest {
 interface PendingMemoRequest {
   kind: 'memo'
   memoKey: string
+  canonicalKey: string
   modelLabel: string
   resolve: () => void
 }
@@ -77,6 +82,7 @@ type PendingWorkerRequest =
 
 interface QueuedMemoItem {
   memoKey: string
+  canonicalKey: string
   memo: VoiceMemoAttachment
   senderPubkey: string
   resolvers: Array<() => void>
@@ -144,9 +150,28 @@ export function useTranscription(
     useState<TranscriptionRuntimeDevice | null>(null)
   const [modelError, setModelError] = useState<string | null>(null)
 
+  const initialPersistedTranscripts = useMemo(() => loadMemoTranscriptCache(), [])
+  const persistedTranscriptsRef = useRef<Record<string, PersistedMemoTranscriptEntry>>(
+    initialPersistedTranscripts
+  )
+
   const [memoTranscripts, setMemoTranscripts] = useState<
     Record<string, MemoTranscriptState>
-  >({})
+  >(() => {
+    const hydrated: Record<string, MemoTranscriptState> = {}
+    for (const [key, entry] of Object.entries(initialPersistedTranscripts)) {
+      hydrated[key] = {
+        status: 'done',
+        text: entry.text,
+        modelLabel: entry.modelLabel,
+        updatedAt: entry.updatedAt,
+      }
+    }
+    return hydrated
+  })
+  const [cachedTranscriptCount, setCachedTranscriptCount] = useState<number>(
+    () => Object.keys(initialPersistedTranscripts).length
+  )
   const [liveCaptionsEnabled, setLiveCaptionsEnabled] = useState<boolean>(false)
   const [liveCaptions, setLiveCaptions] = useState<LiveCaptionEntry[]>([])
 
@@ -287,15 +312,35 @@ export function useTranscription(
 
         if (pending.kind === 'memo') {
           const text = msg.text.trim()
-          setMemoTranscripts((prev) => ({
-            ...prev,
-            [pending.memoKey]: {
-              status: 'done',
-              text: text || '(No speech detected)',
-              modelLabel: pending.modelLabel,
-              updatedAt: Date.now(),
-            },
-          }))
+          const now = Date.now()
+          const nextState: MemoTranscriptState = {
+            status: 'done',
+            text: text || '(No speech detected)',
+            modelLabel: pending.modelLabel,
+            updatedAt: now,
+          }
+          if (text.length > 0) {
+            const nextPersisted = saveMemoTranscriptCache({
+              ...persistedTranscriptsRef.current,
+              [pending.canonicalKey]: {
+                text,
+                modelLabel: pending.modelLabel,
+                updatedAt: now,
+              },
+            })
+            persistedTranscriptsRef.current = nextPersisted
+            setCachedTranscriptCount(Object.keys(nextPersisted).length)
+          }
+          setMemoTranscripts((prev) => {
+            const updated: Record<string, MemoTranscriptState> = {
+              ...prev,
+              [pending.memoKey]: nextState,
+            }
+            if (pending.canonicalKey && pending.canonicalKey !== pending.memoKey) {
+              updated[pending.canonicalKey] = nextState
+            }
+            return updated
+          })
           pending.resolve()
           return
         }
@@ -635,6 +680,7 @@ export function useTranscription(
             pendingRef.current.set(requestId, {
               kind: 'memo',
               memoKey: item.memoKey,
+              canonicalKey: item.canonicalKey,
               modelLabel: model.label,
               resolve,
             })
@@ -673,6 +719,19 @@ export function useTranscription(
     }
   }, [ensureWorker, nextRequestId])
 
+  const clearTranscriptCache = useCallback(() => {
+    clearMemoQueue()
+    clearMemoTranscriptCache()
+    persistedTranscriptsRef.current = {}
+    setMemoTranscripts({})
+    setCachedTranscriptCount(0)
+    pushToastRef.current(
+      'info',
+      'Transcript cache cleared',
+      'Cached voice memo transcripts removed from local storage.'
+    )
+  }, [clearMemoQueue])
+
   // On-demand & automatic voice memo transcription (strictly Trusted-Peers gated + serialized)
   const transcribeVoiceMemo = useCallback(
     async (
@@ -681,10 +740,45 @@ export function useTranscription(
       senderPubkey: string
     ): Promise<void> => {
       if (!memoKey) return
-      if (activeMemoKeyRef.current === memoKey) return
+      const canonicalKey = memo.sha256?.trim() || memoKey
+
+      // Serve immediately from persistent hash cache with zero audio fetch & zero model load
+      const cachedHit =
+        memoTranscriptsRef.current[canonicalKey] ??
+        memoTranscriptsRef.current[memoKey]
+      if (cachedHit?.status === 'done' && cachedHit.text && cachedHit.text.trim()) {
+        if (!memoTranscriptsRef.current[memoKey]) {
+          setMemoTranscripts((prev) => ({
+            ...prev,
+            [memoKey]: cachedHit,
+          }))
+        }
+        return
+      }
+      const persistedHit =
+        persistedTranscriptsRef.current[canonicalKey] ??
+        persistedTranscriptsRef.current[memoKey]
+      if (persistedHit && persistedHit.text.trim()) {
+        const hydrated: MemoTranscriptState = {
+          status: 'done',
+          text: persistedHit.text,
+          modelLabel: persistedHit.modelLabel,
+          updatedAt: persistedHit.updatedAt,
+        }
+        setMemoTranscripts((prev) => ({
+          ...prev,
+          [canonicalKey]: hydrated,
+          [memoKey]: hydrated,
+        }))
+        return
+      }
+
+      if (activeMemoKeyRef.current === memoKey || activeMemoKeyRef.current === canonicalKey) {
+        return
+      }
 
       const existingQueued = memoQueueRef.current.find(
-        (item) => item.memoKey === memoKey
+        (item) => item.memoKey === memoKey || item.canonicalKey === canonicalKey
       )
       if (existingQueued) {
         return await new Promise<void>((resolve) => {
@@ -707,6 +801,7 @@ export function useTranscription(
       await new Promise<void>((resolve) => {
         memoQueueRef.current.push({
           memoKey,
+          canonicalKey,
           memo,
           senderPubkey,
           resolvers: [resolve],
@@ -907,12 +1002,15 @@ export function useTranscription(
 
   const resetAllTranscription = useCallback(() => {
     clearMemoQueue()
+    clearMemoTranscriptCache()
+    persistedTranscriptsRef.current = {}
     stopCapturer()
     terminateWorker()
     liveCaptionsEnabledRef.current = false
     setLiveCaptionsEnabled(false)
     setLiveCaptions([])
     setMemoTranscripts({})
+    setCachedTranscriptCount(0)
     customModelsRef.current = []
     setCustomModels([])
     autoTranscribeRef.current = DEFAULT_AUTO_TRANSCRIBE
@@ -944,6 +1042,8 @@ export function useTranscription(
       preloadModel,
       clearModelCache,
       memoTranscripts,
+      cachedTranscriptCount,
+      clearTranscriptCache,
       transcribeVoiceMemo,
       liveCaptionsEnabled,
       toggleLiveCaptions,
@@ -967,6 +1067,8 @@ export function useTranscription(
       preloadModel,
       clearModelCache,
       memoTranscripts,
+      cachedTranscriptCount,
+      clearTranscriptCache,
       transcribeVoiceMemo,
       liveCaptionsEnabled,
       toggleLiveCaptions,

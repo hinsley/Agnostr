@@ -43,6 +43,7 @@ const KEYS = {
   iceServers: `${PREFIX}ice_servers`,
   recordingQuality: `${PREFIX}recording_quality`,
   transcription: `${PREFIX}transcription`,
+  memoTranscripts: `${PREFIX}memo_transcripts`,
   notifications: `${PREFIX}notifications`,
   servers: `${PREFIX}servers`,
   serverMsgChannel: (serverId: string, channelId: string) => `${PREFIX}smsgs:${serverId}:${channelId}`,
@@ -328,6 +329,7 @@ export function loadTranscriptionConfig(): PersistedTranscriptionConfig {
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   enabled: false,
   dms: true,
+  directPings: true,
   dmCallRinging: true,
   serverMessages: 'all',
   serverCalls: true,
@@ -362,6 +364,10 @@ export function loadNotificationSettings(): NotificationSettings {
       typeof parsed.dms === 'boolean'
         ? parsed.dms
         : DEFAULT_NOTIFICATION_SETTINGS.dms,
+    directPings:
+      typeof parsed.directPings === 'boolean'
+        ? parsed.directPings
+        : DEFAULT_NOTIFICATION_SETTINGS.directPings,
     dmCallRinging:
       typeof parsed.dmCallRinging === 'boolean'
         ? parsed.dmCallRinging
@@ -419,6 +425,80 @@ export function saveTranscriptionConfig(config: PersistedTranscriptionConfig): v
       customModels: customOnly,
     })
   )
+}
+
+export interface PersistedMemoTranscriptEntry {
+  text: string
+  modelLabel?: string
+  updatedAt: number
+}
+
+const MAX_CACHED_MEMO_TRANSCRIPTS = 400
+
+function trimMemoTranscriptCache(
+  cache: Record<string, PersistedMemoTranscriptEntry>,
+  maxEntries: number
+): Record<string, PersistedMemoTranscriptEntry> {
+  const entries = Object.entries(cache).filter(
+    ([k, v]) =>
+      k.trim().length > 0 &&
+      v &&
+      typeof v.text === 'string' &&
+      v.text.trim().length > 0
+  )
+  if (entries.length <= maxEntries) {
+    return Object.fromEntries(entries)
+  }
+  entries.sort((a, b) => (b[1].updatedAt || 0) - (a[1].updatedAt || 0))
+  return Object.fromEntries(entries.slice(0, maxEntries))
+}
+
+export function loadMemoTranscriptCache(): Record<string, PersistedMemoTranscriptEntry> {
+  const parsed = safeJsonParse<Record<string, Partial<PersistedMemoTranscriptEntry>>>(
+    safeGet(KEYS.memoTranscripts),
+    {}
+  )
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const out: Record<string, PersistedMemoTranscriptEntry> = {}
+  for (const [key, val] of Object.entries(parsed)) {
+    if (!key.trim() || !val || typeof val.text !== 'string' || !val.text.trim()) continue
+    out[key] = {
+      text: val.text.trim(),
+      modelLabel:
+        typeof val.modelLabel === 'string' && val.modelLabel.trim()
+          ? val.modelLabel.trim().slice(0, 64)
+          : undefined,
+      updatedAt:
+        typeof val.updatedAt === 'number' && Number.isFinite(val.updatedAt)
+          ? val.updatedAt
+          : Date.now(),
+    }
+  }
+  return trimMemoTranscriptCache(out, MAX_CACHED_MEMO_TRANSCRIPTS)
+}
+
+export function saveMemoTranscriptCache(
+  cache: Record<string, PersistedMemoTranscriptEntry>
+): Record<string, PersistedMemoTranscriptEntry> {
+  let pruned = trimMemoTranscriptCache(cache, MAX_CACHED_MEMO_TRANSCRIPTS)
+  try {
+    localStorage.setItem(KEYS.memoTranscripts, JSON.stringify(pruned))
+    return pruned
+  } catch {
+    // QuotaExceededError or storage full — evict oldest half and retry once
+    const halfCap = Math.max(20, Math.floor(Object.keys(pruned).length / 2))
+    pruned = trimMemoTranscriptCache(pruned, halfCap)
+    try {
+      localStorage.setItem(KEYS.memoTranscripts, JSON.stringify(pruned))
+    } catch {
+      // Ignore persistent storage restriction
+    }
+    return pruned
+  }
+}
+
+export function clearMemoTranscriptCache(): void {
+  safeRemove(KEYS.memoTranscripts)
 }
 
 export function loadJoinedServers(): ServerSummary[] {

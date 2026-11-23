@@ -1,15 +1,27 @@
 import React, { useState } from 'react'
 import {
   AlertCircle,
+  AtSign,
+  Ban,
+  Captions,
   Check,
   CheckCheck,
   Copy,
   CornerUpLeft,
+  ExternalLink,
+  Hash,
+  Link2,
   Loader2,
+  Maximize2,
+  MessageCircle,
+  Phone,
   Radio,
   ShieldCheck,
+  ShieldOff,
   Smile,
   Trash2,
+  User,
+  Video,
 } from 'lucide-react'
 import type { GeoMessage, ImageAttachment, VoiceMemoAttachment } from '../types/protocol'
 import type {
@@ -18,6 +30,7 @@ import type {
 } from '../types/transcription'
 import { identiconDataUrl, pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
+import { useContextMenu, type ContextMenuItem, type ContextMenuReaction } from './ContextMenu'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
 import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
 
@@ -85,7 +98,11 @@ export interface MessageItemProps {
   onOpenLightbox: (payload: LightboxImagePayload) => void
   onToggleActions: (messageId: string | null) => void
   onTrustSender: (pubkey: string, nickname: string) => void
+  onUntrustSender?: (pubkey: string) => void
   onBlockSender: (pubkey: string, displayHandle: string) => void
+  onStartDm?: (pubkey: string, nickname?: string) => void
+  onStartCall?: (pubkey: string, mediaType: 'audio' | 'video', nickname?: string) => void
+  onMentionAuthor?: (handle: string) => void
   onReply?: (message: GeoMessage) => void
   onReact?: (message: GeoMessage, emoji: string) => void
   onDelete?: (message: GeoMessage) => void
@@ -94,6 +111,7 @@ export interface MessageItemProps {
   onClickMention?: (mention: string) => void
   onJumpToMessage?: (messageId: string) => void
   onCopyText?: (text: string) => void
+  onNotify?: (title: string) => void
 }
 
 export const MessageItem: React.FC<MessageItemProps> = React.memo(
@@ -122,7 +140,11 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onOpenLightbox,
     onToggleActions,
     onTrustSender,
+    onUntrustSender,
     onBlockSender,
+    onStartDm,
+    onStartCall,
+    onMentionAuthor,
     onReply,
     onReact,
     onDelete,
@@ -131,9 +153,11 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onClickMention,
     onJumpToMessage,
     onCopyText,
+    onNotify,
   }) => {
     const [pickerOpen, setPickerOpen] = useState(false)
     const [copied, setCopied] = useState(false)
+    const { openContextMenu } = useContextMenu()
 
     // System notice row (left-aligned with subtle accent rail)
     if (message.isSystem) {
@@ -244,8 +268,280 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       .filter(Boolean)
       .join(' ')
 
+    const handleContextMenu = (e: React.MouseEvent<HTMLElement>) => {
+      const items: ContextMenuItem[] = []
+
+      // 1. If right-click landed on a link inside the message, surface link actions at top
+      const targetEl = e.target as HTMLElement | null
+      const anchorEl = targetEl?.closest('a[href]') as HTMLAnchorElement | null
+      const rawHref = anchorEl?.getAttribute('href')?.trim() || ''
+      const lowerHref = rawHref.toLowerCase()
+      const isInternalHref = lowerHref.startsWith('#dm=') || lowerHref.startsWith('#invite=')
+      const isSafeExternalHref =
+        lowerHref.startsWith('https://') ||
+        lowerHref.startsWith('http://') ||
+        lowerHref.startsWith('mailto:')
+
+      if (anchorEl && (isInternalHref || isSafeExternalHref)) {
+        const resolvedUrl = isInternalHref
+          ? `${window.location.origin}${window.location.pathname}${rawHref}`
+          : anchorEl.href
+        items.push(
+          {
+            id: 'msg-open-link',
+            label: 'Open Link',
+            icon: <ExternalLink size={15} />,
+            onSelect: () => {
+              if (isInternalHref) {
+                window.location.hash = rawHref
+              } else {
+                window.open(resolvedUrl, '_blank', 'noopener,noreferrer')
+              }
+            },
+          },
+          {
+            id: 'msg-copy-link',
+            label: 'Copy Link Address',
+            icon: <Link2 size={15} />,
+            onSelect: () => {
+              navigator.clipboard?.writeText(resolvedUrl).catch(() => {})
+              onNotify?.('Link copied')
+            },
+          }
+        )
+      }
+
+      const hasLinkSection = items.length > 0
+
+      // 2. Core message actions
+      if (!isDmMode && onReply) {
+        items.push({
+          id: 'msg-reply',
+          label: 'Reply',
+          icon: <CornerUpLeft size={15} />,
+          dividerBefore: hasLinkSection,
+          onSelect: () => onReply(message),
+        })
+      }
+
+      const selectedText = window.getSelection?.()?.toString().trim() || ''
+      if (selectedText) {
+        items.push({
+          id: 'msg-copy-selected',
+          label: 'Copy Selected Text',
+          icon: <Copy size={15} />,
+          dividerBefore: hasLinkSection && items.length === 2,
+          onSelect: () => {
+            navigator.clipboard?.writeText(selectedText).catch(() => {})
+            onNotify?.('Selected text copied')
+          },
+        })
+      }
+
+      const textToCopy = visibleContent || (!message.voiceMemo && !message.imageAttachment ? message.content : '')
+      if (textToCopy) {
+        items.push({
+          id: 'msg-copy-text',
+          label: 'Copy Text',
+          icon: <Copy size={15} />,
+          dividerBefore: hasLinkSection && items.length === 2,
+          onSelect: handleCopy,
+        })
+      }
+
+      // Voice memo transcript actions
+      if (message.voiceMemo) {
+        const voiceMemoKey = message.voiceMemo.sha256 || message.voiceMemo.url || message.id
+        if (memoTranscript?.status === 'done' && memoTranscript.text) {
+          const transcriptText = memoTranscript.text
+          items.push({
+            id: 'msg-copy-transcript',
+            label: 'Copy Transcript',
+            icon: <Captions size={15} />,
+            onSelect: () => {
+              navigator.clipboard?.writeText(transcriptText).catch(() => {})
+              onNotify?.('Transcript copied')
+            },
+          })
+        } else if (
+          isSenderTrusted &&
+          onTranscribeMemo &&
+          memoTranscript?.status !== 'loading'
+        ) {
+          const memo = message.voiceMemo
+          items.push({
+            id: 'msg-transcribe',
+            label: 'Transcribe Voice Memo',
+            icon: <Captions size={15} />,
+            onSelect: () => {
+              void onTranscribeMemo(voiceMemoKey, memo, message.pubkey)
+            },
+          })
+        }
+      }
+
+      // Trusted image attachment actions
+      if (message.imageAttachment && isSenderTrusted) {
+        const img = message.imageAttachment
+        items.push(
+          {
+            id: 'msg-view-image',
+            label: 'View Fullscreen',
+            icon: <Maximize2 size={15} />,
+            onSelect: () => {
+              void fetchImageAttachmentBlob(img, message.pubkey)
+                .then((blobUrl) => {
+                  onOpenLightbox({
+                    blobUrl,
+                    image: img,
+                    senderDisplayHandle: handle.full,
+                    caption: visibleContent || undefined,
+                  })
+                })
+                .catch(() => {})
+            },
+          },
+          {
+            id: 'msg-copy-image-link',
+            label: 'Copy Image Link',
+            icon: <Link2 size={15} />,
+            onSelect: () => {
+              navigator.clipboard?.writeText(img.url).catch(() => {})
+              onNotify?.('Image link copied')
+            },
+          }
+        )
+      }
+
+      if (!isDmMode && onMentionAuthor) {
+        items.push({
+          id: 'msg-mention',
+          label: `Mention @${handle.base}`,
+          icon: <AtSign size={15} />,
+          onSelect: () => onMentionAuthor(handle.full),
+        })
+      }
+
+      // 3. Peer actions for other authors
+      if (!message.isOwn) {
+        let addedPeerDivider = false
+        const markPeerDivider = () => {
+          if (addedPeerDivider) return false
+          addedPeerDivider = true
+          return items.length > 0
+        }
+
+        if (!isDmMode && onStartDm) {
+          items.push({
+            id: 'msg-dm-peer',
+            label: 'Direct Message',
+            icon: <MessageCircle size={15} />,
+            dividerBefore: markPeerDivider(),
+            onSelect: () => onStartDm(message.pubkey, handle.base),
+          })
+        }
+
+        if (isSenderExplicitlyTrusted && onStartCall) {
+          items.push(
+            {
+              id: 'msg-voice-call',
+              label: 'Voice Call',
+              icon: <Phone size={15} />,
+              dividerBefore: markPeerDivider(),
+              onSelect: () => onStartCall(message.pubkey, 'audio', handle.base),
+            },
+            {
+              id: 'msg-video-call',
+              label: 'Video Call',
+              icon: <Video size={15} />,
+              onSelect: () => onStartCall(message.pubkey, 'video', handle.base),
+            }
+          )
+        }
+
+        if (isSenderExplicitlyTrusted && onUntrustSender) {
+          items.push({
+            id: 'msg-untrust',
+            label: 'Remove Trust',
+            icon: <ShieldOff size={15} />,
+            dividerBefore: markPeerDivider(),
+            onSelect: () => onUntrustSender(message.pubkey),
+          })
+        } else {
+          items.push({
+            id: 'msg-trust',
+            label: 'Trust Peer',
+            icon: <ShieldCheck size={15} />,
+            dividerBefore: markPeerDivider(),
+            onSelect: () => onTrustSender(message.pubkey, handle.base),
+          })
+        }
+
+        if (onInspectAuthor) {
+          items.push({
+            id: 'msg-profile',
+            label: 'View Profile',
+            icon: <User size={15} />,
+            dividerBefore: markPeerDivider(),
+            onSelect: () => onInspectAuthor(message.pubkey, handle.base),
+          })
+        }
+
+        items.push({
+          id: 'msg-block',
+          label: 'Block Peer',
+          icon: <Ban size={15} />,
+          danger: true,
+          onSelect: () => onBlockSender(message.pubkey, handle.full),
+        })
+      }
+
+      // 4. Delete & Event ID
+      if (onDelete) {
+        items.push({
+          id: 'msg-delete',
+          label: 'Delete Message',
+          icon: <Trash2 size={15} />,
+          danger: true,
+          dividerBefore: items.length > 0,
+          onSelect: () => onDelete(message),
+        })
+      }
+
+      items.push({
+        id: 'msg-copy-id',
+        label: 'Copy Event ID',
+        icon: <Hash size={15} />,
+        dividerBefore: !onDelete && items.length > 0,
+        onSelect: () => {
+          navigator.clipboard?.writeText(message.id).catch(() => {})
+          onNotify?.('Event ID copied')
+        },
+      })
+
+      const reactions: ContextMenuReaction[] | undefined =
+        !isDmMode && onReact
+          ? ['👍', '🔥', '❤️', '😂', '👀', '⚡'].map((emoji) => ({
+              emoji,
+              active: message.reactions.some((r) => r.emoji === emoji && r.reactedByMe),
+              onSelect: () => onReact(message, emoji),
+            }))
+          : undefined
+
+      openContextMenu(e, {
+        header: handle.full,
+        reactions,
+        items,
+      })
+    }
+
     return (
-      <article id={`msg-${message.id}`} className={rowClasses} onClick={handleRowClick}>
+      <article
+        id={`msg-${message.id}`}
+        className={rowClasses}
+        onClick={handleRowClick}
+        onContextMenu={handleContextMenu}
+      >
         {/* Left Fixed 36px Gutter: 34px Rounded-Square Avatar OR Subtle Hover Timestamp */}
         <div className="ag-msg-gutter">
           {!grouped ? (

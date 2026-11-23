@@ -38,6 +38,8 @@ export interface ExpandedRadarModalProps {
   onClose: () => void
   onTuneChannel: (geohash: string) => void
   onPlaySound?: (cue: SoundCue) => void
+  /** When true on mobile, renders anchored inside .ag-shell-body above the always-present bottom navbar. */
+  inShell?: boolean
 }
 
 const PRECISION_OPTIONS: readonly PrecisionSelection[] = ['auto', 1, 2, 3, 4, 5, 6, 7, 8]
@@ -56,6 +58,7 @@ export function ExpandedRadarModal({
   onClose,
   onTuneChannel,
   onPlaySound,
+  inShell = false,
 }: ExpandedRadarModalProps) {
   const { activeGeohash, location, pulseRooms, settings } = engine
   const mapRef = useRef<TacticalGeohashMapHandle | null>(null)
@@ -242,9 +245,10 @@ export function ExpandedRadarModal({
 
   return (
     <div
-      className="ag-radar-modal-backdrop"
+      className={`ag-radar-modal-backdrop ${inShell ? 'in-shell' : ''}`}
       onClick={onClose}
       role="presentation"
+      data-no-swipe="true"
     >
       <div
         className="ag-radar-modal"

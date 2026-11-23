@@ -40,8 +40,21 @@ declare const self: ServiceWorkerGlobalScope & {
 
 const swSelf = self
 
-const BASE_PATH = '/Agnostr/'
-const APP_ICON = '/Agnostr/icon-192.png'
+function getBasePath(): string {
+  try {
+    const scope = swSelf.registration?.scope
+    if (scope) {
+      const pathname = new URL(scope).pathname
+      return pathname.endsWith('/') ? pathname : `${pathname}/`
+    }
+  } catch {
+    // Fall back to root path
+  }
+  return '/'
+}
+
+const BASE_PATH = getBasePath()
+const APP_ICON = `${BASE_PATH}icon-192.png`
 
 // 1. Workbox precaching & offline caching (preserving all existing PWA offline capabilities)
 cleanupOutdatedCaches()
@@ -169,6 +182,21 @@ swSelf.addEventListener('message', (event) => {
   }
 })
 
+async function showSwNotificationSafe(
+  title: string,
+  options: ExtendedNotificationOptions
+): Promise<void> {
+  try {
+    await swSelf.registration.showNotification(title, options)
+  } catch {
+    if (options.actions && options.actions.length > 0) {
+      const withoutActions: ExtendedNotificationOptions = { ...options }
+      delete withoutActions.actions
+      await swSelf.registration.showNotification(title, withoutActions)
+    }
+  }
+}
+
 // 3. Web Push reception (DM calls, DMs, Server messages/calls, Geo Radio, call cancel)
 swSelf.addEventListener('push', (event) => {
   const handlePush = async () => {
@@ -229,8 +257,8 @@ swSelf.addEventListener('push', (event) => {
         body:
           payload.body ||
           (data.mediaType === 'video'
-            ? 'Incoming video call · Tap to answer'
-            : 'Incoming voice call · Tap to answer'),
+            ? 'Incoming video call · Tap to accept'
+            : 'Incoming voice call · Tap to accept'),
         icon: APP_ICON,
         badge: APP_ICON,
         tag,
@@ -238,15 +266,34 @@ swSelf.addEventListener('push', (event) => {
         requireInteraction: true,
         vibrate: [380, 180, 380, 1000, 380, 180, 380],
         actions: [
-          { action: 'answer', title: 'Answer' },
+          { action: 'answer', title: 'Accept' },
           { action: 'decline', title: 'Decline' },
         ],
         data: { ...data, tag },
       }
-      await swSelf.registration.showNotification(
-        payload.title || 'Incoming DM Call',
-        options
-      )
+      await showSwNotificationSafe(payload.title || 'Incoming DM Call', options)
+      return
+    }
+
+    if (data.category === 'server-call') {
+      const tag =
+        data.tag ||
+        (data.serverId ? `agnostr-srvcall-${data.serverId.slice(0, 12)}` : 'agnostr-srvcall')
+      const options: ExtendedNotificationOptions = {
+        body: payload.body || 'A group call started in one of your servers',
+        icon: APP_ICON,
+        badge: APP_ICON,
+        tag,
+        renotify: true,
+        requireInteraction: true,
+        vibrate: [180, 90, 180],
+        actions: [
+          { action: 'open', title: 'Accept' },
+          { action: 'decline', title: 'Decline' },
+        ],
+        data: { ...data, tag },
+      }
+      await showSwNotificationSafe(payload.title || 'Server Call Active', options)
       return
     }
 
@@ -269,7 +316,7 @@ swSelf.addEventListener('push', (event) => {
       vibrate: [140, 80, 140],
       data: { ...data, tag },
     }
-    await swSelf.registration.showNotification(payload.title || 'Agnostr', options)
+    await showSwNotificationSafe(payload.title || 'Agnostr', options)
   }
 
   event.waitUntil(handlePush())
@@ -294,8 +341,13 @@ swSelf.addEventListener('notificationclick', (event) => {
       includeUncontrolled: true,
     })
 
+    const scopeHref = swSelf.registration?.scope
     const agnostrClient =
-      allClients.find((c) => c.url.includes(BASE_PATH)) ?? allClients[0] ?? null
+      allClients.find((c) =>
+        scopeHref ? c.url.startsWith(scopeHref) : c.url.includes(BASE_PATH)
+      ) ??
+      allClients[0] ??
+      null
 
     if (agnostrClient) {
       agnostrClient.postMessage({

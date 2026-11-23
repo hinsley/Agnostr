@@ -10,6 +10,7 @@ import {
   Loader2,
   Lock,
   Plus,
+  QrCode,
   RefreshCw,
   Search,
   Server,
@@ -26,6 +27,7 @@ import type {
 } from '../types/servers.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, shortPubkey } from '../utils/identicon.ts'
+import type { QrShareTarget } from './QrShareModal.tsx'
 
 export type ServerHubTab = 'create' | 'join' | 'explore'
 
@@ -36,6 +38,8 @@ export interface ServerHubModalProps {
   onClose: () => void
   onJoinedServer?: (server: ServerSummary) => void
   onPlaySound?: (cue: SoundCue) => void
+  onShowQr?: (target: QrShareTarget) => void
+  onOpenScanner?: () => void
 }
 
 type CreateKindMode = 'virtual-public' | 'virtual-e2ee' | 'nip29'
@@ -72,6 +76,7 @@ export function ServerHubModal({
   onClose,
   onJoinedServer,
   onPlaySound,
+  onOpenScanner,
 }: ServerHubModalProps) {
   const [tab, setTab] = useState<ServerHubTab>(initialTab)
 
@@ -686,9 +691,25 @@ export function ServerHubModal({
           {tab === 'join' && (
             <form className="ag-srv-form" onSubmit={(e) => void handleJoinInviteSubmit(e)}>
               <div>
-                <label className="ag-field-label" htmlFor="ag-srv-invite-input">
-                  Invite Link, Code, or NIP-29 Address
-                </label>
+                <div className="ag-srv-join-head">
+                  <label className="ag-field-label" htmlFor="ag-srv-invite-input">
+                    Invite Link, Code, or NIP-29 Address
+                  </label>
+                  {onOpenScanner && (
+                    <button
+                      type="button"
+                      className="ag-btn ag-btn-secondary ag-btn-xs"
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        handleDismiss()
+                        onOpenScanner()
+                      }}
+                    >
+                      <QrCode size={13} />
+                      <span>Scan Invite QR</span>
+                    </button>
+                  )}
+                </div>
                 <textarea
                   id="ag-srv-invite-input"
                   className="ag-textarea mono"

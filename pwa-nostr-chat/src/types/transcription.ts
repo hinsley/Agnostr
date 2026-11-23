@@ -81,6 +81,8 @@ export interface TranscriptionEngine {
 
   // On-demand & automatic voice memo transcription (strictly Trusted-Peers gated)
   memoTranscripts: Record<string, MemoTranscriptState>
+  cachedTranscriptCount: number
+  clearTranscriptCache: () => void
   transcribeVoiceMemo: (
     memoKey: string,
     memo: VoiceMemoAttachment,

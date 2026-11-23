@@ -18,11 +18,13 @@ import {
   Fingerprint,
   Flame,
   Globe,
+  Link2,
   Loader2,
   Lock,
   Palette,
   PhoneCall,
   Plus,
+  QrCode,
   RefreshCw,
   RotateCcw,
   Server,
@@ -42,8 +44,10 @@ import {
   getRecordingQualitySpec,
 } from '../lib/callRecorder.ts'
 import { DEFAULT_TRANSCRIPTION_MODEL_ID } from '../lib/transcriptionModels.ts'
+import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { radioAudio, type SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import type { QrShareTarget } from './QrShareModal.tsx'
 
 export type SettingsTab =
   | 'profile'
@@ -61,6 +65,10 @@ export interface SettingsModalProps {
   onClose: () => void
   onOpenInstall: () => void
   onPlaySound?: (cue: SoundCue) => void
+  onShowQr?: (target: QrShareTarget) => void
+  onOpenScanner?: () => void
+  /** When true on mobile, renders anchored inside .ag-shell-body above the always-present bottom navbar. */
+  inShell?: boolean
 }
 
 interface ThemeCardOption {
@@ -160,6 +168,8 @@ export function SettingsModal({
   onClose,
   onOpenInstall,
   onPlaySound,
+  onShowQr,
+  inShell = false,
 }: SettingsModalProps) {
   const {
     identity,
@@ -184,7 +194,7 @@ export function SettingsModal({
   const [secretDraft, setSecretDraft] = useState('')
   const [secretFeedback, setSecretFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [revealNsec, setRevealNsec] = useState(false)
-  const [copiedField, setCopiedField] = useState<'npub' | 'nsec' | null>(null)
+  const [copiedField, setCopiedField] = useState<'npub' | 'nsec' | 'dm-link' | null>(null)
 
   // Privacy drafts
   const [trustKeyDraft, setTrustKeyDraft] = useState('')
@@ -383,12 +393,19 @@ export function SettingsModal({
     }
   }
 
-  const handleCopyKey = async (field: 'npub' | 'nsec', value: string) => {
+  const handleCopyKey = async (field: 'npub' | 'nsec' | 'dm-link', value: string) => {
     const ok = await copyClipboard(value)
     if (ok) {
       setCopiedField(field)
       onPlaySound?.('click')
-      engine.pushToast('success', field === 'npub' ? 'Copied public key' : 'Copied secret key')
+      engine.pushToast(
+        'success',
+        field === 'npub'
+          ? 'Copied public key'
+          : field === 'nsec'
+            ? 'Copied secret key'
+            : 'Copied DM link',
+      )
       window.setTimeout(() => setCopiedField((prev) => (prev === field ? null : prev)), 1800)
     }
   }
@@ -602,6 +619,44 @@ export function SettingsModal({
           <RefreshCw size={13} />
           <span>Rotate</span>
         </button>
+      </div>
+
+      {/* Shareable Direct Message Link & QR Code */}
+      <div className="ag-set-dm-share-row">
+        <button
+          type="button"
+          className="ag-btn ag-btn-secondary ag-btn-sm"
+          onClick={() =>
+            void handleCopyKey(
+              'dm-link',
+              buildDmShareUrl(identity.masterPubkey, identity.nickname),
+            )
+          }
+        >
+          {copiedField === 'dm-link' ? <Check size={14} /> : <Link2 size={14} />}
+          <span>{copiedField === 'dm-link' ? 'Copied DM Link' : 'Copy DM Link'}</span>
+        </button>
+
+        {onShowQr && (
+          <button
+            type="button"
+            className="ag-btn ag-btn-primary ag-btn-sm"
+            onClick={() => {
+              onPlaySound?.('click')
+              onShowQr({
+                kind: 'dm',
+                title: 'My DM QR Code',
+                subtitle: identity.activeDisplayHandle,
+                url: buildDmShareUrl(identity.masterPubkey, identity.nickname),
+                codeLabel: 'Public key (npub)',
+                codeValue: identity.masterNpub,
+              })
+            }}
+          >
+            <QrCode size={14} />
+            <span>Show DM QR</span>
+          </button>
+        )}
       </div>
 
       {/* Nickname */}
@@ -1001,9 +1056,29 @@ export function SettingsModal({
 
             <label className="ag-set-notif-row">
               <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">
+                  Direct pings (@mentions &amp; replies)
+                </span>
+                <span className="ag-set-notif-row-desc">
+                  Always notify when someone @mentions you or replies to your message
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.directPings}
+                onChange={() => {
+                  notif.updateSettings({ directPings: !ns.directPings })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
                 <span className="ag-set-notif-row-title">Incoming DM Call Ringing</span>
                 <span className="ag-set-notif-row-desc">
-                  Full-screen call ringer and priority OS alert for 1-on-1 calls
+                  Accept / Decline notification buttons, full-screen ringer, ringtone &amp; vibration
                 </span>
               </div>
               <input
@@ -1794,6 +1869,28 @@ export function SettingsModal({
 
             <button
               type="button"
+              className="ag-btn ag-btn-secondary ag-btn-sm"
+              disabled={transcription.cachedTranscriptCount === 0}
+              onClick={() => {
+                transcription.clearTranscriptCache()
+                onPlaySound?.('click')
+                setModelFeedback({
+                  ok: true,
+                  msg: 'Cleared cached voice memo transcripts',
+                })
+              }}
+              title="Clear locally cached voice memo transcripts"
+            >
+              <Trash2 size={13} />
+              <span>
+                {transcription.cachedTranscriptCount > 0
+                  ? `Clear Transcript Cache (${transcription.cachedTranscriptCount})`
+                  : 'Clear Transcript Cache (0)'}
+              </span>
+            </button>
+
+            <button
+              type="button"
               className="ag-btn ag-btn-ghost ag-btn-sm"
               onClick={() => {
                 setShowAddModel((v) => !v)
@@ -2239,7 +2336,12 @@ export function SettingsModal({
   )
 
   return (
-    <div className="ag-modal-backdrop ag-set-backdrop" onClick={onClose} role="presentation">
+    <div
+      className={`ag-modal-backdrop ag-set-backdrop ${inShell ? 'in-shell' : ''}`}
+      onClick={onClose}
+      role="presentation"
+      data-no-swipe="true"
+    >
       <div
         className={`ag-settings-modal ${mobileScreen === 'detail' ? 'mobile-detail' : 'mobile-menu'}`}
         role="dialog"

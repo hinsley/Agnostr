@@ -540,7 +540,7 @@ export function encodeServerInvite(
   const baseHref =
     typeof window !== 'undefined'
       ? `${window.location.origin}${window.location.pathname}`
-      : 'https://hinsley.github.io/Agnostr/'
+      : 'https://agnostr.com/'
   return {
     code,
     url: `${baseHref}#invite=${code}`,

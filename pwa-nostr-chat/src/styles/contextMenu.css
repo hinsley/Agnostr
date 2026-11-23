@@ -1,0 +1,183 @@
+/* ==========================================================================
+   Agnostr Custom Context Menu (Zero-Green Carbon / Indigo / Stone / Light)
+   ========================================================================== */
+
+.ag-ctx-menu {
+  position: fixed;
+  z-index: 9990;
+  min-width: 210px;
+  max-width: min(296px, calc(100vw - 16px));
+  max-height: calc(var(--ag-vvh, 100dvh) - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg), 0 0 0 1px var(--border-subtle);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+  animation: ag-ctx-pop 110ms var(--ease-out);
+  transform-origin: top left;
+}
+
+@keyframes ag-ctx-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.ag-ctx-header {
+  padding: 5px 9px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 4px;
+}
+
+.ag-ctx-reactions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 3px;
+  padding: 3px 4px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-ctx-react-btn {
+  flex: 1 1 0;
+  min-width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) ease, transform var(--dur-fast) ease, border-color var(--dur-fast) ease;
+}
+
+.ag-ctx-react-btn:hover,
+.ag-ctx-react-btn:focus-visible {
+  background: var(--bg-hover);
+  transform: scale(1.12);
+  outline: none;
+}
+
+.ag-ctx-react-btn.active {
+  background: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-ctx-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border-subtle);
+}
+
+.ag-ctx-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+
+.ag-ctx-item:hover:not(:disabled),
+.ag-ctx-item:focus-visible:not(:disabled),
+.ag-ctx-item.is-focused:not(:disabled) {
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.ag-ctx-item:active:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.ag-ctx-item:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.ag-ctx-item.danger {
+  color: var(--status-danger);
+}
+
+.ag-ctx-item.danger:hover:not(:disabled),
+.ag-ctx-item.danger:focus-visible:not(:disabled),
+.ag-ctx-item.danger.is-focused:not(:disabled) {
+  background: var(--status-danger-soft);
+  color: var(--status-danger);
+}
+
+.ag-ctx-item-icon {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+
+.ag-ctx-item.danger .ag-ctx-item-icon {
+  color: var(--status-danger);
+}
+
+.ag-ctx-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ag-ctx-item-shortcut {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 8px;
+}
+
+@media (max-width: 867px) {
+  .ag-ctx-item {
+    min-height: 40px;
+    padding: 8px 10px;
+    font-size: 14px;
+  }
+
+  .ag-ctx-react-btn {
+    height: 36px;
+    font-size: 17px;
+  }
+}

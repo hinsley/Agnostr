@@ -25,6 +25,7 @@ export type NotificationCategory =
 export interface NotificationSettings {
   enabled: boolean
   dms: boolean
+  directPings: boolean
   dmCallRinging: boolean
   serverMessages: NotificationFilterMode
   serverCalls: boolean

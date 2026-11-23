@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { nip19 } from 'nostr-tools'
 import {
   AlertCircle,
   Captions,
@@ -10,9 +11,11 @@ import {
   FileText,
   HeadphoneOff,
   Headphones,
+  Link2,
   Loader2,
   Lock,
   Maximize2,
+  MessageCircle,
   Mic,
   MicOff,
   Minimize2,
@@ -21,22 +24,26 @@ import {
   PhoneCall,
   PhoneOff,
   Radio,
+  ShieldCheck,
   Square,
   Trash2,
+  User,
   Users,
   Video,
   VideoOff,
   X,
 } from 'lucide-react'
-import type { AgnostrEngine } from '../types/protocol.ts'
+import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { CallEngine, CallParticipant, PeerIceConnectionState } from '../types/calls.ts'
 import {
   RECORDING_QUALITY_PRESETS,
   getRecordingQualitySpec,
 } from '../lib/callRecorder.ts'
+import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
+import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 
 export interface CallStageProps {
   calls: CallEngine
@@ -45,6 +52,8 @@ export interface CallStageProps {
   compactFloating?: boolean
   onToggleExpand: () => void
   onPlaySound?: (cue: SoundCue) => void
+  onInspectPeer?: (peer: PeerInfo) => void
+  onOpenDm?: (pubkey: string, nickname?: string) => void
 }
 
 function formatCallDuration(startedAtMs: number, nowMs: number): string {
@@ -215,12 +224,22 @@ function RemoteAudioTrack({
   return <audio ref={audioRef} autoPlay playsInline className="sr-only" />
 }
 
+function safeEncodeNpub(pubkey: string): string {
+  try {
+    return nip19.npubEncode(pubkey)
+  } catch {
+    return pubkey
+  }
+}
+
 function ParticipantTile({
   participant,
   compact,
+  onContextMenu,
 }: {
   participant: CallParticipant
   compact: boolean
+  onContextMenu?: (e: ReactMouseEvent) => void
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
 
@@ -322,6 +341,7 @@ function ParticipantTile({
       } ${participant.screenSharing ? 'is-screen' : ''} ${
         participant.isRecording ? 'is-recording' : ''
       }`}
+      onContextMenu={onContextMenu}
     >
       {hasLiveVideo ? (
         <video
@@ -407,9 +427,12 @@ export function CallStage({
   compactFloating = false,
   onToggleExpand,
   onPlaySound,
+  onInspectPeer,
+  onOpenDm,
 }: CallStageProps) {
   const { activeCall } = calls
   const { transcription } = engine
+  const { openContextMenu } = useContextMenu()
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [togglingRec, setTogglingRec] = useState(false)
   const [qualityMenuOpen, setQualityMenuOpen] = useState(false)
@@ -701,6 +724,184 @@ export function CallStage({
     engine.pushToast('success', `Saved ${filename}`)
   }
 
+  const copyCallText = async (value: string, toastTitle: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      onPlaySound?.('click')
+      engine.pushToast('success', toastTitle)
+    } catch {
+      engine.pushToast('error', 'Failed to copy to clipboard')
+    }
+  }
+
+  const openParticipantContextMenu = (e: ReactMouseEvent, participant: CallParticipant) => {
+    const npub = safeEncodeNpub(participant.pubkey)
+    const items: ContextMenuItem[] = []
+
+    if (participant.isSelf) {
+      items.push(
+        {
+          id: 'toggle-mute',
+          label: activeCall.localMuted ? 'Unmute Microphone' : 'Mute Microphone',
+          icon: activeCall.localMuted ? <Mic size={14} /> : <MicOff size={14} />,
+          onSelect: handleToggleMute,
+        },
+        {
+          id: 'toggle-camera',
+          label: activeCall.localCameraOn ? 'Turn Camera Off' : 'Turn Camera On',
+          icon: activeCall.localCameraOn ? <VideoOff size={14} /> : <Video size={14} />,
+          onSelect: handleToggleCamera,
+        },
+        {
+          id: 'copy-handle',
+          label: 'Copy Handle',
+          icon: <Copy size={14} />,
+          dividerBefore: true,
+          onSelect: () => {
+            void copyCallText(participant.displayHandle, 'Copied handle')
+          },
+        },
+        {
+          id: 'copy-npub',
+          label: 'Copy npub',
+          icon: <Copy size={14} />,
+          onSelect: () => {
+            void copyCallText(npub, 'Copied public key')
+          },
+        },
+      )
+    } else {
+      const trusted = engine.isExplicitlyTrusted(participant.pubkey)
+      const knownPeer = engine.getPeerByPubkey(participant.pubkey)
+
+      if (onInspectPeer) {
+        items.push({
+          id: 'view-profile',
+          label: 'View Profile',
+          icon: <User size={14} />,
+          onSelect: () => {
+            onPlaySound?.('click')
+            onInspectPeer(
+              knownPeer ?? {
+                pubkey: participant.pubkey,
+                npub,
+                nickname: participant.nickname,
+                displayHandle: participant.displayHandle,
+                lastSeenAt: Math.floor(Date.now() / 1000),
+                isOnline: true,
+                isSelf: false,
+                isTeleported: false,
+                isMeshBridge: false,
+                isBlocked: engine.isPeerBlocked(participant.pubkey),
+                isTrusted: trusted,
+                messageCount: 0,
+                channels: [],
+              },
+            )
+          },
+        })
+      }
+
+      items.push(
+        {
+          id: 'direct-message',
+          label: 'Direct Message',
+          icon: <MessageCircle size={14} />,
+          onSelect: () => {
+            onPlaySound?.('click')
+            if (expanded) onToggleExpand()
+            if (onOpenDm) {
+              onOpenDm(participant.pubkey, participant.nickname)
+            } else {
+              engine.openDmThread(participant.pubkey, participant.nickname)
+            }
+          },
+        },
+        {
+          id: 'copy-handle',
+          label: 'Copy Handle',
+          icon: <Copy size={14} />,
+          dividerBefore: true,
+          onSelect: () => {
+            void copyCallText(participant.displayHandle, 'Copied handle')
+          },
+        },
+        {
+          id: 'copy-npub',
+          label: 'Copy npub',
+          icon: <Copy size={14} />,
+          onSelect: () => {
+            void copyCallText(npub, 'Copied public key')
+          },
+        },
+        {
+          id: 'copy-dm-link',
+          label: 'Copy DM Link',
+          icon: <Link2 size={14} />,
+          onSelect: () => {
+            void copyCallText(
+              buildDmShareUrl(participant.pubkey, participant.nickname),
+              'Copied DM link',
+            )
+          },
+        },
+        {
+          id: 'trust-peer',
+          label: trusted ? 'Remove Trust' : 'Trust Peer',
+          icon: <ShieldCheck size={14} />,
+          dividerBefore: true,
+          onSelect: () => {
+            onPlaySound?.('click')
+            if (trusted) {
+              engine.untrustPubkey(participant.pubkey)
+            } else {
+              engine.trustPubkey(participant.pubkey, participant.nickname)
+            }
+          },
+        },
+      )
+    }
+
+    openContextMenu(e, {
+      header: participant.isSelf ? `${participant.displayHandle} (You)` : participant.displayHandle,
+      items,
+    })
+  }
+
+  const openTranscriptContextMenu = (
+    e: ReactMouseEvent,
+    entry: { displayHandle: string; text: string },
+  ) => {
+    openContextMenu(e, {
+      header: entry.displayHandle,
+      items: [
+        {
+          id: 'copy-line',
+          label: 'Copy Line',
+          icon: <Copy size={14} />,
+          onSelect: () => {
+            void copyCallText(`${entry.displayHandle}: ${entry.text}`, 'Copied transcript line')
+          },
+        },
+        {
+          id: 'copy-transcript',
+          label: 'Copy Full Transcript',
+          icon: <FileText size={14} />,
+          onSelect: () => {
+            void handleCopyTranscript()
+          },
+        },
+        {
+          id: 'download-transcript',
+          label: 'Download Markdown (.md)',
+          icon: <Download size={14} />,
+          dividerBefore: true,
+          onSelect: handleDownloadTranscript,
+        },
+      ],
+    })
+  }
+
   const stageContent = (
     <section
       className={`ag-call-stage ${expanded ? 'ag-call-stage-expanded' : 'ag-call-stage-docked'}`}
@@ -799,6 +1000,7 @@ export function CallStage({
                 key={participant.pubkey}
                 participant={participant}
                 compact={!expanded && count > 2}
+                onContextMenu={(e) => openParticipantContextMenu(e, participant)}
               />
             ))}
           </div>
@@ -924,7 +1126,11 @@ export function CallStage({
                 </div>
               ) : (
                 transcription.liveCaptions.map((entry) => (
-                  <div key={entry.id} className="ag-call-transcript-row">
+                  <div
+                    key={entry.id}
+                    className="ag-call-transcript-row"
+                    onContextMenu={(e) => openTranscriptContextMenu(e, entry)}
+                  >
                     <div className="ag-call-transcript-meta">
                       <span
                         className="ag-call-transcript-speaker truncate"

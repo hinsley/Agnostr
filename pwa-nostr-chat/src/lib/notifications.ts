@@ -10,7 +10,7 @@ import { getPwaSwRegistration } from '../hooks/usePwa.ts'
 import { bytesToHex } from './identity.ts'
 
 export const KIND_NIP98_HTTP_AUTH = 27235
-const APP_ICON = '/Agnostr/icon-192.png'
+const APP_ICON = '/icon-192.png'
 const utf8Encoder = new TextEncoder()
 
 interface ExtendedNotificationOptions extends NotificationOptions {
@@ -168,7 +168,17 @@ export async function showOsNotification(
       await reg.showNotification(input.title, options)
       return true
     } catch {
-      // Fall back to direct Notification constructor below
+      // Some browsers reject `actions` with TypeError — retry cleanly without actions before falling back
+      if (options.actions && options.actions.length > 0) {
+        try {
+          const withoutActions: ExtendedNotificationOptions = { ...options }
+          delete withoutActions.actions
+          await reg.showNotification(input.title, withoutActions)
+          return true
+        } catch {
+          // Fall back to direct Notification constructor below
+        }
+      }
     }
   }
 
@@ -329,6 +339,7 @@ export async function registerWithPushBridge(
     serverIds: params.serverIds.slice(0, 20),
     preferences: {
       dms: params.settings.dms,
+      directPings: params.settings.directPings,
       dmCallRinging: params.settings.dmCallRinging,
       serverMessages: params.settings.serverMessages,
       serverCalls: params.settings.serverCalls,

@@ -295,13 +295,13 @@ export function useAgnostrEngine(): AgnostrEngine {
     saveSettings(settings)
   }, [settings])
 
-  // Sync URL hash <-> activeGeohash (preserve #invite=... and #notify=... deep links until consumed)
+  // Sync URL hash <-> activeGeohash (preserve #invite=..., #notify=..., and #dm=... deep links until consumed)
   useEffect(() => {
     saveActiveGeohash(activeGeohash)
     try {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
       const lowerHash = rawHash.toLowerCase()
-      if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=')) return
+      if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=') || lowerHash.startsWith('dm=')) return
       const currentHash = normalizeGeohash(rawHash)
       if (currentHash !== activeGeohash) {
         window.history.replaceState(window.history.state, '', `#${activeGeohash}`)
@@ -315,7 +315,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     const onHashChange = () => {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
       const lowerHash = rawHash.toLowerCase()
-      if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=')) return
+      if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=') || lowerHash.startsWith('dm=')) return
       const hash = normalizeGeohash(rawHash)
       if (hash && isValidGeohash(hash)) {
         setActiveGeohash(hash)
@@ -648,12 +648,23 @@ export function useAgnostrEngine(): AgnostrEngine {
                   doesContentMentionUser(parsed.content, parsed.mentions, myNick, geoPk) ||
                   (masterPk !== geoPk &&
                     doesContentMentionUser(parsed.content, parsed.mentions, myNick, masterPk))
+                const repliedToMe = Boolean(
+                  parsed.replyTo &&
+                    ((parsed.replyTo.pubkey &&
+                      ownPubkeysRef.current.has(parsed.replyTo.pubkey.toLowerCase())) ||
+                      messagesRef.current.some(
+                        (m) =>
+                          m.id === parsed.replyTo?.id &&
+                          (m.isOwn || ownPubkeysRef.current.has(m.pubkey.toLowerCase()))
+                      ))
+                )
                 notifyGeoMessageRef.current({
                   id: parsed.id,
                   geohash: gh,
                   senderHandle: parsed.displayHandle,
                   content: parsed.content,
                   mentionedMe,
+                  repliedToMe,
                   hasVoice: Boolean(parsed.voiceMemo),
                   hasImage: Boolean(parsed.imageAttachment),
                 })
@@ -759,6 +770,15 @@ export function useAgnostrEngine(): AgnostrEngine {
           const mentionedMe =
             doesContentMentionUser(ev.content, mentions, myNick, geoPubkey) ||
             (masterPubkey !== geoPubkey && doesContentMentionUser(ev.content, mentions, myNick, masterPubkey))
+          const hasReplyTag = ev.tags.some(
+            (t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16
+          )
+          const replyTargetPubkey = hasReplyTag
+            ? getTagValue(ev.tags, 'p')?.toLowerCase()
+            : undefined
+          const repliedToMe = Boolean(
+            replyTargetPubkey && ownPubkeysRef.current.has(replyTargetPubkey)
+          )
 
           setPinnedChannels((prev) =>
             prev.map((p) =>
@@ -766,7 +786,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                 ? {
                     ...p,
                     unreadCount: p.unreadCount + 1,
-                    mentionCount: p.mentionCount + (mentionedMe ? 1 : 0),
+                    mentionCount: p.mentionCount + (mentionedMe || repliedToMe ? 1 : 0),
                   }
                 : p
             )
@@ -778,6 +798,7 @@ export function useAgnostrEngine(): AgnostrEngine {
             senderHandle: formatDisplayHandle(getTagValue(ev.tags, 'n'), pk),
             content: ev.content,
             mentionedMe,
+            repliedToMe,
           })
         },
       }

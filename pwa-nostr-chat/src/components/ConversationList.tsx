@@ -1,38 +1,52 @@
 import React, { useState } from 'react'
 import type { CSSProperties, FormEvent } from 'react'
 import {
+  Ban,
   ChevronDown,
   ChevronRight,
   Compass,
+  Copy,
   Crosshair,
   Download,
   Globe,
   Hash,
   Headphones,
+  Link2,
   Loader2,
   Lock,
+  LogOut,
   Map as MapIcon,
   MessageCircle,
   Phone,
   PhoneOff,
   Plus,
+  QrCode,
   Radio,
+  ScanLine,
   Search,
   Server,
   Settings,
   ShieldCheck,
+  ShieldOff,
   Star,
+  StarOff,
+  User,
   UserPlus,
   Users,
+  Video,
   X,
 } from 'lucide-react'
-import type { AgnostrEngine } from '../types/protocol'
-import type { ServerSummary } from '../types/servers'
+import type { AgnostrEngine, DmThread, PeerInfo } from '../types/protocol'
+import type { ServerChannel, ServerSummary } from '../types/servers'
 import type { PwaState } from '../hooks/usePwa'
 import type { SoundCue } from '../utils/sound'
+import type { QrShareTarget } from './QrShareModal'
 import type { ServerHubTab } from './ServerHubModal'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { SettingsTab } from './SettingsModal'
+import { useContextMenu, type ContextMenuItem } from './ContextMenu'
+import { encodeNpubSafe } from '../lib/identity'
+import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
 import { identiconDataUrl } from '../utils/identicon'
 
 export type ListTab = 'radio' | 'dms' | 'servers'
@@ -71,6 +85,10 @@ export interface ConversationListProps {
   onOpenSettings: (tab?: SettingsTab) => void
   onLocateMe: () => void
   onFocusActiveCall?: () => void
+  onInspectPeer?: (peer: PeerInfo) => void
+  onShowQr?: (target: QrShareTarget) => void
+  onOpenScanner?: () => void
+  onResolvedShareTarget?: (target: ParsedShareTarget) => void
   pwa?: PwaState
   onOpenInstall?: () => void
   onPlaySound?: (cue: SoundCue) => void
@@ -91,11 +109,17 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onOpenSettings,
   onLocateMe,
   onFocusActiveCall,
+  onInspectPeer,
+  onShowQr,
+  onOpenScanner,
+  onResolvedShareTarget,
   pwa,
   onOpenInstall,
   onPlaySound,
 }) => {
+  const { openContextMenu } = useContextMenu()
   const [freqDraft, setFreqDraft] = useState('')
+  const [dmDraft, setDmDraft] = useState('')
   const [collapsedServers, setCollapsedServers] = useState<Record<string, boolean>>({})
   const [addingChannelServerId, setAddingChannelServerId] = useState<string | null>(null)
   const [channelNameDraft, setChannelNameDraft] = useState('')
@@ -111,6 +135,306 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     if (ok !== false) {
       setFreqDraft('')
     }
+  }
+
+  const handleOpenMyDmQr = () => {
+    onPlaySound?.('click')
+    const url = buildDmShareUrl(engine.identity.masterPubkey, engine.identity.nickname)
+    onShowQr?.({
+      kind: 'dm',
+      title: 'My DM QR Code',
+      subtitle: engine.identity.nickname || 'Scan to start an encrypted DM',
+      url,
+      codeLabel: 'Public Key (npub)',
+      codeValue: engine.identity.masterNpub,
+    })
+  }
+
+  const handleQuickStartDm = (e: FormEvent) => {
+    e.preventDefault()
+    const clean = dmDraft.trim()
+    if (!clean) return
+    const parsed = parseShareTarget(clean)
+    if (!parsed) {
+      engine.pushToast(
+        'warning',
+        'Invalid DM link or key',
+        'Paste a DM link (#dm=...), npub, nprofile, hex pubkey, or community invite.'
+      )
+      return
+    }
+    setDmDraft('')
+    if (onResolvedShareTarget) {
+      onResolvedShareTarget(parsed)
+    } else if (parsed.kind === 'dm') {
+      onOpenDm(parsed.pubkey, parsed.nickname)
+    }
+  }
+
+  const openRoomContextMenu = (
+    e: React.MouseEvent,
+    geohash: string,
+    label?: string
+  ) => {
+    const pinned = engine.isChannelPinned(geohash)
+    const roomUrl = `${window.location.origin}${window.location.pathname}#${geohash}`
+    openContextMenu(e, {
+      header: `#${geohash}${label ? ` · ${label}` : ''}`,
+      items: [
+        {
+          id: `room-tune-${geohash}`,
+          label: `Tune to #${geohash}`,
+          icon: <Radio size={15} />,
+          onSelect: () => onTuneChannel(geohash),
+        },
+        {
+          id: `room-copy-${geohash}`,
+          label: 'Copy Room Link',
+          icon: <Link2 size={15} />,
+          onSelect: () => {
+            navigator.clipboard?.writeText(roomUrl).catch(() => {})
+            engine.pushToast('info', `Copied #${geohash} room link`)
+          },
+        },
+        {
+          id: `room-map-${geohash}`,
+          label: 'Open on Radar Map',
+          icon: <MapIcon size={15} />,
+          onSelect: () => {
+            onTuneChannel(geohash)
+            onExpandRadar()
+          },
+        },
+        {
+          id: `room-pin-${geohash}`,
+          label: pinned ? 'Remove Bookmark' : 'Bookmark Room',
+          icon: pinned ? <StarOff size={15} /> : <Star size={15} />,
+          dividerBefore: true,
+          onSelect: () => engine.togglePinChannel(geohash, label),
+        },
+      ],
+    })
+  }
+
+  const openDmContextMenu = (e: React.MouseEvent, thread: DmThread) => {
+    const trusted = engine.isExplicitlyTrusted(thread.peerPubkey)
+    const blocked = engine.isPeerBlocked(thread.peerPubkey)
+    const npub = encodeNpubSafe(thread.peerPubkey)
+    const dmUrl = buildDmShareUrl(thread.peerPubkey, thread.peerNickname)
+    const items: ContextMenuItem[] = [
+      {
+        id: `dm-open-${thread.peerPubkey}`,
+        label: 'Open DM',
+        icon: <MessageCircle size={15} />,
+        onSelect: () => onOpenDm(thread.peerPubkey, thread.peerNickname),
+      },
+    ]
+
+    if (trusted) {
+      items.push(
+        {
+          id: `dm-voice-${thread.peerPubkey}`,
+          label: 'Voice Call',
+          icon: <Phone size={15} />,
+          onSelect: () => {
+            void engine.calls.startDmCall(thread.peerPubkey, 'audio', thread.peerNickname)
+          },
+        },
+        {
+          id: `dm-video-${thread.peerPubkey}`,
+          label: 'Video Call',
+          icon: <Video size={15} />,
+          onSelect: () => {
+            void engine.calls.startDmCall(thread.peerPubkey, 'video', thread.peerNickname)
+          },
+        }
+      )
+    }
+
+    if (onInspectPeer) {
+      items.push({
+        id: `dm-profile-${thread.peerPubkey}`,
+        label: 'View Profile',
+        icon: <User size={15} />,
+        dividerBefore: true,
+        onSelect: () => {
+          const existing = engine.getPeerByPubkey(thread.peerPubkey)
+          if (existing) {
+            onInspectPeer(existing)
+            return
+          }
+          onInspectPeer({
+            pubkey: thread.peerPubkey,
+            npub,
+            nickname: thread.peerNickname,
+            displayHandle: thread.peerDisplayHandle,
+            lastSeenAt: thread.lastMessageAt || Math.floor(Date.now() / 1000),
+            isOnline: false,
+            isSelf: false,
+            isTeleported: false,
+            isMeshBridge: false,
+            isBlocked: blocked,
+            isTrusted: engine.isTrusted(thread.peerPubkey),
+            messageCount: thread.messages.length,
+            channels: [],
+          })
+        },
+      })
+    }
+
+    items.push({
+      id: `dm-copy-link-${thread.peerPubkey}`,
+      label: 'Copy DM Link',
+      icon: <Link2 size={15} />,
+      dividerBefore: !onInspectPeer,
+      onSelect: () => {
+        navigator.clipboard?.writeText(dmUrl).catch(() => {})
+        engine.pushToast('info', 'DM link copied')
+      },
+    })
+
+    if (onShowQr) {
+      items.push({
+        id: `dm-qr-${thread.peerPubkey}`,
+        label: 'Show DM QR',
+        icon: <QrCode size={15} />,
+        onSelect: () => {
+          onShowQr({
+            kind: 'dm',
+            title: `${thread.peerNickname} — DM QR`,
+            subtitle: thread.peerDisplayHandle,
+            url: dmUrl,
+            codeLabel: 'Public Key (npub)',
+            codeValue: npub,
+          })
+        },
+      })
+    }
+
+    items.push(
+      {
+        id: `dm-trust-${thread.peerPubkey}`,
+        label: trusted ? 'Remove Trust' : 'Trust Peer',
+        icon: trusted ? <ShieldOff size={15} /> : <ShieldCheck size={15} />,
+        dividerBefore: true,
+        onSelect: () => {
+          if (trusted) engine.untrustPubkey(thread.peerPubkey)
+          else engine.trustPubkey(thread.peerPubkey, thread.peerNickname)
+        },
+      },
+      {
+        id: `dm-npub-${thread.peerPubkey}`,
+        label: 'Copy npub',
+        icon: <Copy size={15} />,
+        onSelect: () => {
+          navigator.clipboard?.writeText(npub).catch(() => {})
+          engine.pushToast('info', 'Copied npub')
+        },
+      },
+      {
+        id: `dm-block-${thread.peerPubkey}`,
+        label: blocked ? 'Unblock Peer' : 'Block Peer',
+        icon: <Ban size={15} />,
+        danger: !blocked,
+        onSelect: () => engine.toggleBlockPeer(thread.peerPubkey, thread.peerDisplayHandle),
+      }
+    )
+
+    openContextMenu(e, {
+      header: thread.peerDisplayHandle,
+      items,
+    })
+  }
+
+  const openServerContextMenu = (
+    e: React.MouseEvent,
+    server: ServerSummary,
+    channel?: ServerChannel
+  ) => {
+    const invite = engine.servers.buildInviteLink(server.id)
+    const items: ContextMenuItem[] = []
+
+    if (channel) {
+      items.push({
+        id: `srv-open-ch-${server.id}-${channel.id}`,
+        label: `Open #${channel.name}`,
+        icon: server.encrypted ? <Lock size={15} /> : <Hash size={15} />,
+        onSelect: () => {
+          onPlaySound?.('click')
+          onSelectServerChannel(server.id, channel.id)
+        },
+      })
+    } else if (server.channels[0]) {
+      const targetCh =
+        server.channels.find((c) => c.id === server.lastActiveChannelId) ?? server.channels[0]
+      items.push({
+        id: `srv-open-${server.id}`,
+        label: `Open #${targetCh.name}`,
+        icon: server.encrypted ? <Lock size={15} /> : <Hash size={15} />,
+        onSelect: () => {
+          onPlaySound?.('click')
+          onSelectServerChannel(server.id, targetCh.id)
+        },
+      })
+    }
+
+    if (invite) {
+      items.push({
+        id: `srv-copy-invite-${server.id}`,
+        label: 'Copy Invite Link',
+        icon: <Link2 size={15} />,
+        dividerBefore: items.length > 0,
+        onSelect: () => {
+          navigator.clipboard?.writeText(invite.url).catch(() => {})
+          engine.pushToast('success', 'Invite link copied', server.name)
+        },
+      })
+      if (onShowQr) {
+        items.push({
+          id: `srv-qr-invite-${server.id}`,
+          label: 'Show Invite QR',
+          icon: <QrCode size={15} />,
+          onSelect: () => {
+            onShowQr({
+              kind: 'server',
+              title: server.name,
+              subtitle: server.encrypted ? 'Encrypted Community Invite' : 'Community Invite',
+              url: invite.url,
+              codeLabel: 'Invite Code',
+              codeValue: invite.code,
+            })
+          },
+        })
+      }
+    }
+
+    items.push(
+      {
+        id: `srv-settings-${server.id}`,
+        label: 'Server Info & Settings',
+        icon: <Settings size={15} />,
+        dividerBefore: true,
+        onSelect: () => {
+          onPlaySound?.('click')
+          onOpenServerSettings(server.id, 'overview')
+        },
+      },
+      {
+        id: `srv-leave-${server.id}`,
+        label: 'Leave Community',
+        icon: <LogOut size={15} />,
+        danger: true,
+        dividerBefore: true,
+        onSelect: () => {
+          void engine.servers.leaveServer(server.id)
+        },
+      }
+    )
+
+    openContextMenu(e, {
+      header: channel ? `${server.name} · #${channel.name}` : server.name,
+      items,
+    })
   }
 
   const isChannelActive = (gh: string) =>
@@ -347,6 +671,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   type="button"
                   className={`ag-chat-row ${isChannelActive(engine.activeGeohash) ? 'active' : ''}`}
                   onClick={() => onTuneChannel(engine.activeGeohash)}
+                  onContextMenu={(e) =>
+                    openRoomContextMenu(
+                      e,
+                      engine.activeGeohash,
+                      engine.cell.nearestCity || undefined
+                    )
+                  }
                 >
                   <div className="ag-chat-row-avatar radio">
                     <Radio size={18} />
@@ -385,6 +716,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       type="button"
                       className={`ag-chat-row ${active ? 'active' : ''}`}
                       onClick={() => onTuneChannel(pin.geohash)}
+                      onContextMenu={(e) => openRoomContextMenu(e, pin.geohash, pin.label)}
                     >
                       <div className="ag-chat-row-avatar pinned">
                         <Star size={17} fill="currentColor" />
@@ -445,6 +777,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       type="button"
                       className={`ag-chat-row ${active ? 'active' : ''}`}
                       onClick={() => onTuneChannel(room.geohash)}
+                      onContextMenu={(e) =>
+                        openRoomContextMenu(e, room.geohash, room.nearestCity || undefined)
+                      }
                     >
                       <div className="ag-chat-row-avatar radio">
                         <Radio size={18} />
@@ -479,6 +814,52 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         {/* ================= DMs TAB ================= */}
         {activeTab === 'dms' && (
           <div className="ag-conv-section-stack">
+            {(onShowQr || onOpenScanner) && (
+              <div className="ag-dm-actions-row">
+                {onShowQr && (
+                  <button
+                    type="button"
+                    className="ag-dm-action-btn dm"
+                    onClick={handleOpenMyDmQr}
+                    title="Show your shareable DM link & QR code"
+                  >
+                    <QrCode size={15} />
+                    <span>My QR</span>
+                  </button>
+                )}
+                {onOpenScanner && (
+                  <button
+                    type="button"
+                    className="ag-dm-action-btn"
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      onOpenScanner()
+                    }}
+                    title="Scan a DM or community invite QR code"
+                  >
+                    <ScanLine size={15} />
+                    <span>Scan QR</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            <form className="ag-dm-jump-form" onSubmit={handleQuickStartDm}>
+              <input
+                type="text"
+                className="ag-jump-input"
+                value={dmDraft}
+                onChange={(e) => setDmDraft(e.target.value)}
+                placeholder="Paste DM link or npub…"
+                aria-label="Start DM by pasting a DM link or npub"
+              />
+              {dmDraft.trim() && (
+                <button type="submit" className="ag-jump-go-btn dm" aria-label="Open DM">
+                  Open
+                </button>
+              )}
+            </form>
+
             {engine.dmThreads.length === 0 ? (
               <div className="ag-conv-empty-large">
                 <div className="ag-conv-empty-icon dm">
@@ -500,6 +881,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       type="button"
                       className={`ag-chat-row dm ${active ? 'active' : ''}`}
                       onClick={() => onOpenDm(thread.peerPubkey, thread.peerNickname)}
+                      onContextMenu={(e) => openDmContextMenu(e, thread)}
                     >
                       <div className="ag-chat-row-avatar-img-wrap">
                         <img
@@ -556,6 +938,21 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 <Plus size={16} />
                 <span>New or Join Server</span>
               </button>
+              {onOpenScanner && (
+                <button
+                  type="button"
+                  className="ag-srv-scan-btn"
+                  onClick={() => {
+                    onPlaySound?.('click')
+                    onOpenScanner()
+                  }}
+                  title="Scan a community invite QR code"
+                  aria-label="Scan QR code"
+                >
+                  <ScanLine size={15} />
+                  <span>Scan QR</span>
+                </button>
+              )}
             </div>
 
             {engine.servers.joinedServers.length === 0 ? (
@@ -619,7 +1016,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       className={`ag-srv-card ${isActiveServer ? 'active' : ''}`}
                       style={accentStyle}
                     >
-                      <div className="ag-srv-card-head">
+                      <div
+                        className="ag-srv-card-head"
+                        onContextMenu={(e) => openServerContextMenu(e, server)}
+                      >
                         <button
                           type="button"
                           className="ag-srv-card-toggle"
@@ -744,6 +1144,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                                     onPlaySound?.('click')
                                     onSelectServerChannel(server.id, ch.id)
                                   }}
+                                  onContextMenu={(e) => openServerContextMenu(e, server, ch)}
                                 >
                                   <span className="ag-srv-ch-left truncate">
                                     {server.encrypted ? (
