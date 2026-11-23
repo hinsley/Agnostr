@@ -495,6 +495,7 @@ export const Composer: React.FC<ComposerProps> = ({
     const submitIsDm = isDm
     const submitDmThread = dmThread
     const submitIsViolet = isViolet
+    const submitSourceLang = engine.translator.settings.myLanguage
     const submitTargetLang = outgoingTargetLang
 
     const restoreDraftIfSafe = () => {
@@ -567,7 +568,7 @@ export const Composer: React.FC<ComposerProps> = ({
 
     const dispatchText = (
       outgoingBody: string,
-      translatedMeta?: { originalText: string; translatedToLang: string }
+      translatedMeta?: { originalText: string; translatedToLang: string; sourceLang: string }
     ): Promise<boolean> => {
       if (submitIsServer) {
         if (outgoingBody.toLowerCase() === '/clear') {
@@ -589,7 +590,8 @@ export const Composer: React.FC<ComposerProps> = ({
                     id,
                     translatedMeta.originalText,
                     outgoingBody,
-                    translatedMeta.translatedToLang
+                    translatedMeta.translatedToLang,
+                    translatedMeta.sourceLang
                   )
                 },
               }
@@ -597,13 +599,22 @@ export const Composer: React.FC<ComposerProps> = ({
         )
       }
       if (submitIsDm && submitDmThread && !outgoingBody.startsWith('/')) {
-        if (translatedMeta && activeTargetKeyRef.current === submitTargetKey) {
-          return engine.sendInput(outgoingBody, translatedMeta)
-        }
+        const onPublishedId = translatedMeta
+          ? (id: string) => {
+              engine.translator.recordOutgoingOriginal(
+                id,
+                translatedMeta.originalText,
+                outgoingBody,
+                translatedMeta.translatedToLang,
+                translatedMeta.sourceLang
+              )
+            }
+          : undefined
         return engine.sendDirectMessage(
           submitDmThread.peerPubkey,
           outgoingBody,
-          submitDmThread.protocol
+          submitDmThread.protocol,
+          onPublishedId
         )
       }
       return engine.sendInput(outgoingBody, translatedMeta)
@@ -642,13 +653,19 @@ export const Composer: React.FC<ComposerProps> = ({
         submitTargetKey,
         async (): Promise<boolean> => {
           let outgoingBody = trimmed
-          let translatedMeta: { originalText: string; translatedToLang: string } | undefined
+          let translatedMeta:
+            | { originalText: string; translatedToLang: string; sourceLang: string }
+            | undefined
 
           if (shouldTranslate) {
             adjustTranslating(1)
             try {
               const translated = (
-                await engine.translator.translateOutgoingText(trimmed, submitTargetLang)
+                await engine.translator.translateOutgoingText(
+                  trimmed,
+                  submitTargetLang,
+                  submitSourceLang
+                )
               ).trim()
               if (!translated) {
                 throw new Error('Translator returned an empty message.')
@@ -657,6 +674,7 @@ export const Composer: React.FC<ComposerProps> = ({
               translatedMeta = {
                 originalText: trimmed,
                 translatedToLang: submitTargetLang,
+                sourceLang: submitSourceLang,
               }
             } catch (err) {
               pushToast(
@@ -669,6 +687,16 @@ export const Composer: React.FC<ComposerProps> = ({
             } finally {
               adjustTranslating(-1)
             }
+          }
+
+          // Guard Radio/Server sends against landing in a different room if the user switched rooms mid-translation
+          if (!submitIsDm && activeTargetKeyRef.current !== submitTargetKey) {
+            pushToast(
+              'warning',
+              'Switched rooms before translation finished',
+              'Message was not sent to the new room.'
+            )
+            return false
           }
 
           // Synchronously appends optimistic UI & enqueues publish in the engine's inner FIFO queue
@@ -837,12 +865,13 @@ export const Composer: React.FC<ComposerProps> = ({
     const submitIsDm = isDm
     const submitDmThread = dmThread
     const submitIsViolet = isViolet
+    const submitSourceLang = engine.translator.settings.myLanguage
     const submitTargetLang = outgoingTargetLang
     const shouldTranslate = outgoingTranslateActive && !trimmed.startsWith('/')
 
     const dispatchText = (
       outgoingBody: string,
-      translatedMeta?: { originalText: string; translatedToLang: string }
+      translatedMeta?: { originalText: string; translatedToLang: string; sourceLang: string }
     ): Promise<boolean> => {
       if (submitIsServer) {
         return engine.servers.sendMessage(
@@ -854,7 +883,8 @@ export const Composer: React.FC<ComposerProps> = ({
                     id,
                     translatedMeta.originalText,
                     outgoingBody,
-                    translatedMeta.translatedToLang
+                    translatedMeta.translatedToLang,
+                    translatedMeta.sourceLang
                   )
                 },
               }
@@ -862,13 +892,22 @@ export const Composer: React.FC<ComposerProps> = ({
         )
       }
       if (submitIsDm && submitDmThread && !outgoingBody.startsWith('/')) {
-        if (translatedMeta && activeTargetKeyRef.current === submitTargetKey) {
-          return engine.sendInput(outgoingBody, translatedMeta)
-        }
+        const onPublishedId = translatedMeta
+          ? (id: string) => {
+              engine.translator.recordOutgoingOriginal(
+                id,
+                translatedMeta.originalText,
+                outgoingBody,
+                translatedMeta.translatedToLang,
+                translatedMeta.sourceLang
+              )
+            }
+          : undefined
         return engine.sendDirectMessage(
           submitDmThread.peerPubkey,
           outgoingBody,
-          submitDmThread.protocol
+          submitDmThread.protocol,
+          onPublishedId
         )
       }
       return engine.sendInput(outgoingBody, translatedMeta)
@@ -884,18 +923,25 @@ export const Composer: React.FC<ComposerProps> = ({
           submitTargetKey,
           async () => {
             let outgoingBody = trimmed
-            let translatedMeta: { originalText: string; translatedToLang: string } | undefined
+            let translatedMeta:
+              | { originalText: string; translatedToLang: string; sourceLang: string }
+              | undefined
             if (shouldTranslate) {
               adjustTranslating(1)
               try {
                 const translated = (
-                  await engine.translator.translateOutgoingText(trimmed, submitTargetLang)
+                  await engine.translator.translateOutgoingText(
+                    trimmed,
+                    submitTargetLang,
+                    submitSourceLang
+                  )
                 ).trim()
                 if (translated) {
                   outgoingBody = translated
                   translatedMeta = {
                     originalText: trimmed,
                     translatedToLang: submitTargetLang,
+                    sourceLang: submitSourceLang,
                   }
                 }
               } catch (err) {
@@ -908,6 +954,14 @@ export const Composer: React.FC<ComposerProps> = ({
               } finally {
                 adjustTranslating(-1)
               }
+            }
+            if (!submitIsDm && activeTargetKeyRef.current !== submitTargetKey) {
+              pushToast(
+                'warning',
+                'Switched rooms before translation finished',
+                'Message was not sent to the new room.'
+              )
+              return false
             }
             innerSendPromise = dispatchText(outgoingBody, translatedMeta)
             return true

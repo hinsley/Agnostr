@@ -432,7 +432,12 @@ export interface AgnostrEngine {
   totalDmUnread: number
   openDmThread: (peerPubkey: string, nicknameHint?: string, preferredProtocol?: DmProtocol) => void
   closeDmThread: (pubkey: string) => void
-  sendDirectMessage: (peerPubkey: string, content: string, protocol?: DmProtocol) => Promise<boolean>
+  sendDirectMessage: (
+    peerPubkey: string,
+    content: string,
+    protocol?: DmProtocol,
+    onPublishedId?: (id: string) => void
+  ) => Promise<boolean>
 
   // Channel & messaging actions
   tuneGeohash: (geohashOrCity: string) => boolean
@@ -445,6 +450,7 @@ export interface AgnostrEngine {
       onPublishedId?: (id: string) => void
       originalText?: string
       translatedToLang?: string
+      sourceLang?: string
     }
   ) => Promise<boolean>
   sendReaction: (message: GeoMessage, emoji: string) => Promise<void>

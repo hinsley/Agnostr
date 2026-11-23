@@ -7,6 +7,7 @@ import {
   TRANSLATOR_MODELS,
   translationCacheKey,
   type OutgoingOriginalEntry,
+  type TranslateMessageOptions,
   type TranslationEntry,
   type TranslatorEngine,
   type TranslatorModelKey,
@@ -14,13 +15,15 @@ import {
   type TranslatorRuntimeDevice,
   type TranslatorSettings,
 } from '../types/translator.ts'
+import { isNonTranslatableText } from '../lib/languageDetect.ts'
 import type {
   TranslatorWorkerInMessage,
   TranslatorWorkerOutMessage,
 } from '../lib/translator.worker.ts'
 
 const PREFS_STORAGE_KEY = 'agnostr:v2:translator_prefs'
-const TRANSLATIONS_STORAGE_KEY = 'agnostr:v2:translations'
+const LEGACY_V2_TRANSLATIONS_STORAGE_KEY = 'agnostr:v2:translations'
+const TRANSLATIONS_STORAGE_KEY = 'agnostr:v3:translations'
 const OUTGOING_ORIGINALS_STORAGE_KEY = 'agnostr:v2:translator_outgoing'
 const LEGACY_TRANSFORMERS_CACHE_KEY = 'transformers-cache'
 
@@ -36,6 +39,8 @@ interface PersistedTranslationRecord {
   text: string
   targetLang: string
   modelKey?: TranslatorModelKey
+  detectedSourceLang?: string
+  sameLanguage?: boolean
   updatedAt: number
 }
 
@@ -54,6 +59,7 @@ interface PendingMessageRequest {
   modelKey: TranslatorModelKey
   cacheKey: string
   targetLang: string
+  scopeKey?: string
   resolve: (text: string | null) => void
 }
 
@@ -105,17 +111,19 @@ function normalizeModelKey(raw: unknown): TranslatorModelKey {
   return DEFAULT_TRANSLATOR_MODEL_KEY
 }
 
-function isLegacyLfm3CacheUrl(url: string): boolean {
+function isLegacyOrBrokenCacheUrl(url: string): boolean {
   const lower = url.toLowerCase()
   return (
     lower.includes('lfm3-1.7b-onnx') ||
     lower.includes('lfm3%2d1.7b') ||
     lower.includes('onnx-community/lfm3') ||
-    lower.includes('onnx-community%2flfm3')
+    lower.includes('onnx-community%2flfm3') ||
+    ((lower.includes('m2m100_418m') || lower.includes('m2m100%5f418m')) &&
+      lower.includes('_q4f16.onnx'))
   )
 }
 
-async function evictLegacyLfm3Caches(): Promise<void> {
+async function evictLegacyTranslatorCaches(): Promise<void> {
   if (typeof caches === 'undefined') return
   for (const cacheName of [TRANSLATOR_CACHE_KEY, LEGACY_TRANSFORMERS_CACHE_KEY]) {
     try {
@@ -124,7 +132,7 @@ async function evictLegacyLfm3Caches(): Promise<void> {
       const cache = await caches.open(cacheName)
       const keys = await cache.keys()
       for (const req of keys) {
-        if (isLegacyLfm3CacheUrl(req.url)) {
+        if (isLegacyOrBrokenCacheUrl(req.url)) {
           await cache.delete(req)
         }
       }
@@ -142,6 +150,10 @@ function loadTranslatorSettings(): TranslatorSettings {
     return {
       enabled: Boolean(parsed.enabled),
       model: normalizeModelKey(parsed.model),
+      sourceLanguage: normalizeLanguageName(
+        parsed.sourceLanguage,
+        DEFAULT_TRANSLATOR_SETTINGS.sourceLanguage
+      ),
       myLanguage: normalizeLanguageName(
         parsed.myLanguage,
         DEFAULT_TRANSLATOR_SETTINGS.myLanguage
@@ -180,6 +192,8 @@ function pruneTranslationsMap(
 function loadTranslationCache(
   expectedModelKey: TranslatorModelKey
 ): Record<string, PersistedTranslationRecord> {
+  // Purge legacy v2 translation cache that could hold poisoned wrong-language/garbage entries
+  safeStorageRemove(LEGACY_V2_TRANSLATIONS_STORAGE_KEY)
   const raw = safeStorageGet(TRANSLATIONS_STORAGE_KEY)
   if (!raw) return {}
   try {
@@ -201,6 +215,11 @@ function loadTranslationCache(
           text: rec.text,
           targetLang: rec.targetLang.trim(),
           modelKey: rec.modelKey,
+          detectedSourceLang:
+            typeof rec.detectedSourceLang === 'string' && rec.detectedSourceLang.trim()
+              ? rec.detectedSourceLang.trim()
+              : undefined,
+          sameLanguage: typeof rec.sameLanguage === 'boolean' ? rec.sameLanguage : undefined,
           updatedAt:
             typeof rec.updatedAt === 'number' && Number.isFinite(rec.updatedAt)
               ? rec.updatedAt
@@ -318,28 +337,6 @@ function hydrateOutgoingIntoTranslations(
   return next
 }
 
-/**
- * Returns true when text contains no translatable natural-language content
- * (empty, URL-only, emoji-only, mention/channel/Nostr-bech32-only, or pure numbers/symbols).
- */
-function isNonTranslatableText(raw: string): boolean {
-  const trimmed = raw.trim()
-  if (!trimmed) return true
-
-  const stripped = trimmed
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/https?:\/\/\S+/gi, ' ')
-    .replace(/\bwww\.\S+/gi, ' ')
-    .replace(/\bnostr:(?:npub|nsec|note|nprofile|nevent|naddr)1[02-9ac-hj-np-z]+\b/gi, ' ')
-    .replace(/\b(?:npub|note|nprofile|nevent|naddr)1[02-9ac-hj-np-z]{20,}\b/gi, ' ')
-    .replace(/\blnbc[a-z0-9]{20,}\b/gi, ' ')
-    .replace(/\bcashu[AB][A-Za-z0-9_\-+=]{20,}\b/g, ' ')
-    .replace(/(^|\s)@[A-Za-z0-9_.\-#]+/g, ' ')
-    .replace(/(^|\s)#[A-Za-z0-9_-]+/g, ' ')
-
-  return !/\p{L}/u.test(stripped)
-}
-
 function hasInitialWebGpuApi(): boolean {
   if (typeof navigator === 'undefined') return false
   const nav = navigator as Navigator & { gpu?: { requestAdapter?: unknown } }
@@ -402,6 +399,8 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         status: 'done',
         text: rec.text,
         targetLang: rec.targetLang,
+        detectedSourceLang: rec.detectedSourceLang,
+        sameLanguage: rec.sameLanguage,
         updatedAt: rec.updatedAt,
       }
     }
@@ -449,7 +448,8 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       }
     }
     void probe()
-    void evictLegacyLfm3Caches()
+    safeStorageRemove(LEGACY_V2_TRANSLATIONS_STORAGE_KEY)
+    void evictLegacyTranslatorCaches()
     return () => {
       cancelled = true
     }
@@ -534,6 +534,53 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       setModelError(null)
     }, IDLE_WORKER_TEARDOWN_MS)
   }, [clearIdleTeardownTimer, terminateWorker])
+
+  const cancelScope = useCallback(
+    (keepScopeKey?: string) => {
+      if (workerRef.current) {
+        try {
+          workerRef.current.postMessage({
+            type: 'cancelScope',
+            keepScopeKey,
+          } satisfies TranslatorWorkerInMessage)
+        } catch {
+          // Ignore postMessage failure
+        }
+      }
+
+      const staleKeys: string[] = []
+      for (const [reqId, req] of Array.from(pendingRef.current.entries())) {
+        if (req.kind !== 'message') continue
+        if (!keepScopeKey || req.scopeKey !== keepScopeKey) {
+          pendingRef.current.delete(reqId)
+          inFlightByKeyRef.current.delete(req.cacheKey)
+          staleKeys.push(req.cacheKey)
+          req.resolve(null)
+        }
+      }
+
+      if (staleKeys.length > 0) {
+        setTranslations((prev) => {
+          let changed = false
+          const next = { ...prev }
+          for (const key of staleKeys) {
+            if (next[key]?.status === 'loading') {
+              delete next[key]
+              changed = true
+            }
+          }
+          if (changed) {
+            translationsRef.current = next
+            return next
+          }
+          return prev
+        })
+      }
+
+      scheduleIdleWorkerTeardown()
+    },
+    [scheduleIdleWorkerTeardown]
+  )
 
   useEffect(() => {
     if (settings.enabled) {
@@ -666,6 +713,8 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
               text: translated,
               targetLang: pending.targetLang,
               modelKey: pending.modelKey,
+              detectedSourceLang: msg.detectedSourceLang,
+              sameLanguage: msg.sameLanguage,
               updatedAt: now,
             },
           })
@@ -676,6 +725,8 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
             status: 'done',
             text: translated,
             targetLang: pending.targetLang,
+            detectedSourceLang: msg.detectedSourceLang,
+            sameLanguage: msg.sameLanguage,
             updatedAt: now,
           }
           setTranslations((prev) => {
@@ -842,6 +893,10 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       const next: TranslatorSettings = {
         enabled: patch.enabled !== undefined ? Boolean(patch.enabled) : prev.enabled,
         model: nextModelKey,
+        sourceLanguage:
+          patch.sourceLanguage !== undefined
+            ? normalizeLanguageName(patch.sourceLanguage, prev.sourceLanguage)
+            : prev.sourceLanguage,
         myLanguage:
           patch.myLanguage !== undefined
             ? normalizeLanguageName(patch.myLanguage, prev.myLanguage)
@@ -860,10 +915,18 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
             : prev.underlyingCollapsed,
       }
 
+      const langChanged =
+        next.myLanguage !== prev.myLanguage || next.sourceLanguage !== prev.sourceLanguage
+      const turnedOff = prev.enabled && !next.enabled
+
       settingsRef.current = next
       activeModelRef.current = TRANSLATOR_MODELS[next.model]
       setSettings(next)
       saveTranslatorSettings(next)
+
+      if (modelChanged || langChanged || turnedOff) {
+        cancelScope()
+      }
 
       if (modelChanged) {
         // Clear in-memory translations (preserving outgoing originals) so messages re-translate with the new model
@@ -876,6 +939,8 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
             status: 'done',
             text: rec.text,
             targetLang: rec.targetLang,
+            detectedSourceLang: rec.detectedSourceLang,
+            sameLanguage: rec.sameLanguage,
             updatedAt: rec.updatedAt,
           }
         }
@@ -911,7 +976,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         void preloadModel()
       }
     },
-    [preloadModel]
+    [cancelScope, preloadModel]
   )
 
   const recordOutgoingOriginal = useCallback(
@@ -919,18 +984,22 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       msgId: string,
       originalText: string,
       translatedText: string,
-      targetLang: string
+      targetLang: string,
+      sourceLang?: string
     ) => {
       const cleanId = msgId.trim()
       if (!cleanId) return
-      const sourceLang = settingsRef.current.myLanguage
+      const resolvedSource = normalizeLanguageName(
+        sourceLang,
+        settingsRef.current.myLanguage
+      )
       const cleanTarget = targetLang.trim() || settingsRef.current.outgoingLanguage
       const now = Date.now()
       const nextPersisted = saveOutgoingOriginals({
         ...persistedOutgoingRef.current,
         [cleanId]: {
           originalText,
-          sourceLang,
+          sourceLang: resolvedSource,
           translatedText,
           targetLang: cleanTarget,
           updatedAt: now,
@@ -942,14 +1011,16 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       setOriginalOutgoingById(stripped)
 
       // Also expose under translations[msgId:sourceLang] so left-column lookups are instant
-      const sourceKey = translationCacheKey(cleanId, sourceLang)
+      const sourceKey = translationCacheKey(cleanId, resolvedSource)
       setTranslations((prev) => {
         const next: Record<string, TranslationEntry> = {
           ...prev,
           [sourceKey]: {
             status: 'done',
             text: originalText,
-            targetLang: sourceLang,
+            targetLang: resolvedSource,
+            detectedSourceLang: resolvedSource,
+            sameLanguage: true,
             updatedAt: now,
           },
         }
@@ -964,7 +1035,8 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
     (
       msgId: string,
       text: string,
-      targetLang?: string
+      targetLang?: string,
+      options?: TranslateMessageOptions
     ): Promise<string | null> => {
       const cleanId = msgId.trim()
       if (!cleanId || isNonTranslatableText(text)) {
@@ -976,17 +1048,24 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         settingsRef.current.myLanguage
       )
 
-      // If this is our own previously translated outgoing message and target matches our source language,
+      const rawSource = options?.sourceLang ?? settingsRef.current.sourceLanguage
+      const explicitSource =
+        rawSource && rawSource.trim() && rawSource.trim().toLowerCase() !== 'auto'
+          ? rawSource.trim()
+          : undefined
+
+      // If this is our own previously translated outgoing message and target matches its original language,
       // return the exact original text we wrote instead of round-trip translating.
       const ownOriginal = originalOutgoingByIdRef.current[cleanId]
       if (
         ownOriginal &&
+        !explicitSource &&
         ownOriginal.sourceLang.trim().toLowerCase() === resolvedLang.toLowerCase()
       ) {
         return Promise.resolve(ownOriginal.originalText)
       }
 
-      const cacheKey = translationCacheKey(cleanId, resolvedLang)
+      const cacheKey = translationCacheKey(cleanId, resolvedLang, explicitSource)
       const existing = translationsRef.current[cacheKey]
       if (existing?.status === 'done' && existing.text) {
         const persisted = persistedTranslationsRef.current[cacheKey]
@@ -1000,6 +1079,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       if (inFlight) return inFlight
 
       const model = activeModelRef.current
+      let promiseRef: Promise<string | null> | null = null
       const promise = new Promise<string | null>((resolve) => {
         try {
           const worker = ensureWorker()
@@ -1023,6 +1103,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
             modelKey: model.key,
             cacheKey,
             targetLang: resolvedLang,
+            scopeKey: options?.scopeKey,
             resolve,
           })
 
@@ -1033,7 +1114,10 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
             modelId: model.id,
             text,
             targetLang: resolvedLang,
-            priority: 'normal',
+            sourceLang: explicitSource,
+            roomHintLang: options?.roomHintLang ?? null,
+            scopeKey: options?.scopeKey,
+            priority: options?.priority ?? 'normal',
           }
           worker.postMessage(payload)
         } catch (err) {
@@ -1055,9 +1139,12 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
           resolve(null)
         }
       }).finally(() => {
-        inFlightByKeyRef.current.delete(cacheKey)
+        if (promiseRef && inFlightByKeyRef.current.get(cacheKey) === promiseRef) {
+          inFlightByKeyRef.current.delete(cacheKey)
+        }
       })
 
+      promiseRef = promise
       inFlightByKeyRef.current.set(cacheKey, promise)
       return promise
     },
@@ -1065,7 +1152,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
   )
 
   const translateOutgoingText = useCallback(
-    async (text: string, targetLang?: string): Promise<string> => {
+    async (text: string, targetLang?: string, sourceLang?: string): Promise<string> => {
       if (isNonTranslatableText(text)) {
         return text
       }
@@ -1074,9 +1161,12 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         targetLang,
         settingsRef.current.outgoingLanguage
       )
-      const sourceLang = settingsRef.current.myLanguage
+      const resolvedSource = normalizeLanguageName(
+        sourceLang,
+        settingsRef.current.myLanguage
+      )
 
-      if (sourceLang.trim().toLowerCase() === resolvedTarget.toLowerCase()) {
+      if (resolvedSource.toLowerCase() === resolvedTarget.toLowerCase()) {
         return text
       }
 
@@ -1097,7 +1187,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
           modelKey: model.key,
           modelId: model.id,
           text,
-          sourceLang,
+          sourceLang: resolvedSource,
           targetLang: resolvedTarget,
           priority: 'high',
         }
@@ -1109,6 +1199,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
 
   const clearTranslationCache = useCallback(() => {
     safeStorageRemove(TRANSLATIONS_STORAGE_KEY)
+    safeStorageRemove(LEGACY_V2_TRANSLATIONS_STORAGE_KEY)
     persistedTranslationsRef.current = {}
     setTranslations((prev) => {
       const loadingOnly: Record<string, TranslationEntry> = {}
@@ -1145,7 +1236,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       if (typeof caches !== 'undefined') {
         await caches.delete(TRANSLATOR_CACHE_KEY)
       }
-      await evictLegacyLfm3Caches()
+      await evictLegacyTranslatorCaches()
       pushToastRef.current?.(
         'info',
         'Translator model cache cleared',
@@ -1164,6 +1255,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
     terminateWorker()
     safeStorageRemove(PREFS_STORAGE_KEY)
     safeStorageRemove(TRANSLATIONS_STORAGE_KEY)
+    safeStorageRemove(LEGACY_V2_TRANSLATIONS_STORAGE_KEY)
     safeStorageRemove(OUTGOING_ORIGINALS_STORAGE_KEY)
 
     const defaults = { ...DEFAULT_TRANSLATOR_SETTINGS }
@@ -1209,6 +1301,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       recordOutgoingOriginal,
       translateMessage,
       translateOutgoingText,
+      cancelScope,
       cachedTranslationCount,
       clearTranslationCache,
       resetAll,
@@ -1230,6 +1323,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       recordOutgoingOriginal,
       translateMessage,
       translateOutgoingText,
+      cancelScope,
       cachedTranslationCount,
       clearTranslationCache,
       resetAll,

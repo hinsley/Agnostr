@@ -10,6 +10,9 @@ import {
   type TranslatorModelStatus,
   type TranslatorRuntimeDevice,
 } from '../types/translator.ts'
+import { detectLanguageDetailed, isNonTranslatableText } from './languageDetect.ts'
+
+export type TranslatorJobPriority = 'high' | 'visible' | 'normal'
 
 export type TranslatorWorkerInMessage =
   | {
@@ -26,7 +29,13 @@ export type TranslatorWorkerInMessage =
       text: string
       targetLang: string
       sourceLang?: string
-      priority: 'high' | 'normal'
+      roomHintLang?: string | null
+      scopeKey?: string
+      priority: TranslatorJobPriority
+    }
+  | {
+      type: 'cancelScope'
+      keepScopeKey?: string
     }
   | {
       type: 'dispose'
@@ -52,6 +61,8 @@ export type TranslatorWorkerOutMessage =
       modelId: string
       runtimeDevice: TranslatorRuntimeDevice
       dtype: TranslatorModelDtype
+      detectedSourceLang?: string
+      sameLanguage?: boolean
     }
   | {
       type: 'error'
@@ -92,10 +103,12 @@ interface QueuedJob {
   requestId: string
   modelKey: TranslatorModelKey
   modelId: string
-  priority: 'high' | 'normal'
+  priority: TranslatorJobPriority
   text?: string
   targetLang?: string
   sourceLang?: string
+  roomHintLang?: string | null
+  scopeKey?: string
 }
 
 interface ActiveModelHandle {
@@ -106,12 +119,19 @@ interface ActiveModelHandle {
   pipe: TranslationPipelineLike
 }
 
-const MAX_PENDING_NORMAL_JOBS = 48
+interface TranslationRunOutput {
+  text: string
+  detectedSourceLang: string
+  sameLanguage: boolean
+}
+
+const MAX_PENDING_NORMAL_JOBS = 64
 const MAX_SEGMENT_CHARS = 900
+const INFERENCE_TIMEOUT_MS = 30_000
 const LEGACY_TRANSFORMERS_CACHE_KEY = 'transformers-cache'
 
 // Verified encoder + decoder ONNX byte totals from HuggingFace live probe:
-// M2M-100 q8: 274.5 + 328.2 = 602.7 MiB (~632 MB); q4f16: 333.7 + 361.6 = 695.3 MiB (~729 MB)
+// M2M-100 q8: 274.5 + 328.2 = 602.7 MiB (~632 MB)
 // NLLB-200 q8: 399.7 + 453.5 = 853.2 MiB (~895 MB); q4f16: 583.9 + 611.9 = 1,195.9 MiB (~1,254 MB)
 const EXPECTED_MODEL_BYTES: Record<TranslatorModelKey, Record<TranslatorModelDtype, number>> = {
   m2m100: {
@@ -124,33 +144,40 @@ const EXPECTED_MODEL_BYTES: Record<TranslatorModelKey, Record<TranslatorModelDty
   },
 }
 
+const COMPACT_SCRIPT_RE = /[\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0E00-\u0E7F]/
+
 let transformersModulePromise: Promise<typeof import('@huggingface/transformers')> | null = null
 let activeHandle: ActiveModelHandle | null = null
 let webGpuFailed = false
 let legacyEvictionStarted = false
 
 const queue: QueuedJob[] = []
+const cancelledRequestIds = new Set<string>()
+let activeJob: QueuedJob | null = null
 let processing = false
 
 function postOut(msg: TranslatorWorkerOutMessage): void {
   self.postMessage(msg)
 }
 
-function isLegacyLfm3CacheUrl(url: string): boolean {
+function isLegacyOrBrokenCacheUrl(url: string): boolean {
   const lower = url.toLowerCase()
   return (
     lower.includes('lfm3-1.7b-onnx') ||
     lower.includes('lfm3%2d1.7b') ||
     lower.includes('onnx-community/lfm3') ||
-    lower.includes('onnx-community%2flfm3')
+    lower.includes('onnx-community%2flfm3') ||
+    // Evict broken m2m100 q4f16 weights from older builds (m2m100 always runs wasm/q8)
+    ((lower.includes('m2m100_418m') || lower.includes('m2m100%5f418m')) &&
+      lower.includes('_q4f16.onnx'))
   )
 }
 
 /**
- * Silently evicts legacy ~1.1–1.3 GB LFM3-1.7B-ONNX cache entries from both
- * `agnostr-translator-cache` and `transformers-cache` so users reclaim storage.
+ * Silently evicts legacy LFM3-1.7B-ONNX and broken M2M-100 q4f16 cache entries
+ * from both `agnostr-translator-cache` and `transformers-cache`.
  */
-async function evictLegacyLfm3CacheOnce(): Promise<void> {
+async function evictLegacyCacheOnce(): Promise<void> {
   if (legacyEvictionStarted) return
   legacyEvictionStarted = true
   try {
@@ -162,7 +189,7 @@ async function evictLegacyLfm3CacheOnce(): Promise<void> {
       const keys = await cache.keys()
       const deletions: Promise<boolean>[] = []
       for (const req of keys) {
-        if (isLegacyLfm3CacheUrl(req.url)) {
+        if (isLegacyOrBrokenCacheUrl(req.url)) {
           deletions.push(cache.delete(req))
         }
       }
@@ -236,6 +263,13 @@ async function disposeActiveModel(): Promise<void> {
   }
 }
 
+function extractTranslationText(
+  out: TranslationOutputItemLike | TranslationOutputItemLike[]
+): string {
+  const first = Array.isArray(out) ? out[0] : out
+  return typeof first?.translation_text === 'string' ? first.translation_text.trim() : ''
+}
+
 async function createPipelineAttempt(
   mod: typeof import('@huggingface/transformers'),
   modelKey: TranslatorModelKey,
@@ -289,7 +323,6 @@ async function createPipelineAttempt(
 
     let computedPercent = lastPercent
     if (sumTotal > 0) {
-      // Wait until both encoder + decoder ONNX chunks report totals before dropping the expected total floor
       const effectiveTotal =
         onnxFilesWithTotal.size >= 2 ? sumTotal : Math.max(sumTotal, expectedTotalBytes)
       computedPercent = Math.min(
@@ -303,11 +336,7 @@ async function createPipelineAttempt(
 
     const percent = Math.min(99, Math.max(lastPercent, computedPercent))
     const now = Date.now()
-    if (
-      percent !== lastPercent ||
-      info.status === 'done' ||
-      now - lastReportTs > 120
-    ) {
+    if (percent !== lastPercent || info.status === 'done' || now - lastReportTs > 120) {
       lastPercent = percent
       lastReportTs = now
       postOut({
@@ -336,12 +365,34 @@ async function createPipelineAttempt(
   })
 }
 
+/**
+ * 1-shot sanity verification for WebGPU pipelines (guards against GPU driver / FP16
+ * silent numerical collapse that outputs punctuation garbage without throwing).
+ */
+async function verifyNllbWebGpuSanity(pipe: TranslationPipelineLike): Promise<boolean> {
+  try {
+    const out = await pipe('Hello world', {
+      src_lang: 'eng_Latn',
+      tgt_lang: 'spa_Latn',
+      num_beams: 1,
+      max_new_tokens: 24,
+      repetition_penalty: 1.12,
+      no_repeat_ngram_size: 4,
+    })
+    const text = extractTranslationText(out)
+    const letterCount = text.match(/\p{L}/gu)?.length ?? 0
+    return letterCount >= 3
+  } catch {
+    return false
+  }
+}
+
 async function ensureModel(
   rawModelKey: TranslatorModelKey,
   rawModelId: string,
   forceWasm = false
 ): Promise<ActiveModelHandle> {
-  void evictLegacyLfm3CacheOnce()
+  void evictLegacyCacheOnce()
 
   const modelKey: TranslatorModelKey =
     rawModelKey === 'nllb200' ? 'nllb200' : DEFAULT_TRANSLATOR_MODEL_KEY
@@ -359,31 +410,46 @@ async function ensureModel(
   await disposeActiveModel()
 
   const mod = await getTransformersModule()
-  const gpu = await probeWebGpu()
 
-  // Live-verified optimal dtype strategy:
-  // - WebGPU w/ shader-f16: q4f16 (GPU MatMulNBits) with automatic fallback to WASM q8
-  // - Otherwise: WASM q8 (602.7 MB M2M-100 / 853.2 MB NLLB-200 — never int8/q4 which are 1.1-2.2 GB!)
+  // Empirically verified runtime matrix:
+  // - M2M-100: ALWAYS WASM q8 (602.7 MiB, 260–650 ms/msg, 100% accurate).
+  //   Never WebGPU q4f16/fp16 (FP16 collapse outputs "."/"¿ ¿,") or WebGPU q8 (3× slower).
+  // - NLLB-200: WebGPU q4f16 when WebGPU+shader-f16 passes 1-shot sanity check (207–440 ms/msg),
+  //   with automatic fallback to WASM q8 (853.2 MiB, 357–830 ms/msg).
   const attempts: Array<{
     device: TranslatorRuntimeDevice
     dtype: TranslatorModelDtype
   }> = []
 
-  if (!forceWasm && !webGpuFailed && gpu.available && gpu.hasFp16) {
-    attempts.push({ device: 'webgpu', dtype: 'q4f16' })
+  if (modelKey === 'nllb200' && !forceWasm && !webGpuFailed) {
+    const gpu = await probeWebGpu()
+    if (gpu.available && gpu.hasFp16) {
+      attempts.push({ device: 'webgpu', dtype: 'q4f16' })
+    }
   }
   attempts.push({ device: 'wasm', dtype: 'q8' })
 
   let lastErr: unknown = null
   for (const attempt of attempts) {
+    let pipe: TranslationPipelineLike | null = null
     try {
-      const pipe = await createPipelineAttempt(
-        mod,
-        modelKey,
-        modelId,
-        attempt.device,
-        attempt.dtype
-      )
+      pipe = await createPipelineAttempt(mod, modelKey, modelId, attempt.device, attempt.dtype)
+      if (attempt.device === 'webgpu' && modelKey === 'nllb200') {
+        const sane = await verifyNllbWebGpuSanity(pipe)
+        if (!sane) {
+          webGpuFailed = true
+          if (typeof pipe.dispose === 'function') {
+            try {
+              await pipe.dispose()
+            } catch {
+              // Ignore dispose error
+            }
+          }
+          pipe = null
+          lastErr = new Error('WebGPU self-check failed; falling back to WASM.')
+          continue
+        }
+      }
       activeHandle = {
         modelKey,
         modelId,
@@ -404,6 +470,13 @@ async function ensureModel(
       return activeHandle
     } catch (err) {
       lastErr = err
+      if (pipe && typeof pipe.dispose === 'function') {
+        try {
+          await pipe.dispose()
+        } catch {
+          // Ignore dispose error
+        }
+      }
       if (attempt.device === 'webgpu') {
         webGpuFailed = true
       }
@@ -416,206 +489,13 @@ async function ensureModel(
 }
 
 // ---------------------------------------------------------------------------
-// Lightweight Deterministic Source Language Detection (Script + Latin Heuristics)
-// ---------------------------------------------------------------------------
-
-const TRADITIONAL_HAN_RE = /[體國臺學機時會來個點這為說們發與後經開關問進動對義無應當產車書長門東風雲龍電愛馬鳥魚麼]/g
-const SIMPLIFIED_HAN_RE = /[体国台学机时会来个点这为说们发与后经开关问进动对义无应当产车书长门东风云龙电爱马鸟鱼么]/g
-
-const LATIN_LANG_STOPWORDS: Record<string, ReadonlySet<string>> = {
-  English: new Set([
-    'the', 'and', 'you', 'that', 'this', 'with', 'for', 'are', 'have', 'not', 'but', 'what',
-    'all', 'your', 'from', 'they', 'just', 'like', 'about', 'would', 'there', 'their', 'will',
-    'can', 'how', 'when', 'where', 'hello', 'hey', 'thanks', 'thank', 'good', 'please', 'yes',
-    'really', 'going', 'think', 'know', 'here', 'been', 'were', 'was', 'has', 'had', 'its',
-    'dont', "don't", "it's", "i'm", "that's", "can't", "won't", 'because', 'should', 'could',
-  ]),
-  Spanish: new Set([
-    'que', 'los', 'las', 'por', 'para', 'con', 'una', 'uno', 'pero', 'como', 'cómo', 'está',
-    'estás', 'estoy', 'hola', 'gracias', 'amigo', 'buenos', 'buenas', 'días', 'tardes', 'noches',
-    'porque', 'también', 'todo', 'todos', 'esta', 'este', 'eso', 'muy', 'bien', 'donde', 'dónde',
-    'quien', 'quién', 'cuando', 'cuándo', 'tengo', 'tiene', 'tienes', 'hacer', 'puede', 'puedo',
-    'quiero', 'algo', 'nada', 'siempre', 'nunca', 'ahora', 'aquí', 'mucho', 'más', 'sin', 'sobre',
-  ]),
-  French: new Set([
-    'les', 'des', 'est', 'une', 'que', 'qui', 'dans', 'pour', 'pas', 'sur', 'avec', 'plus',
-    'tout', 'mais', 'nous', 'vous', 'sont', 'être', 'avoir', 'faire', 'bonjour', 'salut', 'merci',
-    'très', 'bien', 'aussi', 'comme', 'peut', 'veux', 'suis', 'chez', 'sans', 'donc', 'alors',
-    'quand', 'comment', 'pourquoi', 'oui', 'non', "c'est", "j'ai", "n'est", "qu'il", 'toujours',
-  ]),
-  German: new Set([
-    'der', 'die', 'das', 'und', 'ist', 'nicht', 'ich', 'ein', 'eine', 'mit', 'auf', 'für',
-    'von', 'den', 'dem', 'des', 'sich', 'auch', 'als', 'wie', 'aber', 'noch', 'nach', 'über',
-    'bei', 'wir', 'ihr', 'sind', 'war', 'haben', 'wird', 'kann', 'hallo', 'danke', 'bitte',
-    'geht', 'gut', 'sehr', 'hier', 'jetzt', 'oder', 'wenn', 'weil', 'schon', 'immer', 'nein',
-  ]),
-  Portuguese: new Set([
-    'que', 'não', 'nao', 'com', 'uma', 'para', 'por', 'mais', 'como', 'mas', 'foi', 'são',
-    'sao', 'está', 'esta', 'você', 'voce', 'tudo', 'bem', 'olá', 'ola', 'obrigado', 'obrigada',
-    'muito', 'também', 'tambem', 'isso', 'aqui', 'agora', 'onde', 'quando', 'porque', 'tenho',
-    'fazer', 'pode', 'posso', 'quero', 'ainda', 'então', 'entao', 'sempre', 'nunca', 'bom',
-  ]),
-  Italian: new Set([
-    'che', 'non', 'per', 'con', 'una', 'sono', 'come', 'stai', 'ciao', 'grazie', 'prego',
-    'questo', 'questa', 'quello', 'tutto', 'molto', 'bene', 'anche', 'perché', 'perche', 'dove',
-    'quando', 'chi', 'cosa', 'fatto', 'fare', 'puoi', 'posso', 'voglio', 'sempre', 'ancora',
-    'ora', 'qui', 'degli', 'della', 'delle', 'nel', 'nella', 'alla', 'dalla', 'buongiorno',
-  ]),
-  Dutch: new Set([
-    'het', 'een', 'van', 'dat', 'niet', 'met', 'voor', 'zijn', 'maar', 'ook', 'aan', 'nog',
-    'wel', 'naar', 'dan', 'wat', 'hoe', 'waar', 'wanneer', 'waarom', 'bedankt', 'dank', 'hallo',
-    'goed', 'heel', 'veel', 'hier', 'jij', 'wij', 'zij', 'hebben', 'worden', 'kunnen', 'moeten',
-  ]),
-  Polish: new Set([
-    'nie', 'jest', 'się', 'sie', 'jak', 'tak', 'ale', 'czy', 'dla', 'tym', 'tego', 'tylko',
-    'bardzo', 'może', 'moze', 'gdzie', 'kiedy', 'cześć', 'czesc', 'dzięki', 'dzieki', 'proszę',
-    'prosze', 'dobrze', 'tutaj', 'teraz', 'wszystko', 'jeszcze', 'już', 'juz', 'przez', 'które',
-  ]),
-  Turkish: new Set([
-    'bir', 'bu', 've', 'için', 'icin', 'ile', 'ama', 'çok', 'cok', 'daha', 'gibi', 'kadar',
-    'olan', 'olarak', 'var', 'yok', 'ben', 'sen', 'biz', 'siz', 'merhaba', 'selam', 'teşekkür',
-    'tesekkur', 'teşekkürler', 'nasılsın', 'nasilsin', 'evet', 'hayır', 'hayir', 'şimdi', 'burada',
-  ]),
-  Vietnamese: new Set([
-    'không', 'khong', 'của', 'cua', 'và', 'là', 'cho', 'một', 'mot', 'có', 'được', 'duoc',
-    'trong', 'này', 'nay', 'những', 'nhung', 'người', 'nguoi', 'với', 'voi', 'bạn', 'ban',
-    'tôi', 'toi', 'chào', 'chao', 'cảm', 'cam', 'ơn', 'rất', 'nhiều', 'nhieu', 'đang', 'sẽ',
-  ]),
-  Indonesian: new Set([
-    'yang', 'dan', 'ini', 'itu', 'dengan', 'untuk', 'tidak', 'dari', 'pada', 'adalah', 'akan',
-    'juga', 'bisa', 'ada', 'saya', 'kamu', 'kita', 'mereka', 'sudah', 'belum', 'halo', 'selamat',
-    'terima', 'kasih', 'apa', 'kabar', 'baik', 'sangat', 'disini', 'sekarang', 'bagaimana',
-  ]),
-  Swedish: new Set([
-    'och', 'det', 'att', 'som', 'inte', 'för', 'med', 'har', 'jag', 'han', 'hon', 'den',
-    'till', 'men', 'var', 'kan', 'ska', 'hej', 'tack', 'bra', 'mycket', 'här', 'nu', 'hur',
-    'vad', 'när', 'varför', 'också', 'eller', 'från', 'ett', 'alla', 'bara', 'vill',
-  ]),
-  Czech: new Set([
-    'jsou', 'jsem', 'není', 'neni', 'ale', 'pro', 'jako', 'tak', 'byl', 'byla', 'být', 'byt',
-    'který', 'ktery', 'která', 'ktera', 'když', 'kdyz', 'velmi', 'ahoj', 'děkuji', 'dekuji',
-    'prosím', 'prosim', 'dobře', 'dobre', 'tady', 'teď', 'ted', 'kde', 'proč', 'proc', 'může',
-  ]),
-  Romanian: new Set([
-    'este', 'sunt', 'care', 'pentru', 'dar', 'mai', 'din', 'sau', 'fost', 'când', 'cand',
-    'dacă', 'daca', 'foarte', 'bine', 'bună', 'buna', 'salut', 'mulțumesc', 'multumesc',
-    'acum', 'aici', 'unde', 'cum', 'toate', 'acest', 'această', 'aceasta', 'doar', 'poate',
-  ]),
-}
-
-function stripNonProseForDetection(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`[^`]+`/g, ' ')
-    .replace(/https?:\/\/\S+/gi, ' ')
-    .replace(/\bwww\.\S+/gi, ' ')
-    .replace(/\bnostr:(?:npub|nsec|note|nprofile|nevent|naddr)1[02-9ac-hj-np-z]+\b/gi, ' ')
-    .replace(/\b(?:npub|note|nprofile|nevent|naddr)1[02-9ac-hj-np-z]{20,}\b/gi, ' ')
-    .replace(/\blnbc[a-z0-9]{20,}\b/gi, ' ')
-    .replace(/\bcashu[AB][A-Za-z0-9_\-+=]{20,}\b/g, ' ')
-    .replace(/(^|\s)@[A-Za-z0-9_.\-#]+/g, ' ')
-    .replace(/(^|\s)#[A-Za-z0-9_-]+/g, ' ')
-}
-
-function detectSourceLanguage(text: string, targetLangName: string): string {
-  const sample = stripNonProseForDetection(text).trim()
-  if (!sample) return targetLangName
-
-  // 1. Deterministic non-Latin Unicode script detection
-  if (/[\u3040-\u309F\u30A0-\u30FF]/.test(sample)) return 'Japanese'
-  if (/[\uAC00-\uD7AF\u1100-\u11FF]/.test(sample)) return 'Korean'
-  if (/[\u4E00-\u9FFF]/.test(sample)) {
-    const tradMatches = sample.match(TRADITIONAL_HAN_RE)?.length ?? 0
-    const simpMatches = sample.match(SIMPLIFIED_HAN_RE)?.length ?? 0
-    if (tradMatches > simpMatches) return 'Chinese (Traditional)'
-    return 'Chinese (Simplified)'
-  }
-  if (/[\u0400-\u04FF]/.test(sample)) {
-    return /[іїєґІЇЄҐ]/.test(sample) ? 'Ukrainian' : 'Russian'
-  }
-  if (/[\u0600-\u06FF]/.test(sample)) return 'Arabic'
-  if (/[\u0900-\u097F]/.test(sample)) return 'Hindi'
-  if (/[\u0E00-\u0E7F]/.test(sample)) return 'Thai'
-  if (/[\u0370-\u03FF]/.test(sample)) return 'Greek'
-  if (/[\u0590-\u05FF]/.test(sample)) return 'Hebrew'
-
-  // 2. Latin diacritic + stopword scoring
-  const scores: Record<string, number> = {}
-  const addScore = (lang: string, pts: number) => {
-    scores[lang] = (scores[lang] ?? 0) + pts
-  }
-
-  // Distinctive diacritics & punctuation
-  if (/[¿¡ñÑ]/.test(sample)) addScore('Spanish', 5)
-  if (/[áéíóúÁÉÍÓÚ]/.test(sample)) addScore('Spanish', 1)
-  if (/[ãõÃÕ]/.test(sample)) addScore('Portuguese', 6)
-  if (/[çÇ]/.test(sample)) {
-    addScore('Portuguese', 1.5)
-    addScore('French', 1.5)
-    addScore('Turkish', 1.5)
-  }
-  if (/[œŒæÆêëîïûùàèçé]/i.test(sample) && /[àèùçœ]/i.test(sample)) addScore('French', 2.5)
-  if (/[ß]/.test(sample)) addScore('German', 6)
-  if (/[äöüÄÖÜ]/.test(sample)) addScore('German', 2)
-  if (/[åÅ]/.test(sample)) addScore('Swedish', 6)
-  if (/[łśźżćńąęŁŚŹŻĆŃĄĘ]/.test(sample)) addScore('Polish', 6)
-  if (/[ğışİĞŞ]/.test(sample)) addScore('Turkish', 6)
-  if (/[đĐơƠưƯạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ]/.test(sample)) {
-    addScore('Vietnamese', 7)
-  }
-  if (/[řěůčšžďťňŘĚŮČŠŽĎŤŇ]/.test(sample)) addScore('Czech', 6)
-  if (/[șțȘȚăĂîÎ]/.test(sample)) addScore('Romanian', 5)
-
-  // Tokenize words (including contractions like don't / c'est)
-  const words = sample.toLowerCase().match(/[\p{L}]+(?:'[\p{L}]+)?/gu) ?? []
-  for (const word of words) {
-    for (const [lang, dict] of Object.entries(LATIN_LANG_STOPWORDS)) {
-      if (dict.has(word)) {
-        addScore(lang, 2)
-      }
-    }
-  }
-
-  let bestLang = ''
-  let bestScore = 0
-  let secondScore = 0
-  for (const [lang, sc] of Object.entries(scores)) {
-    if (sc > bestScore) {
-      secondScore = bestScore
-      bestScore = sc
-      bestLang = lang
-    } else if (sc > secondScore) {
-      secondScore = sc
-    }
-  }
-
-  if (bestLang && bestScore >= 2 && bestScore > secondScore) {
-    return bestLang
-  }
-  if (bestLang && bestScore >= 2) {
-    // Tie-break: prefer target language if tied (avoids unnecessary re-translation)
-    if ((scores[targetLangName] ?? 0) === bestScore) return targetLangName
-    return bestLang
-  }
-
-  // Fallback for very short ASCII messages with no stopwords:
-  // If user is reading in a non-English language, assume English; otherwise assume Spanish if non-ASCII, else English
-  const targetResolved = resolveLanguageCodes(targetLangName)
-  if (targetResolved.m2mCode !== 'en') {
-    return 'English'
-  }
-  if (bestLang && bestScore > 0) {
-    return bestLang
-  }
-  return 'English'
-}
-
-// ---------------------------------------------------------------------------
 // Structured Token Protection (Code Blocks, URLs, Nostr IDs, Cashu, Mentions)
 // ---------------------------------------------------------------------------
 
 const INLINE_PROTECTED_RE =
   /(`[^`\n]+`|\$\$[^$\n]+\$\$|\$[^$\n]+\$|https?:\/\/[^\s<>()]+|\bwww\.[^\s<>()]+|\bnostr:(?:npub|nsec|note|nprofile|nevent|naddr)1[02-9ac-hj-np-z]+\b|\b(?:npub|note|nprofile|nevent|naddr)1[02-9ac-hj-np-z]{20,}\b|\blnbc[a-z0-9]{20,}\b|\bcashu[AB][A-Za-z0-9_\-+=]{20,}\b|(?:^|(?<=\s))@[A-Za-z0-9_.\-#]+|(?:^|(?<=\s))#[A-Za-z0-9_-]+)/gi
+
+const STRUCTURAL_LINE_PREFIX_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>\s|#{1,6}\s)/
 
 interface ProtectedLine {
   leading: string
@@ -712,10 +592,7 @@ function splitLongProse(prose: string): string[] {
   return chunks
 }
 
-function resolveModelLangCode(
-  handle: ActiveModelHandle,
-  langInput: string
-): string {
+function resolveModelLangCode(handle: ActiveModelHandle, langInput: string): string {
   const resolved = resolveLanguageCodes(langInput)
   const desired = handle.modelKey === 'nllb200' ? resolved.nllbCode : resolved.m2mCode
   const supported = handle.pipe.tokenizer?.language_codes
@@ -726,11 +603,11 @@ function resolveModelLangCode(
   return supported.includes(fallback) ? fallback : supported[0]
 }
 
-function extractTranslationText(
-  out: TranslationOutputItemLike | TranslationOutputItemLike[]
-): string {
-  const first = Array.isArray(out) ? out[0] : out
-  return typeof first?.translation_text === 'string' ? first.translation_text.trim() : ''
+function computeMaxNewTokens(chunk: string): number {
+  if (COMPACT_SCRIPT_RE.test(chunk)) {
+    return Math.min(200, Math.max(32, Math.ceil(chunk.length * 2.5) + 24))
+  }
+  return Math.min(192, Math.max(24, Math.ceil(chunk.length * 0.9) + 24))
 }
 
 async function translateProseChunk(
@@ -744,13 +621,16 @@ async function translateProseChunk(
   }
   const chunks = splitLongProse(prose)
   const translatedParts: string[] = []
+  // Strictly batch=1 sequential (batching corrupts M2M-100 attention & runs 4.4× slower)
   for (const chunk of chunks) {
-    const maxLength = Math.min(512, Math.max(96, Math.ceil(chunk.length * 2.5) + 48))
+    const maxNewTokens = computeMaxNewTokens(chunk)
     const out = await handle.pipe(chunk, {
       src_lang: srcCode,
       tgt_lang: tgtCode,
       num_beams: 1,
-      max_length: maxLength,
+      max_new_tokens: maxNewTokens,
+      repetition_penalty: 1.12,
+      no_repeat_ngram_size: 4,
     })
     const result = extractTranslationText(out)
     translatedParts.push(result || chunk)
@@ -758,24 +638,132 @@ async function translateProseChunk(
   return translatedParts.join(' ')
 }
 
+function resolveSourceLanguageForMessage(
+  text: string,
+  cleanTarget: string,
+  explicitSource?: string,
+  roomHintLang?: string | null
+): { sourceLang: string; alreadySameLanguage: boolean } {
+  const explicitClean = explicitSource?.trim() ?? ''
+  if (explicitClean && explicitClean.toLowerCase() !== 'auto') {
+    return { sourceLang: explicitClean, alreadySameLanguage: false }
+  }
+
+  const targetResolved = resolveLanguageCodes(cleanTarget)
+  const targetLower = cleanTarget.toLowerCase()
+  const detected = detectLanguageDetailed(text)
+
+  if ((detected.confidence === 'high' || detected.confidence === 'medium') && detected.lang) {
+    return { sourceLang: detected.lang, alreadySameLanguage: false }
+  }
+
+  const hintClean = roomHintLang?.trim() ?? ''
+  if (hintClean && hintClean.toLowerCase() !== 'auto') {
+    const hintResolved = resolveLanguageCodes(hintClean)
+    if (
+      hintClean.toLowerCase() !== targetLower &&
+      hintResolved.nllbCode !== targetResolved.nllbCode
+    ) {
+      return { sourceLang: hintClean, alreadySameLanguage: false }
+    }
+  }
+
+  if (detected.lang && detected.lang.toLowerCase() !== targetLower) {
+    return { sourceLang: detected.lang, alreadySameLanguage: false }
+  }
+
+  if (targetResolved.m2mCode !== 'en') {
+    return { sourceLang: 'English', alreadySameLanguage: false }
+  }
+
+  return { sourceLang: cleanTarget, alreadySameLanguage: true }
+}
+
+/**
+ * Coalesces consecutive short plain-prose lines within a paragraph so wrapped chat
+ * messages translate in a single ONNX pass, while preserving blank lines, lists,
+ * blockquotes, headings, and lines anchored by leading/trailing protected tokens.
+ */
+function buildParagraphSegments(part: string): Array<{ kind: 'raw'; text: string } | { kind: 'prose'; line: string }> {
+  const rawLines = part.split('\n')
+  const segments: Array<{ kind: 'raw'; text: string } | { kind: 'prose'; line: string }> = []
+  let proseBuffer = ''
+
+  const flushBuffer = () => {
+    if (proseBuffer) {
+      segments.push({ kind: 'prose', line: proseBuffer })
+      proseBuffer = ''
+    }
+  }
+
+  for (const line of rawLines) {
+    if (!line.trim()) {
+      flushBuffer()
+      segments.push({ kind: 'raw', text: line })
+      continue
+    }
+
+    if (isNonTranslatableText(line)) {
+      flushBuffer()
+      segments.push({ kind: 'raw', text: line })
+      continue
+    }
+
+    const isStructural = STRUCTURAL_LINE_PREFIX_RE.test(line)
+    const protectedInfo = protectLine(line)
+    const hasEdgeTokens = Boolean(protectedInfo.leading || protectedInfo.trailing)
+
+    if (isStructural || hasEdgeTokens || line.length > 260) {
+      flushBuffer()
+      segments.push({ kind: 'prose', line })
+      continue
+    }
+
+    if (proseBuffer && proseBuffer.length + 1 + line.trim().length <= 360) {
+      proseBuffer = `${proseBuffer} ${line.trim()}`
+    } else {
+      flushBuffer()
+      proseBuffer = line.trim()
+    }
+  }
+
+  flushBuffer()
+  return segments
+}
+
 async function runTranslation(
   handle: ActiveModelHandle,
   text: string,
   targetLang: string,
-  sourceLang?: string
-): Promise<string> {
+  sourceLang?: string,
+  roomHintLang?: string | null
+): Promise<TranslationRunOutput> {
   const cleanTarget = targetLang.trim() || 'English'
-  const effectiveSource =
-    sourceLang && sourceLang.trim() && sourceLang.trim().toLowerCase() !== 'auto'
-      ? sourceLang.trim()
-      : detectSourceLanguage(text, cleanTarget)
+  const { sourceLang: effectiveSource, alreadySameLanguage } = resolveSourceLanguageForMessage(
+    text,
+    cleanTarget,
+    sourceLang,
+    roomHintLang
+  )
+
+  if (alreadySameLanguage) {
+    return {
+      text: text.trim(),
+      detectedSourceLang: effectiveSource,
+      sameLanguage: true,
+    }
+  }
 
   const srcCode = resolveModelLangCode(handle, effectiveSource)
   const tgtCode = resolveModelLangCode(handle, cleanTarget)
 
   // Already in target language: return original text immediately (0 ms, zero garbling!)
   if (srcCode === tgtCode) {
-    return text.trim()
+    return {
+      text: text.trim(),
+      detectedSourceLang: effectiveSource,
+      sameLanguage: true,
+    }
   }
 
   // Split by fenced code blocks so code blocks stay 100% verbatim
@@ -790,16 +778,16 @@ async function runTranslation(
       continue
     }
 
-    const lines = part.split('\n')
+    const segments = buildParagraphSegments(part)
     const outLines: string[] = []
-    for (const line of lines) {
-      if (!line.trim()) {
-        outLines.push(line)
+    for (const seg of segments) {
+      if (seg.kind === 'raw') {
+        outLines.push(seg.text)
         continue
       }
-      const protectedLine = protectLine(line)
+      const protectedLine = protectLine(seg.line)
       if (!protectedLine.prose) {
-        outLines.push(line)
+        outLines.push(seg.line)
         continue
       }
       const translatedProse = await translateProseChunk(
@@ -813,7 +801,77 @@ async function runTranslation(
     renderedParts.push(outLines.join('\n'))
   }
 
-  return renderedParts.join('').trim()
+  return {
+    text: renderedParts.join('').trim(),
+    detectedSourceLang: effectiveSource,
+    sameLanguage: false,
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(label))
+        }, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer)
+    }
+  }
+}
+
+function priorityRank(priority: TranslatorJobPriority): number {
+  if (priority === 'high') return 0
+  if (priority === 'visible') return 1
+  return 2
+}
+
+function enqueueTranslateJob(job: QueuedJob): void {
+  const rank = priorityRank(job.priority)
+  if (rank === 0) {
+    const idx = queue.findIndex((item) => item.type !== 'load' && priorityRank(item.priority) > 0)
+    if (idx === -1) queue.push(job)
+    else queue.splice(idx, 0, job)
+    return
+  }
+
+  if (rank === 1) {
+    const idx = queue.findIndex((item) => item.type !== 'load' && priorityRank(item.priority) > 1)
+    if (idx === -1) queue.push(job)
+    else queue.splice(idx, 0, job)
+  } else {
+    queue.push(job)
+  }
+
+  // Enforce bounded background queue (prefer dropping oldest 'normal' job first, never 'high')
+  let nonHighCount = 0
+  for (const item of queue) {
+    if (item.type === 'translate' && item.priority !== 'high') {
+      nonHighCount += 1
+    }
+  }
+  while (nonHighCount > MAX_PENDING_NORMAL_JOBS) {
+    let dropIdx = queue.findIndex(
+      (item) => item.type === 'translate' && item.priority === 'normal'
+    )
+    if (dropIdx === -1) {
+      dropIdx = queue.findIndex(
+        (item) => item.type === 'translate' && item.priority === 'visible'
+      )
+    }
+    if (dropIdx === -1) break
+    const [dropped] = queue.splice(dropIdx, 1)
+    nonHighCount -= 1
+    if (dropped) {
+      postOut({ type: 'dropped', requestId: dropped.requestId })
+    }
+  }
 }
 
 async function processQueue(): Promise<void> {
@@ -823,8 +881,20 @@ async function processQueue(): Promise<void> {
     while (queue.length > 0) {
       const job = queue.shift()
       if (!job) continue
+      activeJob = job
       try {
+        if (cancelledRequestIds.delete(job.requestId)) {
+          postOut({ type: 'dropped', requestId: job.requestId })
+          continue
+        }
+
         const handle = await ensureModel(job.modelKey, job.modelId)
+
+        if (cancelledRequestIds.delete(job.requestId)) {
+          postOut({ type: 'dropped', requestId: job.requestId })
+          continue
+        }
+
         if (job.type === 'load') {
           postOut({
             type: 'result',
@@ -849,46 +919,65 @@ async function processQueue(): Promise<void> {
             modelId: handle.modelId,
             runtimeDevice: handle.device,
             dtype: handle.dtype,
+            sameLanguage: true,
           })
           continue
         }
 
-        let translatedText: string
+        let runOut: TranslationRunOutput
         let finalHandle = handle
         try {
-          translatedText = await runTranslation(
-            handle,
-            sourceText,
-            targetLang,
-            job.sourceLang
+          runOut = await withTimeout(
+            runTranslation(handle, sourceText, targetLang, job.sourceLang, job.roomHintLang),
+            INFERENCE_TIMEOUT_MS,
+            'Translation timed out.'
           )
         } catch (inferErr) {
           if (handle.device === 'webgpu') {
             webGpuFailed = true
             finalHandle = await ensureModel(job.modelKey, job.modelId, true)
-            translatedText = await runTranslation(
-              finalHandle,
-              sourceText,
-              targetLang,
-              job.sourceLang
+            if (cancelledRequestIds.delete(job.requestId)) {
+              postOut({ type: 'dropped', requestId: job.requestId })
+              continue
+            }
+            runOut = await withTimeout(
+              runTranslation(
+                finalHandle,
+                sourceText,
+                targetLang,
+                job.sourceLang,
+                job.roomHintLang
+              ),
+              INFERENCE_TIMEOUT_MS,
+              'Translation timed out.'
             )
           } else {
             throw inferErr
           }
         }
 
+        if (cancelledRequestIds.delete(job.requestId)) {
+          postOut({ type: 'dropped', requestId: job.requestId })
+          continue
+        }
+
         postOut({
           type: 'result',
           requestId: job.requestId,
-          text: translatedText,
+          text: runOut.text,
           modelKey: finalHandle.modelKey,
           modelId: finalHandle.modelId,
           runtimeDevice: finalHandle.device,
           dtype: finalHandle.dtype,
+          detectedSourceLang: runOut.detectedSourceLang,
+          sameLanguage: runOut.sameLanguage,
         })
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : 'Local translation failed.'
+        if (cancelledRequestIds.delete(job.requestId)) {
+          postOut({ type: 'dropped', requestId: job.requestId })
+          continue
+        }
+        const message = err instanceof Error ? err.message : 'Local translation failed.'
         if (job.type === 'load' || !activeHandle) {
           postOut({
             type: 'status',
@@ -904,15 +993,20 @@ async function processQueue(): Promise<void> {
           kind: job.type,
           error: message,
         })
+      } finally {
+        if (activeJob?.requestId === job.requestId) {
+          activeJob = null
+        }
       }
     }
   } finally {
+    activeJob = null
     processing = false
   }
 }
 
-// Proactively reclaim ~1.1 GB of legacy LFM3-1.7B-ONNX cache entries on worker startup
-void evictLegacyLfm3CacheOnce()
+// Proactively reclaim legacy LFM3-1.7B-ONNX & broken M2M-100 q4f16 cache entries on startup
+void evictLegacyCacheOnce()
 
 self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
   const msg = event.data
@@ -925,7 +1019,31 @@ self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
         postOut({ type: 'dropped', requestId: dropped.requestId })
       }
     }
+    if (activeJob) {
+      cancelledRequestIds.add(activeJob.requestId)
+    }
     void disposeActiveModel()
+    return
+  }
+
+  if (msg.type === 'cancelScope') {
+    const keep = msg.keepScopeKey
+    for (let i = queue.length - 1; i >= 0; i -= 1) {
+      const item = queue[i]
+      if (item.type !== 'translate' || item.priority === 'high') continue
+      if (!keep || item.scopeKey !== keep) {
+        queue.splice(i, 1)
+        postOut({ type: 'dropped', requestId: item.requestId })
+      }
+    }
+    if (
+      activeJob &&
+      activeJob.type === 'translate' &&
+      activeJob.priority !== 'high' &&
+      (!keep || activeJob.scopeKey !== keep)
+    ) {
+      cancelledRequestIds.add(activeJob.requestId)
+    }
     return
   }
 
@@ -955,33 +1073,10 @@ self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
       text: msg.text,
       targetLang: msg.targetLang,
       sourceLang: msg.sourceLang,
+      roomHintLang: msg.roomHintLang,
+      scopeKey: msg.scopeKey,
     }
-
-    if (msg.priority === 'high') {
-      // Jump ahead of queued background incoming-message translations so outgoing send feels instant
-      const firstNormalIdx = queue.findIndex((item) => item.priority === 'normal')
-      if (firstNormalIdx === -1) {
-        queue.push(job)
-      } else {
-        queue.splice(firstNormalIdx, 0, job)
-      }
-    } else {
-      let normalCount = 0
-      for (const item of queue) {
-        if (item.priority === 'normal') normalCount += 1
-      }
-      while (normalCount >= MAX_PENDING_NORMAL_JOBS) {
-        const dropIdx = queue.findIndex((item) => item.priority === 'normal')
-        if (dropIdx === -1) break
-        const [dropped] = queue.splice(dropIdx, 1)
-        normalCount -= 1
-        if (dropped) {
-          postOut({ type: 'dropped', requestId: dropped.requestId })
-        }
-      }
-      queue.push(job)
-    }
-
+    enqueueTranslateJob(job)
     void processQueue()
   }
 }

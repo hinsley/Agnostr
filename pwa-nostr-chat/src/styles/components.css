@@ -5565,17 +5565,21 @@ img.ag-avatar-agnostr,
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .ag-translator-field-label {
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .ag-translator-select {
   height: 26px;
   max-width: 142px;
+  min-width: 0;
   padding: 0 7px;
   border-radius: var(--radius-xs);
   background-color: var(--bg-input);
@@ -5587,7 +5591,7 @@ img.ag-avatar-agnostr,
 }
 
 .ag-translator-select.compact {
-  max-width: 126px;
+  max-width: 132px;
 }
 
 .ag-translator-select:focus {
@@ -5631,6 +5635,8 @@ img.ag-avatar-agnostr,
   gap: 6px;
   margin-left: auto;
   flex-shrink: 0;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .ag-translator-model-status {
@@ -5646,9 +5652,14 @@ img.ag-avatar-agnostr,
   font-weight: 600;
   color: var(--text-muted);
   white-space: nowrap;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.ag-translator-model-status.downloading {
+.ag-translator-model-status.downloading,
+.ag-translator-model-status.translating {
   color: var(--accent);
   border-color: var(--border-accent);
   background-color: var(--accent-soft);
@@ -5801,10 +5812,37 @@ img.ag-avatar-agnostr,
   gap: 6px;
   font-size: 12.5px;
   color: var(--text-muted);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ag-translator-inline-status.pending {
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.72;
 }
 
 .ag-translator-inline-status.error {
   color: var(--status-danger);
+}
+
+.ag-translator-error-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ag-translator-error-fallback {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  opacity: 0.82;
+  overflow-wrap: anywhere;
+}
+
+.ag-translator-error-fallback-label {
+  font-weight: 600;
 }
 
 .ag-translator-msg-meta {
@@ -5923,10 +5961,23 @@ img.ag-avatar-agnostr,
     padding: 6px 10px;
   }
 
+  .ag-translator-bar-row {
+    gap: 6px;
+  }
+
   .ag-translator-select {
     font-size: 16px;
     height: 32px;
-    max-width: 132px;
+    max-width: 118px;
+  }
+
+  .ag-translator-select.compact {
+    max-width: 114px;
+  }
+
+  .ag-translator-model-status {
+    font-size: 10.5px;
+    max-width: 170px;
   }
 
   .ag-translator-pill-btn {

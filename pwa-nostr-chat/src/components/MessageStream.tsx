@@ -24,7 +24,9 @@ import {
   TRANSLATION_LANGUAGE_OPTIONS,
   TRANSLATOR_MODELS,
   translationCacheKey,
+  type OutgoingOriginalEntry,
 } from '../types/translator'
+import { detectRoomDominantLanguage, isNonTranslatableText } from '../lib/languageDetect'
 import type { ZapTarget } from '../types/wallet'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { LightboxImagePayload } from './ImageLightboxModal'
@@ -131,6 +133,58 @@ export interface MessageStreamProps {
 
 const INITIAL_RENDER_LIMIT = 80
 const LOAD_EARLIER_STEP = 60
+const MAX_ACTIVE_TRANSLATIONS = 10
+const DEFAULT_VIEWPORT_TAIL = 20
+
+interface MessageTranslationSpec {
+  mode: 'skip' | 'own-original' | 'translate'
+  textToTranslate?: string
+  sourceLang?: string
+  cacheKey?: string
+  badge?: string
+}
+
+function resolveMessageTranslationSpec(
+  msg: GeoMessage,
+  outgoingOrig: OutgoingOriginalEntry | undefined,
+  myLanguage: string,
+  explicitSourceLang: string | undefined
+): MessageTranslationSpec {
+  if (msg.isSystem) return { mode: 'skip' }
+
+  if (outgoingOrig) {
+    const badge = `Sent as ${outgoingOrig.targetLang}`
+    if (outgoingOrig.sourceLang.trim().toLowerCase() === myLanguage.trim().toLowerCase()) {
+      return { mode: 'own-original', badge }
+    }
+    const origText = outgoingOrig.originalText.trim()
+    if (!origText || isNonTranslatableText(origText)) {
+      return { mode: 'skip' }
+    }
+    const origSource = outgoingOrig.sourceLang.trim()
+    const normalizedSource =
+      origSource && origSource.toLowerCase() !== 'auto' ? origSource : undefined
+    return {
+      mode: 'translate',
+      textToTranslate: origText,
+      sourceLang: normalizedSource,
+      cacheKey: translationCacheKey(msg.id, myLanguage, normalizedSource),
+      badge,
+    }
+  }
+
+  const cleanOriginal = extractCleanMessageText(msg)
+  if (!cleanOriginal || isNonTranslatableText(cleanOriginal)) {
+    return { mode: 'skip' }
+  }
+
+  return {
+    mode: 'translate',
+    textToTranslate: cleanOriginal,
+    sourceLang: explicitSourceLang,
+    cacheKey: translationCacheKey(msg.id, myLanguage, explicitSourceLang),
+  }
+}
 
 export const MessageStream: React.FC<MessageStreamProps> = ({
   engine,
@@ -161,10 +215,37 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     null
   )
   const pendingJumpIdRef = useRef<string | null>(null)
+  const visibleCountRef = useRef(0)
   const [renderLimit, setRenderLimit] = useState<number>(INITIAL_RENDER_LIMIT)
+  const [viewportRange, setViewportRange] = useState<[number, number]>([0, -1])
   const [showJumpBtn, setShowJumpBtn] = useState(false)
   const [unseenBelow, setUnseenBelow] = useState(0)
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null)
+
+  const syncViewportRange = useCallback(() => {
+    const count = visibleCountRef.current
+    if (count <= 0) {
+      setViewportRange((prev) => (prev[0] === 0 && prev[1] === -1 ? prev : [0, -1]))
+      return
+    }
+    const el = scrollRef.current
+    let nextStart: number
+    let nextEnd: number
+    if (!el || stickToBottomRef.current || el.scrollHeight <= el.clientHeight + 8) {
+      nextStart = Math.max(0, count - DEFAULT_VIEWPORT_TAIL)
+      nextEnd = count - 1
+    } else {
+      const totalH = Math.max(1, el.scrollHeight)
+      const startRatio = Math.max(0, el.scrollTop / totalH)
+      const endRatio = Math.min(1, (el.scrollTop + el.clientHeight) / totalH)
+      const overscan = 3
+      nextStart = Math.max(0, Math.min(count - 1, Math.floor(startRatio * count) - overscan))
+      nextEnd = Math.max(nextStart, Math.min(count - 1, Math.ceil(endRatio * count) + overscan))
+    }
+    setViewportRange((prev) =>
+      prev[0] === nextStart && prev[1] === nextEnd ? prev : [nextStart, nextEnd]
+    )
+  }, [])
 
   const scrollContainerToBottom = useCallback((smooth = false) => {
     const container = scrollRef.current
@@ -393,6 +474,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         if (stickToBottomRef.current) {
           scrollContainerToBottom(false)
         }
+        syncViewportRange()
       })
     }
 
@@ -412,7 +494,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       vv?.removeEventListener('resize', pinIfStuck)
       ro?.disconnect()
     }
-  }, [scrollContainerToBottom])
+  }, [scrollContainerToBottom, syncViewportRange])
 
   // Scroll to active search hit when navigating search results (auto-expanding window if hit is older)
   useEffect(() => {
@@ -476,15 +558,18 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       lastAutoExpandAtRef.current = now
       loadEarlierMessages()
     }
-  }, [unseenBelow, engine, hiddenEarlierCount, loadEarlierMessages])
+
+    syncViewportRange()
+  }, [unseenBelow, engine, hiddenEarlierCount, loadEarlierMessages, syncViewportRange])
 
   const scrollToLatest = useCallback(() => {
     stickToBottomRef.current = true
     setShowJumpBtn(false)
     setUnseenBelow(0)
     scrollContainerToBottom(true)
+    syncViewportRange()
     engine.markChannelRead()
-  }, [engine, scrollContainerToBottom])
+  }, [engine, scrollContainerToBottom, syncViewportRange])
 
   const handleJumpToMessage = useCallback(
     (id: string) => {
@@ -741,35 +826,206 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     engine.zaps.watchEventIds(watchedZapIdsKey.split(','))
   }, [watchedZapIdsKey, engine.zaps])
 
-  // Double-Column Translator Mode — auto-translate recent visible messages when ON
+  // Double-Column Translator Mode — viewport-aware newest-first sliding scheduler
   const translator = engine.translator
+  const {
+    translations,
+    originalOutgoingById,
+    translateMessage,
+    cancelScope,
+    updateSettings,
+    preloadModel,
+  } = translator
   const translatorShortLabel =
     TRANSLATOR_MODELS[translator.modelKey]?.shortLabel ?? translator.modelLabel
   const translatorEnabled = translator.settings.enabled
   const myLanguage = translator.settings.myLanguage
+  const sourceLanguage = translator.settings.sourceLanguage || 'Auto'
   const outgoingEnabled = translator.settings.outgoingEnabled
   const outgoingLanguage = translator.settings.outgoingLanguage
   const underlyingCollapsed = translator.settings.underlyingCollapsed
+  const explicitSourceLang = sourceLanguage !== 'Auto' ? sourceLanguage : undefined
+  const scopeKey = `${streamKey}|${myLanguage}|${sourceLanguage}|${translator.modelKey}`
 
+  // Sync visible message count & viewport range whenever message window, room, or translator mode changes
+  useLayoutEffect(() => {
+    visibleCountRef.current = visibleMessages.length
+    syncViewportRange()
+  }, [visibleMessages.length, streamKey, translatorEnabled, syncViewportRange])
+
+  // Detect dominant foreign language across the latest 40 non-system messages for Auto room hint
+  const recentTextsForHint = useMemo(() => {
+    if (!translatorEnabled) return [] as string[]
+    const otherTexts: string[] = []
+    const allTexts: string[] = []
+    for (let i = Math.max(0, displayMessages.length - 40); i < displayMessages.length; i += 1) {
+      const m = displayMessages[i]
+      if (m.isSystem) continue
+      const clean = extractCleanMessageText(m)
+      if (!clean || isNonTranslatableText(clean)) continue
+      allTexts.push(clean)
+      if (!m.isOwn) otherTexts.push(clean)
+    }
+    return otherTexts.length >= 2 ? otherTexts : allTexts
+  }, [translatorEnabled, displayMessages])
+
+  const roomHintLang = useMemo(() => {
+    if (!translatorEnabled || recentTextsForHint.length === 0) return null
+    return detectRoomDominantLanguage(recentTextsForHint, myLanguage)
+  }, [translatorEnabled, recentTextsForHint, myLanguage])
+
+  const effectiveSourceLabel = explicitSourceLang ?? roomHintLang ?? null
+
+  // Immediately cancel stale worker jobs on room/language/model/enabled change
+  useEffect(() => {
+    cancelScope(translatorEnabled ? scopeKey : undefined)
+  }, [translatorEnabled, scopeKey, cancelScope])
+
+  // Stop background translation cleanly when leaving chat view (e.g., switching to Agmail/Agwallet)
+  useEffect(() => {
+    return () => {
+      cancelScope(undefined)
+    }
+  }, [cancelScope])
+
+  // Prioritized newest-first sliding window scheduler (MAX_ACTIVE_TRANSLATIONS = 10, no 30-msg cap)
   useEffect(() => {
     if (!translatorEnabled) return
-    const startIdx = Math.max(0, displayMessages.length - 30)
-    for (let i = startIdx; i < displayMessages.length; i += 1) {
-      const msg = displayMessages[i]
-      if (msg.isSystem) continue
-      if (translator.originalOutgoingById[msg.id]) continue
-      const key = translationCacheKey(msg.id, myLanguage)
-      if (translator.translations[key]) continue
-      const clean = extractCleanMessageText(msg)
-      if (!clean) continue
-      void translator.translateMessage(msg.id, clean, myLanguage)
+    const total = visibleMessages.length
+    if (total === 0) return
+
+    let visStart: number
+    let visEnd: number
+    if (stickToBottomRef.current || viewportRange[1] < viewportRange[0]) {
+      visStart = Math.max(0, total - DEFAULT_VIEWPORT_TAIL)
+      visEnd = total - 1
+    } else {
+      visStart = Math.max(0, Math.min(total - 1, viewportRange[0]))
+      visEnd = Math.max(visStart, Math.min(total - 1, viewportRange[1]))
+    }
+
+    let activeLoadingCount = 0
+    const seenKeys = new Set<string>()
+    const inspectCandidate = (idx: number): MessageTranslationSpec | null => {
+      const msg = visibleMessages[idx]
+      if (!msg || msg.isSystem || msg.id.startsWith('pending-')) return null
+      const spec = resolveMessageTranslationSpec(
+        msg,
+        originalOutgoingById[msg.id],
+        myLanguage,
+        explicitSourceLang
+      )
+      if (spec.mode !== 'translate' || !spec.cacheKey || !spec.textToTranslate) return null
+      if (seenKeys.has(spec.cacheKey)) return null
+      seenKeys.add(spec.cacheKey)
+      const entry = translations[spec.cacheKey]
+      if (entry?.status === 'loading') {
+        activeLoadingCount += 1
+        return null
+      }
+      if (entry?.status === 'done' || entry?.status === 'error') {
+        return null
+      }
+      return spec
+    }
+
+    const candidates: Array<{
+      msgId: string
+      spec: MessageTranslationSpec
+      priority: 'visible' | 'normal'
+    }> = []
+
+    // Priority 1 ('visible'): viewport items NEWEST -> OLDEST (bottom-to-top)
+    for (let i = visEnd; i >= visStart; i -= 1) {
+      const spec = inspectCandidate(i)
+      if (spec) {
+        candidates.push({ msgId: visibleMessages[i].id, spec, priority: 'visible' })
+      }
+    }
+
+    // Priority 2 ('normal'): expand outward from viewport — below viewport first, then above newest -> oldest
+    for (let i = visEnd + 1; i < total; i += 1) {
+      const spec = inspectCandidate(i)
+      if (spec) {
+        candidates.push({ msgId: visibleMessages[i].id, spec, priority: 'normal' })
+      }
+    }
+    for (let i = visStart - 1; i >= 0; i -= 1) {
+      const spec = inspectCandidate(i)
+      if (spec) {
+        candidates.push({ msgId: visibleMessages[i].id, spec, priority: 'normal' })
+      }
+    }
+
+    if (candidates.length === 0) return
+
+    let slots = Math.max(0, MAX_ACTIVE_TRANSLATIONS - activeLoadingCount)
+    if (slots <= 0) return
+
+    for (const cand of candidates) {
+      if (slots <= 0) break
+      slots -= 1
+      void translateMessage(cand.msgId, cand.spec.textToTranslate!, myLanguage, {
+        sourceLang: cand.spec.sourceLang ?? 'Auto',
+        roomHintLang: cand.spec.sourceLang ? undefined : roomHintLang,
+        scopeKey,
+        priority: cand.priority,
+      })
     }
   }, [
     translatorEnabled,
-    displayMessages,
+    visibleMessages,
+    viewportRange,
     myLanguage,
-    translator,
+    explicitSourceLang,
+    roomHintLang,
+    scopeKey,
+    translations,
+    originalOutgoingById,
+    translateMessage,
   ])
+
+  const translationProgress = useMemo(() => {
+    if (!translatorEnabled) {
+      return { totalTranslatable: 0, doneCount: 0, pendingCount: 0 }
+    }
+    let totalTranslatable = 0
+    let doneCount = 0
+    let pendingCount = 0
+    for (const msg of visibleMessages) {
+      if (msg.isSystem || msg.id.startsWith('pending-')) continue
+      const spec = resolveMessageTranslationSpec(
+        msg,
+        originalOutgoingById[msg.id],
+        myLanguage,
+        explicitSourceLang
+      )
+      if (spec.mode !== 'translate' || !spec.cacheKey) continue
+      totalTranslatable += 1
+      const status = translations[spec.cacheKey]?.status
+      if (status === 'done') {
+        doneCount += 1
+      } else if (status !== 'error') {
+        pendingCount += 1
+      }
+    }
+    return { totalTranslatable, doneCount, pendingCount }
+  }, [
+    translatorEnabled,
+    visibleMessages,
+    originalOutgoingById,
+    myLanguage,
+    explicitSourceLang,
+    translations,
+  ])
+
+  const sourceLanguageOptions = useMemo(() => {
+    const names = TRANSLATION_LANGUAGE_OPTIONS.map((o) => o.name)
+    if (sourceLanguage !== 'Auto' && !names.includes(sourceLanguage)) {
+      return [sourceLanguage, ...names]
+    }
+    return names
+  }, [sourceLanguage])
 
   const myLanguageOptions = useMemo(() => {
     const names = TRANSLATION_LANGUAGE_OPTIONS.map((o) => o.name)
@@ -780,6 +1036,9 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     const names = TRANSLATION_LANGUAGE_OPTIONS.map((o) => o.name)
     return names.includes(outgoingLanguage) ? names : [outgoingLanguage, ...names]
   }, [outgoingLanguage])
+
+  const translationLoadingLabel =
+    translator.modelStatus === 'downloading' ? 'Loading model…' : 'Translating…'
 
   const showTrustedFilterBar = !isDm && engine.strictWhitelistMode && hiddenCount > 0
 
@@ -813,12 +1072,32 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
               <span className="ag-translator-bar-icon" aria-hidden="true">
                 <Languages size={14} />
               </span>
+
+              <label className="ag-translator-select-wrap" title="Source chat language">
+                <span className="ag-translator-field-label">From</span>
+                <select
+                  className="ag-translator-select compact"
+                  value={sourceLanguage}
+                  onChange={(e) => updateSettings({ sourceLanguage: e.target.value })}
+                  aria-label="Source chat language"
+                >
+                  <option value="Auto">
+                    {roomHintLang ? `Auto (${roomHintLang})` : 'Auto'}
+                  </option>
+                  {sourceLanguageOptions.map((lang) => (
+                    <option key={lang} value={lang}>
+                      {lang}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
               <label className="ag-translator-select-wrap" title="Your reading language">
                 <span className="ag-translator-field-label">Read</span>
                 <select
                   className="ag-translator-select"
                   value={myLanguage}
-                  onChange={(e) => translator.updateSettings({ myLanguage: e.target.value })}
+                  onChange={(e) => updateSettings({ myLanguage: e.target.value })}
                   aria-label="My reading language"
                 >
                   {myLanguageOptions.map((lang) => (
@@ -832,7 +1111,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
               <button
                 type="button"
                 className={`ag-translator-pill-btn ${outgoingEnabled ? 'active' : ''}`}
-                onClick={() => translator.updateSettings({ outgoingEnabled: !outgoingEnabled })}
+                onClick={() => updateSettings({ outgoingEnabled: !outgoingEnabled })}
                 aria-pressed={outgoingEnabled}
                 title="Translate your outgoing messages before sending"
               >
@@ -843,7 +1122,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 <select
                   className="ag-translator-select compact"
                   value={outgoingLanguage}
-                  onChange={(e) => translator.updateSettings({ outgoingLanguage: e.target.value })}
+                  onChange={(e) => updateSettings({ outgoingLanguage: e.target.value })}
                   aria-label="Outgoing message language"
                 >
                   {outgoingLanguageOptions.map((lang) => (
@@ -870,37 +1149,50 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 <button
                   type="button"
                   className="ag-translator-model-status error"
-                  onClick={() => void translator.preloadModel()}
+                  onClick={() => void preloadModel()}
                   title={translator.modelError || 'Retry loading translator model'}
                 >
                   <AlertCircle size={12} />
                   <span>Retry model</span>
                 </button>
+              ) : translationProgress.pendingCount > 0 ? (
+                <span
+                  className="ag-translator-model-status translating tabular"
+                  title={`Translating messages (${translationProgress.doneCount} of ${translationProgress.totalTranslatable} done)`}
+                >
+                  <Loader2 size={12} className="ag-spin" />
+                  <span>
+                    Translating ({translationProgress.doneCount}/{translationProgress.totalTranslatable})
+                  </span>
+                </span>
               ) : (
                 <span
                   className="ag-translator-model-status ready ag-desktop-only"
                   title={`${translator.modelLabel} · On-device translation`}
                 >
                   <Columns2 size={11} />
-                  <span>{translatorShortLabel}</span>
+                  <span>
+                    {translatorShortLabel}
+                    {translator.runtimeDevice
+                      ? ` · ${translator.runtimeDevice === 'webgpu' ? 'WebGPU' : 'WASM'}`
+                      : ''}
+                  </span>
                 </span>
               )}
 
               <button
                 type="button"
                 className={`ag-translator-pill-btn ${!underlyingCollapsed ? 'active' : ''}`}
-                onClick={() =>
-                  translator.updateSettings({ underlyingCollapsed: !underlyingCollapsed })
-                }
+                onClick={() => updateSettings({ underlyingCollapsed: !underlyingCollapsed })}
                 title={
                   underlyingCollapsed
-                    ? 'Show Underlying Chat column'
-                    : 'Hide Underlying Chat column'
+                    ? 'Show Original column'
+                    : 'Hide Original column'
                 }
                 aria-label={
                   underlyingCollapsed
-                    ? 'Show Underlying Chat column'
-                    : 'Hide Underlying Chat column'
+                    ? 'Show Original column'
+                    : 'Hide Original column'
                 }
               >
                 {underlyingCollapsed ? <PanelRightOpen size={13} /> : <PanelRightClose size={13} />}
@@ -912,7 +1204,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
               <button
                 type="button"
                 className="ag-translator-close-btn"
-                onClick={() => translator.updateSettings({ enabled: false })}
+                onClick={() => updateSettings({ enabled: false })}
                 title="Exit Translator Mode"
                 aria-label="Exit Translator Mode"
               >
@@ -1104,11 +1396,13 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 >
                   <div className="ag-translator-col-head">
                     <Languages size={12} />
-                    <span>My Language · {myLanguage}</span>
+                    <span className="truncate">My Language · {myLanguage}</span>
                   </div>
                   {!underlyingCollapsed && (
                     <div className="ag-translator-col-head underlying">
-                      <span>Underlying Chat</span>
+                      <span className="truncate">
+                        {effectiveSourceLabel ? `Original · ${effectiveSourceLabel}` : 'Original'}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -1186,22 +1480,33 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
                 // Compute Left-column translation state when Translator Mode is active
                 let displayContentOverride: string | undefined
-                let translationStatus: 'idle' | 'loading' | 'done' | 'error' | undefined
+                let translationStatus: 'idle' | 'pending' | 'loading' | 'done' | 'error' | undefined
                 let translationError: string | undefined
                 let translationBadge: string | undefined
                 let onRetryTranslation: (() => void) | undefined
 
                 if (translatorEnabled && !msg.isSystem) {
-                  const outgoingOrig = translator.originalOutgoingById[msg.id]
-                  if (outgoingOrig) {
-                    displayContentOverride = outgoingOrig.originalText
-                    translationStatus = 'done'
-                    translationBadge = `Original · ${outgoingOrig.sourceLang} → ${outgoingOrig.targetLang}`
+                  if (msg.id.startsWith('pending-')) {
+                    if (outgoingEnabled && msg.deliveryStatus === 'sending') {
+                      translationStatus = 'loading'
+                    }
                   } else {
-                    const cleanOriginal = extractCleanMessageText(msg)
-                    if (cleanOriginal) {
-                      const tKey = translationCacheKey(msg.id, myLanguage)
-                      const tEntry = translator.translations[tKey]
+                    const outgoingOrig = originalOutgoingById[msg.id]
+                    const spec = resolveMessageTranslationSpec(
+                      msg,
+                      outgoingOrig,
+                      myLanguage,
+                      explicitSourceLang
+                    )
+                    if (spec.mode === 'own-original' && outgoingOrig) {
+                      displayContentOverride = outgoingOrig.originalText
+                      translationStatus = 'done'
+                      translationBadge = spec.badge
+                    } else if (spec.mode === 'translate' && spec.cacheKey && spec.textToTranslate) {
+                      const tEntry = translations[spec.cacheKey]
+                      if (spec.badge) {
+                        translationBadge = spec.badge
+                      }
                       if (tEntry?.status === 'done' && tEntry.text) {
                         displayContentOverride = tEntry.text
                         translationStatus = 'done'
@@ -1210,9 +1515,20 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       } else if (tEntry?.status === 'error') {
                         translationStatus = 'error'
                         translationError = tEntry.error
+                        const retryText = spec.textToTranslate
+                        const retrySourceLang = spec.sourceLang
+                        const retryRoomHint = retrySourceLang ? undefined : roomHintLang
                         onRetryTranslation = () => {
-                          void translator.translateMessage(msg.id, cleanOriginal, myLanguage)
+                          void translateMessage(msg.id, retryText, myLanguage, {
+                            sourceLang: retrySourceLang ?? 'Auto',
+                            roomHintLang: retryRoomHint,
+                            scopeKey,
+                            priority: 'visible',
+                          })
                         }
+                      } else {
+                        // Translatable message queued behind sliding window: never render raw foreign text
+                        translationStatus = 'pending'
                       }
                     }
                   }
@@ -1270,10 +1586,12 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     onClaimCashuToken={onClaimCashuToken}
                     displayContentOverride={displayContentOverride}
                     translationStatus={translationStatus}
+                    translationLoadingLabel={translatorEnabled ? translationLoadingLabel : undefined}
                     translationError={translationError}
                     translationBadge={translationBadge}
                     onRetryTranslation={onRetryTranslation}
                     compactTranslatorRow={translatorEnabled}
+                    underlyingCollapsed={underlyingCollapsed}
                   />
                 )
 
@@ -1301,7 +1619,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                         <div className="ag-translator-cell translated">{messageNode}</div>
 
                         {!underlyingCollapsed && (
-                          <div className="ag-translator-cell original" aria-label="Underlying chat message">
+                          <div className="ag-translator-cell original" aria-label="Original chat message">
                             {!grouped && (
                               <div className="ag-translator-orig-head">
                                 <span

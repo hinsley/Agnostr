@@ -4091,6 +4091,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         onPublishedId?: (id: string) => void
         originalText?: string
         translatedToLang?: string
+        sourceLang?: string
       }
     ): Promise<boolean> => {
       const trimmed = rawText.trim()
@@ -4130,7 +4131,8 @@ export function useAgnostrEngine(): AgnostrEngine {
             id,
             options.originalText,
             trimmed,
-            options.translatedToLang
+            options.translatedToLang,
+            options.sourceLang
           )
         }
       }

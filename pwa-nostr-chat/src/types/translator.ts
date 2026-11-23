@@ -15,7 +15,7 @@ export const TRANSLATOR_MODELS: Record<TranslatorModelKey, TranslatorModelOption
     id: 'Xenova/m2m100_418M',
     label: 'M2M-100 (418M)',
     shortLabel: 'M2M-100',
-    sizeHint: '~603 MB (q8) / ~695 MB (WebGPU)',
+    sizeHint: '~603 MB (WASM q8)',
     description: 'Fast, lightweight 100-language translation (Default)',
   },
   nllb200: {
@@ -23,7 +23,7 @@ export const TRANSLATOR_MODELS: Record<TranslatorModelKey, TranslatorModelOption
     id: 'Xenova/nllb-200-distilled-600M',
     label: 'NLLB-200 (600M)',
     shortLabel: 'NLLB-200',
-    sizeHint: '~853 MB (q8) / ~1.2 GB (WebGPU)',
+    sizeHint: '~853 MB (WASM) / ~1.2 GB (WebGPU)',
     description: 'Higher-quality 200-language translation',
   },
 }
@@ -231,6 +231,8 @@ export interface TranslatorSettings {
   enabled: boolean
   /** On-device translation model selection (default: 'm2m100') */
   model: TranslatorModelKey
+  /** Source language of incoming chat messages ('Auto' for automatic detection, or an explicit language) */
+  sourceLanguage: string
   /** Target reading language for incoming messages (default: 'English') */
   myLanguage: string
   /** Translates outgoing messages before publishing to chat (default: false) */
@@ -244,6 +246,7 @@ export interface TranslatorSettings {
 export const DEFAULT_TRANSLATOR_SETTINGS: TranslatorSettings = {
   enabled: false,
   model: DEFAULT_TRANSLATOR_MODEL_KEY,
+  sourceLanguage: 'Auto',
   myLanguage: 'English',
   outgoingEnabled: false,
   outgoingLanguage: 'Spanish',
@@ -261,7 +264,16 @@ export interface TranslationEntry {
   text?: string
   error?: string
   targetLang: string
+  detectedSourceLang?: string
+  sameLanguage?: boolean
   updatedAt: number
+}
+
+export interface TranslateMessageOptions {
+  sourceLang?: string
+  roomHintLang?: string | null
+  scopeKey?: string
+  priority?: 'visible' | 'normal'
 }
 
 export interface OutgoingOriginalEntry {
@@ -272,10 +284,21 @@ export interface OutgoingOriginalEntry {
 }
 
 /**
- * Canonical key for `TranslatorEngine.translations`: `${msgId}:${targetLang}`.
+ * Canonical key for `TranslatorEngine.translations`:
+ * - Auto source: `${msgId}:${targetLang}`
+ * - Explicit source: `${msgId}:${targetLang}:from:${sourceLang}`
  */
-export function translationCacheKey(msgId: string, targetLang: string): string {
-  return `${msgId}:${targetLang.trim()}`
+export function translationCacheKey(
+  msgId: string,
+  targetLang: string,
+  sourceLang?: string
+): string {
+  const cleanTarget = targetLang.trim()
+  const cleanSource = sourceLang?.trim() ?? ''
+  if (!cleanSource || cleanSource.toLowerCase() === 'auto') {
+    return `${msgId}:${cleanTarget}`
+  }
+  return `${msgId}:${cleanTarget}:from:${cleanSource}`
 }
 
 export interface TranslatorEngine {
@@ -304,14 +327,21 @@ export interface TranslatorEngine {
     msgId: string,
     originalText: string,
     translatedText: string,
-    targetLang: string
+    targetLang: string,
+    sourceLang?: string
   ) => void
   translateMessage: (
     msgId: string,
     text: string,
-    targetLang?: string
+    targetLang?: string,
+    options?: TranslateMessageOptions
   ) => Promise<string | null>
-  translateOutgoingText: (text: string, targetLang?: string) => Promise<string>
+  translateOutgoingText: (
+    text: string,
+    targetLang?: string,
+    sourceLang?: string
+  ) => Promise<string>
+  cancelScope: (keepScopeKey?: string) => void
 
   // Local cache & Panic Wipe
   cachedTranslationCount: number

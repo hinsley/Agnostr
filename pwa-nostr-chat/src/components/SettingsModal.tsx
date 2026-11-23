@@ -2432,6 +2432,12 @@ export function SettingsModal({
             ? { cls: 'ag-badge-danger', text: 'Error' }
             : { cls: 'ag-badge-muted', text: 'On-demand' }
 
+    const srcSelectVal =
+      !trs.sourceLanguage || trs.sourceLanguage.toLowerCase() === 'auto'
+        ? 'Auto'
+        : SUPPORTED_TRANSLATION_LANGUAGES.includes(trs.sourceLanguage)
+          ? trs.sourceLanguage
+          : 'Auto'
     const mySelectVal =
       customMyLangMode || !SUPPORTED_TRANSLATION_LANGUAGES.includes(trs.myLanguage)
         ? '__custom__'
@@ -2481,7 +2487,7 @@ export function SettingsModal({
           )}
 
           <p className="ag-set-helper">
-            100% local neural translation ({tr.modelSizeHint}) — messages never leave your device.
+            On-device translation ({tr.modelSizeHint}) — messages stay on your device.
           </p>
 
           <div className="ag-set-ai-actions">
@@ -2613,45 +2619,75 @@ export function SettingsModal({
           />
         </label>
 
-        {/* Reading Language */}
-        <div className="ag-set-group">
-          <label className="ag-set-label" htmlFor="ag-set-my-lang">
-            My Language (Incoming)
-          </label>
-          <select
-            id="ag-set-my-lang"
-            className="ag-input ag-select"
-            value={mySelectVal}
-            onChange={(e) => {
-              const v = e.target.value
-              onPlaySound?.('click')
-              if (v === '__custom__') {
-                setCustomMyLangMode(true)
-              } else {
-                setCustomMyLangMode(false)
-                tr.updateSettings({ myLanguage: v })
-              }
-            }}
-          >
-            {TRANSLATION_LANGUAGE_OPTIONS.map((opt) => (
-              <option key={opt.code} value={opt.name}>
-                {opt.name} ({opt.nativeName})
-              </option>
-            ))}
-            <option value="__custom__">Custom language…</option>
-          </select>
+        {/* Chat Source & Reading Languages */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+            gap: '12px',
+          }}
+        >
+          <div className="ag-set-group">
+            <label className="ag-set-label" htmlFor="ag-set-src-lang">
+              Chat Source Language
+            </label>
+            <select
+              id="ag-set-src-lang"
+              className="ag-input ag-select"
+              value={srcSelectVal}
+              onChange={(e) => {
+                onPlaySound?.('click')
+                tr.updateSettings({ sourceLanguage: e.target.value })
+              }}
+            >
+              <option value="Auto">Auto-detect</option>
+              {TRANSLATION_LANGUAGE_OPTIONS.map((opt) => (
+                <option key={opt.code} value={opt.name}>
+                  {opt.name} ({opt.nativeName})
+                </option>
+              ))}
+            </select>
+          </div>
 
-          {mySelectVal === '__custom__' && (
-            <input
-              type="text"
-              maxLength={40}
-              className="ag-input"
-              value={trs.myLanguage}
-              onChange={(e) => tr.updateSettings({ myLanguage: e.target.value })}
-              placeholder="Enter any language (e.g. Swedish, Swahili, Latin)"
-              aria-label="Custom reading language"
-            />
-          )}
+          <div className="ag-set-group">
+            <label className="ag-set-label" htmlFor="ag-set-my-lang">
+              My Language (Incoming)
+            </label>
+            <select
+              id="ag-set-my-lang"
+              className="ag-input ag-select"
+              value={mySelectVal}
+              onChange={(e) => {
+                const v = e.target.value
+                onPlaySound?.('click')
+                if (v === '__custom__') {
+                  setCustomMyLangMode(true)
+                } else {
+                  setCustomMyLangMode(false)
+                  tr.updateSettings({ myLanguage: v })
+                }
+              }}
+            >
+              {TRANSLATION_LANGUAGE_OPTIONS.map((opt) => (
+                <option key={opt.code} value={opt.name}>
+                  {opt.name} ({opt.nativeName})
+                </option>
+              ))}
+              <option value="__custom__">Custom language…</option>
+            </select>
+
+            {mySelectVal === '__custom__' && (
+              <input
+                type="text"
+                maxLength={40}
+                className="ag-input"
+                value={trs.myLanguage}
+                onChange={(e) => tr.updateSettings({ myLanguage: e.target.value })}
+                placeholder="Enter any language (e.g. Swedish, Swahili, Latin)"
+                aria-label="Custom reading language"
+              />
+            )}
+          </div>
         </div>
 
         {/* Outgoing Translation */}

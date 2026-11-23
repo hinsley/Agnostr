@@ -144,13 +144,15 @@ export interface MessageItemProps {
   zapTotalSats?: number
   onOpenZap?: (target: ZapTarget) => void
   onClaimCashuToken?: (token: string) => void
-  // Double-Column Translator Mode overrides (LFM3-1.7B)
+  // Double-Column Translator Mode overrides
   displayContentOverride?: string
-  translationStatus?: 'idle' | 'loading' | 'done' | 'error'
+  translationStatus?: 'idle' | 'pending' | 'loading' | 'done' | 'error'
+  translationLoadingLabel?: string
   translationError?: string
   translationBadge?: string
   onRetryTranslation?: () => void
   compactTranslatorRow?: boolean
+  underlyingCollapsed?: boolean
 }
 
 export const MessageItem: React.FC<MessageItemProps> = React.memo(
@@ -201,10 +203,12 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onClaimCashuToken,
     displayContentOverride,
     translationStatus,
+    translationLoadingLabel,
     translationError,
     translationBadge,
     onRetryTranslation,
     compactTranslatorRow = false,
+    underlyingCollapsed = false,
   }) => {
     const [pickerOpen, setPickerOpen] = useState(false)
     const [copied, setCopied] = useState(false)
@@ -357,6 +361,13 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             cashuTokens.map((t) => t.raw)
           )
         : baseTextContent
+    const hideRawUntranslatedBody =
+      displayContentOverride === undefined &&
+      ((compactTranslatorRow &&
+        (translationStatus === 'loading' ||
+          translationStatus === 'pending' ||
+          translationStatus === 'error')) ||
+        translationStatus === 'loading')
 
     const canZapSender = Boolean(!message.isOwn && senderLightningAddress && onOpenZap)
 
@@ -825,13 +836,22 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
           )}
 
           {/* Full-Width Message Text Body (with optional Translator Mode) */}
-          {(visibleContent.length > 0 || translationStatus === 'loading' || translationStatus === 'error') && (
+          {(visibleContent.length > 0 ||
+            translationStatus === 'loading' ||
+            translationStatus === 'pending' ||
+            translationStatus === 'error') && (
             <>
-              {translationStatus === 'loading' && displayContentOverride === undefined ? (
-                <div className="ag-translator-inline-status">
-                  <Loader2 size={12} className="ag-spin" />
-                  <span>Translating…</span>
-                </div>
+              {hideRawUntranslatedBody ? (
+                translationStatus === 'loading' ? (
+                  <div className="ag-translator-inline-status">
+                    <Loader2 size={12} className="ag-spin" />
+                    <span>{translationLoadingLabel || 'Translating…'}</span>
+                  </div>
+                ) : translationStatus === 'pending' ? (
+                  <div className="ag-translator-inline-status pending">
+                    <span>Queued…</span>
+                  </div>
+                ) : null
               ) : visibleContent.length > 0 ? (
                 <RichMessageContent
                   content={visibleContent}
@@ -850,21 +870,29 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
               )}
 
               {translationStatus === 'error' && (
-                <div className="ag-translator-inline-status error">
-                  <AlertCircle size={12} />
-                  <span className="truncate">{translationError || 'Translation failed'}</span>
-                  {onRetryTranslation && (
-                    <button
-                      type="button"
-                      className="ag-translator-retry-btn"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onRetryTranslation()
-                      }}
-                    >
-                      <RefreshCw size={11} />
-                      <span>Retry</span>
-                    </button>
+                <div className="ag-translator-error-wrap">
+                  <div className="ag-translator-inline-status error">
+                    <AlertCircle size={12} />
+                    <span className="truncate">{translationError || 'Translation failed'}</span>
+                    {onRetryTranslation && (
+                      <button
+                        type="button"
+                        className="ag-translator-retry-btn"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onRetryTranslation()
+                        }}
+                      >
+                        <RefreshCw size={11} />
+                        <span>Retry</span>
+                      </button>
+                    )}
+                  </div>
+                  {underlyingCollapsed && hideRawUntranslatedBody && visibleContent.length > 0 && (
+                    <div className="ag-translator-error-fallback">
+                      <span className="ag-translator-error-fallback-label">Original:</span>{' '}
+                      {visibleContent}
+                    </div>
                   )}
                 </div>
               )}
