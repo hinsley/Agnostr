@@ -21,6 +21,7 @@ import type {
   DeviceSyncWalletChunkPacket,
   DeviceSyncWirePacket,
   SyncedBlockedRecord,
+  SyncedDeviceRecord,
   SyncedDmPeerNameRecord,
   SyncedPeerNoteRecord,
   SyncedRecentMessagesTail,
@@ -67,6 +68,9 @@ export const MAX_EPHEMERAL_SYNC_AGE_SEC = 180
 
 /** Strict cap for synced active DM peer names (keeps checkpoint footprint ~2–5 KB max) */
 export const MAX_SYNCED_DM_PEER_NAMES = 60
+
+/** Strict cap for synced devices tracked per master keypair */
+export const MAX_SYNCED_DEVICES = 16
 
 const utf8Encoder = new TextEncoder()
 
@@ -121,6 +125,7 @@ export function createEmptyCrdtState(): DeviceSyncCrdtState {
     nickname: { value: '', updatedAt: 0 },
     peerNotes: {},
     dmPeerNames: {},
+    devices: {},
   }
 }
 
@@ -174,6 +179,56 @@ function sanitizeServerOrder(raw: unknown): SyncedServerOrderState {
     }
   }
   return { updatedAt, ids }
+}
+
+export function sanitizeSyncedDevicesMap(raw: unknown): Record<string, SyncedDeviceRecord> {
+  if (!isRecord(raw)) return {}
+  const entries: SyncedDeviceRecord[] = []
+  const seen = new Set<string>()
+
+  for (const [rawKey, val] of Object.entries(raw)) {
+    if (!isRecord(val)) continue
+    const keyId = rawKey.trim()
+    const fieldId = typeof val.deviceId === 'string' ? val.deviceId.trim() : ''
+    const deviceId = keyId || fieldId
+    if (!deviceId || deviceId.length > 64 || seen.has(deviceId)) continue
+    seen.add(deviceId)
+
+    const rawLabel = typeof val.label === 'string' ? val.label.trim().slice(0, 48) : ''
+    const label = rawLabel || 'Agnostr Device'
+    const lastSyncedAt =
+      typeof val.lastSyncedAt === 'number' && Number.isFinite(val.lastSyncedAt) && val.lastSyncedAt > 0
+        ? Math.floor(val.lastSyncedAt)
+        : 0
+    const updatedAt =
+      typeof val.updatedAt === 'number' && Number.isFinite(val.updatedAt) && val.updatedAt > 0
+        ? Math.floor(val.updatedAt)
+        : 0
+    const removedAt =
+      typeof val.removedAt === 'number' && Number.isFinite(val.removedAt) && val.removedAt > 0
+        ? Math.floor(val.removedAt)
+        : undefined
+
+    entries.push({
+      deviceId,
+      label,
+      lastSyncedAt,
+      updatedAt,
+      ...(removedAt !== undefined ? { removedAt } : {}),
+    })
+  }
+
+  entries.sort((a, b) => {
+    const recencyA = Math.max(a.updatedAt, a.lastSyncedAt, a.removedAt ?? 0)
+    const recencyB = Math.max(b.updatedAt, b.lastSyncedAt, b.removedAt ?? 0)
+    return recencyB - recencyA || a.deviceId.localeCompare(b.deviceId)
+  })
+
+  const out: Record<string, SyncedDeviceRecord> = {}
+  for (const rec of entries.slice(0, MAX_SYNCED_DEVICES)) {
+    out[rec.deviceId] = rec
+  }
+  return out
 }
 
 function arePinnedListsEqual(a: readonly PinnedChannel[], b: readonly PinnedChannel[]): boolean {
@@ -558,6 +613,7 @@ export function reconcileLocalSnapshotIntoCrdt(
       nickname: nextNickname,
       peerNotes: nextPeerNotes,
       dmPeerNames: cappedDmPeerNames,
+      devices: sanitizeSyncedDevicesMap(prev.devices),
     },
     changed: true,
   }
@@ -584,6 +640,7 @@ export function mergeCrdtStates(
     nicknameChanged: false,
     peerNotesChanged: false,
     dmPeerNamesChanged: false,
+    devicesChanged: false,
     itemsUpdated: 0,
   }
 
@@ -929,6 +986,66 @@ export function mergeCrdtStates(
     }
   }
 
+  // 10. Merge Synced Devices Registry (LWW by updatedAt, max lastSyncedAt, sticky removedAt tombstones)
+  const localDevices = sanitizeSyncedDevicesMap(local.devices)
+  const remoteDevices = sanitizeSyncedDevicesMap(remote.devices)
+  const rawMergedDevices: Record<string, SyncedDeviceRecord> = {}
+  const deviceIds = new Set([...Object.keys(localDevices), ...Object.keys(remoteDevices)])
+  for (const id of deviceIds) {
+    const a = localDevices[id]
+    const b = remoteDevices[id]
+    if (a && !b) {
+      rawMergedDevices[id] = a
+      continue
+    }
+    if (!a && b) {
+      rawMergedDevices[id] = b
+      diff.devicesChanged = true
+      if ((b.removedAt ?? 0) < b.updatedAt) {
+        diff.itemsUpdated += 1
+      }
+      continue
+    }
+    if (!a || !b) continue
+
+    const lastSyncedAt = Math.max(a.lastSyncedAt, b.lastSyncedAt)
+    const updatedAt = Math.max(a.updatedAt, b.updatedAt)
+    const maxRemovedAt = Math.max(a.removedAt ?? 0, b.removedAt ?? 0)
+    const bWinsLabel =
+      b.updatedAt > a.updatedAt || (b.updatedAt === a.updatedAt && b.label > a.label)
+    const label = (bWinsLabel ? b.label : a.label) || a.label || b.label || 'Agnostr Device'
+
+    const nextRec: SyncedDeviceRecord = {
+      deviceId: id,
+      label,
+      lastSyncedAt,
+      updatedAt,
+      ...(maxRemovedAt > 0 ? { removedAt: maxRemovedAt } : {}),
+    }
+    rawMergedDevices[id] = nextRec
+
+    const wasActive = (a.removedAt ?? 0) < a.updatedAt
+    const nowActive = (nextRec.removedAt ?? 0) < nextRec.updatedAt
+    if (
+      nextRec.label !== a.label ||
+      nextRec.lastSyncedAt !== a.lastSyncedAt ||
+      nextRec.updatedAt !== a.updatedAt ||
+      (nextRec.removedAt ?? 0) !== (a.removedAt ?? 0)
+    ) {
+      diff.devicesChanged = true
+      if (wasActive !== nowActive || nextRec.label !== a.label) {
+        diff.itemsUpdated += 1
+      }
+    }
+  }
+  const mergedDevices = sanitizeSyncedDevicesMap(rawMergedDevices)
+  for (const id of Object.keys(localDevices)) {
+    if (!mergedDevices[id]) {
+      diff.devicesChanged = true
+      break
+    }
+  }
+
   const changed =
     diff.serversChanged ||
     Boolean(diff.serverOrderChanged) ||
@@ -939,7 +1056,8 @@ export function mergeCrdtStates(
     diff.lud16Changed ||
     diff.nicknameChanged ||
     diff.peerNotesChanged ||
-    diff.dmPeerNamesChanged
+    diff.dmPeerNamesChanged ||
+    Boolean(diff.devicesChanged)
 
   return {
     merged: {
@@ -954,6 +1072,7 @@ export function mergeCrdtStates(
       nickname: mergedNickname,
       peerNotes: mergedPeerNotes,
       dmPeerNames: mergedDmPeerNames,
+      devices: mergedDevices,
     },
     changed,
     diff,
@@ -1041,9 +1160,29 @@ export function extractActiveDmPeerNames(crdt: DeviceSyncCrdtState): Record<stri
   return out
 }
 
+export function extractActiveSyncedDevices(
+  crdt: DeviceSyncCrdtState,
+  selfDeviceId?: string
+): SyncedDeviceRecord[] {
+  const selfId = selfDeviceId?.trim() ?? ''
+  return Object.values(sanitizeSyncedDevicesMap(crdt.devices))
+    .filter((rec) => {
+      if (selfId && rec.deviceId === selfId) return false
+      return (rec.removedAt ?? 0) < rec.updatedAt
+    })
+    .sort(
+      (a, b) =>
+        b.lastSyncedAt - a.lastSyncedAt ||
+        b.updatedAt - a.updatedAt ||
+        a.deviceId.localeCompare(b.deviceId)
+    )
+    .slice(0, MAX_SYNCED_DEVICES)
+}
+
 export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
   const notes = crdt.peerNotes ?? {}
   const dmNames = crdt.dmPeerNames ?? {}
+  const devices = sanitizeSyncedDevicesMap(crdt.devices)
   const canonical = {
     servers: Object.keys(crdt.servers)
       .sort()
@@ -1085,6 +1224,12 @@ export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
     dmPeerNames: Object.keys(dmNames)
       .sort()
       .map((k) => [k, dmNames[k].updatedAt, dmNames[k].name]),
+    devices: Object.keys(devices)
+      .sort()
+      .map((k) => {
+        const d = devices[k]
+        return [k, d.label, d.lastSyncedAt, d.updatedAt, d.removedAt ?? 0]
+      }),
   }
   return sha256ShortHex(JSON.stringify(canonical))
 }
@@ -1139,6 +1284,7 @@ export function fitCheckpointStateWithinBudget(
     nickname: crdt.nickname,
     peerNotes: crdt.peerNotes ?? {},
     dmPeerNames: crdt.dmPeerNames ?? {},
+    devices: sanitizeSyncedDevicesMap(crdt.devices),
   }
 
   // 1. Full (`base + wallet + amail + recentMessages`)
@@ -1680,6 +1826,7 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
   }
 
   const serverOrder = sanitizeServerOrder(raw.serverOrder)
+  const devices = sanitizeSyncedDevicesMap(raw.devices)
 
   return {
     v: 1,
@@ -1693,6 +1840,7 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     nickname,
     peerNotes,
     dmPeerNames,
+    devices,
     ...(wallet ? { wallet } : {}),
     ...(amail ? { amail } : {}),
     ...(recentMessages ? { recentMessages } : {}),

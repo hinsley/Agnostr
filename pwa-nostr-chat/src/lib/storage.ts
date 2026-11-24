@@ -11,6 +11,7 @@ import type {
   DeviceSyncCrdtState,
   LinkedDeviceInfo,
   PersistedDeviceSyncState,
+  SyncedDeviceRecord,
   SyncedDmPeerNameRecord,
   SyncedPeerNoteRecord,
   SyncedServerOrderState,
@@ -80,6 +81,7 @@ const KEYS = {
   dmClearedAt: `${PREFIX}dm_cleared_at`,
   deviceSeed: `${PREFIX}device_seed`,
   deviceId: `${PREFIX}device_id`,
+  deviceLabel: `${PREFIX}device_label`,
   deviceSyncState: `${PREFIX}device_sync_state`,
   signMode: `${PREFIX}sign_mode`,
   localSecret: `${PREFIX}local_secret`,
@@ -1189,6 +1191,70 @@ export function resetDeviceId(): string {
   return fresh
 }
 
+export function loadCustomDeviceLabel(): string | null {
+  const raw = safeGet(KEYS.deviceLabel)
+  if (!raw) return null
+  const clean = raw.trim().slice(0, 48)
+  return clean.length > 0 ? clean : null
+}
+
+export function saveCustomDeviceLabel(label: string | null): void {
+  const clean = (label ?? '').trim().slice(0, 48)
+  if (!clean) {
+    safeRemove(KEYS.deviceLabel)
+  } else {
+    safeSet(KEYS.deviceLabel, clean)
+  }
+}
+
+const MAX_PERSISTED_SYNCED_DEVICES = 16
+
+function sanitizePersistedDevicesMap(raw: unknown): Record<string, SyncedDeviceRecord> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const entries: SyncedDeviceRecord[] = []
+  const seen = new Set<string>()
+  for (const [rawKey, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const rec = entry as Partial<SyncedDeviceRecord>
+    const keyId = rawKey.trim()
+    const fieldId = typeof rec.deviceId === 'string' ? rec.deviceId.trim() : ''
+    const deviceId = keyId || fieldId
+    if (!deviceId || deviceId.length > 64 || seen.has(deviceId)) continue
+    seen.add(deviceId)
+    const rawLabel = typeof rec.label === 'string' ? rec.label.trim().slice(0, 48) : ''
+    const label = rawLabel || 'Agnostr Device'
+    const lastSyncedAt =
+      typeof rec.lastSyncedAt === 'number' && Number.isFinite(rec.lastSyncedAt) && rec.lastSyncedAt > 0
+        ? Math.floor(rec.lastSyncedAt)
+        : 0
+    const updatedAt =
+      typeof rec.updatedAt === 'number' && Number.isFinite(rec.updatedAt) && rec.updatedAt > 0
+        ? Math.floor(rec.updatedAt)
+        : 0
+    const removedAt =
+      typeof rec.removedAt === 'number' && Number.isFinite(rec.removedAt) && rec.removedAt > 0
+        ? Math.floor(rec.removedAt)
+        : undefined
+    entries.push({
+      deviceId,
+      label,
+      lastSyncedAt,
+      updatedAt,
+      ...(removedAt !== undefined ? { removedAt } : {}),
+    })
+  }
+  entries.sort((a, b) => {
+    const recencyA = Math.max(a.updatedAt, a.lastSyncedAt, a.removedAt ?? 0)
+    const recencyB = Math.max(b.updatedAt, b.lastSyncedAt, b.removedAt ?? 0)
+    return recencyB - recencyA || a.deviceId.localeCompare(b.deviceId)
+  })
+  const out: Record<string, SyncedDeviceRecord> = {}
+  for (const rec of entries.slice(0, MAX_PERSISTED_SYNCED_DEVICES)) {
+    out[rec.deviceId] = rec
+  }
+  return out
+}
+
 const MAX_PERSISTED_SYNCED_DM_PEER_NAMES = 60
 
 function isGenericAnonNickname(nick: string | null | undefined): boolean {
@@ -1331,6 +1397,7 @@ export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
           })()
         : {},
     dmPeerNames: sanitizeDmPeerNamesMap(rawCrdt.dmPeerNames),
+    devices: sanitizePersistedDevicesMap(rawCrdt.devices),
   }
 
   const linkedDevices: LinkedDeviceInfo[] = Array.isArray(parsed.linkedDevices)
@@ -1339,15 +1406,22 @@ export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
           (d): d is LinkedDeviceInfo =>
             Boolean(d) &&
             typeof d.deviceId === 'string' &&
+            d.deviceId.trim().length > 0 &&
             typeof d.label === 'string' &&
-            typeof d.lastSeenAt === 'number'
+            typeof d.lastSeenAt === 'number' &&
+            Number.isFinite(d.lastSeenAt)
         )
-        .slice(0, 16)
+        .slice(0, MAX_PERSISTED_SYNCED_DEVICES)
         .map((d) => ({
-          deviceId: d.deviceId,
-          label: d.label.slice(0, 48),
+          deviceId: d.deviceId.trim().slice(0, 64),
+          label: d.label.trim().slice(0, 48) || 'Sibling Device',
           nickname: typeof d.nickname === 'string' ? d.nickname.slice(0, 32) : '',
           lastSeenAt: d.lastSeenAt,
+          ...(typeof d.lastSyncedAt === 'number' &&
+          Number.isFinite(d.lastSyncedAt) &&
+          d.lastSyncedAt > 0
+            ? { lastSyncedAt: Math.floor(d.lastSyncedAt) }
+            : {}),
           online: false,
         }))
     : []
@@ -1389,8 +1463,20 @@ export function saveDeviceSyncState(state: PersistedDeviceSyncState): void {
       nickname: state.crdt.nickname,
       peerNotes: state.crdt.peerNotes ?? {},
       dmPeerNames: sanitizeDmPeerNamesMap(state.crdt.dmPeerNames),
+      devices: sanitizePersistedDevicesMap(state.crdt.devices),
     },
-    linkedDevices: state.linkedDevices.slice(0, 16),
+    linkedDevices: state.linkedDevices.slice(0, MAX_PERSISTED_SYNCED_DEVICES).map((d) => ({
+      deviceId: d.deviceId.trim().slice(0, 64),
+      label: d.label.trim().slice(0, 48) || 'Sibling Device',
+      nickname: typeof d.nickname === 'string' ? d.nickname.slice(0, 32) : '',
+      lastSeenAt: Number.isFinite(d.lastSeenAt) ? d.lastSeenAt : 0,
+      ...(typeof d.lastSyncedAt === 'number' &&
+      Number.isFinite(d.lastSyncedAt) &&
+      d.lastSyncedAt > 0
+        ? { lastSyncedAt: Math.floor(d.lastSyncedAt) }
+        : {}),
+      online: Boolean(d.online),
+    })),
   }
   safeSet(KEYS.deviceSyncState, JSON.stringify(sanitized))
 }

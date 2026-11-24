@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import {
+  AlertCircle,
   ArrowLeft,
   ArrowUp,
   AtSign,
@@ -17,6 +18,7 @@ import {
   Heart,
   ImagePlus,
   Landmark,
+  Languages,
   Link2,
   Loader2,
   Mail,
@@ -47,6 +49,13 @@ import type {
   AgoraUploadedMedia,
 } from '../types/agora.ts'
 import type { AgnostrEngine } from '../types/protocol.ts'
+import {
+  TRANSLATION_LANGUAGE_OPTIONS,
+  TRANSLATOR_MODELS,
+  resolveLanguageCodes,
+  translationCacheKey,
+  type TranslationEntry,
+} from '../types/translator.ts'
 import type { ZapTarget } from '../types/wallet.ts'
 import {
   encodeNoteEventId,
@@ -55,6 +64,7 @@ import {
   tokenizeAgoraContent,
 } from '../lib/agoraProtocol.ts'
 import { encodeNpubSafe } from '../lib/identity.ts'
+import { isNonTranslatableText } from '../lib/languageDetect.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { identiconDataUrl, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
@@ -166,6 +176,72 @@ async function copyTextSafe(text: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+const MAX_AGORA_CONCURRENT_TRANSLATIONS = 3
+const MAX_AGORA_TRANSLATE_NOTES = 40
+
+function extractTranslatableAgoraText(note: AgoraNote): string | null {
+  if (!note.content || !note.content.trim()) return null
+  const tokens = tokenizeAgoraContent(note.content, note.media)
+  const parts: string[] = []
+  for (const tok of tokens) {
+    if (tok.type === 'text') {
+      parts.push(tok.text)
+    } else if (tok.type === 'hashtag' || tok.type === 'mention') {
+      parts.push(tok.raw)
+    } else if (tok.type === 'link') {
+      parts.push(tok.url)
+    }
+    // Strip 'quote' tokens (bare nostr:nevent1…/nostr:note1…)
+  }
+  const clean = parts
+    .join('')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  if (!clean || isNonTranslatableText(clean)) return null
+  return clean
+}
+
+function normalizeTranslationText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+function textsDifferMeaningfully(original: string, translated: string): boolean {
+  const normOrig = normalizeTranslationText(original)
+  const normTrans = normalizeTranslationText(translated)
+  return Boolean(normTrans) && normOrig !== normTrans
+}
+
+function resolveAgoraTranslatedFromLabel(
+  entry: TranslationEntry | undefined,
+  myLanguage: string,
+  explicitSourceLang: string | undefined
+): string | null {
+  if (!entry || entry.status !== 'done' || entry.sameLanguage) return null
+  const myLangClean = myLanguage.trim()
+  if (!myLangClean) return null
+  const myNllb = resolveLanguageCodes(myLangClean).nllbCode
+
+  if (explicitSourceLang) {
+    const srcClean = explicitSourceLang.trim()
+    if (!srcClean) return null
+    if (srcClean.toLowerCase() === myLangClean.toLowerCase()) return null
+    if (resolveLanguageCodes(srcClean).nllbCode === myNllb) return null
+    return `Translated from ${srcClean}`
+  }
+
+  // Auto mode: only show when worker confirmed sourceDetected (populates detectedSourceLang)
+  const detectedLang = entry.detectedSourceLang?.trim()
+  if (!detectedLang) return null
+  if (detectedLang.toLowerCase() === myLangClean.toLowerCase()) return null
+  if (resolveLanguageCodes(detectedLang).nllbCode === myNllb) return null
+  return `Translated from ${detectedLang}`
+}
+
+function agoraShowOriginalKey(noteId: string, myLanguage: string, sourceLanguage: string): string {
+  return `${noteId}:${myLanguage}:${sourceLanguage}`
 }
 
 /* --------------------------------------------------------------------------
@@ -474,9 +550,23 @@ const AgoraComposerBox: React.FC<AgoraComposerBoxProps> = ({
 const AgoraQuotedNoteCard: React.FC<{
   eventId: string
   engine: AgnostrEngine
+  translationScopeKey: string
+  showOriginalKeys: Set<string>
+  onToggleShowOriginal: (key: string) => void
   onOpenThread: (noteId: string) => void
-}> = ({ eventId, engine, onOpenThread }) => {
-  const { agora } = engine
+  onOpenProfile: (pubkey: string) => void
+  onSelectHashtag: (tag: string) => void
+}> = ({
+  eventId,
+  engine,
+  translationScopeKey,
+  showOriginalKeys,
+  onToggleShowOriginal,
+  onOpenThread,
+  onOpenProfile,
+  onSelectHashtag,
+}) => {
+  const { agora, translator } = engine
   const note = agora.getNote(eventId)
   const profile = note ? agora.getProfile(note.pubkey) : null
 
@@ -487,6 +577,61 @@ const AgoraQuotedNoteCard: React.FC<{
       agora.ensureProfiles([note.pubkey])
     }
   }, [agora, eventId, note, profile])
+
+  const translatorEnabled = translator.settings.enabled
+  const myLanguage = translator.settings.myLanguage
+  const sourceLanguage = translator.settings.sourceLanguage
+  const explicitSourceLang = sourceLanguage !== 'Auto' ? sourceLanguage : undefined
+
+  const translatableText = useMemo(
+    () => (note ? extractTranslatableAgoraText(note) : null),
+    [note]
+  )
+  const translationEntry =
+    note && translatorEnabled && translatableText
+      ? translator.translations[
+          translationCacheKey(`agora:${note.id}`, myLanguage, explicitSourceLang)
+        ]
+      : undefined
+
+  const hasMeaningfulTranslation = Boolean(
+    note &&
+      translatorEnabled &&
+      translatableText &&
+      translationEntry?.status === 'done' &&
+      !translationEntry.sameLanguage &&
+      translationEntry.text?.trim() &&
+      textsDifferMeaningfully(translatableText, translationEntry.text)
+  )
+  const origToggleKey = note ? agoraShowOriginalKey(note.id, myLanguage, sourceLanguage) : ''
+  const showingOriginal = Boolean(origToggleKey) && showOriginalKeys.has(origToggleKey)
+  const useTranslatedBody = hasMeaningfulTranslation && !showingOriginal
+
+  const displayTokens = useMemo(() => {
+    if (!note) return []
+    const sourceText =
+      useTranslatedBody && translationEntry?.text ? translationEntry.text : note.content
+    return tokenizeAgoraContent(sourceText, note.media)
+  }, [note, translationEntry?.text, useTranslatedBody])
+
+  const translatedFromLabel = useMemo(
+    () =>
+      useTranslatedBody
+        ? resolveAgoraTranslatedFromLabel(translationEntry, myLanguage, explicitSourceLang)
+        : null,
+    [explicitSourceLang, myLanguage, translationEntry, useTranslatedBody]
+  )
+
+  const translationLoading =
+    Boolean(note) &&
+    translatorEnabled &&
+    Boolean(translatableText) &&
+    translationEntry?.status === 'loading'
+  const translationErrored =
+    Boolean(note) &&
+    translatorEnabled &&
+    Boolean(translatableText) &&
+    translationEntry?.status === 'error'
 
   if (!note) {
     return (
@@ -517,6 +662,7 @@ const AgoraQuotedNoteCard: React.FC<{
 
   const authorName = getProfileDisplayName(profile, note.pubkey)
   const firstImg = note.media.find((m) => m.kind === 'image')
+  const hasVisibleText = displayTokens.some((t) => t.type !== 'quote')
 
   return (
     <div
@@ -541,7 +687,114 @@ const AgoraQuotedNoteCard: React.FC<{
         <span className="ag-agora-dot-sep">·</span>
         <span className="ag-agora-time tabular">{formatRelativeSeconds(note.createdAt)}</span>
       </div>
-      {note.content && <div className="ag-agora-quote-body">{note.content}</div>}
+      {hasVisibleText && (
+        <div className="ag-agora-quote-body">
+          {displayTokens.map((tok, idx) => {
+            if (tok.type === 'text') {
+              return <React.Fragment key={idx}>{tok.text}</React.Fragment>
+            }
+            if (tok.type === 'hashtag') {
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  className="ag-agora-tag-link"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onSelectHashtag(tok.tag)
+                  }}
+                >
+                  #{tok.tag}
+                </button>
+              )
+            }
+            if (tok.type === 'mention') {
+              const mProfile = agora.getProfile(tok.pubkey)
+              const mName = getProfileDisplayName(mProfile, tok.pubkey)
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  className="ag-agora-mention-link"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenProfile(tok.pubkey)
+                  }}
+                >
+                  @{mName}
+                </button>
+              )
+            }
+            if (tok.type === 'link') {
+              return (
+                <a
+                  key={idx}
+                  href={tok.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="ag-agora-ext-link"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {tok.display}
+                </a>
+              )
+            }
+            return null
+          })}
+        </div>
+      )}
+      {(hasMeaningfulTranslation || translationLoading || translationErrored) && (
+        <div
+          className="ag-agora-tr-note-foot ag-agora-quote-tr-foot"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {hasMeaningfulTranslation ? (
+            <>
+              {!showingOriginal && translatedFromLabel && (
+                <span className="ag-agora-tr-badge">
+                  <Languages size={11} aria-hidden="true" />
+                  <span>{translatedFromLabel}</span>
+                </span>
+              )}
+              <button
+                type="button"
+                className="ag-agora-tr-toggle-btn"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onToggleShowOriginal(origToggleKey)
+                }}
+              >
+                {showingOriginal ? 'Show translation' : 'Show original'}
+              </button>
+            </>
+          ) : translationLoading ? (
+            <span className="ag-agora-tr-status-pill" aria-live="polite">
+              <Loader2 size={11} className="ag-agora-spin" aria-hidden="true" />
+              <span>
+                {translator.modelStatus === 'downloading' ? 'Loading model…' : 'Translating…'}
+              </span>
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="ag-agora-tr-retry-btn"
+              title={translationEntry?.error || 'Retry translating this quoted post'}
+              onClick={(e) => {
+                e.stopPropagation()
+                if (!translatableText) return
+                void translator.translateMessage(`agora:${note.id}`, translatableText, myLanguage, {
+                  sourceLang: explicitSourceLang ?? 'Auto',
+                  scopeKey: translationScopeKey,
+                  priority: 'visible',
+                })
+              }}
+            >
+              <AlertCircle size={11} aria-hidden="true" />
+              <span>Translation failed · Retry</span>
+            </button>
+          )}
+        </div>
+      )}
       {firstImg && (
         <img
           src={firstImg.url}
@@ -567,6 +820,9 @@ interface AgoraNoteCardProps {
   showThreadConnector?: boolean
   revealedCw: boolean
   onRevealCw: (noteId: string) => void
+  translationScopeKey: string
+  showOriginalKeys: Set<string>
+  onToggleShowOriginal: (key: string) => void
   onOpenThread: (noteId: string) => void
   onOpenProfile: (pubkey: string) => void
   onSelectHashtag: (tag: string) => void
@@ -588,6 +844,9 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   showThreadConnector = false,
   revealedCw,
   onRevealCw,
+  translationScopeKey,
+  showOriginalKeys,
+  onToggleShowOriginal,
   onOpenThread,
   onOpenProfile,
   onSelectHashtag,
@@ -599,7 +858,7 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   onOpenLightbox,
   onPlaySound,
 }) => {
-  const { agora } = engine
+  const { agora, translator } = engine
   const [menuOpen, setMenuOpen] = useState(false)
   const [repostMenuOpen, setRepostMenuOpen] = useState(false)
   const menuWrapRef = useRef<HTMLDivElement | null>(null)
@@ -646,21 +905,67 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   const following = agora.isFollowing(note.pubkey)
   const bookmarked = agora.isBookmarked(note.id)
 
-  const tokens = useMemo(
+  const originalTokens = useMemo(
     () => tokenizeAgoraContent(note.content, note.media),
     [note.content, note.media]
   )
 
   const embeddedQuoteIds = useMemo(() => {
     const ids = new Set<string>()
-    for (const tok of tokens) {
+    for (const tok of originalTokens) {
       if (tok.type === 'quote') ids.add(tok.eventId)
     }
     for (const qid of note.quoteIds) {
       ids.add(qid)
     }
     return Array.from(ids).slice(0, 2)
-  }, [note.quoteIds, tokens])
+  }, [note.quoteIds, originalTokens])
+
+  const translatorEnabled = translator.settings.enabled
+  const myLanguage = translator.settings.myLanguage
+  const sourceLanguage = translator.settings.sourceLanguage
+  const explicitSourceLang = sourceLanguage !== 'Auto' ? sourceLanguage : undefined
+
+  const translatableText = useMemo(() => extractTranslatableAgoraText(note), [note])
+  const translationEntry =
+    translatorEnabled && translatableText
+      ? translator.translations[
+          translationCacheKey(`agora:${note.id}`, myLanguage, explicitSourceLang)
+        ]
+      : undefined
+
+  const hasMeaningfulTranslation = Boolean(
+    translatorEnabled &&
+      translatableText &&
+      translationEntry?.status === 'done' &&
+      !translationEntry.sameLanguage &&
+      translationEntry.text?.trim() &&
+      textsDifferMeaningfully(translatableText, translationEntry.text)
+  )
+  const origToggleKey = agoraShowOriginalKey(note.id, myLanguage, sourceLanguage)
+  const showingOriginal = showOriginalKeys.has(origToggleKey)
+  const useTranslatedBody = hasMeaningfulTranslation && !showingOriginal
+
+  const displayTokens = useMemo(
+    () =>
+      useTranslatedBody && translationEntry?.text
+        ? tokenizeAgoraContent(translationEntry.text, note.media)
+        : originalTokens,
+    [note.media, originalTokens, translationEntry?.text, useTranslatedBody]
+  )
+
+  const translatedFromLabel = useMemo(
+    () =>
+      useTranslatedBody
+        ? resolveAgoraTranslatedFromLabel(translationEntry, myLanguage, explicitSourceLang)
+        : null,
+    [explicitSourceLang, myLanguage, translationEntry, useTranslatedBody]
+  )
+
+  const translationLoading =
+    translatorEnabled && Boolean(translatableText) && translationEntry?.status === 'loading'
+  const translationErrored =
+    translatorEnabled && Boolean(translatableText) && translationEntry?.status === 'error'
 
   const mediaSlice = useMemo(() => note.media.slice(0, 4), [note.media])
   const needsCwGate = Boolean(note.contentWarning) && !revealedCw
@@ -928,9 +1233,9 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
             </div>
           ) : (
             <>
-              {tokens.some((t) => t.type !== 'quote') && (
+              {displayTokens.some((t) => t.type !== 'quote') && (
                 <div className="ag-agora-body">
-                  {tokens.map((tok, idx) => {
+                  {displayTokens.map((tok, idx) => {
                     if (tok.type === 'text') {
                       return <React.Fragment key={idx}>{tok.text}</React.Fragment>
                     }
@@ -985,6 +1290,59 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                 </div>
               )}
 
+              {(hasMeaningfulTranslation || translationLoading || translationErrored) && (
+                <div className="ag-agora-tr-note-foot" onClick={(e) => e.stopPropagation()}>
+                  {hasMeaningfulTranslation ? (
+                    <>
+                      {!showingOriginal && translatedFromLabel && (
+                        <span className="ag-agora-tr-badge">
+                          <Languages size={11} aria-hidden="true" />
+                          <span>{translatedFromLabel}</span>
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="ag-agora-tr-toggle-btn"
+                        onClick={() => onToggleShowOriginal(origToggleKey)}
+                      >
+                        {showingOriginal ? 'Show translation' : 'Show original'}
+                      </button>
+                    </>
+                  ) : translationLoading ? (
+                    <span className="ag-agora-tr-status-pill" aria-live="polite">
+                      <Loader2 size={11} className="ag-agora-spin" aria-hidden="true" />
+                      <span>
+                        {translator.modelStatus === 'downloading'
+                          ? 'Loading model…'
+                          : 'Translating…'}
+                      </span>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="ag-agora-tr-retry-btn"
+                      title={translationEntry?.error || 'Retry translating this post'}
+                      onClick={() => {
+                        if (!translatableText) return
+                        void translator.translateMessage(
+                          `agora:${note.id}`,
+                          translatableText,
+                          myLanguage,
+                          {
+                            sourceLang: explicitSourceLang ?? 'Auto',
+                            scopeKey: translationScopeKey,
+                            priority: 'visible',
+                          }
+                        )
+                      }}
+                    >
+                      <AlertCircle size={11} aria-hidden="true" />
+                      <span>Translation failed · Retry</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
               {mediaSlice.length > 0 && (
                 <div
                   className={`ag-agora-media-grid count-${mediaSlice.length}`}
@@ -1025,7 +1383,12 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                   key={qid}
                   eventId={qid}
                   engine={engine}
+                  translationScopeKey={translationScopeKey}
+                  showOriginalKeys={showOriginalKeys}
+                  onToggleShowOriginal={onToggleShowOriginal}
                   onOpenThread={onOpenThread}
+                  onOpenProfile={onOpenProfile}
+                  onSelectHashtag={onSelectHashtag}
                 />
               ))}
             </>
@@ -1554,7 +1917,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   onOpenLightbox,
   onPlaySound,
 }) => {
-  const { agora } = engine
+  const { agora, translator } = engine
   const streamRef = useRef<HTMLDivElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -1563,6 +1926,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false)
   const [searchDraft, setSearchDraft] = useState(agora.searchQuery)
   const [revealedCwIds, setRevealedCwIds] = useState<Set<string>>(() => new Set())
+  const [showOriginalKeys, setShowOriginalKeys] = useState<Set<string>>(() => new Set())
   const [copiedNpub, setCopiedNpub] = useState(false)
   const [failedBannerUrl, setFailedBannerUrl] = useState<string | null>(null)
 
@@ -1680,6 +2044,15 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
     })
   }, [])
 
+  const handleToggleShowOriginal = useCallback((key: string) => {
+    setShowOriginalKeys((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
+
   const handleToggleFollow = useCallback(
     (pubkey: string) => {
       onPlaySound?.('click')
@@ -1757,6 +2130,205 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
     }
   }, [agora.profileView])
 
+  // ---------------------------------------------------------------------------
+  // Agora Translation Mode (shared engine.translator: Opus-MT / M2M-100 / NLLB-200)
+  // ---------------------------------------------------------------------------
+  const translatorEnabled = translator.settings.enabled
+  const myLanguage = translator.settings.myLanguage
+  const sourceLanguage = translator.settings.sourceLanguage
+  const explicitSourceLang = sourceLanguage !== 'Auto' ? sourceLanguage : undefined
+  const translatorShortLabel = TRANSLATOR_MODELS[translator.modelKey].shortLabel
+  const {
+    translations: translatorTranslations,
+    translateMessage,
+    cancelScope,
+    cancelDownload,
+    preloadModel,
+    updateSettings: updateTranslatorSettings,
+    modelStatus: translatorModelStatus,
+  } = translator
+
+  const sourceLanguageOptions = useMemo(() => {
+    const names = TRANSLATION_LANGUAGE_OPTIONS.map((o) => o.name)
+    if (sourceLanguage !== 'Auto' && !names.includes(sourceLanguage)) {
+      return [sourceLanguage, ...names]
+    }
+    return names
+  }, [sourceLanguage])
+
+  const myLanguageOptions = useMemo(() => {
+    const names = TRANSLATION_LANGUAGE_OPTIONS.map((o) => o.name)
+    return names.includes(myLanguage) ? names : [myLanguage, ...names]
+  }, [myLanguage])
+
+  const translationScopeKey = useMemo(() => {
+    const viewPart = inThread
+      ? `thread:${agora.thread?.focusedNoteId ?? ''}`
+      : inProfile
+        ? `profile:${agora.profileView?.pubkey ?? ''}:${agora.profileView?.tab ?? 'posts'}`
+        : inSearch
+          ? `search:${agora.activeHashtag || agora.searchQuery}`
+          : `feed:${agora.activeTab}`
+    return `agora:${viewPart}:${myLanguage}:${explicitSourceLang ?? 'Auto'}:${translator.modelKey}`
+  }, [
+    inThread,
+    agora.thread?.focusedNoteId,
+    inProfile,
+    agora.profileView?.pubkey,
+    agora.profileView?.tab,
+    inSearch,
+    agora.activeHashtag,
+    agora.searchQuery,
+    agora.activeTab,
+    myLanguage,
+    explicitSourceLang,
+    translator.modelKey,
+  ])
+
+  const visibleTranslatableNotes = useMemo(() => {
+    if (!translatorEnabled || inNotifications) {
+      return [] as Array<{ note: AgoraNote; text: string }>
+    }
+
+    const rawPrimary: AgoraNote[] = []
+    if (inThread && agora.thread) {
+      if (agora.thread.focusedNote) rawPrimary.push(agora.thread.focusedNote)
+      for (const anc of agora.thread.ancestors) rawPrimary.push(anc)
+      for (const rep of agora.thread.replies) rawPrimary.push(rep)
+    } else if (inProfile && agora.profileView) {
+      for (const n of profileDisplayedNotes) rawPrimary.push(n)
+    } else if (inSearch) {
+      for (const n of agora.searchResults) rawPrimary.push(n)
+    } else {
+      for (const item of agora.feedItems) rawPrimary.push(item.note)
+    }
+
+    const result: Array<{ note: AgoraNote; text: string }> = []
+    const seenIds = new Set<string>()
+
+    const pushNote = (candidate: AgoraNote) => {
+      if (result.length >= MAX_AGORA_TRANSLATE_NOTES) return
+      if (seenIds.has(candidate.id)) return
+      seenIds.add(candidate.id)
+      if (candidate.contentWarning && !revealedCwIds.has(candidate.id)) return
+      const text = extractTranslatableAgoraText(candidate)
+      if (!text) return
+      result.push({ note: candidate, text })
+    }
+
+    for (const primary of rawPrimary) {
+      if (result.length >= MAX_AGORA_TRANSLATE_NOTES) break
+      pushNote(primary)
+      if (!primary.contentWarning || revealedCwIds.has(primary.id)) {
+        const qIds = new Set<string>(primary.quoteIds)
+        if (qIds.size < 2 && primary.content.includes('nostr:')) {
+          for (const tok of tokenizeAgoraContent(primary.content, primary.media)) {
+            if (tok.type === 'quote') qIds.add(tok.eventId)
+          }
+        }
+        let qCount = 0
+        for (const qid of qIds) {
+          if (qCount >= 2 || result.length >= MAX_AGORA_TRANSLATE_NOTES) break
+          qCount += 1
+          const quoted = agora.getNote(qid)
+          if (quoted) pushNote(quoted)
+        }
+      }
+    }
+
+    return result
+  }, [
+    translatorEnabled,
+    inNotifications,
+    inThread,
+    inProfile,
+    inSearch,
+    agora,
+    profileDisplayedNotes,
+    revealedCwIds,
+  ])
+
+  const translationProgress = useMemo(() => {
+    if (!translatorEnabled || visibleTranslatableNotes.length === 0) {
+      return { totalTranslatable: 0, doneCount: 0, pendingCount: 0 }
+    }
+    let totalTranslatable = 0
+    let doneCount = 0
+    let pendingCount = 0
+    for (const { note } of visibleTranslatableNotes) {
+      totalTranslatable += 1
+      const key = translationCacheKey(`agora:${note.id}`, myLanguage, explicitSourceLang)
+      const entry = translatorTranslations[key]
+      if (entry?.status === 'done' || entry?.status === 'error') {
+        doneCount += 1
+      } else {
+        pendingCount += 1
+      }
+    }
+    return { totalTranslatable, doneCount, pendingCount }
+  }, [
+    translatorEnabled,
+    visibleTranslatableNotes,
+    myLanguage,
+    explicitSourceLang,
+    translatorTranslations,
+  ])
+
+  // Cancel stale worker jobs immediately when switching Agora views, languages, model, or disabling
+  useEffect(() => {
+    cancelScope(translatorEnabled ? translationScopeKey : undefined)
+  }, [translatorEnabled, translationScopeKey, cancelScope])
+
+  // Cancel background Agora translation jobs cleanly on unmount
+  useEffect(() => {
+    return () => {
+      cancelScope(undefined)
+    }
+  }, [cancelScope])
+
+  // Auto-translate visible Agora posts, replies, ancestors & embedded quoted notes (max 3 in-flight)
+  useEffect(() => {
+    if (!translatorEnabled || translatorModelStatus === 'error') return
+    if (visibleTranslatableNotes.length === 0) return
+
+    let activeLoading = 0
+    const candidates: Array<{ noteId: string; text: string }> = []
+
+    for (const { note, text } of visibleTranslatableNotes) {
+      const key = translationCacheKey(`agora:${note.id}`, myLanguage, explicitSourceLang)
+      const entry = translatorTranslations[key]
+      if (entry?.status === 'loading') {
+        activeLoading += 1
+        continue
+      }
+      if (entry?.status === 'done' || entry?.status === 'error') {
+        continue
+      }
+      candidates.push({ noteId: note.id, text })
+    }
+
+    const slots = Math.max(0, MAX_AGORA_CONCURRENT_TRANSLATIONS - activeLoading)
+    if (slots <= 0 || candidates.length === 0) return
+
+    for (let i = 0; i < Math.min(slots, candidates.length); i += 1) {
+      const cand = candidates[i]
+      void translateMessage(`agora:${cand.noteId}`, cand.text, myLanguage, {
+        sourceLang: explicitSourceLang ?? 'Auto',
+        scopeKey: translationScopeKey,
+        priority: 'visible',
+      })
+    }
+  }, [
+    translatorEnabled,
+    translatorModelStatus,
+    visibleTranslatableNotes,
+    myLanguage,
+    explicitSourceLang,
+    translationScopeKey,
+    translatorTranslations,
+    translateMessage,
+  ])
+
   const renderNoteCard = (
     note: AgoraNote,
     opts?: {
@@ -1776,6 +2348,9 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
       showThreadConnector={opts?.showThreadConnector}
       revealedCw={revealedCwIds.has(note.id)}
       onRevealCw={handleRevealCw}
+      translationScopeKey={translationScopeKey}
+      showOriginalKeys={showOriginalKeys}
+      onToggleShowOriginal={handleToggleShowOriginal}
       onOpenThread={handleOpenThread}
       onOpenProfile={handleOpenProfile}
       onSelectHashtag={handleSelectHashtag}
@@ -1797,6 +2372,9 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
       engine={engine}
       revealedCw={revealedCwIds.has(item.note.id)}
       onRevealCw={handleRevealCw}
+      translationScopeKey={translationScopeKey}
+      showOriginalKeys={showOriginalKeys}
+      onToggleShowOriginal={handleToggleShowOriginal}
       onOpenThread={handleOpenThread}
       onOpenProfile={handleOpenProfile}
       onSelectHashtag={handleSelectHashtag}
@@ -2198,6 +2776,28 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
             <div className="ag-agora-header-actions">
               <button
                 type="button"
+                className={`ag-agora-icon-btn ag-agora-translate-toggle-btn${translatorEnabled ? ' active' : ''}`}
+                onClick={() => {
+                  onPlaySound?.('click')
+                  updateTranslatorSettings({ enabled: !translatorEnabled })
+                }}
+                aria-pressed={translatorEnabled}
+                aria-label={
+                  translatorEnabled
+                    ? `Exit Translator Mode (${myLanguage})`
+                    : `Translate posts (${myLanguage})`
+                }
+                title={
+                  translatorEnabled
+                    ? `Exit Translator Mode (${myLanguage})`
+                    : `Translate posts (${myLanguage})`
+                }
+              >
+                <Languages size={16} />
+              </button>
+
+              <button
+                type="button"
                 className={`ag-agora-icon-btn ag-agora-search-toggle-btn${mobileSearchOpen ? ' active' : ''}`}
                 onClick={() => {
                   setMobileSearchOpen((v) => !v)
@@ -2238,6 +2838,138 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
               </button>
             </div>
           </header>
+
+          {/* Compact Agora Translation Status Bar (visible when Translator Mode is active) */}
+          {translatorEnabled && (
+            <div
+              className="ag-agora-translator-bar"
+              role="region"
+              aria-label="Agora translator controls"
+            >
+              <div className="ag-agora-tr-row">
+                <div className="ag-agora-tr-controls">
+                  <span className="ag-agora-tr-icon" aria-hidden="true">
+                    <Languages size={13} />
+                  </span>
+
+                  <label className="ag-agora-tr-select-wrap" title="Source post language">
+                    <span className="ag-agora-tr-label">From</span>
+                    <select
+                      className="ag-agora-tr-select"
+                      value={sourceLanguage}
+                      onChange={(e) =>
+                        updateTranslatorSettings({ sourceLanguage: e.target.value })
+                      }
+                      aria-label="Source post language"
+                    >
+                      <option value="Auto">Auto</option>
+                      {sourceLanguageOptions.map((lang) => (
+                        <option key={lang} value={lang}>
+                          {lang}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="ag-agora-tr-select-wrap" title="Translate posts to language">
+                    <span className="ag-agora-tr-label">To</span>
+                    <select
+                      className="ag-agora-tr-select"
+                      value={myLanguage}
+                      onChange={(e) => updateTranslatorSettings({ myLanguage: e.target.value })}
+                      aria-label="Target reading language"
+                    >
+                      {myLanguageOptions.map((lang) => (
+                        <option key={lang} value={lang}>
+                          {lang}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="ag-agora-tr-right">
+                  {translatorModelStatus === 'downloading' ? (
+                    <>
+                      <span
+                        className="ag-agora-tr-status downloading tabular"
+                        title={translator.modelLabel}
+                      >
+                        <Loader2 size={12} className="ag-agora-spin" aria-hidden="true" />
+                        <span>
+                          {translatorShortLabel} · {Math.round(translator.downloadProgress)}%
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        className="ag-agora-tr-pill-btn"
+                        onClick={() => cancelDownload()}
+                        title="Cancel model download"
+                        aria-label="Cancel model download"
+                      >
+                        <span>Cancel</span>
+                      </button>
+                    </>
+                  ) : translatorModelStatus === 'error' ? (
+                    <button
+                      type="button"
+                      className="ag-agora-tr-status error"
+                      onClick={() => void preloadModel()}
+                      title={translator.modelError || 'Retry loading translator model'}
+                    >
+                      <AlertCircle size={12} aria-hidden="true" />
+                      <span>Retry model</span>
+                    </button>
+                  ) : translationProgress.pendingCount > 0 ? (
+                    <span
+                      className="ag-agora-tr-status translating tabular"
+                      title={`Translating posts (${translationProgress.doneCount} of ${translationProgress.totalTranslatable} done)`}
+                    >
+                      <Loader2 size={12} className="ag-agora-spin" aria-hidden="true" />
+                      <span>
+                        Translating ({translationProgress.doneCount}/
+                        {translationProgress.totalTranslatable})
+                      </span>
+                    </span>
+                  ) : (
+                    <span
+                      className="ag-agora-tr-status ready"
+                      title={`${translator.modelLabel} · On-device translation`}
+                    >
+                      <span>
+                        {translatorShortLabel}
+                        {translator.runtimeDevice
+                          ? ` · ${translator.runtimeDevice === 'webgpu' ? 'WebGPU' : 'WASM'}`
+                          : ''}
+                      </span>
+                    </span>
+                  )}
+
+                  <button
+                    type="button"
+                    className="ag-agora-tr-exit-btn"
+                    onClick={() => updateTranslatorSettings({ enabled: false })}
+                    title="Exit Translator Mode"
+                    aria-label="Exit Translator Mode"
+                  >
+                    <X size={13} aria-hidden="true" />
+                    <span className="ag-agora-tr-exit-label">Exit</span>
+                  </button>
+                </div>
+              </div>
+
+              {translatorModelStatus === 'downloading' && (
+                <div className="ag-agora-tr-progress-track" aria-hidden="true">
+                  <div
+                    className="ag-agora-tr-progress-fill"
+                    style={{
+                      width: `${Math.max(4, Math.min(100, Math.round(translator.downloadProgress)))}%`,
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Collapsible Mobile / Tablet Search & Trending Drawer */}
           {mobileSearchOpen && (

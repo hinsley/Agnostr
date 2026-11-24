@@ -26,6 +26,7 @@ import {
   Lock,
   Mic,
   Palette,
+  Pencil,
   PhoneCall,
   Plus,
   QrCode,
@@ -46,6 +47,7 @@ import {
   Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, SignMode, ThemeId } from '../types/protocol.ts'
+import type { LinkedDeviceInfo } from '../types/deviceSync.ts'
 import type {
   ContentFilterCallVideoMode,
   ContentFilterMediaScope,
@@ -220,6 +222,55 @@ function formatSyncAge(ts: number | null): string {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
+function formatSyncAgeLower(ts: number | null): string {
+  const age = formatSyncAge(ts)
+  return age === 'Just now' ? 'just now' : age
+}
+
+function shortDeviceTag(deviceId: string): string {
+  const clean = deviceId.replace(/[^a-zA-Z0-9]/g, '')
+  if (!clean) return '#0000'
+  return `#${clean.slice(-4).toLowerCase()}`
+}
+
+function formatDeviceSyncStatus(dev: LinkedDeviceInfo): { text: string; title: string } {
+  const syncedMs =
+    typeof dev.lastSyncedAt === 'number' && Number.isFinite(dev.lastSyncedAt) && dev.lastSyncedAt > 0
+      ? dev.lastSyncedAt < 1e12
+        ? dev.lastSyncedAt * 1000
+        : dev.lastSyncedAt
+      : null
+  const seenMs =
+    typeof dev.lastSeenAt === 'number' && Number.isFinite(dev.lastSeenAt) && dev.lastSeenAt > 0
+      ? dev.lastSeenAt < 1e12
+        ? dev.lastSeenAt * 1000
+        : dev.lastSeenAt
+      : null
+
+  let text: string
+  if (dev.online) {
+    text = syncedMs ? `Online · Synced ${formatSyncAgeLower(syncedMs)}` : 'Online'
+  } else if (syncedMs) {
+    text = `Synced ${formatSyncAgeLower(syncedMs)}`
+  } else if (seenMs) {
+    text = `Last seen ${formatSyncAgeLower(seenMs)}`
+  } else {
+    text = 'Synced'
+  }
+
+  const tooltipParts: string[] = []
+  if (syncedMs) {
+    tooltipParts.push(`Last synced: ${new Date(syncedMs).toLocaleString()}`)
+  }
+  if (seenMs) {
+    tooltipParts.push(`Last seen live: ${new Date(seenMs).toLocaleString()}`)
+  }
+  return {
+    text,
+    title: tooltipParts.length > 0 ? tooltipParts.join(' · ') : `Device ID: ${dev.deviceId}`,
+  }
+}
+
 function stripScheme(url: string): string {
   return url.replace(/^(wss?|https?):\/\//i, '').replace(/\/+$/, '')
 }
@@ -273,6 +324,30 @@ export function SettingsModal({
   useEffect(() => {
     setLud16Draft(engine.zaps.lightningAddress ?? '')
   }, [engine.zaps.lightningAddress])
+  const [editingDeviceLabel, setEditingDeviceLabel] = useState(false)
+  const [deviceLabelDraft, setDeviceLabelDraft] = useState(() => engine.deviceSync.deviceLabel)
+  const [, setSyncAgeTick] = useState(0)
+
+  useEffect(() => {
+    if (!editingDeviceLabel) {
+      setDeviceLabelDraft(engine.deviceSync.deviceLabel)
+    }
+  }, [engine.deviceSync.deviceLabel, editingDeviceLabel])
+
+  useEffect(() => {
+    if (!open) {
+      setEditingDeviceLabel(false)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open || activeTab !== 'profile') return
+    const timer = window.setInterval(() => {
+      setSyncAgeTick((t) => t + 1)
+    }, 30_000)
+    return () => window.clearInterval(timer)
+  }, [open, activeTab])
+
   const [secretDraft, setSecretDraft] = useState('')
   const [secretFeedback, setSecretFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [revealNsec, setRevealNsec] = useState(false)
@@ -1083,8 +1158,10 @@ export function SettingsModal({
             }`}
           >
             {engine.deviceSync.onlineSiblingCount > 0
-              ? `${engine.deviceSync.onlineSiblingCount} linked online`
-              : 'Solo device'}
+              ? `${engine.deviceSync.onlineSiblingCount} online`
+              : engine.deviceSync.linkedDevices.length > 0
+                ? `${engine.deviceSync.linkedDevices.length} synced`
+                : 'Solo device'}
           </span>
         </div>
 
@@ -1110,39 +1187,148 @@ export function SettingsModal({
             />
           </label>
 
-          <div className="ag-set-sync-this-row">
-            <span className="ag-set-sync-key">This Device</span>
-            <span className="ag-set-sync-val truncate">{engine.deviceSync.deviceLabel}</span>
-          </div>
+          {editingDeviceLabel ? (
+            <form
+              className="ag-set-sync-this-row ag-set-sync-this-edit"
+              onSubmit={(e) => {
+                e.preventDefault()
+                engine.deviceSync.setDeviceLabel(deviceLabelDraft)
+                setEditingDeviceLabel(false)
+                onPlaySound?.('click')
+              }}
+            >
+              <input
+                type="text"
+                className="ag-input ag-set-sync-rename-input"
+                value={deviceLabelDraft}
+                onChange={(e) => setDeviceLabelDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.stopPropagation()
+                    setEditingDeviceLabel(false)
+                    setDeviceLabelDraft(engine.deviceSync.deviceLabel)
+                  }
+                }}
+                maxLength={48}
+                placeholder="e.g. MacBook Pro, Pixel 8"
+                aria-label="Friendly name for this device"
+                autoFocus
+              />
+              <div className="ag-set-sync-rename-actions">
+                <button type="submit" className="ag-btn ag-btn-primary ag-btn-xs">
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-ghost ag-btn-xs"
+                  onClick={() => {
+                    setEditingDeviceLabel(false)
+                    setDeviceLabelDraft(engine.deviceSync.deviceLabel)
+                  }}
+                  aria-label="Cancel device rename"
+                  title="Cancel"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="ag-set-sync-this-row">
+              <span className="ag-set-sync-key">This Device</span>
+              <div className="ag-set-sync-this-main">
+                <span className="ag-set-sync-val truncate" title={engine.deviceSync.deviceLabel}>
+                  {engine.deviceSync.deviceLabel}
+                </span>
+                <span
+                  className="ag-set-sync-id mono"
+                  title={`Device ID: ${engine.deviceSync.deviceId}`}
+                >
+                  {shortDeviceTag(engine.deviceSync.deviceId)}
+                </span>
+                <button
+                  type="button"
+                  className="ag-set-sync-rename-btn"
+                  onClick={() => {
+                    setDeviceLabelDraft(engine.deviceSync.deviceLabel)
+                    setEditingDeviceLabel(true)
+                    onPlaySound?.('click')
+                  }}
+                  aria-label="Rename this device"
+                  title="Rename this device"
+                >
+                  <Pencil size={12} />
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="ag-set-sync-devices">
             <span className="ag-set-sync-subhead">
-              Linked Devices ({engine.deviceSync.linkedDevices.length})
+              Synced Devices ({engine.deviceSync.linkedDevices.length})
             </span>
             {engine.deviceSync.linkedDevices.length === 0 ? (
               <p className="ag-set-sync-empty">
-                No other devices detected on this key yet.
+                No other devices synced on this key yet.
               </p>
             ) : (
               <div className="ag-set-sync-device-list" role="list">
-                {engine.deviceSync.linkedDevices.map((dev) => (
-                  <div key={dev.deviceId} role="listitem" className="ag-set-sync-device-row">
-                    <span
-                      className={`ag-set-sync-dot ${dev.online ? 'online' : ''}`}
-                      aria-hidden="true"
-                    />
-                    <span className="ag-set-sync-device-label truncate">{dev.label}</span>
-                    <span className="ag-set-sync-device-meta mono">
-                      {dev.online ? 'Online' : formatSyncAge(dev.lastSeenAt)}
-                    </span>
-                  </div>
-                ))}
+                {engine.deviceSync.linkedDevices.map((dev) => {
+                  const status = formatDeviceSyncStatus(dev)
+                  const tag = shortDeviceTag(dev.deviceId)
+                  return (
+                    <div key={dev.deviceId} role="listitem" className="ag-set-sync-device-row">
+                      <span
+                        className={`ag-set-sync-dot ${dev.online ? 'online' : ''}`}
+                        aria-hidden="true"
+                      />
+                      <div className="ag-set-sync-device-info">
+                        <div className="ag-set-sync-device-title-row">
+                          <span className="ag-set-sync-device-label truncate" title={dev.label}>
+                            {dev.label}
+                          </span>
+                          <span
+                            className="ag-set-sync-id mono"
+                            title={`Device ID: ${dev.deviceId}`}
+                          >
+                            {tag}
+                          </span>
+                        </div>
+                        <span className="ag-set-sync-device-meta mono" title={status.title}>
+                          {status.text}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="ag-set-sync-forget-btn"
+                        onClick={() => {
+                          onPlaySound?.('click')
+                          engine.deviceSync.removeLinkedDevice(dev.deviceId)
+                        }}
+                        aria-label={`Forget ${dev.label} (${tag})`}
+                        title={`Forget ${dev.label}`}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
 
+          <p className="ag-set-sync-note">
+            Identified via a private per-browser ID — web browsers never expose hardware MAC addresses.
+          </p>
+
           <div className="ag-set-sync-footer">
-            <span className="ag-set-sync-meta mono">
+            <span
+              className="ag-set-sync-meta mono"
+              title={
+                engine.deviceSync.lastSyncedAt
+                  ? new Date(engine.deviceSync.lastSyncedAt).toLocaleString()
+                  : undefined
+              }
+            >
               Last synced: {formatSyncAge(engine.deviceSync.lastSyncedAt)}
               {engine.deviceSync.syncedItemsCount > 0
                 ? ` · ${engine.deviceSync.syncedItemsCount} items`

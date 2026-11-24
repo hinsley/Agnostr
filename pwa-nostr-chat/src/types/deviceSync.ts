@@ -12,7 +12,18 @@ export interface LinkedDeviceInfo {
   label: string
   nickname: string
   lastSeenAt: number
+  /** Exact ms timestamp of last sync/checkpoint from this device */
+  lastSyncedAt?: number
   online: boolean
+}
+
+/** LWW registry record for a device synced under this master Nostr keypair */
+export interface SyncedDeviceRecord {
+  deviceId: string
+  label: string
+  lastSyncedAt: number
+  updatedAt: number
+  removedAt?: number
 }
 
 /** Public engine surface exposed as `engine.deviceSync` */
@@ -21,12 +32,14 @@ export interface DeviceSyncEngine {
   setEnabled: (enabled: boolean) => void
   deviceId: string
   deviceLabel: string
+  setDeviceLabel: (label: string) => void
   linkedDevices: LinkedDeviceInfo[]
   onlineSiblingCount: number
   lastSyncedAt: number | null
   isSyncing: boolean
   syncedItemsCount: number
   syncNow: () => Promise<void>
+  removeLinkedDevice: (deviceId: string) => void
   resetAll: () => void
 }
 
@@ -155,6 +168,7 @@ export interface DeviceSyncCrdtState {
   nickname: SyncedNicknameState
   peerNotes?: Record<string, SyncedPeerNoteRecord>
   dmPeerNames?: Record<string, SyncedDmPeerNameRecord>
+  devices?: Record<string, SyncedDeviceRecord>
   wallet?: SyncedWalletState | null
   amail?: SyncedAmailState | null
   recentMessages?: SyncedRecentMessagesTail
@@ -283,6 +297,7 @@ export interface DeviceSyncMergeDiff {
   nicknameChanged: boolean
   peerNotesChanged: boolean
   dmPeerNamesChanged: boolean
+  devicesChanged?: boolean
   itemsUpdated: number
 }
 

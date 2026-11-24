@@ -12,6 +12,7 @@ import type {
   DeviceSyncStatePacket,
   DeviceSyncWirePacket,
   LinkedDeviceInfo,
+  SyncedDeviceRecord,
   SyncedDmPeerNameRecord,
   SyncedRecentMessagesTail,
   SyncedWalletState,
@@ -46,16 +47,19 @@ import {
   extractActiveDmPeerNames,
   extractActivePeerNotes,
   extractActiveServers,
+  extractActiveSyncedDevices,
   extractActiveTrusted,
   fitCheckpointStateWithinBudget,
   isAutoAnonNickname,
   KIND_DEVICE_SYNC_CHECKPOINT,
   KIND_DEVICE_SYNC_EPHEMERAL,
   MAX_NIP44_CHUNK_BYTES,
+  MAX_SYNCED_DEVICES,
   mergeCrdtStates,
   parseDeviceSyncCheckpointEvent,
   parseDeviceSyncEphemeralEvent,
   reconcileLocalSnapshotIntoCrdt,
+  sanitizeSyncedDevicesMap,
   type LocalSyncSnapshot,
 } from '../lib/deviceSync.ts'
 import type { IdentityManager } from '../lib/identity.ts'
@@ -65,10 +69,12 @@ import {
   isEphemeralPendingMessage,
   isStuckMediaPlaceholder,
   loadChannelMessages,
+  loadCustomDeviceLabel,
   loadDeviceSyncState,
   loadOrCreateDeviceId,
   loadServerChannelMessages,
   resetDeviceId,
+  saveCustomDeviceLabel,
   saveDeviceSyncState,
 } from '../lib/storage.ts'
 
@@ -148,6 +154,93 @@ interface PendingWalletTransfer {
 const SIBLING_STATE_COOLDOWN_MS = 3_000
 const SIBLING_REQ_COOLDOWN_MS = 4_000
 const MAX_SEEN_SYNC_EVENTS = 1200
+const SELF_CHECKPOINT_STALE_MS = 15 * 60 * 1000
+
+function sortLinkedDevices(list: LinkedDeviceInfo[]): LinkedDeviceInfo[] {
+  return [...list].sort(
+    (a, b) =>
+      Number(b.online) - Number(a.online) ||
+      Math.max(b.lastSyncedAt ?? 0, b.lastSeenAt) - Math.max(a.lastSyncedAt ?? 0, a.lastSeenAt) ||
+      a.deviceId.localeCompare(b.deviceId)
+  )
+}
+
+function areLinkedDevicesEqual(a: readonly LinkedDeviceInfo[], b: readonly LinkedDeviceInfo[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (
+      a[i].deviceId !== b[i].deviceId ||
+      a[i].label !== b[i].label ||
+      a[i].nickname !== b[i].nickname ||
+      a[i].lastSeenAt !== b[i].lastSeenAt ||
+      (a[i].lastSyncedAt ?? 0) !== (b[i].lastSyncedAt ?? 0) ||
+      a[i].online !== b[i].online
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function mergeCrdtDevicesIntoLinkedDevices(
+  prev: readonly LinkedDeviceInfo[],
+  crdt: DeviceSyncCrdtState,
+  selfDeviceId: string,
+  nowMs: number
+): { next: LinkedDeviceInfo[]; changed: boolean } {
+  const selfId = selfDeviceId.trim()
+  const rawDevices = sanitizeSyncedDevicesMap(crdt.devices)
+  const tombstones = new Map<string, number>()
+  for (const [id, rec] of Object.entries(rawDevices)) {
+    if ((rec.removedAt ?? 0) >= rec.updatedAt && (rec.removedAt ?? 0) > 0) {
+      tombstones.set(id, rec.removedAt ?? 0)
+    }
+  }
+
+  const byId = new Map<string, LinkedDeviceInfo>()
+  for (const existing of prev) {
+    if (!existing.deviceId || existing.deviceId === selfId) continue
+    const removedAt = tombstones.get(existing.deviceId)
+    if (
+      removedAt !== undefined &&
+      removedAt >= Math.max(existing.lastSeenAt, existing.lastSyncedAt ?? 0)
+    ) {
+      continue
+    }
+    const isOnline =
+      existing.lastSeenAt > 0 && nowMs - existing.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
+    byId.set(existing.deviceId, {
+      ...existing,
+      online: isOnline,
+    })
+  }
+
+  const activeCrdtDevices = extractActiveSyncedDevices(crdt, selfId)
+  for (const rec of activeCrdtDevices) {
+    const existing = byId.get(rec.deviceId)
+    const lastSeenAt = existing?.lastSeenAt ?? 0
+    const isOnline = lastSeenAt > 0 && nowMs - lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
+    const lastSyncedAt = Math.max(existing?.lastSyncedAt ?? 0, rec.lastSyncedAt)
+    const label =
+      existing && existing.lastSeenAt > rec.updatedAt && existing.label.trim()
+        ? existing.label.trim().slice(0, 48)
+        : rec.label.trim().slice(0, 48) || existing?.label || 'Agnostr Device'
+    byId.set(rec.deviceId, {
+      deviceId: rec.deviceId,
+      label,
+      nickname: existing?.nickname ?? '',
+      lastSeenAt,
+      ...(lastSyncedAt > 0 ? { lastSyncedAt } : {}),
+      online: isOnline,
+    })
+  }
+
+  const next = sortLinkedDevices(Array.from(byId.values())).slice(0, MAX_SYNCED_DEVICES)
+  return {
+    next,
+    changed: !areLinkedDevicesEqual(prev, next),
+  }
+}
 
 export function useDeviceSync(options: UseDeviceSyncOptions): {
   deviceSync: DeviceSyncEngine
@@ -190,15 +283,24 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   } = options
 
   const persistedInitial = useMemo(() => loadDeviceSyncState(), [])
+  const initialDeviceId = useMemo(() => loadOrCreateDeviceId(), [])
 
-  const [deviceId, setDeviceId] = useState<string>(() => loadOrCreateDeviceId())
-  const deviceLabel = useMemo(() => detectDeviceLabel(), [])
-  const [enabled, setEnabledState] = useState<boolean>(() => persistedInitial?.enabled ?? true)
-  const [linkedDevices, setLinkedDevices] = useState<LinkedDeviceInfo[]>(() =>
-    persistedInitial && persistedInitial.ownerPubkey === masterPubkey.toLowerCase()
-      ? persistedInitial.linkedDevices.map((d) => ({ ...d, online: false }))
-      : []
+  const [deviceId, setDeviceId] = useState<string>(initialDeviceId)
+  const [deviceLabel, setDeviceLabelState] = useState<string>(
+    () => loadCustomDeviceLabel() || detectDeviceLabel()
   )
+  const [enabled, setEnabledState] = useState<boolean>(() => persistedInitial?.enabled ?? true)
+  const [linkedDevices, setLinkedDevices] = useState<LinkedDeviceInfo[]>(() => {
+    if (!persistedInitial || persistedInitial.ownerPubkey !== masterPubkey.toLowerCase()) {
+      return []
+    }
+    return mergeCrdtDevicesIntoLinkedDevices(
+      persistedInitial.linkedDevices.map((d) => ({ ...d, online: false })),
+      persistedInitial.crdt,
+      initialDeviceId,
+      Date.now()
+    ).next
+  })
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(() =>
     persistedInitial && persistedInitial.ownerPubkey === masterPubkey.toLowerCase()
       ? persistedInitial.lastSyncedAt
@@ -208,6 +310,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   const [syncedItemsCount, setSyncedItemsCount] = useState<number>(0)
 
   const deviceIdRef = useRef<string>(deviceId)
+  const deviceLabelRef = useRef<string>(deviceLabel)
   const enabledRef = useRef<boolean>(enabled)
   const ownerPubkeyRef = useRef<string | null>(
     persistedInitial?.ownerPubkey ?? masterPubkey.toLowerCase()
@@ -306,6 +409,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   useLayoutEffect(() => {
     deviceIdRef.current = deviceId
   }, [deviceId])
+
+  useLayoutEffect(() => {
+    deviceLabelRef.current = deviceLabel
+  }, [deviceLabel])
 
   useLayoutEffect(() => {
     enabledRef.current = enabled
@@ -408,17 +515,92 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     [persistLocalJournal]
   )
 
+  const upsertSelfDeviceRecord = useCallback((nowMs = Date.now(), labelOverride?: string) => {
+    const selfId = deviceIdRef.current.trim().slice(0, 64)
+    if (!selfId) return
+    const cleanLabel =
+      (labelOverride ?? deviceLabelRef.current).trim().slice(0, 48) || detectDeviceLabel()
+    const prevDevices = sanitizeSyncedDevicesMap(crdtRef.current.devices)
+    const existing = prevDevices[selfId]
+    const minNextTs = Math.max(
+      nowMs,
+      existing?.lastSyncedAt ?? 0,
+      existing?.updatedAt ?? 0,
+      existing?.removedAt ? existing.removedAt + 1 : 0
+    )
+    const nextRec: SyncedDeviceRecord = {
+      deviceId: selfId,
+      label: cleanLabel,
+      lastSyncedAt: minNextTs,
+      updatedAt: minNextTs,
+      ...(existing?.removedAt ? { removedAt: existing.removedAt } : {}),
+    }
+    crdtRef.current = {
+      ...crdtRef.current,
+      devices: sanitizeSyncedDevicesMap({
+        ...prevDevices,
+        [selfId]: nextRec,
+      }),
+    }
+  }, [])
+
+  const syncLinkedDevicesFromCrdt = useCallback((crdt: DeviceSyncCrdtState) => {
+    const now = Date.now()
+    const { next, changed } = mergeCrdtDevicesIntoLinkedDevices(
+      linkedDevicesRef.current,
+      crdt,
+      deviceIdRef.current,
+      now
+    )
+    if (!changed) return false
+    linkedDevicesRef.current = next
+    setLinkedDevices(next)
+    saveDeviceSyncState({
+      enabled: enabledRef.current,
+      ownerPubkey: ownerPubkeyRef.current,
+      stateRevision: stateRevisionRef.current,
+      lastSyncedAt: lastSyncedAtRef.current,
+      crdt: crdtRef.current,
+      linkedDevices: next,
+    })
+    return true
+  }, [])
+
   const touchSiblingDevice = useCallback(
-    (siblingId: string, label: string, nick: string) => {
-      if (!siblingId || siblingId === deviceIdRef.current) return
+    (
+      siblingId: string,
+      label?: string,
+      nick?: string,
+      touchOptions?: { markSynced?: boolean; syncedAt?: number }
+    ) => {
+      const cleanId = siblingId.trim().slice(0, 64)
+      if (!cleanId || cleanId === deviceIdRef.current) return
       const now = Date.now()
+      const syncTs = touchOptions?.markSynced
+        ? Math.max(now, touchOptions.syncedAt ?? 0)
+        : touchOptions?.syncedAt
       setLinkedDevices((prev) => {
-        const idx = prev.findIndex((d) => d.deviceId === siblingId)
+        const idx = prev.findIndex((d) => d.deviceId === cleanId)
+        const existing = idx !== -1 ? prev[idx] : undefined
+        const crdtRec = crdtRef.current.devices?.[cleanId]
+        const nextLabel =
+          (label && label.trim().slice(0, 48)) ||
+          existing?.label ||
+          crdtRec?.label ||
+          'Sibling Device'
+        const nextNick =
+          nick !== undefined ? nick.trim().slice(0, 32) : (existing?.nickname ?? '')
+        const nextLastSyncedAt = Math.max(
+          existing?.lastSyncedAt ?? 0,
+          syncTs ?? 0,
+          crdtRec?.lastSyncedAt ?? 0
+        )
         const nextEntry: LinkedDeviceInfo = {
-          deviceId: siblingId,
-          label: label.trim().slice(0, 48) || 'Sibling Device',
-          nickname: nick.trim().slice(0, 32),
+          deviceId: cleanId,
+          label: nextLabel,
+          nickname: nextNick,
           lastSeenAt: now,
+          ...(nextLastSyncedAt > 0 ? { lastSyncedAt: nextLastSyncedAt } : {}),
           online: true,
         }
         let next: LinkedDeviceInfo[]
@@ -426,9 +608,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           next = [...prev]
           next[idx] = nextEntry
         } else {
-          next = [nextEntry, ...prev].slice(0, 16)
+          next = [nextEntry, ...prev].slice(0, MAX_SYNCED_DEVICES)
         }
-        next.sort((a, b) => b.lastSeenAt - a.lastSeenAt)
+        next = sortLinkedDevices(next)
         linkedDevicesRef.current = next
         saveDeviceSyncState({
           enabled: enabledRef.current,
@@ -692,6 +874,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           }
         : null
       const recentTail = buildRecentMessagesTail()
+      upsertSelfDeviceRecord(Date.now())
+      persistLocalJournal()
       const bounded = fitCheckpointStateWithinBudget(
         crdtRef.current,
         amailInfo,
@@ -721,6 +905,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       getAmailExportInfo,
       getWalletExportInfo,
       buildRecentMessagesTail,
+      upsertSelfDeviceRecord,
+      persistLocalJournal,
       recordSyncedActivity,
     ]
   )
@@ -748,7 +934,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         v: 1,
         type: 'sync-hello',
         deviceId: deviceIdRef.current,
-        deviceLabel,
+        deviceLabel: deviceLabelRef.current,
         nickname: snapshotRef.current.nickname,
         ts: Date.now(),
         stateRevision: stateRevisionRef.current,
@@ -758,7 +944,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       lastHelloSentAtRef.current = Date.now()
       return await publishEphemeralPacket(packet, allowExtensionPrompt)
     },
-    [identityManager, deviceLabel, computeLocalMsgDigests, publishEphemeralPacket]
+    [identityManager, computeLocalMsgDigests, publishEphemeralPacket]
   )
 
   const sendStateToPeer = useCallback(
@@ -788,6 +974,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
             payload: walletInfo.payload,
           }
         : null
+      upsertSelfDeviceRecord(now)
+      persistLocalJournal()
       const statePayload = fitCheckpointStateWithinBudget(
         crdtRef.current,
         amailInfo,
@@ -799,7 +987,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         v: 1,
         type: 'sync-state',
         deviceId: deviceIdRef.current,
-        deviceLabel,
+        deviceLabel: deviceLabelRef.current,
         nickname: snapshotRef.current.nickname,
         ...(targetDeviceId ? { targetDeviceId } : {}),
         ts: now,
@@ -807,7 +995,13 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
       return await publishEphemeralPacket(packet, allowExtensionPrompt)
     },
-    [deviceLabel, getAmailExportInfo, getWalletExportInfo, publishEphemeralPacket]
+    [
+      getAmailExportInfo,
+      getWalletExportInfo,
+      upsertSelfDeviceRecord,
+      persistLocalJournal,
+      publishEphemeralPacket,
+    ]
   )
 
   const applyRecentMessagesTail = useCallback(
@@ -956,12 +1150,14 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         }
       }
 
+      syncLinkedDevicesFromCrdt(changed ? merged : crdtRef.current)
+
       if (itemsApplied > 0 || changed) {
         recordSyncedActivity(itemsApplied)
       }
       return { changed, itemsApplied }
     },
-    [applyRecentMessagesTail, recordSyncedActivity]
+    [applyRecentMessagesTail, syncLinkedDevicesFromCrdt, recordSyncedActivity]
   )
 
   const requestMissingMessagesFromPeer = useCallback(
@@ -1071,7 +1267,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
 
       if (packet.type === 'sync-state') {
-        touchSiblingDevice(packet.deviceId, packet.deviceLabel, packet.nickname)
+        touchSiblingDevice(packet.deviceId, packet.deviceLabel, packet.nickname, {
+          markSynced: true,
+          syncedAt: packet.ts,
+        })
         const remoteHashBefore = computeCrdtStateHash(packet.state)
         const { changed } = await applyMergedRemoteCrdt(packet.state)
         const localHashAfter = computeCrdtStateHash(crdtRef.current)
@@ -1089,6 +1288,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
 
       if (packet.type === 'sync-msg-req') {
+        touchSiblingDevice(packet.deviceId)
         const { dmMap, serverMap, bitchatMap } = collectLocalMessageBuckets()
         for (const req of packet.scopes.slice(0, 32)) {
           const known = new Set(req.knownIds)
@@ -1184,6 +1384,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
 
       if (packet.type === 'sync-msg-chunk') {
+        touchSiblingDevice(packet.deviceId, undefined, undefined, {
+          markSynced: true,
+          syncedAt: packet.ts,
+        })
         let added = 0
         const cleanChunk = packet.messages.filter(
           (m) => !isStuckMediaPlaceholder(m) && !isEphemeralPendingMessage(m)
@@ -1220,6 +1424,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         if (!amailProviderRef.current || packet.totalChunks <= 0 || packet.totalChunks > 64) {
           return
         }
+        touchSiblingDevice(packet.deviceId, undefined, undefined, {
+          markSynced: true,
+          syncedAt: packet.ts,
+        })
         const tKey = `${packet.deviceId}:${packet.transferId}`
         const now = Date.now()
         // Prune stale incomplete transfers (> 90s old)
@@ -1266,6 +1474,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         if (!walletProviderRef.current || packet.totalChunks <= 0 || packet.totalChunks > 64) {
           return
         }
+        touchSiblingDevice(packet.deviceId, undefined, undefined, {
+          markSynced: true,
+          syncedAt: packet.ts,
+        })
         const tKey = `${packet.deviceId}:${packet.transferId}`
         const now = Date.now()
         // Prune stale incomplete transfers (> 90s old)
@@ -1466,7 +1678,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     }
     scheduleCheckpointPublish()
     const hasOnlineSibling = linkedDevicesRef.current.some(
-      (d) => Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
+      (d) => d.lastSeenAt > 0 && Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
     )
     if (!hasOnlineSibling) return
     if (msgSyncNotifyTimerRef.current !== null) {
@@ -1503,6 +1715,18 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         const parsed = await parseDeviceSyncCheckpointEvent(newestCheckpointEvent, material, false)
         if (!cancelled && parsed) {
           await applyMergedRemoteCrdt(parsed)
+        }
+      }
+      if (!cancelled) {
+        const selfId = deviceIdRef.current
+        const selfRec = crdtRef.current.devices?.[selfId]
+        const needsSelfRegistration =
+          !selfRec ||
+          (selfRec.removedAt ?? 0) >= selfRec.updatedAt ||
+          selfRec.label !== deviceLabelRef.current ||
+          Date.now() - selfRec.lastSyncedAt > SELF_CHECKPOINT_STALE_MS
+        if (needsSelfRegistration) {
+          checkpointDirtyRef.current = true
         }
       }
       if (!cancelled && checkpointDirtyRef.current) {
@@ -1607,7 +1831,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       setLinkedDevices((prev) => {
         let changed = false
         const next = prev.map((d) => {
-          const isOnline = now - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
+          const isOnline = d.lastSeenAt > 0 && now - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
           if (isOnline !== d.online) {
             changed = true
             return { ...d, online: isOnline }
@@ -1674,6 +1898,76 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       })
     },
     []
+  )
+
+  const setDeviceLabel = useCallback(
+    (rawLabel: string) => {
+      const trimmed = rawLabel.trim().slice(0, 48)
+      saveCustomDeviceLabel(trimmed || null)
+      const resolved = trimmed || detectDeviceLabel()
+      deviceLabelRef.current = resolved
+      setDeviceLabelState(resolved)
+      upsertSelfDeviceRecord(Date.now(), resolved)
+      stateRevisionRef.current += 1
+      persistLocalJournal()
+      if (enabledRef.current) {
+        scheduleCheckpointPublish()
+        void sendStateToPeer(undefined, false, true)
+        void broadcastHello(false)
+      }
+    },
+    [
+      upsertSelfDeviceRecord,
+      persistLocalJournal,
+      scheduleCheckpointPublish,
+      sendStateToPeer,
+      broadcastHello,
+    ]
+  )
+
+  const removeLinkedDevice = useCallback(
+    (targetDeviceId: string) => {
+      const cleanId = targetDeviceId.trim().slice(0, 64)
+      if (!cleanId || cleanId === deviceIdRef.current) return
+      const now = Date.now()
+      const prevDevices = sanitizeSyncedDevicesMap(crdtRef.current.devices)
+      const existingRec = prevDevices[cleanId]
+      const existingLinked = linkedDevicesRef.current.find((d) => d.deviceId === cleanId)
+      const tombstoneTs = Math.max(
+        now,
+        (existingRec?.updatedAt ?? 0) + 1,
+        (existingRec?.removedAt ?? 0) + 1
+      )
+      const nextRec: SyncedDeviceRecord = {
+        deviceId: cleanId,
+        label: existingRec?.label || existingLinked?.label || 'Sibling Device',
+        lastSyncedAt: Math.max(existingRec?.lastSyncedAt ?? 0, existingLinked?.lastSyncedAt ?? 0),
+        updatedAt: tombstoneTs,
+        removedAt: tombstoneTs,
+      }
+      crdtRef.current = {
+        ...crdtRef.current,
+        devices: sanitizeSyncedDevicesMap({
+          ...prevDevices,
+          [cleanId]: nextRec,
+        }),
+      }
+      stateRevisionRef.current += 1
+
+      const nextLinked = linkedDevicesRef.current.filter((d) => d.deviceId !== cleanId)
+      linkedDevicesRef.current = nextLinked
+      setLinkedDevices(nextLinked)
+      lastStateSentToPeerRef.current.delete(cleanId)
+      lastReqSentToPeerRef.current.delete(cleanId)
+      lastPeerDigestsRef.current.delete(cleanId)
+      persistLocalJournal()
+
+      if (enabledRef.current) {
+        scheduleCheckpointPublish()
+        void sendStateToPeer(undefined, false, true)
+      }
+    },
+    [persistLocalJournal, scheduleCheckpointPublish, sendStateToPeer]
   )
 
   const syncNow = useCallback(async (): Promise<void> => {
@@ -1754,7 +2048,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     if (!enabledRef.current || isApplyingRemoteRef.current) return
     scheduleCheckpointPublish()
     const hasOnlineSibling = linkedDevicesRef.current.some(
-      (d) => Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
+      (d) => d.lastSeenAt > 0 && Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
     )
     if (hasOnlineSibling) {
       void broadcastHello(false)
@@ -1769,7 +2063,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     if (!enabledRef.current || isApplyingRemoteRef.current) return
     scheduleCheckpointPublish()
     const hasOnlineSibling = linkedDevicesRef.current.some(
-      (d) => Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
+      (d) => d.lastSeenAt > 0 && Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
     )
     if (!hasOnlineSibling) return
     if (walletNotifyTimerRef.current !== null) {
@@ -1797,9 +2091,13 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       walletNotifyTimerRef.current = null
     }
     clearDeviceSyncState()
+    saveCustomDeviceLabel(null)
     const freshId = resetDeviceId()
     deviceIdRef.current = freshId
     setDeviceId(freshId)
+    const freshLabel = detectDeviceLabel()
+    deviceLabelRef.current = freshLabel
+    setDeviceLabelState(freshLabel)
     enabledRef.current = true
     setEnabledState(true)
     crdtRef.current = createEmptyCrdtState()
@@ -1833,12 +2131,14 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       setEnabled,
       deviceId,
       deviceLabel,
+      setDeviceLabel,
       linkedDevices,
       onlineSiblingCount,
       lastSyncedAt,
       isSyncing,
       syncedItemsCount,
       syncNow,
+      removeLinkedDevice,
       resetAll,
     }),
     [
@@ -1846,12 +2146,14 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       setEnabled,
       deviceId,
       deviceLabel,
+      setDeviceLabel,
       linkedDevices,
       onlineSiblingCount,
       lastSyncedAt,
       isSyncing,
       syncedItemsCount,
       syncNow,
+      removeLinkedDevice,
       resetAll,
     ]
   )

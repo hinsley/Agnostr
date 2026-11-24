@@ -6385,6 +6385,35 @@
   background-color: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   font-size: var(--text-xs);
+  min-width: 0;
+}
+
+.ag-set-sync-this-main {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.36rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-set-sync-this-edit {
+  gap: 0.45rem;
+}
+
+.ag-set-sync-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0.25rem 0.5rem;
+  font-size: 12px;
+}
+
+.ag-set-sync-rename-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
 }
 
 .ag-set-sync-key {
@@ -6396,6 +6425,54 @@
 .ag-set-sync-val {
   color: var(--text-primary);
   font-weight: 600;
+  min-width: 0;
+}
+
+.ag-set-sync-id {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.08rem 0.34rem;
+  border-radius: var(--radius-xs, 4px);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.ag-set-sync-rename-btn,
+.ag-set-sync-forget-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.ag-set-sync-rename-btn:hover,
+.ag-set-sync-rename-btn:focus-visible {
+  background-color: var(--bg-hover);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.ag-set-sync-forget-btn:hover,
+.ag-set-sync-forget-btn:focus-visible {
+  background-color: var(--status-danger-soft);
+  border-color: transparent;
+  color: var(--status-danger);
+  outline: none;
 }
 
 .ag-set-sync-devices {
@@ -6419,18 +6496,19 @@
 .ag-set-sync-device-list {
   display: flex;
   flex-direction: column;
-  gap: 0.28rem;
+  gap: 0.32rem;
 }
 
 .ag-set-sync-device-row {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.36rem 0.55rem;
+  gap: 0.5rem;
+  padding: 0.42rem 0.5rem 0.42rem 0.58rem;
   border-radius: var(--radius-sm);
   background-color: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   font-size: 12px;
+  min-width: 0;
 }
 
 .ag-set-sync-dot {
@@ -6438,15 +6516,32 @@
   height: 7px;
   border-radius: var(--radius-full);
   background-color: var(--text-muted);
+  opacity: 0.65;
   flex-shrink: 0;
 }
 
 .ag-set-sync-dot.online {
   background-color: var(--status-ok);
+  opacity: 1;
+}
+
+.ag-set-sync-device-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.14rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ag-set-sync-device-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.36rem;
+  min-width: 0;
 }
 
 .ag-set-sync-device-label {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   color: var(--text-primary);
   font-weight: 500;
@@ -6456,7 +6551,15 @@
   font-size: 10.5px;
   color: var(--text-muted);
   white-space: nowrap;
-  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ag-set-sync-note {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
 }
 
 .ag-set-sync-footer {
@@ -6477,6 +6580,22 @@
 @media (max-width: 867px) {
   .ag-select {
     font-size: 16px;
+  }
+
+  .ag-set-sync-this-edit {
+    flex-wrap: wrap;
+  }
+
+  .ag-set-sync-rename-input {
+    font-size: 16px;
+    height: 36px;
+    min-width: 140px;
+  }
+
+  .ag-set-sync-rename-btn,
+  .ag-set-sync-forget-btn {
+    width: 30px;
+    height: 30px;
   }
 
   .ag-set-scope-item .ag-segmented button {
