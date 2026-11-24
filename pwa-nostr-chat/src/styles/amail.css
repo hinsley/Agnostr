@@ -953,9 +953,34 @@
 }
 
 .ag-amail-row-sender {
+  min-width: 0;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
+}
+
+.ag-amail-row-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 17px;
+  padding: 0 0.34rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-amail-row.unread .ag-amail-row-count {
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--accent);
 }
 
 .ag-amail-row.unread .ag-amail-row-sender,

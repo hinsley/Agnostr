@@ -101,13 +101,28 @@ interface AmailTooltipState {
 }
 
 interface FolderPickerState {
-  messageId: string
+  pickerKey: string
+  targetIds: string[]
   currentFolder: AmailFolder
   anchorTop: number
   anchorBottom: number
   anchorLeft: number
   anchorRight: number
   closeReaderOnMove: boolean
+}
+
+interface MailThreadListItem {
+  key: string
+  isDraft: boolean
+  sectionMessages: AmailMessage[]
+  conversationMessages: AmailMessage[]
+  primaryMsg: AmailMessage
+  latestMsg: AmailMessage
+  latestSentAt: number
+  messageCount: number
+  isUnread: boolean
+  isStarred: boolean
+  displaySubject: string
 }
 
 interface AutocompleteCandidate {
@@ -242,6 +257,113 @@ function resolvePubkeyInput(raw: string): { pubkey: string; npub: string; nickna
 
 function baseMailId(id: string): string {
   return id.endsWith(':self') ? id.slice(0, -5) : id
+}
+
+function formatThreadSubject(rawSubject: string): string {
+  const trimmed = rawSubject.trim()
+  if (!trimmed) return '(no subject)'
+  return trimmed.replace(/^(re:\s*){2,}/i, 'Re: ')
+}
+
+function matchesMailQuery(m: AmailMessage, q: string): boolean {
+  const recipMatch = [
+    ...(m.toRecipients ?? []),
+    ...(m.ccRecipients ?? []),
+    ...(m.bccRecipients ?? []),
+  ].some(
+    (r) =>
+      r.nickname.toLowerCase().includes(q) ||
+      r.npub.toLowerCase().includes(q) ||
+      r.pubkey.toLowerCase().includes(q),
+  )
+  return (
+    m.subject.toLowerCase().includes(q) ||
+    m.body.toLowerCase().includes(q) ||
+    m.fromName.toLowerCase().includes(q) ||
+    m.toName.toLowerCase().includes(q) ||
+    m.fromNpub.toLowerCase().includes(q) ||
+    m.toNpub.toLowerCase().includes(q) ||
+    recipMatch
+  )
+}
+
+function buildCanonicalThreadMap(messages: readonly AmailMessage[]): Map<string, string> {
+  const parent = new Map<string, string>()
+
+  const find = (x: string): string => {
+    let root = x
+    while (parent.has(root) && parent.get(root) !== root) {
+      root = parent.get(root)!
+    }
+    let curr = x
+    while (parent.has(curr) && parent.get(curr) !== root) {
+      const next = parent.get(curr)!
+      parent.set(curr, root)
+      curr = next
+    }
+    if (!parent.has(root)) parent.set(root, root)
+    return root
+  }
+
+  const union = (a: string, b: string) => {
+    const ra = find(a)
+    const rb = find(b)
+    if (ra !== rb) {
+      if (ra < rb) parent.set(rb, ra)
+      else parent.set(ra, rb)
+    }
+  }
+
+  const nonDrafts = messages.filter((m) => m.folder !== 'drafts')
+  for (const m of nonDrafts) {
+    const baseKey = `m:${baseMailId(m.id)}`
+    find(baseKey)
+    const tid = m.threadId?.trim()
+    if (tid) {
+      union(baseKey, `t:${tid}`)
+    }
+    const replyTo = m.inReplyTo?.trim()
+    if (replyTo) {
+      union(baseKey, `m:${baseMailId(replyTo)}`)
+    }
+  }
+
+  const map = new Map<string, string>()
+  for (const m of nonDrafts) {
+    map.set(m.id, find(`m:${baseMailId(m.id)}`))
+  }
+  return map
+}
+
+function dedupeThreadMessages(
+  msgs: readonly AmailMessage[],
+  preferOut: boolean,
+  preferredId?: string | null,
+): AmailMessage[] {
+  const byBaseId = new Map<string, AmailMessage>()
+  for (const m of msgs) {
+    const bId = baseMailId(m.id)
+    const prev = byBaseId.get(bId)
+    if (!prev) {
+      byBaseId.set(bId, m)
+      continue
+    }
+    if (preferredId && m.id === preferredId) {
+      byBaseId.set(bId, m)
+    } else if (!preferredId || prev.id !== preferredId) {
+      if (preferOut && m.direction === 'out') {
+        byBaseId.set(bId, m)
+      } else if (!preferOut && m.direction === 'in') {
+        byBaseId.set(bId, m)
+      }
+    }
+  }
+  return [...byBaseId.values()].sort((a, b) => {
+    if (a.sentAt !== b.sentAt) return a.sentAt - b.sentAt
+    if (b.inReplyTo && baseMailId(b.inReplyTo) === baseMailId(a.id)) return -1
+    if (a.inReplyTo && baseMailId(a.inReplyTo) === baseMailId(b.id)) return 1
+    return a.updatedAt - b.updatedAt
+  })
 }
 
 function getMessageToList(msg: AmailMessage): AmailRecipient[] {
@@ -819,53 +941,148 @@ export function AmailView({
     }
   }, [activeRecipientField])
 
+  const canonicalThreadMap = useMemo(
+    () => buildCanonicalThreadMap(amail.messages),
+    [amail.messages],
+  )
+
   const folderCounts = useMemo(() => {
-    let starred = 0
+    const starredThreads = new Set<string>()
     let drafts = 0
-    const customCounts: Record<string, number> = {}
+    const customThreadSets: Record<string, Set<string>> = {}
     for (const m of amail.messages) {
-      if (m.isStarred && m.folder !== 'trash') starred += 1
-      if (m.folder === 'drafts') drafts += 1
+      if (m.folder === 'drafts') {
+        drafts += 1
+        if (m.isStarred) starredThreads.add(`draft:${m.id}`)
+        continue
+      }
+      const tKey = canonicalThreadMap.get(m.id) ?? `m:${baseMailId(m.id)}`
+      if (m.isStarred && m.folder !== 'trash') {
+        starredThreads.add(tKey)
+      }
       if (!BUILTIN_FOLDER_SET.has(m.folder)) {
-        customCounts[m.folder] = (customCounts[m.folder] ?? 0) + 1
+        if (!customThreadSets[m.folder]) {
+          customThreadSets[m.folder] = new Set<string>()
+        }
+        customThreadSets[m.folder].add(tKey)
       }
     }
-    return { starred, drafts, customCounts }
-  }, [amail.messages])
+    const customCounts: Record<string, number> = {}
+    for (const [folderId, set] of Object.entries(customThreadSets)) {
+      customCounts[folderId] = set.size
+    }
+    return { starred: starredThreads.size, drafts, customCounts }
+  }, [amail.messages, canonicalThreadMap])
 
-  const visibleMessages = useMemo(() => {
+  const visibleThreads = useMemo<MailThreadListItem[]>(() => {
     if (section === 'contacts' || section === 'mesh') return []
     const q = searchQuery.trim().toLowerCase()
-    return amail.messages
-      .filter((m) => {
-        if (section === 'starred') {
-          if (!m.isStarred || m.folder === 'trash') return false
-        } else if (m.folder !== section) {
-          return false
-        }
-        if (!q) return true
-        const recipMatch = [
-          ...(m.toRecipients ?? []),
-          ...(m.ccRecipients ?? []),
-          ...(m.bccRecipients ?? []),
-        ].some(
-          (r) =>
-            r.nickname.toLowerCase().includes(q) ||
-            r.npub.toLowerCase().includes(q) ||
-            r.pubkey.toLowerCase().includes(q),
-        )
-        return (
-          m.subject.toLowerCase().includes(q) ||
-          m.body.toLowerCase().includes(q) ||
-          m.fromName.toLowerCase().includes(q) ||
-          m.toName.toLowerCase().includes(q) ||
-          m.fromNpub.toLowerCase().includes(q) ||
-          m.toNpub.toLowerCase().includes(q) ||
-          recipMatch
-        )
+
+    // Drafts stay un-consolidated (each draft is its own editable row)
+    if (section === 'drafts') {
+      return amail.messages
+        .filter((m) => m.folder === 'drafts' && (!q || matchesMailQuery(m, q)))
+        .sort((a, b) => b.sentAt - a.sentAt || b.updatedAt - a.updatedAt)
+        .map<MailThreadListItem>((m) => ({
+          key: m.id,
+          isDraft: true,
+          sectionMessages: [m],
+          conversationMessages: [m],
+          primaryMsg: m,
+          latestMsg: m,
+          latestSentAt: m.sentAt,
+          messageCount: 1,
+          isUnread: false,
+          isStarred: m.isStarred,
+          displaySubject: formatThreadSubject(m.subject),
+        }))
+    }
+
+    const byThreadKey = new Map<string, AmailMessage[]>()
+    const sectionBuckets = new Map<string, AmailMessage[]>()
+
+    for (const m of amail.messages) {
+      const isDraft = m.folder === 'drafts'
+      const tKey = isDraft
+        ? `draft:${m.id}`
+        : (canonicalThreadMap.get(m.id) ?? `m:${baseMailId(m.id)}`)
+
+      if (!isDraft) {
+        const list = byThreadKey.get(tKey)
+        if (list) list.push(m)
+        else byThreadKey.set(tKey, [m])
+      }
+
+      const belongsToSection =
+        section === 'starred' ? m.isStarred && m.folder !== 'trash' : m.folder === section
+      if (!belongsToSection) continue
+
+      const bucket = sectionBuckets.get(tKey)
+      if (bucket) bucket.push(m)
+      else sectionBuckets.set(tKey, [m])
+    }
+
+    const items: MailThreadListItem[] = []
+    for (const [tKey, rawSecMsgs] of sectionBuckets.entries()) {
+      const sectionMessages = [...rawSecMsgs].sort(
+        (a, b) => b.sentAt - a.sentAt || b.updatedAt - a.updatedAt,
+      )
+      const primaryMsg = sectionMessages[0]
+      const isDraft = primaryMsg.folder === 'drafts'
+
+      let conversationMessages: AmailMessage[]
+      if (isDraft) {
+        conversationMessages = [primaryMsg]
+      } else {
+        const allInThread = byThreadKey.get(tKey) ?? sectionMessages
+        const scoped =
+          section === 'trash'
+            ? allInThread.filter((m) => m.folder === 'trash')
+            : allInThread.filter((m) => m.folder !== 'trash')
+        const deduped = dedupeThreadMessages(scoped, section === 'sent')
+        conversationMessages = deduped.length > 0 ? deduped : [...sectionMessages].reverse()
+      }
+
+      if (
+        q &&
+        !conversationMessages.some((m) => matchesMailQuery(m, q)) &&
+        !sectionMessages.some((m) => matchesMailQuery(m, q))
+      ) {
+        continue
+      }
+
+      const latestMsg = conversationMessages[conversationMessages.length - 1] ?? primaryMsg
+      const latestSentAt = Math.max(latestMsg.sentAt, primaryMsg.sentAt)
+      const isUnread =
+        sectionMessages.some((m) => !m.isRead && m.direction === 'in') ||
+        (section === 'starred' &&
+          conversationMessages.some((m) => !m.isRead && m.direction === 'in'))
+      const isStarred =
+        conversationMessages.some((m) => m.isStarred) || sectionMessages.some((m) => m.isStarred)
+      const displaySubject = formatThreadSubject(
+        conversationMessages[0]?.subject || primaryMsg.subject,
+      )
+
+      items.push({
+        key: tKey,
+        isDraft,
+        sectionMessages,
+        conversationMessages,
+        primaryMsg,
+        latestMsg,
+        latestSentAt,
+        messageCount: conversationMessages.length,
+        isUnread,
+        isStarred,
+        displaySubject,
       })
-      .sort((a, b) => b.sentAt - a.sentAt)
-  }, [amail.messages, section, searchQuery])
+    }
+
+    items.sort(
+      (a, b) => b.latestSentAt - a.latestSentAt || b.primaryMsg.updatedAt - a.primaryMsg.updatedAt,
+    )
+    return items
+  }, [amail.messages, canonicalThreadMap, section, searchQuery])
 
   const selectedMessage = useMemo(
     () =>
@@ -875,43 +1092,28 @@ export function AmailView({
     [amail.messages, selectedMessageId],
   )
 
-  // Deduplicate self-mail sibling pairs (`id` vs `${id}:self`) so self-mail never renders twice in Reader
+  // Show all messages in the canonical thread chronologically, deduplicating self-mail sibling pairs
   const threadMessages = useMemo(() => {
     if (!selectedMessage) return []
-    const tid = selectedMessage.threadId
-    if (!tid) return [selectedMessage]
-    const rawSiblings = amail.messages
-      .filter(
-        (m) =>
-          m.threadId === tid &&
-          m.folder !== 'drafts' &&
-          (m.folder !== 'trash' || m.id === selectedMessage.id),
-      )
-      .sort((a, b) => a.sentAt - b.sentAt)
-
-    const byBaseId = new Map<string, AmailMessage>()
-    const preferOut = selectedMessage.direction === 'out' && selectedMessage.folder === 'sent'
-    for (const m of rawSiblings) {
-      const bId = baseMailId(m.id)
-      const prev = byBaseId.get(bId)
-      if (!prev) {
-        byBaseId.set(bId, m)
-        continue
+    if (selectedMessage.folder === 'drafts') return [selectedMessage]
+    const tKey = canonicalThreadMap.get(selectedMessage.id)
+    if (!tKey) return [selectedMessage]
+    const isViewingTrash = section === 'trash' || selectedMessage.folder === 'trash'
+    const rawSiblings = amail.messages.filter((m) => {
+      if (m.folder === 'drafts') return false
+      if (canonicalThreadMap.get(m.id) !== tKey) return false
+      if (isViewingTrash) {
+        return m.folder === 'trash' || m.id === selectedMessage.id
       }
-      if (m.id === selectedMessage.id) {
-        byBaseId.set(bId, m)
-      } else if (prev.id !== selectedMessage.id) {
-        if (preferOut && m.direction === 'out') {
-          byBaseId.set(bId, m)
-        } else if (!preferOut && m.direction === 'in') {
-          byBaseId.set(bId, m)
-        }
-      }
-    }
+      return m.folder !== 'trash' || m.id === selectedMessage.id
+    })
 
-    const deduped = [...byBaseId.values()].sort((a, b) => a.sentAt - b.sentAt)
+    const preferOut =
+      section === 'sent' ||
+      (selectedMessage.direction === 'out' && selectedMessage.folder === 'sent')
+    const deduped = dedupeThreadMessages(rawSiblings, preferOut, selectedMessage.id)
     return deduped.length > 0 ? deduped : [selectedMessage]
-  }, [amail.messages, selectedMessage])
+  }, [amail.messages, selectedMessage, canonicalThreadMap, section])
 
   // Build autocomplete matches for active recipient field (including top `Me (Yourself)` entry)
   const getAutocompleteForField = useCallback(
@@ -1027,6 +1229,58 @@ export function AmailView({
     }
   }
 
+  const formatThreadParticipants = (
+    thread: MailThreadListItem,
+  ): { label: string; colorPubkey: string } => {
+    if (thread.messageCount <= 1) {
+      return formatRowCounterparty(thread.primaryMsg)
+    }
+    const participants: { pubkey: string; name: string; isSelf: boolean }[] = []
+    const seen = new Set<string>()
+    for (const m of thread.conversationMessages) {
+      const pk = (m.fromPubkey || '').toLowerCase()
+      const isSelf = m.direction === 'out' || pk === myPubkey
+      const dedupeKey = isSelf ? '__self__' : pk || (m.fromName || '').toLowerCase()
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
+      participants.push({
+        pubkey: pk,
+        name: isSelf ? 'Me' : m.fromName?.trim() || shortPubkey(m.fromPubkey, 6, 4),
+        isSelf,
+      })
+    }
+    if (participants.length === 0) {
+      return formatRowCounterparty(thread.primaryMsg)
+    }
+    // If every message in the thread was sent by self to a remote recipient, show recipient cleanly
+    if (participants.length === 1 && participants[0].isSelf) {
+      const hasRemoteRecipient = thread.conversationMessages.some((m) =>
+        [
+          ...getMessageToList(m),
+          ...(m.ccRecipients ?? []),
+          ...(m.bccRecipients ?? []),
+        ].some((r) => r.pubkey.toLowerCase() !== myPubkey),
+      )
+      if (hasRemoteRecipient && thread.primaryMsg.direction === 'out') {
+        return formatRowCounterparty(thread.primaryMsg)
+      }
+      return { label: 'Me', colorPubkey: myPubkey }
+    }
+
+    const firstNonSelf = participants.find((p) => !p.isSelf)
+    const colorPubkey = firstNonSelf?.pubkey || participants[0].pubkey
+    if (participants.length <= 3) {
+      return {
+        label: participants.map((p) => p.name).join(', '),
+        colorPubkey,
+      }
+    }
+    return {
+      label: `${participants[0].name}, ${participants[1].name} +${participants.length - 2}`,
+      colorPubkey,
+    }
+  }
+
   const copyValue = async (key: string, value: string, toastTitle: string) => {
     try {
       await navigator.clipboard.writeText(value)
@@ -1039,10 +1293,11 @@ export function AmailView({
     }
   }
 
-  const handleOpenMessage = (msg: AmailMessage) => {
+  const handleOpenThread = (thread: MailThreadListItem) => {
     onPlaySound?.('click')
     hideTooltip()
-    if (msg.folder === 'drafts') {
+    const msg = thread.primaryMsg
+    if (thread.isDraft || msg.folder === 'drafts') {
       const toList = getMessageToList(msg)
       openFreshComposer({
         toList,
@@ -1059,9 +1314,65 @@ export function AmailView({
       return
     }
     setSelectedMessageId(msg.id)
-    if (!msg.isRead) {
-      void amail.markRead(msg.id, true)
+    const unreadIds = new Set<string>()
+    for (const m of thread.sectionMessages) {
+      if (!m.isRead) unreadIds.add(m.id)
     }
+    for (const m of thread.conversationMessages) {
+      if (!m.isRead) unreadIds.add(m.id)
+    }
+    if (unreadIds.size > 0) {
+      void (async () => {
+        for (const id of unreadIds) {
+          await amail.markRead(id, true)
+        }
+      })()
+    }
+  }
+
+  const handleToggleThreadRead = async (thread: MailThreadListItem) => {
+    onPlaySound?.('click')
+    if (thread.isUnread) {
+      const unreadIds = new Set<string>()
+      for (const m of thread.sectionMessages) {
+        if (!m.isRead) unreadIds.add(m.id)
+      }
+      for (const m of thread.conversationMessages) {
+        if (!m.isRead && (section === 'starred' || m.folder === section)) {
+          unreadIds.add(m.id)
+        }
+      }
+      for (const id of unreadIds) {
+        await amail.markRead(id, true)
+      }
+      return
+    }
+    const target =
+      thread.sectionMessages.find((m) => m.direction === 'in') ?? thread.primaryMsg
+    await amail.markRead(target.id, false)
+  }
+
+  const handleToggleThreadStar = async (
+    conversationMessages: readonly AmailMessage[],
+    sectionMessages: readonly AmailMessage[],
+    latestMsg: AmailMessage,
+    isStarred: boolean,
+  ) => {
+    onPlaySound?.('click')
+    if (isStarred) {
+      const starredIds = new Set<string>()
+      for (const m of conversationMessages) {
+        if (m.isStarred) starredIds.add(m.id)
+      }
+      for (const m of sectionMessages) {
+        if (m.isStarred) starredIds.add(m.id)
+      }
+      for (const id of starredIds) {
+        await amail.toggleStar(id)
+      }
+      return
+    }
+    await amail.toggleStar(latestMsg.id)
   }
 
   const canReplyAll = (msg: AmailMessage): boolean => {
@@ -1088,7 +1399,7 @@ export function AmailView({
       to: replyPubkey ? { pubkey: replyPubkey, nickname: replyName } : null,
       subject: nextSubject,
       body: '',
-      threadId: msg.threadId,
+      threadId: msg.threadId || baseMailId(msg.id),
       inReplyTo: msg.id,
     })
   }
@@ -1139,7 +1450,7 @@ export function AmailView({
       ccList: ccCandidates,
       subject: nextSubject,
       body: '',
-      threadId: msg.threadId,
+      threadId: msg.threadId || baseMailId(msg.id),
       inReplyTo: msg.id,
     })
   }
@@ -1169,81 +1480,125 @@ export function AmailView({
     })
   }
 
-  const handleRestoreMessage = async (msg: AmailMessage, closeReader = false) => {
+  const handleRestoreMessages = async (targetIds: readonly string[], closeReader = false) => {
+    if (targetIds.length === 0) return
     onPlaySound?.('click')
     hideTooltip()
-    const restoredTo = await amail.restoreMessage(msg.id)
+    const uniqueIds = [...new Set(targetIds)]
+    let restoredTo: AmailFolder | null = null
+    for (const id of uniqueIds) {
+      const dest = await amail.restoreMessage(id)
+      if (dest && !restoredTo) restoredTo = dest
+    }
     if (restoredTo) {
       engine.pushToast('success', `Restored to ${getFolderDisplayName(restoredTo)}`)
     }
-    if (closeReader || selectedMessageId === msg.id) {
+    if (closeReader || (selectedMessageId && uniqueIds.includes(selectedMessageId))) {
       setSelectedMessageId(null)
     }
   }
 
-  const handleMoveToFolder = async (
-    messageId: string,
+  const handleMoveMessagesToFolder = async (
+    targetIds: readonly string[],
     targetFolder: AmailFolder,
     closeReader = false,
   ) => {
+    if (targetIds.length === 0) return
     onPlaySound?.('click')
     hideTooltip()
     setFolderPicker(null)
-    await amail.moveToFolder(messageId, targetFolder)
+    const uniqueIds = [...new Set(targetIds)]
+    for (const id of uniqueIds) {
+      await amail.moveToFolder(id, targetFolder)
+    }
     engine.pushToast('info', `Moved to ${getFolderDisplayName(targetFolder)}`)
-    if (closeReader || (selectedMessageId === messageId && targetFolder !== section)) {
+    if (
+      closeReader ||
+      (selectedMessageId && uniqueIds.includes(selectedMessageId) && targetFolder !== section)
+    ) {
+      setSelectedMessageId(null)
+    }
+  }
+
+  const handleDeleteMessages = async (
+    targetIds: readonly string[],
+    folder: AmailFolder,
+    closeReader = false,
+  ) => {
+    if (targetIds.length === 0) return
+    onPlaySound?.('click')
+    hideTooltip()
+    const uniqueIds = [...new Set(targetIds)]
+    for (const id of uniqueIds) {
+      if (folder === 'drafts') {
+        await amail.deleteDraft(id)
+      } else if (folder === 'trash') {
+        await amail.deletePermanently(id)
+      } else {
+        await amail.moveToFolder(id, 'trash')
+      }
+    }
+    if (closeReader || (selectedMessageId && uniqueIds.includes(selectedMessageId))) {
       setSelectedMessageId(null)
     }
   }
 
   const openFolderPickerAt = (
     e: ReactMouseEvent<HTMLElement>,
-    msg: AmailMessage,
-    closeReaderOnMove: boolean,
+    opts: {
+      pickerKey: string
+      targetIds: string[]
+      currentFolder: AmailFolder
+      closeReaderOnMove: boolean
+    },
   ) => {
     e.stopPropagation()
     hideTooltip()
     onPlaySound?.('click')
-    if (folderPicker && folderPicker.messageId === msg.id) {
+    if (folderPicker && folderPicker.pickerKey === opts.pickerKey) {
       setFolderPicker(null)
       return
     }
     const rect = e.currentTarget.getBoundingClientRect()
     setFolderPicker({
-      messageId: msg.id,
-      currentFolder: msg.folder,
+      pickerKey: opts.pickerKey,
+      targetIds: opts.targetIds,
+      currentFolder: opts.currentFolder,
       anchorTop: rect.top,
       anchorBottom: rect.bottom,
       anchorLeft: rect.left,
       anchorRight: rect.right,
-      closeReaderOnMove,
+      closeReaderOnMove: opts.closeReaderOnMove,
     })
   }
 
-  const openMessageContextMenu = (e: ReactMouseEvent, msg: AmailMessage) => {
+  const openThreadContextMenu = (e: ReactMouseEvent, thread: MailThreadListItem) => {
     hideTooltip()
+    const msg = thread.primaryMsg
+    const replyTarget = thread.latestMsg
+    const targetIds = thread.sectionMessages.map((m) => m.id)
     const items: ContextMenuItem[] = [
       {
         id: 'open',
-        label: msg.folder === 'drafts' ? 'Edit Draft' : 'Open',
+        label: thread.isDraft || msg.folder === 'drafts' ? 'Edit Draft' : 'Open',
         icon: <MailOpen size={14} />,
-        onSelect: () => handleOpenMessage(msg),
+        onSelect: () => handleOpenThread(thread),
       },
     ]
 
-    if (msg.folder !== 'drafts') {
+    if (!thread.isDraft && msg.folder !== 'drafts') {
       items.push({
         id: 'reply',
         label: 'Reply',
         icon: <Reply size={14} />,
-        onSelect: () => handleReply(msg),
+        onSelect: () => handleReply(replyTarget),
       })
-      if (canReplyAll(msg)) {
+      if (canReplyAll(replyTarget)) {
         items.push({
           id: 'reply-all',
           label: 'Reply All',
           icon: <ReplyAll size={14} />,
-          onSelect: () => handleReplyAll(msg),
+          onSelect: () => handleReplyAll(replyTarget),
         })
       }
       items.push(
@@ -1251,25 +1606,28 @@ export function AmailView({
           id: 'forward',
           label: 'Forward',
           icon: <Forward size={14} />,
-          onSelect: () => handleForward(msg),
+          onSelect: () => handleForward(replyTarget),
         },
         {
           id: 'toggle-read',
-          label: msg.isRead ? 'Mark as Unread' : 'Mark as Read',
-          icon: msg.isRead ? <Mail size={14} /> : <MailOpen size={14} />,
+          label: thread.isUnread ? 'Mark as Read' : 'Mark as Unread',
+          icon: thread.isUnread ? <MailOpen size={14} /> : <Mail size={14} />,
           dividerBefore: true,
           onSelect: () => {
-            onPlaySound?.('click')
-            void amail.markRead(msg.id, !msg.isRead)
+            void handleToggleThreadRead(thread)
           },
         },
         {
           id: 'toggle-star',
-          label: msg.isStarred ? 'Remove Star' : 'Star',
+          label: thread.isStarred ? 'Remove Star' : 'Star',
           icon: <Star size={14} />,
           onSelect: () => {
-            onPlaySound?.('click')
-            void amail.toggleStar(msg.id)
+            void handleToggleThreadStar(
+              thread.conversationMessages,
+              thread.sectionMessages,
+              thread.latestMsg,
+              thread.isStarred,
+            )
           },
         },
       )
@@ -1280,7 +1638,7 @@ export function AmailView({
           label: 'Restore',
           icon: <RotateCcw size={14} />,
           dividerBefore: true,
-          onSelect: () => void handleRestoreMessage(msg),
+          onSelect: () => void handleRestoreMessages(targetIds),
         })
       } else {
         items.push({
@@ -1288,7 +1646,7 @@ export function AmailView({
           label: 'Archive',
           icon: <Archive size={14} />,
           dividerBefore: true,
-          onSelect: () => void handleMoveToFolder(msg.id, 'archive'),
+          onSelect: () => void handleMoveMessagesToFolder(targetIds, 'archive'),
         })
       }
 
@@ -1297,7 +1655,7 @@ export function AmailView({
           id: 'move-inbox',
           label: 'Move to Inbox',
           icon: <Inbox size={14} />,
-          onSelect: () => void handleMoveToFolder(msg.id, 'inbox'),
+          onSelect: () => void handleMoveMessagesToFolder(targetIds, 'inbox'),
         })
       }
 
@@ -1307,7 +1665,7 @@ export function AmailView({
           id: `move-${folder.id}`,
           label: `Move to ${folder.name}`,
           icon: <Folder size={14} />,
-          onSelect: () => void handleMoveToFolder(msg.id, folder.id),
+          onSelect: () => void handleMoveMessagesToFolder(targetIds, folder.id),
         })
       }
     }
@@ -1320,20 +1678,12 @@ export function AmailView({
       danger: true,
       dividerBefore: true,
       onSelect: () => {
-        onPlaySound?.('click')
-        if (msg.folder === 'drafts') {
-          void amail.deleteDraft(msg.id)
-        } else if (msg.folder === 'trash') {
-          void amail.deletePermanently(msg.id)
-        } else {
-          void amail.moveToFolder(msg.id, 'trash')
-        }
-        if (selectedMessageId === msg.id) setSelectedMessageId(null)
+        void handleDeleteMessages(targetIds, msg.folder)
       },
     })
 
     openContextMenu(e, {
-      header: msg.subject.trim() || '(no subject)',
+      header: thread.displaySubject,
       items,
     })
   }
@@ -1611,7 +1961,32 @@ export function AmailView({
       if (sent) {
         onPlaySound?.('send')
         setComposing(false)
-        setSection('sent')
+        const isReply = Boolean(composeThreadId)
+        let keepCurrentSection = false
+        if (
+          isReply &&
+          section !== 'sent' &&
+          section !== 'drafts' &&
+          section !== 'contacts' &&
+          section !== 'mesh'
+        ) {
+          const replyAnchorKey = composeInReplyTo
+            ? (canonicalThreadMap.get(composeInReplyTo) ??
+              `m:${baseMailId(composeInReplyTo)}`)
+            : null
+          keepCurrentSection = amail.messages.some((m) => {
+            if (m.folder === 'drafts') return false
+            const inSection =
+              section === 'starred' ? m.isStarred && m.folder !== 'trash' : m.folder === section
+            if (!inSection) return false
+            if (composeThreadId && m.threadId === composeThreadId) return true
+            if (replyAnchorKey && canonicalThreadMap.get(m.id) === replyAnchorKey) return true
+            return false
+          })
+        }
+        if (!keepCurrentSection) {
+          setSection('sent')
+        }
         setSelectedMessageId(sent.id)
       }
     } finally {
@@ -1730,7 +2105,7 @@ export function AmailView({
 
   const renderMailList = () => (
     <div className="ag-amail-list-pane">
-      {visibleMessages.length === 0 ? (
+      {visibleThreads.length === 0 ? (
         <div className="ag-amail-empty">
           <Mail size={26} className="ag-amail-empty-icon" aria-hidden="true" />
           <p className="ag-amail-empty-title">
@@ -1758,10 +2133,13 @@ export function AmailView({
         </div>
       ) : (
         <div className="ag-amail-rows" role="list" aria-label={`${getFolderDisplayName(section as AmailFolder)} messages`}>
-          {visibleMessages.map((msg) => {
-            const isUnread = !msg.isRead && msg.direction === 'in'
-            const { label: counterpartyName, colorPubkey } = formatRowCounterparty(msg)
-            const snippet = buildBodySnippet(msg.body)
+          {visibleThreads.map((thread) => {
+            const msg = thread.primaryMsg
+            const latestMsg = thread.latestMsg
+            const targetIds = thread.sectionMessages.map((m) => m.id)
+            const isUnread = thread.isUnread
+            const { label: counterpartyName, colorPubkey } = formatThreadParticipants(thread)
+            const snippet = buildBodySnippet(latestMsg.body)
             const isRestorable = msg.folder === 'trash' || msg.folder === 'archive'
             const restoreTip =
               msg.folder === 'trash' ? 'Restore from Trash' : 'Restore from Archive'
@@ -1771,28 +2149,32 @@ export function AmailView({
                 : msg.folder === 'drafts'
                   ? 'Discard draft'
                   : 'Move to Trash'
-            const isPickerOpenForRow = folderPicker?.messageId === msg.id
+            const isPickerOpenForRow = folderPicker?.pickerKey === thread.key
 
             return (
               <div
-                key={msg.id}
+                key={thread.key}
                 role="listitem"
                 className={`ag-amail-row ${isUnread ? 'unread' : ''} ${isPickerOpenForRow ? 'menu-open' : ''}`}
-                onClick={() => handleOpenMessage(msg)}
-                onContextMenu={(e) => openMessageContextMenu(e, msg)}
+                onClick={() => handleOpenThread(thread)}
+                onContextMenu={(e) => openThreadContextMenu(e, thread)}
               >
                 <button
                   type="button"
-                  className={`ag-amail-star-btn ${msg.isStarred ? 'starred' : ''}`}
+                  className={`ag-amail-star-btn ${thread.isStarred ? 'starred' : ''}`}
                   onClick={(e) => {
                     e.stopPropagation()
-                    onPlaySound?.('click')
-                    void amail.toggleStar(msg.id)
+                    void handleToggleThreadStar(
+                      thread.conversationMessages,
+                      thread.sectionMessages,
+                      latestMsg,
+                      thread.isStarred,
+                    )
                   }}
-                  aria-label={msg.isStarred ? 'Remove star' : 'Star this message'}
-                  {...tipProps(msg.isStarred ? 'Remove star' : 'Star this message')}
+                  aria-label={thread.isStarred ? 'Remove star' : 'Star this conversation'}
+                  {...tipProps(thread.isStarred ? 'Remove star' : 'Star this conversation')}
                 >
-                  <Star size={14} fill={msg.isStarred ? 'currentColor' : 'none'} />
+                  <Star size={14} fill={thread.isStarred ? 'currentColor' : 'none'} />
                 </button>
 
                 <div className="ag-amail-row-main">
@@ -1806,42 +2188,54 @@ export function AmailView({
                     >
                       {counterpartyName}
                     </span>
+                    {thread.messageCount > 1 && (
+                      <span
+                        className="ag-amail-row-count mono"
+                        aria-label={`${thread.messageCount} messages`}
+                      >
+                        {thread.messageCount}
+                      </span>
+                    )}
                   </div>
 
                   <div className="ag-amail-row-content-col">
-                    <span className="ag-amail-row-subject truncate">
-                      {msg.subject.trim() || '(no subject)'}
-                    </span>
+                    <span className="ag-amail-row-subject truncate">{thread.displaySubject}</span>
                     {snippet && <span className="ag-amail-row-snippet truncate"> — {snippet}</span>}
                   </div>
                 </div>
 
                 <div className="ag-amail-row-right">
-                  {msg.direction === 'out' && renderStatusIcon(msg.deliveryStatus)}
-                  <span className="ag-amail-row-time mono">{formatMailTimestamp(msg.sentAt)}</span>
+                  {latestMsg.direction === 'out' && renderStatusIcon(latestMsg.deliveryStatus)}
+                  <span className="ag-amail-row-time mono">
+                    {formatMailTimestamp(thread.latestSentAt)}
+                  </span>
 
                   <div
                     className={`ag-amail-row-hover-actions ${isRestorable ? 'has-restore' : ''}`}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    {msg.folder !== 'drafts' && (
+                    {!thread.isDraft && msg.folder !== 'drafts' && (
                       <>
                         <button
                           type="button"
                           className="ag-amail-icon-btn"
-                          onClick={() => {
-                            onPlaySound?.('click')
-                            void amail.markRead(msg.id, !msg.isRead)
-                          }}
-                          aria-label={msg.isRead ? 'Mark as unread' : 'Mark as read'}
-                          {...tipProps(msg.isRead ? 'Mark as unread' : 'Mark as read')}
+                          onClick={() => void handleToggleThreadRead(thread)}
+                          aria-label={isUnread ? 'Mark as read' : 'Mark as unread'}
+                          {...tipProps(isUnread ? 'Mark as read' : 'Mark as unread')}
                         >
-                          {msg.isRead ? <Mail size={13} /> : <MailOpen size={13} />}
+                          {isUnread ? <MailOpen size={13} /> : <Mail size={13} />}
                         </button>
                         <button
                           type="button"
                           className={`ag-amail-icon-btn ${isPickerOpenForRow ? 'active' : ''}`}
-                          onClick={(e) => openFolderPickerAt(e, msg, false)}
+                          onClick={(e) =>
+                            openFolderPickerAt(e, {
+                              pickerKey: thread.key,
+                              targetIds,
+                              currentFolder: msg.folder,
+                              closeReaderOnMove: false,
+                            })
+                          }
                           aria-label="Move to a folder"
                           aria-expanded={isPickerOpenForRow}
                           {...tipProps('Move to a folder')}
@@ -1852,7 +2246,7 @@ export function AmailView({
                           <button
                             type="button"
                             className="ag-amail-icon-btn restore"
-                            onClick={() => void handleRestoreMessage(msg)}
+                            onClick={() => void handleRestoreMessages(targetIds)}
                             aria-label={restoreTip}
                             {...tipProps(restoreTip)}
                           >
@@ -1862,7 +2256,7 @@ export function AmailView({
                           <button
                             type="button"
                             className="ag-amail-icon-btn"
-                            onClick={() => void handleMoveToFolder(msg.id, 'archive')}
+                            onClick={() => void handleMoveMessagesToFolder(targetIds, 'archive')}
                             aria-label="Archive — move out of Inbox without deleting"
                             {...tipProps('Archive — move out of Inbox without deleting')}
                           >
@@ -1874,17 +2268,7 @@ export function AmailView({
                     <button
                       type="button"
                       className="ag-amail-icon-btn danger"
-                      onClick={() => {
-                        onPlaySound?.('click')
-                        hideTooltip()
-                        if (msg.folder === 'drafts') {
-                          void amail.deleteDraft(msg.id)
-                        } else if (msg.folder === 'trash') {
-                          void amail.deletePermanently(msg.id)
-                        } else {
-                          void amail.moveToFolder(msg.id, 'trash')
-                        }
-                      }}
+                      onClick={() => void handleDeleteMessages(targetIds, msg.folder)}
                       aria-label={deleteTip}
                       {...tipProps(deleteTip)}
                     >
@@ -1901,12 +2285,39 @@ export function AmailView({
   )
 
   const renderReader = (msg: AmailMessage) => {
-    const statusMeta = formatDeliveryMeta(msg)
-    const isRestorable = msg.folder === 'trash' || msg.folder === 'archive'
-    const restoreTip = msg.folder === 'trash' ? 'Restore from Trash' : 'Restore from Archive'
-    const deleteTip = msg.folder === 'trash' ? 'Delete permanently' : 'Move to Trash'
-    const showReplyAll = canReplyAll(msg)
-    const isPickerOpen = folderPicker?.messageId === msg.id
+    const tKey = canonicalThreadMap.get(msg.id)
+    const latestMsg = threadMessages[threadMessages.length - 1] ?? msg
+    const readerSectionMessages = (() => {
+      if (!tKey || msg.folder === 'drafts') return [msg]
+      const inThread = amail.messages.filter(
+        (m) => m.folder !== 'drafts' && canonicalThreadMap.get(m.id) === tKey,
+      )
+      if (section === 'starred') {
+        const matched = inThread.filter(
+          (m) => m.folder !== 'trash' && (m.isStarred || m.folder === msg.folder),
+        )
+        return matched.length > 0 ? matched : [msg]
+      }
+      if (section !== 'contacts' && section !== 'mesh') {
+        const matched = inThread.filter((m) => m.folder === section)
+        if (matched.length > 0) return matched
+      }
+      const sameFolder = inThread.filter((m) => m.folder === msg.folder)
+      return sameFolder.length > 0 ? sameFolder : [msg]
+    })()
+
+    const readerTargetIds = readerSectionMessages.map((m) => m.id)
+    const readerFolder: AmailFolder = readerSectionMessages[0]?.folder ?? msg.folder
+    const readerPickerKey = `reader:${tKey ?? msg.id}`
+    const statusMeta = formatDeliveryMeta(latestMsg)
+    const isRestorable = readerFolder === 'trash' || readerFolder === 'archive'
+    const restoreTip = readerFolder === 'trash' ? 'Restore from Trash' : 'Restore from Archive'
+    const deleteTip = readerFolder === 'trash' ? 'Delete permanently' : 'Move to Trash'
+    const showReplyAll = canReplyAll(latestMsg)
+    const isStarred =
+      threadMessages.some((m) => m.isStarred) || readerSectionMessages.some((m) => m.isStarred)
+    const displaySubject = formatThreadSubject(threadMessages[0]?.subject || msg.subject)
+    const isPickerOpen = folderPicker?.pickerKey === readerPickerKey
 
     return (
       <div className="ag-amail-reader">
@@ -1928,7 +2339,7 @@ export function AmailView({
               <button
                 type="button"
                 className="ag-amail-tonal-btn accent"
-                onClick={() => void handleRestoreMessage(msg, true)}
+                onClick={() => void handleRestoreMessages(readerTargetIds, true)}
                 aria-label={restoreTip}
                 {...tipProps(restoreTip)}
               >
@@ -1939,7 +2350,7 @@ export function AmailView({
             <button
               type="button"
               className="ag-amail-tonal-btn"
-              onClick={() => handleReply(msg)}
+              onClick={() => handleReply(latestMsg)}
               aria-label="Reply to sender"
               {...tipProps('Reply to sender')}
             >
@@ -1950,7 +2361,7 @@ export function AmailView({
               <button
                 type="button"
                 className="ag-amail-tonal-btn"
-                onClick={() => handleReplyAll(msg)}
+                onClick={() => handleReplyAll(latestMsg)}
                 aria-label="Reply to all recipients"
                 {...tipProps('Reply to all recipients')}
               >
@@ -1961,7 +2372,7 @@ export function AmailView({
             <button
               type="button"
               className="ag-amail-tonal-btn"
-              onClick={() => handleForward(msg)}
+              onClick={() => handleForward(latestMsg)}
               aria-label="Forward this message"
               {...tipProps('Forward this message')}
             >
@@ -1970,20 +2381,31 @@ export function AmailView({
             </button>
             <button
               type="button"
-              className={`ag-amail-icon-btn ${msg.isStarred ? 'ag-amail-star-active' : ''}`}
-              onClick={() => {
-                onPlaySound?.('click')
-                void amail.toggleStar(msg.id)
-              }}
-              aria-label={msg.isStarred ? 'Remove star' : 'Star this message'}
-              {...tipProps(msg.isStarred ? 'Remove star' : 'Star this message')}
+              className={`ag-amail-icon-btn ${isStarred ? 'ag-amail-star-active' : ''}`}
+              onClick={() =>
+                void handleToggleThreadStar(
+                  threadMessages,
+                  readerSectionMessages,
+                  latestMsg,
+                  isStarred,
+                )
+              }
+              aria-label={isStarred ? 'Remove star' : 'Star this conversation'}
+              {...tipProps(isStarred ? 'Remove star' : 'Star this conversation')}
             >
-              <Star size={14} fill={msg.isStarred ? 'currentColor' : 'none'} />
+              <Star size={14} fill={isStarred ? 'currentColor' : 'none'} />
             </button>
             <button
               type="button"
               className={`ag-amail-icon-btn ${isPickerOpen ? 'active' : ''}`}
-              onClick={(e) => openFolderPickerAt(e, msg, true)}
+              onClick={(e) =>
+                openFolderPickerAt(e, {
+                  pickerKey: readerPickerKey,
+                  targetIds: readerTargetIds,
+                  currentFolder: readerFolder,
+                  closeReaderOnMove: true,
+                })
+              }
               aria-label="Move to a folder"
               aria-expanded={isPickerOpen}
               {...tipProps('Move to a folder')}
@@ -1994,7 +2416,7 @@ export function AmailView({
               <button
                 type="button"
                 className="ag-amail-icon-btn"
-                onClick={() => void handleMoveToFolder(msg.id, 'archive', true)}
+                onClick={() => void handleMoveMessagesToFolder(readerTargetIds, 'archive', true)}
                 aria-label="Archive — move out of Inbox without deleting"
                 {...tipProps('Archive — move out of Inbox without deleting')}
               >
@@ -2004,16 +2426,7 @@ export function AmailView({
             <button
               type="button"
               className="ag-amail-icon-btn danger"
-              onClick={() => {
-                onPlaySound?.('click')
-                hideTooltip()
-                if (msg.folder === 'trash') {
-                  void amail.deletePermanently(msg.id)
-                } else {
-                  void amail.moveToFolder(msg.id, 'trash')
-                }
-                setSelectedMessageId(null)
-              }}
+              onClick={() => void handleDeleteMessages(readerTargetIds, readerFolder, true)}
               aria-label={deleteTip}
               {...tipProps(deleteTip)}
             >
@@ -2024,16 +2437,16 @@ export function AmailView({
 
         <div className="ag-amail-reader-scroll">
           <div className="ag-amail-reader-head">
-            <h2 className="ag-amail-reader-subject">{msg.subject.trim() || '(no subject)'}</h2>
+            <h2 className="ag-amail-reader-subject">{displaySubject}</h2>
             <div className="ag-amail-reader-meta-row">
               <span className={`ag-amail-status-text ${statusMeta.tone}`}>
-                {msg.deliveryStatus === 'read' ? <CheckCheck size={12} /> : <Lock size={11} />}
+                {latestMsg.deliveryStatus === 'read' ? <CheckCheck size={12} /> : <Lock size={11} />}
                 <span>{statusMeta.label}</span>
               </span>
-              {!BUILTIN_FOLDER_SET.has(msg.folder) && (
+              {!BUILTIN_FOLDER_SET.has(readerFolder) && (
                 <span className="ag-amail-folder-tag">
                   <Folder size={11} />
-                  <span>{getFolderDisplayName(msg.folder)}</span>
+                  <span>{getFolderDisplayName(readerFolder)}</span>
                 </span>
               )}
               {threadMessages.length > 1 && (
@@ -3629,8 +4042,8 @@ export function AmailView({
                     item.id === 'trash' ? 'danger' : ''
                   }`}
                   onClick={() =>
-                    void handleMoveToFolder(
-                      folderPicker.messageId,
+                    void handleMoveMessagesToFolder(
+                      folderPicker.targetIds,
                       item.id,
                       folderPicker.closeReaderOnMove,
                     )
@@ -3655,8 +4068,8 @@ export function AmailView({
                       role="menuitem"
                       className={`ag-amail-popover-item ${isCurrent ? 'current' : ''}`}
                       onClick={() =>
-                        void handleMoveToFolder(
-                          folderPicker.messageId,
+                        void handleMoveMessagesToFolder(
+                          folderPicker.targetIds,
                           folder.id,
                           folderPicker.closeReaderOnMove,
                         )
