@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Amail — E2EE Briar-Inspired Store-and-Forward Meshnet Snailmail Types
+   Agmail — E2EE Store-and-Forward Meshnet Mail Types
    ========================================================================== */
 
 import type { VoiceMemoEncryption } from './protocol.ts'

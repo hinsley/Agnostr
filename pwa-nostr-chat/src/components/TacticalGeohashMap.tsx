@@ -79,7 +79,7 @@ const THEME_FALLBACKS: Record<
     accentSecondary: '#38BDF8',
     borderStrong: 'rgba(255, 255, 255, 0.19)',
   },
-  obsidian: {
+  indigo: {
     accent: '#6366F1',
     accentSecondary: '#38BDF8',
     borderStrong: 'rgba(255, 255, 255, 0.2)',

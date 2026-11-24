@@ -40,8 +40,10 @@ import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
 import type { ServerMessage, ServerSummary } from './types/servers'
 import type { WalletInitialIntent, ZapTarget } from './types/wallet'
 import { bitchatAudio, type SoundCue } from './utils/sound'
-import { identiconDataUrl, shortPubkey } from './utils/identicon'
+import { shortPubkey } from './utils/identicon'
 import AppRail, { type ActiveWorkspace } from './components/AppRail'
+import { AvatarImg } from './components/AvatarImg'
+import { UntrustedLinkModal } from './components/UntrustedLinkModal'
 import SuiteLauncher from './components/SuiteLauncher'
 import ConversationList, { type ListTab } from './components/ConversationList'
 import UserListPane from './components/UserListPane'
@@ -81,7 +83,7 @@ const ImageLightboxModal = lazy(() => import('./components/ImageLightboxModal'))
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#0B0C0F',
-  obsidian: '#090A10',
+  indigo: '#090A10',
   amber: '#100F0E',
   daylight: '#FFFFFF',
 }
@@ -1283,6 +1285,7 @@ export function App() {
 
   useEffect(() => {
     if (!noteEditorPeer) return
+    engine.ensureProfilePictures([noteEditorPeer.pubkey])
     const raf = window.requestAnimationFrame(() => {
       const el = noteTextareaRef.current
       if (el) {
@@ -1292,7 +1295,20 @@ export function App() {
       }
     })
     return () => window.cancelAnimationFrame(raf)
-  }, [noteEditorPeer])
+  }, [noteEditorPeer, engine])
+
+  useEffect(() => {
+    const pks: string[] = []
+    if (engine.calls.incomingCall?.callerPubkey) {
+      pks.push(engine.calls.incomingCall.callerPubkey)
+    }
+    if (engine.pendingTrustRequest?.pubkey) {
+      pks.push(engine.pendingTrustRequest.pubkey)
+    }
+    if (pks.length > 0) {
+      engine.ensureProfilePictures(pks)
+    }
+  }, [engine.calls.incomingCall?.callerPubkey, engine.pendingTrustRequest?.pubkey, engine])
 
   useEffect(() => {
     if (!pendingDeleteDm) return
@@ -2595,6 +2611,7 @@ export function App() {
             open={serverHubState.open}
             initialTab={serverHubState.tab}
             servers={engine.servers}
+            engine={engine}
             onClose={closeServerHub}
             onJoinedServer={handleJoinedServer}
             onShowQr={setQrShareTarget}
@@ -2686,6 +2703,7 @@ export function App() {
       {engine.calls.incomingCall && (
         <IncomingCallBanner
           incoming={engine.calls.incomingCall}
+          callerAvatarUrl={engine.getProfilePicture(engine.calls.incomingCall.callerPubkey)}
           mode="dm"
           isRinging={engine.notifications.isRinging}
           isRingMuted={engine.notifications.isRingMuted}
@@ -2734,9 +2752,17 @@ export function App() {
       {/* Global Trust Peer Security Warning Confirmation Dialog */}
       <TrustConfirmModal
         request={engine.pendingTrustRequest}
+        avatarUrl={
+          engine.pendingTrustRequest
+            ? engine.getProfilePicture(engine.pendingTrustRequest.pubkey)
+            : undefined
+        }
         onConfirm={engine.confirmPendingTrust}
         onCancel={engine.cancelPendingTrust}
       />
+
+      {/* Global Untrusted External Link Confirmation Warning Modal */}
+      <UntrustedLinkModal />
 
       {/* Universal Delete Private Chat Confirmation Modal */}
       {pendingDeleteDm &&
@@ -2817,8 +2843,9 @@ export function App() {
               onClick={(e) => e.stopPropagation()}
             >
               <div className="ag-inline-dialog-head">
-                <img
-                  src={identiconDataUrl(noteEditorPeer.pubkey)}
+                <AvatarImg
+                  pubkey={noteEditorPeer.pubkey}
+                  pictureUrl={engine.getProfilePicture(noteEditorPeer.pubkey)}
                   alt=""
                   className="ag-note-dialog-avatar"
                 />

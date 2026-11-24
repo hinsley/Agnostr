@@ -515,22 +515,83 @@ export function parseImageFromImeta(tags: string[][]): ImageAttachment | undefin
 
 export const AGNOSTR_CLIENT_TAG = 'agnostr'
 
-export function parseClientTag(tags: string[][]): string | undefined {
+export type KnownClientId = 'agnostr' | 'nymchat' | 'glubchat'
+
+export function detectKnownClient(opts: {
+  tags?: string[][]
+  clientName?: string | null
+  isAgnostrClient?: boolean
+  eventKind?: number
+}): KnownClientId | null {
+  const rawClient =
+    (typeof opts.clientName === 'string' ? opts.clientName.trim() : '') ||
+    (opts.tags ? getTagValue(opts.tags, 'client')?.trim() ?? '' : '')
+  const clientLower = rawClient.toLowerCase()
+
+  if (opts.isAgnostrClient || clientLower === AGNOSTR_CLIENT_TAG) {
+    return 'agnostr'
+  }
+  if (
+    clientLower === 'glub.chat' ||
+    clientLower === 'glubchat' ||
+    clientLower.startsWith('glub') ||
+    Boolean(opts.tags?.some((t) => t[0] === 'glub'))
+  ) {
+    return 'glubchat'
+  }
+  if (
+    clientLower === 'nymchat' ||
+    clientLower === 'nym' ||
+    clientLower.includes('nymchat') ||
+    Boolean(opts.tags?.some((t) => t[0] === 'nymquote'))
+  ) {
+    return 'nymchat'
+  }
+  if (!clientLower) {
+    if (opts.eventKind === KIND_NAMED_BITCHAT_CHAT) {
+      return 'nymchat'
+    }
+    if (opts.tags?.some((t) => t[0] === 'ms' && /^\d{13}$/.test(t[1] ?? ''))) {
+      return 'nymchat'
+    }
+  }
+  return null
+}
+
+export function clientAvatarRingClass(
+  clientName?: string | null,
+  isAgnostrClient?: boolean
+): string {
+  const known = detectKnownClient({ clientName, isAgnostrClient })
+  if (known === 'agnostr') return 'ag-avatar-agnostr'
+  if (known === 'nymchat') return 'ag-avatar-nymchat'
+  if (known === 'glubchat') return 'ag-avatar-glubchat'
+  return ''
+}
+
+export function parseClientTag(tags: string[][], eventKind?: number): string | undefined {
   const raw = getTagValue(tags, 'client')?.trim()
-  return raw || undefined
+  if (raw) return raw
+  const inferred = detectKnownClient({ tags, eventKind })
+  if (inferred === 'glubchat') return 'glub.chat'
+  if (inferred === 'nymchat') return 'nymchat'
+  return undefined
 }
 
 export function isAgnostrClientTag(tags: string[][]): boolean {
-  return parseClientTag(tags)?.toLowerCase() === AGNOSTR_CLIENT_TAG
+  return getTagValue(tags, 'client')?.trim().toLowerCase() === AGNOSTR_CLIENT_TAG
 }
 
 export function formatClientDisplayName(
   raw?: string | null,
   isAgnostr?: boolean
 ): string | null {
+  const known = detectKnownClient({ clientName: raw, isAgnostrClient: isAgnostr })
+  if (known === 'agnostr') return 'Agnostr'
+  if (known === 'glubchat') return 'Glub.chat'
+  if (known === 'nymchat') return 'Nymchat'
   const clean = raw?.trim()
-  if (!clean) return isAgnostr ? 'Agnostr' : null
-  if (clean.toLowerCase() === AGNOSTR_CLIENT_TAG) return 'Agnostr'
+  if (!clean) return null
   if (clean === clean.toLowerCase()) {
     return `${clean.charAt(0).toUpperCase()}${clean.slice(1)}`
   }
@@ -725,7 +786,10 @@ export function parseGeohashChatEvent(
   const displayHandle = formatDisplayHandle(nickname, pubkey)
 
   const isTeleported = hasTagPair(event.tags, 't', 'teleport')
-  const clientTag = parseClientTag(event.tags)
+  const isOwn = ownPubkeys.has(pubkey)
+  const explicitClientTag = getTagValue(event.tags, 'client')?.trim()
+  const clientTag =
+    explicitClientTag || (!isOwn ? parseClientTag(event.tags, event.kind) : undefined)
   const isAgnostrClient = isAgnostrClientTag(event.tags)
   const proxyTag = event.tags.find((t) => t[0] === 'proxy')
   const isMeshBridge =
@@ -795,7 +859,10 @@ export function parseNamedBitchatChatEvent(
   const nickname = rawNick || `anon${pubkey.slice(-4)}`
   const displayHandle = formatDisplayHandle(nickname, pubkey)
 
-  const clientTag = parseClientTag(event.tags)
+  const isOwn = ownPubkeys.has(pubkey)
+  const explicitClientTag = getTagValue(event.tags, 'client')?.trim()
+  const clientTag =
+    explicitClientTag || (!isOwn ? parseClientTag(event.tags, event.kind) : undefined)
   const isAgnostrClient = isAgnostrClientTag(event.tags)
   const proxyTag = event.tags.find((t) => t[0] === 'proxy')
   const isMeshBridge =

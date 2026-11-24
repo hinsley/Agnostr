@@ -18,6 +18,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
+import type { AgnostrEngine } from '../types/protocol.ts'
 import type {
   Nip29GroupMeta,
   ServerInvite,
@@ -25,7 +26,8 @@ import type {
   ServerSummary,
 } from '../types/servers.ts'
 import type { SoundCue } from '../utils/sound.ts'
-import { identiconDataUrl, shortPubkey } from '../utils/identicon.ts'
+import { shortPubkey } from '../utils/identicon.ts'
+import { AvatarImg } from './AvatarImg.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 
 export type ServerHubTab = 'create' | 'join' | 'explore'
@@ -33,6 +35,7 @@ export type ServerHubTab = 'create' | 'join' | 'explore'
 export interface ServerHubModalProps {
   open: boolean
   initialTab?: ServerHubTab
+  engine?: AgnostrEngine
   servers: ServersEngine
   onClose: () => void
   onJoinedServer?: (server: ServerSummary) => void
@@ -68,9 +71,35 @@ function getMonogram(name: string): string {
   return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
 }
 
+function readVerifiedCachedPicture(pubkey: string | undefined): string | undefined {
+  if (!pubkey || typeof localStorage === 'undefined') return undefined
+  const pk = pubkey.trim().toLowerCase()
+  if (!/^[0-9a-f]{64}$/.test(pk)) return undefined
+  try {
+    const raw = localStorage.getItem('agnostr:v2:agora_profiles')
+    if (!raw) return undefined
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return undefined
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue
+      const entry = item as { pubkey?: unknown; picture?: unknown }
+      if (typeof entry.pubkey === 'string' && entry.pubkey.toLowerCase() === pk) {
+        if (typeof entry.picture === 'string' && /^https:\/\//i.test(entry.picture.trim())) {
+          return entry.picture.trim()
+        }
+        return undefined
+      }
+    }
+  } catch {
+    // Ignore storage parse failures
+  }
+  return undefined
+}
+
 export function ServerHubModal({
   open,
   initialTab = 'create',
+  engine,
   servers,
   onClose,
   onJoinedServer,
@@ -161,6 +190,18 @@ export function ServerHubModal({
     if (!trimmed) return servers.pendingInvite
     return servers.parseInviteInput(trimmed)
   }, [inviteDraft, servers])
+
+  const inviterPubkey = parsedInvite?.inviterPubkey
+  const ensureProfilePictures = engine?.ensureProfilePictures
+  useEffect(() => {
+    if (!open || !inviterPubkey || !ensureProfilePictures) return
+    ensureProfilePictures([inviterPubkey])
+  }, [open, inviterPubkey, ensureProfilePictures])
+
+  const inviterPictureUrl = useMemo(() => {
+    if (!inviterPubkey) return undefined
+    return engine?.getProfilePicture(inviterPubkey) ?? readVerifiedCachedPicture(inviterPubkey)
+  }, [engine, inviterPubkey])
 
   const joinedKeySet = useMemo(() => {
     const set = new Set<string>()
@@ -767,9 +808,9 @@ export function ServerHubModal({
 
                   {parsedInvite.inviterPubkey && (
                     <div className="ag-srv-preview-inviter">
-                      <img
-                        src={identiconDataUrl(parsedInvite.inviterPubkey)}
-                        alt=""
+                      <AvatarImg
+                        pubkey={parsedInvite.inviterPubkey}
+                        pictureUrl={inviterPictureUrl}
                         width={20}
                         height={20}
                         className="ag-srv-tiny-avatar"

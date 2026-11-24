@@ -120,7 +120,7 @@ const THEME_CARDS: readonly ThemeCardOption[] = [
     accent: '#3B82F6',
   },
   {
-    id: 'obsidian',
+    id: 'indigo',
     name: 'Indigo',
     tagline: 'Deep ink & modern indigo',
     bg: '#090A10',
@@ -2440,6 +2440,27 @@ export function SettingsModal({
           disabled={strictWhitelistMode}
           onChange={() => {
             engine.setAllowUntrustedVoiceMemos(!engine.settings.allowUntrustedVoiceMemos)
+            onPlaySound?.('click')
+          }}
+        />
+      </label>
+
+      <label className="ag-set-toggle-card">
+        <div className="ag-set-toggle-copy">
+          <span className="ag-set-toggle-title">
+            <Link2 size={16} />
+            <span>Warn before opening untrusted links</span>
+          </span>
+          <span className="ag-set-toggle-desc">
+            Links from people you haven&apos;t trusted open a confirmation warning instead of navigating directly.
+          </span>
+        </div>
+        <input
+          type="checkbox"
+          className="ag-switch"
+          checked={!engine.settings.allowUntrustedLinks}
+          onChange={() => {
+            engine.updateSettings({ allowUntrustedLinks: !engine.settings.allowUntrustedLinks })
             onPlaySound?.('click')
           }}
         />

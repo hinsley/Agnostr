@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Lock, Phone, PhoneOff, Users, Video, Volume2, VolumeX } from 'lucide-react'
 import type { IncomingCallOffer } from '../types/calls.ts'
-import { identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
+import { pubkeyToColor } from '../utils/identicon.ts'
+import { AvatarImg } from './AvatarImg.tsx'
 
 export interface IncomingCallBannerProps {
   incoming: IncomingCallOffer
+  callerAvatarUrl?: string
   mode?: 'dm' | 'server'
   isRinging?: boolean
   isRingMuted?: boolean
@@ -13,6 +15,31 @@ export interface IncomingCallBannerProps {
   onAcceptAudio: () => void
   onAcceptVideo: () => void
   onDecline: () => void
+}
+
+function readVerifiedCachedPicture(pubkey: string | undefined): string | undefined {
+  if (!pubkey || typeof localStorage === 'undefined') return undefined
+  const pk = pubkey.trim().toLowerCase()
+  if (!/^[0-9a-f]{64}$/.test(pk)) return undefined
+  try {
+    const raw = localStorage.getItem('agnostr:v2:agora_profiles')
+    if (!raw) return undefined
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return undefined
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue
+      const entry = item as { pubkey?: unknown; picture?: unknown }
+      if (typeof entry.pubkey === 'string' && entry.pubkey.toLowerCase() === pk) {
+        if (typeof entry.picture === 'string' && /^https:\/\//i.test(entry.picture.trim())) {
+          return entry.picture.trim()
+        }
+        return undefined
+      }
+    }
+  } catch {
+    // Ignore storage parse failures
+  }
+  return undefined
 }
 
 function useIsNarrowViewport(maxWidthPx = 640): boolean {
@@ -34,6 +61,7 @@ function useIsNarrowViewport(maxWidthPx = 640): boolean {
 
 export function IncomingCallBanner({
   incoming,
+  callerAvatarUrl,
   mode = 'dm',
   isRinging = true,
   isRingMuted = false,
@@ -45,6 +73,10 @@ export function IncomingCallBanner({
 }: IncomingCallBannerProps) {
   const isNarrow = useIsNarrowViewport(640)
   const callerColor = pubkeyToColor(incoming.callerPubkey)
+  const resolvedCallerAvatarUrl = useMemo(
+    () => callerAvatarUrl ?? readVerifiedCachedPicture(incoming.callerPubkey),
+    [callerAvatarUrl, incoming.callerPubkey],
+  )
   const isVideo = incoming.mediaType === 'video'
   const isDm = mode === 'dm'
   const isFullScreenTakeover = isDm && (isNarrow || isStandalonePwa)
@@ -96,9 +128,9 @@ export function IncomingCallBanner({
                   <span className="ag-incoming-fs-halo delay" aria-hidden="true" />
                 </>
               )}
-              <img
-                src={identiconDataUrl(incoming.callerPubkey)}
-                alt=""
+              <AvatarImg
+                pubkey={incoming.callerPubkey}
+                pictureUrl={resolvedCallerAvatarUrl}
                 width={104}
                 height={104}
                 className="ag-incoming-fs-avatar"
@@ -174,9 +206,9 @@ export function IncomingCallBanner({
       <div className="ag-incoming-top">
         <div className="ag-incoming-avatar-wrap">
           {animateRing && <span className="ag-incoming-ring" aria-hidden="true" />}
-          <img
-            src={identiconDataUrl(incoming.callerPubkey)}
-            alt=""
+          <AvatarImg
+            pubkey={incoming.callerPubkey}
+            pictureUrl={resolvedCallerAvatarUrl}
             width={44}
             height={44}
             className="ag-incoming-avatar"

@@ -624,7 +624,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
     [refreshFromStorage]
   )
 
-  // Initialize IndexedDB storage + Briar Mesh Node whenever identity changes
+  // Initialize IndexedDB storage + Store-and-Forward Mesh Node whenever identity changes
   useEffect(() => {
     let cancelled = false
     const storage = storageRef.current!

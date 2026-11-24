@@ -34,7 +34,7 @@ import type { SoundCue } from '../utils/sound.ts'
 import type { ServerSettingsTab } from './ServerSettingsModal.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
-import { formatClientDisplayName } from '../lib/bitchatProtocol.ts'
+import { clientAvatarRingClass, formatClientDisplayName } from '../lib/bitchatProtocol.ts'
 import { isAutoAnonNickname } from '../lib/deviceSync.ts'
 import { encodeGeohash } from '../lib/geohash.ts'
 import {
@@ -778,7 +778,7 @@ export function RoomInfoSheet({
                           alt=""
                           width={36}
                           height={36}
-                          className={`ag-sheet-avatar ${peer.isAgnostrClient ? 'ag-avatar-agnostr' : ''}`}
+                          className={`ag-sheet-avatar ${clientAvatarRingClass(peer.clientName, peer.isAgnostrClient)}`}
                         />
                         {peer.isOnline && <span className="ag-sheet-online-dot" />}
                       </span>
@@ -983,7 +983,7 @@ export function RoomInfoSheet({
             alt=""
             width={72}
             height={72}
-            className={`ag-sheet-hero-avatar ${dmIsAgnostr ? 'ag-avatar-agnostr' : ''}`}
+            className={`ag-sheet-hero-avatar ${clientAvatarRingClass(dmPeerInfo?.clientName, dmIsAgnostr)}`}
           />
           <h2
             className="ag-sheet-hero-title truncate"
@@ -1464,14 +1464,22 @@ export function RoomInfoSheet({
                       }}
                     >
                       <span className="ag-sheet-avatar-wrap">
-                        <AvatarImg
-                          pubkey={m.pubkey}
-                          pictureUrl={engine.getProfilePicture(m.pubkey)}
-                          alt=""
-                          width={36}
-                          height={36}
-                          className="ag-sheet-avatar"
-                        />
+                        {(() => {
+                          const knownMember = engine.getPeerByPubkey(m.pubkey)
+                          const memberIsAgnostr = m.isSelf
+                            ? Boolean(knownMember?.isAgnostrClient ?? engine.broadcastClientTag)
+                            : Boolean(knownMember?.isAgnostrClient)
+                          return (
+                            <AvatarImg
+                              pubkey={m.pubkey}
+                              pictureUrl={engine.getProfilePicture(m.pubkey)}
+                              alt=""
+                              width={36}
+                              height={36}
+                              className={`ag-sheet-avatar ${clientAvatarRingClass(knownMember?.clientName, memberIsAgnostr)}`}
+                            />
+                          )
+                        })()}
                       </span>
                       <span className="ag-sheet-person-text">
                         <span

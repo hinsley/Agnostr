@@ -308,7 +308,7 @@ export class AmailMeshNode {
   }
 
   /**
-   * Triggers an immediate Briar anti-entropy sync round across all connected
+   * Triggers an immediate mesh anti-entropy sync round across all connected
    * WebRTC couriers + Layer 2 ephemeral mesh peers.
    */
   async syncNow(): Promise<void> {
@@ -338,7 +338,7 @@ export class AmailMeshNode {
   /**
    * Dispatches a newly sealed local capsule into connected WebRTC couriers (fanout <= 3)
    * AND emits a bounded Layer 2 ephemeral hop so both online recipients and offline
-   * Briar couriers pick it up immediately.
+   * Mesh couriers pick it up immediately.
    */
   async publishLocalCapsule(capsule: AmailSealedCapsule): Promise<number> {
     let relayedCount = 0
@@ -596,7 +596,7 @@ export class AmailMeshNode {
       peer.connectedAt = Date.now()
       peer.lastSyncAt = Date.now()
       this.callbacks.onStateChange()
-      // Immediately start Briar anti-entropy INV exchange upon DataChannel open
+      // Immediately start mesh anti-entropy INV exchange upon DataChannel open
       this.sendWireMessage(peer, this.buildInvMessage())
     }
     dc.onclose = () => {

@@ -16,6 +16,7 @@ import {
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { ZapTarget } from '../types/wallet.ts'
 import type { SoundCue } from '../utils/sound.ts'
+import { clientAvatarRingClass } from '../lib/bitchatProtocol.ts'
 import { isAutoAnonNickname } from '../lib/deviceSync.ts'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 import { AvatarImg } from './AvatarImg.tsx'
@@ -685,7 +686,7 @@ export function UserListPane({
                           alt=""
                           width={32}
                           height={32}
-                          className={`ag-users-avatar ${item.isAgnostrClient ? 'ag-avatar-agnostr' : ''}`}
+                          className={`ag-users-avatar ${clientAvatarRingClass(item.clientName, item.isAgnostrClient)}`}
                         />
                         {item.isOnline && (
                           <span className="ag-users-online-dot" aria-hidden="true" />

@@ -9,7 +9,7 @@ import type { TranscriptionEngine } from './transcription.ts'
 import type { TranslatorEngine } from './translator.ts'
 import type { WalletEngine, ZapEngine } from './wallet.ts'
 
-export type ThemeId = 'phosphor' | 'amber' | 'obsidian' | 'daylight'
+export type ThemeId = 'phosphor' | 'amber' | 'indigo' | 'daylight'
 
 export type InspectorTab = 'radar' | 'peers' | 'notes' | 'relays' | 'identity'
 
@@ -356,6 +356,8 @@ export interface AppSettings {
   broadcastClientTag: boolean
   /** When true (default), voice memos from untrusted non-blocked peers can play and transcribe; blocked peers are always denied */
   allowUntrustedVoiceMemos: boolean
+  /** When false (default), clicking external links from untrusted senders shows a safety confirmation warning */
+  allowUntrustedLinks: boolean
   /** When true, hides text and voice memos from untrusted pubkeys too (images & calls always require trust; voice memos are allowed by default unless restricted or strictWhitelistMode is on) */
   strictWhitelistMode: boolean
 }
@@ -537,7 +539,7 @@ export interface AgnostrEngine {
   setTheme: (theme: ThemeId) => void
   panicWipe: () => void
 
-  // Discord-like Servers (Instant Virtual Public/E2EE + NIP-29 Relay Communities)
+  // Group Servers (Instant Virtual Public/E2EE + NIP-29 Relay Communities)
   servers: ServersEngine
 
   // P2P WebRTC Voice & Video Calls (1-on-1 DM Calls + Server Group Calls up to 6)
@@ -561,7 +563,7 @@ export interface AgnostrEngine {
   // Silent Multi-Device Same-Key Background Sync (NIP-44 self-encrypted CRDT + delta messages)
   deviceSync: DeviceSyncEngine
 
-  // Amail — E2EE Briar-inspired Store-and-Forward Meshnet Snailmail
+  // Agmail — E2EE Store-and-Forward Meshnet Mail
   amail: AmailEngine
 
   // Agora — Clean-room Nostr public social feed, threads, profiles, search & bookmarks

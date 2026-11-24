@@ -44,7 +44,7 @@ const BASE_NON_MENTION_PATTERNS = [
   // 3. Inline image suppression (never renders <img>) & named links
   IMAGE_SYNTAX_PATTERN,
   NAMED_LINK_PATTERN,
-  // 4. Discord spoilers & Obsidian / Discord formatting
+  // 4. Spoiler pills & rich markdown formatting
   String.raw`\|\|[^|\n]+?\|\|`,
   String.raw`\*\*\*[^*\n]+?\*\*\*`,
   String.raw`\*\*[^*\n]+?\*\*`,
@@ -268,7 +268,7 @@ const MathNode: React.FC<{ tex: string; display: boolean }> = React.memo(({ tex,
 MathNode.displayName = 'MathNode'
 
 /**
- * Interactive Discord-style clickable spoiler pill (`||secret||`).
+ * Interactive clickable spoiler pill (`||secret||`).
  */
 const SpoilerNode: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [revealed, setRevealed] = useState(false)
@@ -290,7 +290,7 @@ const SpoilerNode: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
 /**
  * Parses inline markdown, currency-safe inline MathJax, sanitized named links,
- * Discord spoilers, Obsidian highlights, URLs, nostr: URIs, #geohash, and multi-word @mentions.
+ * spoiler pills, highlights, URLs, nostr: URIs, #geohash, and multi-word @mentions.
  */
 function renderInline(
   text: string,
@@ -922,7 +922,7 @@ function renderBlocks(
       continue
     }
 
-    // 6. Discord Multi-Line Blockquote (`>>> ...` consumes rest of message)
+    // 6. Multi-Line Blockquote (`>>> ...` consumes rest of message)
     if (quoteDepth < 3 && /^>>>(?:\s|$)/.test(trimmed)) {
       const firstLine = trimmed.replace(/^>>>\s?/, '')
       const rest = [firstLine, ...lines.slice(i + 1)].join('\n')
@@ -950,7 +950,7 @@ function renderBlocks(
       continue
     }
 
-    // 8. Obsidian Pipe Table (`| a | b |`)
+    // 8. Markdown Pipe Table (`| a | b |`)
     if (isTableStart(lines, i)) {
       const headers = splitTableRow(lines[i])
       const alignments = parseTableAlignments(lines[i + 1])
@@ -992,7 +992,7 @@ function renderBlocks(
       continue
     }
 
-    // 9. Unordered List & Obsidian Task Checklist (`- `, `* `, `- [ ] `, `- [x] `)
+    // 9. Unordered List & Task Checklist (`- `, `* `, `- [ ] `, `- [x] `)
     if (TASK_LIST_REGEX.test(line) || UL_LINE_REGEX.test(line)) {
       const listKey = `${keyPrefix}ul-${bIdx++}`
       const items: React.ReactNode[] = []
@@ -1081,7 +1081,7 @@ export interface RichMessageContentProps extends MarkdownCallbacks {
 }
 
 /**
- * Safe, zero-HTML-injection Discord/Obsidian markdown, MathJax SVG, and Bitchat entity renderer.
+ * Safe, zero-HTML-injection markdown, MathJax SVG, and Bitchat entity renderer.
  * Never renders inline <img> elements or unsafe link schemes.
  */
 export const RichMessageContent: React.FC<RichMessageContentProps> = React.memo(

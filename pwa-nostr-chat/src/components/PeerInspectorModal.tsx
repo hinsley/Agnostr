@@ -14,7 +14,11 @@ import {
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { ZapTarget } from '../types/wallet.ts'
-import { formatClientDisplayName } from '../lib/bitchatProtocol.ts'
+import {
+  clientAvatarRingClass,
+  detectKnownClient,
+  formatClientDisplayName,
+} from '../lib/bitchatProtocol.ts'
 import { formatHandle, pubkeyToColor } from '../utils/identicon.ts'
 import { AvatarImg } from './AvatarImg.tsx'
 
@@ -103,10 +107,13 @@ export function PeerInspectorModal({
   const canZapPeer = engine.zaps.canZapPeer(livePeer.pubkey)
   const handle = formatHandle(livePeer.nickname, livePeer.pubkey)
   const handleColor = pubkeyToColor(livePeer.pubkey)
-  const resolvedClient = formatClientDisplayName(
-    livePeer.clientName ?? peer.clientName,
-    Boolean(livePeer.isAgnostrClient || peer.isAgnostrClient)
-  )
+  const peerClientName = livePeer.clientName ?? peer.clientName
+  const peerIsAgnostr = Boolean(livePeer.isAgnostrClient || peer.isAgnostrClient)
+  const knownClientId = detectKnownClient({
+    clientName: peerClientName,
+    isAgnostrClient: peerIsAgnostr,
+  })
+  const resolvedClient = formatClientDisplayName(peerClientName, peerIsAgnostr)
   const clientDisplayText = resolvedClient
     ? resolvedClient
     : livePeer.isSelf && !livePeer.isAgnostrClient
@@ -199,7 +206,7 @@ export function PeerInspectorModal({
                 pubkey={livePeer.pubkey}
                 pictureUrl={engine.getProfilePicture(livePeer.pubkey)}
                 alt=""
-                className={`ag-peer-modal-avatar ${livePeer.isAgnostrClient ? 'ag-avatar-agnostr' : ''}`}
+                className={`ag-peer-modal-avatar ${clientAvatarRingClass(peerClientName, peerIsAgnostr)}`}
                 width={52}
                 height={52}
               />
@@ -282,12 +289,18 @@ export function PeerInspectorModal({
           </div>
         </div>
 
-        {/* Client Info (Plain Text) */}
+        {/* Client Info */}
         <div className="ag-peer-modal-section">
           <div className="ag-key-row ag-peer-client-row">
             <div className="ag-key-meta">
               <span className="ag-key-label">CLIENT</span>
-              <span className="ag-key-value">{clientDisplayText}</span>
+              {knownClientId ? (
+                <span className={`ag-peer-client-pill ag-client-pill-${knownClientId}`}>
+                  {clientDisplayText}
+                </span>
+              ) : (
+                <span className="ag-key-value">{clientDisplayText}</span>
+              )}
             </div>
           </div>
         </div>

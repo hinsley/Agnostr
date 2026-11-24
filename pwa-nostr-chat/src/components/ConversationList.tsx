@@ -1313,7 +1313,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const renderDiscordServerPane = (server: ServerSummary | null) => {
     if (!server) {
       return (
-        <div className="ag-srv-discord-pane">
+        <div className="ag-srv-pane-pane">
           <div className="ag-conv-header">
             <span className="ag-conv-section-title">Groups</span>
             <div className="ag-conv-header-actions">
@@ -1332,7 +1332,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             </div>
           </div>
 
-          <div className="ag-srv-discord-empty">
+          <div className="ag-srv-pane-empty">
             <div className="ag-conv-empty-icon">
               <Users size={22} />
             </div>
@@ -1406,11 +1406,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         )
 
     return (
-      <div className="ag-srv-discord-pane" style={accentStyle}>
+      <div className="ag-srv-pane-pane" style={accentStyle}>
         {/* Aligned 52px Server Header */}
         <button
           type="button"
-          className="ag-srv-discord-header"
+          className="ag-srv-pane-header"
           onClick={(e) => {
             onPlaySound?.('click')
             openServerHeaderMenu(e, server, canAddChannel)
@@ -1418,18 +1418,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           onContextMenu={(e) => openServerHeaderMenu(e, server, canAddChannel)}
           aria-label={`${server.name} menu`}
         >
-          <span className="ag-srv-discord-head-left truncate">
+          <span className="ag-srv-pane-head-left truncate">
             {server.encrypted ? (
-              <Lock size={13} className="ag-srv-discord-kind dm" aria-hidden="true" />
+              <Lock size={13} className="ag-srv-pane-kind dm" aria-hidden="true" />
             ) : (
-              <Globe size={13} className="ag-srv-discord-kind" aria-hidden="true" />
+              <Globe size={13} className="ag-srv-pane-kind" aria-hidden="true" />
             )}
-            <span className="ag-srv-discord-name truncate">{server.name}</span>
+            <span className="ag-srv-pane-name truncate">{server.name}</span>
           </span>
-          <ChevronDown size={15} className="ag-srv-discord-caret" aria-hidden="true" />
+          <ChevronDown size={15} className="ag-srv-pane-caret" aria-hidden="true" />
         </button>
 
-        <div className="ag-srv-discord-scroll">
+        <div className="ag-srv-pane-scroll">
           {server.kind === 'nip29' && server.isJoinedMember === false && (
             <button
               type="button"
@@ -1447,11 +1447,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           )}
 
           {/* TEXT CHANNELS Category */}
-          <section className="ag-srv-discord-section" aria-label="Text channels">
-            <div className="ag-srv-discord-cat">
+          <section className="ag-srv-pane-section" aria-label="Text channels">
+            <div className="ag-srv-pane-cat">
               <button
                 type="button"
-                className="ag-srv-discord-cat-toggle"
+                className="ag-srv-pane-cat-toggle"
                 onClick={() => setTextSectionOpen((v) => !v)}
                 aria-expanded={textSectionOpen}
               >
@@ -1461,7 +1461,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               {canAddChannel && (
                 <button
                   type="button"
-                  className="ag-srv-discord-cat-add"
+                  className="ag-srv-pane-cat-add"
                   onClick={() => {
                     onPlaySound?.('click')
                     setTextSectionOpen(true)
@@ -1563,11 +1563,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           </section>
 
           {/* VOICE Category */}
-          <section className="ag-srv-discord-section" aria-label="Voice">
-            <div className="ag-srv-discord-cat">
+          <section className="ag-srv-pane-section" aria-label="Voice">
+            <div className="ag-srv-pane-cat">
               <button
                 type="button"
-                className="ag-srv-discord-cat-toggle"
+                className="ag-srv-pane-cat-toggle"
                 onClick={() => setVoiceSectionOpen((v) => !v)}
                 aria-expanded={voiceSectionOpen}
               >
@@ -1577,11 +1577,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             </div>
 
             {(voiceSectionOpen || isInThisCall || voiceParticipants.length > 0) && (
-              <div className="ag-srv-discord-voice-group">
-                <div className={`ag-srv-discord-voice-row ${isInThisCall ? 'in-call' : ''}`}>
+              <div className="ag-srv-pane-voice-group">
+                <div className={`ag-srv-pane-voice-row ${isInThisCall ? 'in-call' : ''}`}>
                   <button
                     type="button"
-                    className="ag-srv-discord-voice-btn"
+                    className="ag-srv-pane-voice-btn"
                     disabled={(!isInThisCall && voiceFull) || joiningVoiceServerId === server.id}
                     onClick={() => {
                       if (isInThisCall) {
@@ -1592,15 +1592,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     }}
                   >
                     {joiningVoiceServerId === server.id ? (
-                      <Loader2 size={14} className="ag-spin ag-srv-discord-voice-icon" />
+                      <Loader2 size={14} className="ag-spin ag-srv-pane-voice-icon" />
                     ) : (
-                      <Volume2 size={15} className="ag-srv-discord-voice-icon" />
+                      <Volume2 size={15} className="ag-srv-pane-voice-icon" />
                     )}
-                    <span className="ag-srv-discord-voice-name truncate">Voice Lounge</span>
+                    <span className="ag-srv-pane-voice-name truncate">Voice Lounge</span>
                     {anyoneRecording && (
                       <span className="ag-voice-rec-dot" aria-label="Recording in progress" />
                     )}
-                    <span className="ag-srv-discord-voice-count tabular">
+                    <span className="ag-srv-pane-voice-count tabular">
                       {voiceCount}/{voiceMax}
                     </span>
                   </button>
@@ -1608,7 +1608,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   {isInThisCall && (
                     <button
                       type="button"
-                      className="ag-srv-discord-voice-leave"
+                      className="ag-srv-pane-voice-leave"
                       onClick={() => {
                         onPlaySound?.('call-leave')
                         engine.calls.leaveCall()
@@ -1622,18 +1622,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 </div>
 
                 {voiceParticipants.length > 0 && (
-                  <div className="ag-srv-discord-voice-users" role="list" aria-label="In voice">
+                  <div className="ag-srv-pane-voice-users" role="list" aria-label="In voice">
                     {voiceParticipants.map((p) => (
-                      <div key={p.pubkey} className="ag-srv-discord-voice-user" role="listitem">
+                      <div key={p.pubkey} className="ag-srv-pane-voice-user" role="listitem">
                         <AvatarImg
                           pubkey={p.pubkey}
                           pictureUrl={engine.getProfilePicture(p.pubkey)}
                           width={22}
                           height={22}
-                          className="ag-srv-discord-voice-avatar"
+                          className="ag-srv-pane-voice-avatar"
                         />
                         <span
-                          className="ag-srv-discord-voice-uname truncate"
+                          className="ag-srv-pane-voice-uname truncate"
                           style={{ color: pubkeyToColor(p.pubkey) }}
                         >
                           {p.displayHandle}
@@ -2896,7 +2896,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
       )}
 
-      {/* Bottom User Dock (Compact Discord-style Profile + Quiet Status; mobile-only Settings) */}
+      {/* Bottom User Dock (Compact Profile + Quiet Status; mobile-only Settings) */}
       <div ref={footerRef} className="ag-conv-footer">
         <button
           ref={profileTriggerRef}
@@ -2956,7 +2956,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
       </div>
 
-      {/* Sleek Discord-Inspired Quick Profile Card Popover */}
+      {/* Sleek Quick Profile Card Popover */}
       {isQuickProfileVisible &&
         typeof document !== 'undefined' &&
         (() => {

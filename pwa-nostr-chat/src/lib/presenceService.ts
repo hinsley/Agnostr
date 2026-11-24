@@ -1,4 +1,5 @@
 import type { ChannelPresenceSummary, PeerInfo } from '../types/protocol.ts'
+import { detectKnownClient } from './bitchatProtocol.ts'
 import { getPrecisionInfo, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe, formatDisplayHandle } from './identity.ts'
 import { isTopicChannel } from './bitchatChannel.ts'
@@ -6,6 +7,24 @@ import { isTopicChannel } from './bitchatChannel.ts'
 export const ONLINE_WINDOW_SEC = 5 * 60 // 5 minutes per docs/GeohashPresenceSpec.md
 export const PRESENCE_MIN_INTERVAL_MS = 40_000
 export const PRESENCE_MAX_INTERVAL_MS = 80_000
+
+function canonicalizeClientHint(
+  clientName?: string | null,
+  isAgnostrClient?: boolean
+): { clientName?: string; isAgnostr: boolean } {
+  const trimmed = clientName?.trim() || undefined
+  const known = detectKnownClient({ clientName: trimmed, isAgnostrClient })
+  if (known === 'agnostr') {
+    return { clientName: 'agnostr', isAgnostr: true }
+  }
+  if (known === 'glubchat') {
+    return { clientName: 'glub.chat', isAgnostr: false }
+  }
+  if (known === 'nymchat') {
+    return { clientName: 'nymchat', isAgnostr: false }
+  }
+  return { clientName: trimmed, isAgnostr: Boolean(isAgnostrClient) }
+}
 
 interface PeerRecord {
   pubkey: string
@@ -23,7 +42,7 @@ export class PresenceTracker {
   private byChannel = new Map<string, Map<string, PeerRecord>>()
   private globalNicknames = new Map<string, string>()
   private globalChannels = new Map<string, Set<string>>()
-  private globalClients = new Map<string, string>()
+  private clientNamesByPubkey = new Map<string, string>()
   private agnostrPeers = new Set<string>()
 
   recordActivity(opts: {
@@ -49,12 +68,16 @@ export class PresenceTracker {
     if (cleanNick) {
       this.globalNicknames.set(pk, cleanNick)
     }
-    const cleanClient = opts.clientName?.trim() || (opts.isAgnostrClient ? 'agnostr' : undefined)
-    if (cleanClient) {
-      this.globalClients.set(pk, cleanClient)
-    }
-    if (opts.isAgnostrClient || cleanClient?.toLowerCase() === 'agnostr') {
+    const { clientName: parsedClient, isAgnostr: parsedAgnostr } = canonicalizeClientHint(
+      opts.clientName,
+      opts.isAgnostrClient
+    )
+    const knownAgnostr = Boolean(parsedAgnostr || this.agnostrPeers.has(pk))
+    if (knownAgnostr) {
       this.agnostrPeers.add(pk)
+      this.clientNamesByPubkey.set(pk, 'agnostr')
+    } else if (parsedClient) {
+      this.clientNamesByPubkey.set(pk, parsedClient)
     }
 
     let peerChannels = this.globalChannels.get(pk)
@@ -64,13 +87,9 @@ export class PresenceTracker {
     }
     peerChannels.add(gh)
 
-    const knownAgnostr = Boolean(
-      opts.isAgnostrClient ||
-        cleanClient?.toLowerCase() === 'agnostr' ||
-        this.agnostrPeers.has(pk)
-    )
-    const knownClient =
-      cleanClient || this.globalClients.get(pk) || (knownAgnostr ? 'agnostr' : undefined)
+    const knownClient = knownAgnostr
+      ? 'agnostr'
+      : parsedClient || this.clientNamesByPubkey.get(pk)
     const existing = channelMap.get(pk)
     if (existing) {
       existing.lastSeenAt = Math.max(existing.lastSeenAt, opts.seenAtSec)
@@ -94,11 +113,25 @@ export class PresenceTracker {
         channels: new Set([gh]),
       })
     }
+
+    // Backfill newly learned client metadata across any other channels where this peer appeared
+    if (knownClient || knownAgnostr) {
+      for (const map of this.byChannel.values()) {
+        const rec = map.get(pk)
+        if (!rec) continue
+        if (knownAgnostr && !rec.isAgnostrClient) {
+          rec.isAgnostrClient = true
+        }
+        if (knownClient && rec.clientName !== knownClient) {
+          rec.clientName = knownClient
+        }
+      }
+    }
   }
 
   /**
-   * Records a client tag hint (e.g. `['client', 'agnostr']`) observed from any verified event
-   * (presence, reaction, location note, or Global Pulse) and backfills existing `PeerRecord`s
+   * Records a client tag hint (e.g. `agnostr`, `nymchat`, `glub.chat`) observed from any verified
+   * event (presence, reaction, location note, or Global Pulse) and backfills existing `PeerRecord`s
    * across channels WITHOUT fabricating presence in channels the peer is not active in.
    * Returns `true` if newly learned or updated.
    */
@@ -108,13 +141,19 @@ export class PresenceTracker {
     isAgnostrClient?: boolean
   ): boolean {
     const pk = pubkey.toLowerCase()
-    const cleanClient = clientName?.trim() || (isAgnostrClient ? 'agnostr' : undefined)
-    const isAgnostr = Boolean(isAgnostrClient || cleanClient?.toLowerCase() === 'agnostr')
-    if (!cleanClient && !isAgnostr) return false
+    const { clientName: parsedClient, isAgnostr: parsedAgnostr } = canonicalizeClientHint(
+      clientName,
+      isAgnostrClient
+    )
+    const isAgnostr = Boolean(parsedAgnostr || this.agnostrPeers.has(pk))
+    if (!parsedClient && !isAgnostr) return false
 
     let changed = false
-    if (cleanClient && this.globalClients.get(pk) !== cleanClient) {
-      this.globalClients.set(pk, cleanClient)
+    const resolvedClient = isAgnostr
+      ? 'agnostr'
+      : parsedClient || this.clientNamesByPubkey.get(pk)
+    if (resolvedClient && this.clientNamesByPubkey.get(pk) !== resolvedClient) {
+      this.clientNamesByPubkey.set(pk, resolvedClient)
       changed = true
     }
     if (isAgnostr && !this.agnostrPeers.has(pk)) {
@@ -122,8 +161,6 @@ export class PresenceTracker {
       changed = true
     }
 
-    const resolvedClient =
-      cleanClient || this.globalClients.get(pk) || (isAgnostr ? 'agnostr' : undefined)
     for (const channelMap of this.byChannel.values()) {
       const rec = channelMap.get(pk)
       if (!rec) continue
@@ -146,17 +183,17 @@ export class PresenceTracker {
 
   getKnownClient(pubkey: string): string | undefined {
     const pk = pubkey.toLowerCase()
-    return this.globalClients.get(pk) ?? (this.agnostrPeers.has(pk) ? 'agnostr' : undefined)
+    return this.clientNamesByPubkey.get(pk) ?? (this.agnostrPeers.has(pk) ? 'agnostr' : undefined)
   }
 
   setSelfAgnostrFlag(pubkey: string, enabled: boolean): void {
     const pk = pubkey.toLowerCase()
     if (enabled) {
       this.agnostrPeers.add(pk)
-      this.globalClients.set(pk, 'agnostr')
+      this.clientNamesByPubkey.set(pk, 'agnostr')
     } else {
       this.agnostrPeers.delete(pk)
-      this.globalClients.delete(pk)
+      this.clientNamesByPubkey.delete(pk)
     }
     for (const channelMap of this.byChannel.values()) {
       const rec = channelMap.get(pk)
@@ -187,7 +224,9 @@ export class PresenceTracker {
       const nick = this.globalNicknames.get(rec.pubkey) || rec.nickname
       const isAgnostr = rec.isAgnostrClient || this.agnostrPeers.has(rec.pubkey)
       const clientName =
-        rec.clientName || this.globalClients.get(rec.pubkey) || (isAgnostr ? 'agnostr' : undefined)
+        rec.clientName ||
+        this.clientNamesByPubkey.get(rec.pubkey) ||
+        (isAgnostr ? 'agnostr' : undefined)
       list.push({
         pubkey: rec.pubkey,
         npub: encodeNpubSafe(rec.pubkey),
@@ -236,7 +275,9 @@ export class PresenceTracker {
     const nick = this.globalNicknames.get(pk) || latest?.nickname || `anon${pk.slice(-4)}`
     const isAgnostr = Boolean(latest?.isAgnostrClient || this.agnostrPeers.has(pk))
     const clientName =
-      latest?.clientName || this.globalClients.get(pk) || (isAgnostr ? 'agnostr' : undefined)
+      latest?.clientName ||
+      this.clientNamesByPubkey.get(pk) ||
+      (isAgnostr ? 'agnostr' : undefined)
     return {
       pubkey: pk,
       npub: encodeNpubSafe(pk),
@@ -289,7 +330,7 @@ export class PresenceTracker {
     this.byChannel.clear()
     this.globalNicknames.clear()
     this.globalChannels.clear()
-    this.globalClients.clear()
+    this.clientNamesByPubkey.clear()
     this.agnostrPeers.clear()
   }
 }

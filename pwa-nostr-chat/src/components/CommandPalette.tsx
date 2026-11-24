@@ -67,7 +67,7 @@ const GEOHASH_REGEX = /^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$/i
 
 const THEMES: Array<{ id: ThemeId; name: string; desc: string }> = [
   { id: 'phosphor', name: 'Carbon', desc: 'Neutral graphite & electric blue' },
-  { id: 'obsidian', name: 'Indigo', desc: 'Deep ink & modern indigo' },
+  { id: 'indigo', name: 'Indigo', desc: 'Deep ink & modern indigo' },
   { id: 'amber', name: 'Stone', desc: 'Warm charcoal & refined amber' },
   { id: 'daylight', name: 'Light', desc: 'Clean white & cobalt blue' },
 ]

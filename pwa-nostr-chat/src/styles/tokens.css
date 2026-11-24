@@ -1,8 +1,8 @@
 /* ==========================================================================
-   Agnostr Modern Neutral Design System Tokens (Linear × Discord × Slack)
+   Agnostr Modern Neutral Design System Tokens
    4 Zero-Green Curated Themes (ThemeId keys preserved for user persistence):
      phosphor -> Carbon (default: neutral graphite & electric blue)
-     obsidian -> Indigo (deep ink & modern indigo)
+     indigo   -> Indigo (deep ink & modern indigo)
      amber    -> Stone  (warm charcoal & refined amber)
      daylight -> Light  (crisp pure white & cobalt blue)
    ========================================================================== */
@@ -28,7 +28,7 @@
   --header-h: 52px;
   --tabbar-h: 56px;
 
-  /* Crisp Modern Linear × Discord Radii */
+  /* Crisp Modern Radii */
   --radius-xs: 5px;
   --radius-sm: 8px;
   --radius-md: 10px;
@@ -55,7 +55,7 @@
 
 /* --------------------------------------------------------------------------
    Theme 1: Carbon (`phosphor`, default)
-   Neutral obsidian graphite & crisp electric blue — zero green
+   Neutral dark graphite & crisp electric blue — zero green
    -------------------------------------------------------------------------- */
 :root,
 [data-theme='phosphor'] {
@@ -115,10 +115,10 @@
 }
 
 /* --------------------------------------------------------------------------
-   Theme 2: Indigo (`obsidian`)
+   Theme 2: Indigo (`indigo`)
    Deep midnight ink & modern indigo accent
    -------------------------------------------------------------------------- */
-[data-theme='obsidian'] {
+[data-theme='indigo'] {
   color-scheme: dark;
   --theme-meta-color: #090A10;
 

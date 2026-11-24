@@ -4,15 +4,12 @@ import {
   AlertCircle,
   ArrowDown,
   Ban,
-  Columns2,
   Crosshair,
   Hash,
   Languages,
   Loader2,
   Lock,
   Map as MapIcon,
-  PanelRightClose,
-  PanelRightOpen,
   Server,
   ShieldCheck,
   UserPlus,
@@ -126,6 +123,9 @@ const INITIAL_RENDER_LIMIT = 80
 const LOAD_EARLIER_STEP = 60
 const MAX_ACTIVE_BACKFILL = 2
 const DEFAULT_VIEWPORT_TAIL = 20
+const STICKY_REENGAGE_PX = 100
+const UNSTICK_DELTA_PX = 2
+const JUMP_BTN_THRESHOLD_PX = 160
 
 interface MessageTranslationSpec {
   mode: 'skip' | 'own-original' | 'translate'
@@ -214,8 +214,15 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   onClaimCashuToken,
 }) => {
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const innerRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
+  const lastScrollTopRef = useRef(0)
+  const lastScrollHeightRef = useRef(0)
   const lastClientHeightRef = useRef(0)
+  const smoothScrollToBottomRef = useRef(false)
+  const smoothScrollTimerRef = useRef<number | null>(null)
+  const lastUpwardInputAtRef = useRef(0)
+  const touchDraggingUpRef = useRef(false)
   const streamSwitchedAtRef = useRef(0)
   const lastAutoExpandAtRef = useRef(0)
   const pendingScrollAnchorRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(
@@ -240,9 +247,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const [unseenBelow, setUnseenBelow] = useState(0)
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null)
   const [openBlockedRunId, setOpenBlockedRunId] = useState<string | null>(null)
-  const handleToggleOriginalActions = useCallback((id: string | null) => {
-    setActiveActionMsgId(id ? `${id}-orig` : null)
-  }, [])
 
   useEffect(() => {
     if (!openBlockedRunId) return
@@ -278,30 +282,90 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     )
   }, [])
 
-  const scrollContainerToBottom = useCallback((smooth = false) => {
-    const container = scrollRef.current
-    if (!container) return
-    const targetTop = Math.max(0, container.scrollHeight - container.clientHeight)
-    if (smooth) {
-      container.scrollTo({ top: targetTop, behavior: 'smooth' })
-    } else {
-      container.scrollTop = container.scrollHeight
+  const clearSmoothScrollGuard = useCallback(() => {
+    smoothScrollToBottomRef.current = false
+    if (smoothScrollTimerRef.current !== null) {
+      window.clearTimeout(smoothScrollTimerRef.current)
+      smoothScrollTimerRef.current = null
     }
   }, [])
 
-  const scrollMessageIntoContainer = useCallback((targetEl: HTMLElement, smooth = true) => {
-    const container = scrollRef.current
-    if (!container) return
-    const containerRect = container.getBoundingClientRect()
-    const targetRect = targetEl.getBoundingClientRect()
-    const offsetInContainer = targetRect.top - containerRect.top + container.scrollTop
-    const maxTop = Math.max(0, container.scrollHeight - container.clientHeight)
-    const centeredTop = Math.max(
-      0,
-      Math.min(maxTop, offsetInContainer - (container.clientHeight - targetRect.height) / 2)
-    )
-    container.scrollTo({ top: centeredTop, behavior: smooth ? 'smooth' : 'auto' })
+  const isUpwardInputActive = useCallback(
+    () => touchDraggingUpRef.current || Date.now() - lastUpwardInputAtRef.current < 260,
+    []
+  )
+
+  useEffect(() => {
+    return () => {
+      if (smoothScrollTimerRef.current !== null) {
+        window.clearTimeout(smoothScrollTimerRef.current)
+        smoothScrollTimerRef.current = null
+      }
+    }
   }, [])
+
+  const pinScrollToBottomNow = useCallback((el: HTMLDivElement) => {
+    const targetTop = Math.max(0, el.scrollHeight - el.clientHeight)
+    el.scrollTop = targetTop
+    lastScrollTopRef.current = el.scrollTop
+    lastScrollHeightRef.current = el.scrollHeight
+    lastClientHeightRef.current = el.clientHeight
+  }, [])
+
+  const scrollContainerToBottom = useCallback(
+    (smooth = false) => {
+      const container = scrollRef.current
+      if (!container) return
+      const targetTop = Math.max(0, container.scrollHeight - container.clientHeight)
+      if (smooth) {
+        clearSmoothScrollGuard()
+        smoothScrollToBottomRef.current = true
+        lastUpwardInputAtRef.current = 0
+        touchDraggingUpRef.current = false
+        container.scrollTo({ top: targetTop, behavior: 'smooth' })
+        const dist = Math.max(
+          0,
+          container.scrollHeight - container.scrollTop - container.clientHeight
+        )
+        if (dist <= 8) {
+          smoothScrollToBottomRef.current = false
+          lastScrollTopRef.current = container.scrollTop
+          lastScrollHeightRef.current = container.scrollHeight
+          lastClientHeightRef.current = container.clientHeight
+        } else {
+          smoothScrollTimerRef.current = window.setTimeout(() => {
+            smoothScrollToBottomRef.current = false
+            smoothScrollTimerRef.current = null
+          }, 900)
+        }
+      } else {
+        clearSmoothScrollGuard()
+        pinScrollToBottomNow(container)
+      }
+    },
+    [clearSmoothScrollGuard, pinScrollToBottomNow]
+  )
+
+  const scrollMessageIntoContainer = useCallback(
+    (targetEl: HTMLElement, smooth = true) => {
+      const container = scrollRef.current
+      if (!container) return
+      const containerRect = container.getBoundingClientRect()
+      const targetRect = targetEl.getBoundingClientRect()
+      const offsetInContainer = targetRect.top - containerRect.top + container.scrollTop
+      const maxTop = Math.max(0, container.scrollHeight - container.clientHeight)
+      const centeredTop = Math.max(
+        0,
+        Math.min(maxTop, offsetInContainer - (container.clientHeight - targetRect.height) / 2)
+      )
+      clearSmoothScrollGuard()
+      if (maxTop - centeredTop > STICKY_REENGAGE_PX) {
+        stickToBottomRef.current = false
+      }
+      container.scrollTo({ top: centeredTop, behavior: smooth ? 'smooth' : 'auto' })
+    },
+    [clearSmoothScrollGuard]
+  )
 
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
   const isServer =
@@ -510,15 +574,21 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     if (heightDelta > 0) {
       el.scrollTop = anchor.prevScrollTop + heightDelta
     }
+    lastScrollTopRef.current = el.scrollTop
+    lastScrollHeightRef.current = el.scrollHeight
+    lastClientHeightRef.current = el.clientHeight
   }, [visibleMessages.length])
 
-  // Snapshot existing IDs on channel/DM switch, reset DOM window to latest 80, & snap to bottom
-  useEffect(() => {
+  // Snapshot existing IDs on channel/DM switch, reset DOM window to latest 80, & snap to bottom synchronously
+  useLayoutEffect(() => {
     initialIdsRef.current = {
       key: streamKey,
       ids: new Set(displayMessages.map((m) => m.id)),
     }
     stickToBottomRef.current = true
+    clearSmoothScrollGuard()
+    lastUpwardInputAtRef.current = 0
+    touchDraggingUpRef.current = false
     streamSwitchedAtRef.current = Date.now()
     pendingScrollAnchorRef.current = null
     pendingJumpIdRef.current = null
@@ -527,79 +597,211 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     setUnseenBelow(0)
     setActiveActionMsgId(null)
     setOpenBlockedRunId(null)
-    requestAnimationFrame(() => {
-      scrollContainerToBottom(false)
+    const el = scrollRef.current
+    if (el) {
+      pinScrollToBottomNow(el)
+    }
+    const rafId = window.requestAnimationFrame(() => {
+      if (stickToBottomRef.current && scrollRef.current) {
+        pinScrollToBottomNow(scrollRef.current)
+      }
     })
+    return () => window.cancelAnimationFrame(rafId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamKey])
 
-  // Auto-scroll when new messages arrive if anchored at bottom; exclude blocked placeholders from unseenBelow
+  // Synchronously auto-pin on newly appended tail messages (including when room buffer is capped)
+  // and exclude blocked placeholders from unseenBelow
   const nonPlaceholderCount = useMemo(
     () => displayMessages.reduce((acc, m) => (m.isBlockedPlaceholder ? acc : acc + 1), 0),
     [displayMessages]
   )
-  const prevTotalCountRef = useRef(displayMessages.length)
-  const prevNonPlaceholderCountRef = useRef(nonPlaceholderCount)
-  const prevStreamKeyForCountRef = useRef(streamKey)
-  useEffect(() => {
-    if (prevStreamKeyForCountRef.current !== streamKey) {
-      prevStreamKeyForCountRef.current = streamKey
-      prevTotalCountRef.current = displayMessages.length
-      prevNonPlaceholderCountRef.current = nonPlaceholderCount
+  const tailTrackerRef = useRef<{
+    streamKey: string
+    lastMsgId: string | null
+    totalCount: number
+    nonPlaceholderCount: number
+    seenIds: Set<string>
+  }>({
+    streamKey: '',
+    lastMsgId: null,
+    totalCount: 0,
+    nonPlaceholderCount: 0,
+    seenIds: new Set(),
+  })
+
+  useLayoutEffect(() => {
+    const lastMsg = displayMessages.length > 0 ? displayMessages[displayMessages.length - 1] : null
+    const lastMsgId = lastMsg?.id ?? null
+    const prev = tailTrackerRef.current
+
+    if (prev.streamKey !== streamKey) {
+      tailTrackerRef.current = {
+        streamKey,
+        lastMsgId,
+        totalCount: displayMessages.length,
+        nonPlaceholderCount,
+        seenIds: new Set(displayMessages.map((m) => m.id)),
+      }
+      if (stickToBottomRef.current && scrollRef.current) {
+        pinScrollToBottomNow(scrollRef.current)
+      }
       return
     }
-    const totalDelta = displayMessages.length - prevTotalCountRef.current
-    const realDelta = nonPlaceholderCount - prevNonPlaceholderCountRef.current
-    prevTotalCountRef.current = displayMessages.length
-    prevNonPlaceholderCountRef.current = nonPlaceholderCount
 
-    if (totalDelta > 0 && stickToBottomRef.current) {
-      requestAnimationFrame(() => {
-        scrollContainerToBottom(false)
-      })
-    } else if (realDelta > 0 && !stickToBottomRef.current) {
-      setUnseenBelow((c) => c + realDelta)
+    let appendedTotal = 0
+    let appendedReal = 0
+    let hasOwnAppended = false
+
+    if (lastMsgId !== null && lastMsgId !== prev.lastMsgId) {
+      for (let i = displayMessages.length - 1; i >= 0; i -= 1) {
+        const m = displayMessages[i]
+        if (m.id === prev.lastMsgId || prev.seenIds.has(m.id)) break
+        appendedTotal += 1
+        if (!m.isBlockedPlaceholder) {
+          appendedReal += 1
+          if (m.isOwn) hasOwnAppended = true
+        }
+      }
+    } else if (displayMessages.length > prev.totalCount && lastMsgId !== null && prev.lastMsgId === null) {
+      appendedTotal = displayMessages.length
+      appendedReal = nonPlaceholderCount
+      hasOwnAppended = displayMessages.some((m) => m.isOwn && !m.isBlockedPlaceholder)
     }
-  }, [streamKey, displayMessages.length, nonPlaceholderCount, scrollContainerToBottom])
 
-  // Keep pinned to latest message when the virtual keyboard opens or composer height changes
+    tailTrackerRef.current = {
+      streamKey,
+      lastMsgId,
+      totalCount: displayMessages.length,
+      nonPlaceholderCount,
+      seenIds: new Set(displayMessages.map((m) => m.id)),
+    }
+
+    if (appendedTotal > 0) {
+      if (hasOwnAppended) {
+        stickToBottomRef.current = true
+        clearSmoothScrollGuard()
+        lastUpwardInputAtRef.current = 0
+        touchDraggingUpRef.current = false
+        setShowJumpBtn(false)
+        setUnseenBelow(0)
+        if (scrollRef.current) {
+          pinScrollToBottomNow(scrollRef.current)
+        }
+      } else if (stickToBottomRef.current) {
+        if (scrollRef.current) {
+          pinScrollToBottomNow(scrollRef.current)
+        }
+      } else if (appendedReal > 0) {
+        setUnseenBelow((c) => c + appendedReal)
+        setShowJumpBtn(true)
+      }
+    }
+  }, [streamKey, displayMessages, nonPlaceholderCount, clearSmoothScrollGuard, pinScrollToBottomNow])
+
+  // Track direct upward user scroll input so smooth-scroll or height growth never fights the user
   useEffect(() => {
     const container = scrollRef.current
     if (!container) return
-    lastClientHeightRef.current = container.clientHeight
 
-    let rafId: number | null = null
-    const pinIfStuck = () => {
-      if (rafId !== null) window.cancelAnimationFrame(rafId)
-      rafId = window.requestAnimationFrame(() => {
-        rafId = null
-        const el = scrollRef.current
-        if (!el) return
+    let touchStartY = 0
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) {
+        clearSmoothScrollGuard()
+        lastUpwardInputAtRef.current = Date.now()
+      } else if (e.deltaY > 0) {
+        lastUpwardInputAtRef.current = 0
+      }
+    }
+    const onTouchStart = (e: TouchEvent) => {
+      clearSmoothScrollGuard()
+      touchStartY = e.touches[0]?.clientY ?? 0
+      touchDraggingUpRef.current = false
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY ?? touchStartY
+      if (y > touchStartY + 4) {
+        // Finger moving down drags content down -> scrolling UP into older messages
+        clearSmoothScrollGuard()
+        touchDraggingUpRef.current = true
+        lastUpwardInputAtRef.current = Date.now()
+      } else if (y < touchStartY - 4) {
+        touchDraggingUpRef.current = false
+        lastUpwardInputAtRef.current = 0
+      }
+    }
+    const onTouchEnd = () => {
+      touchDraggingUpRef.current = false
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'PageUp' || e.key === 'ArrowUp' || e.key === 'Home') {
+        clearSmoothScrollGuard()
+        lastUpwardInputAtRef.current = Date.now()
+      } else if (e.key === 'PageDown' || e.key === 'ArrowDown' || e.key === 'End') {
+        lastUpwardInputAtRef.current = 0
+      }
+    }
+
+    container.addEventListener('wheel', onWheel, { passive: true })
+    container.addEventListener('touchstart', onTouchStart, { passive: true })
+    container.addEventListener('touchmove', onTouchMove, { passive: true })
+    container.addEventListener('touchend', onTouchEnd, { passive: true })
+    container.addEventListener('touchcancel', onTouchEnd, { passive: true })
+    container.addEventListener('keydown', onKeyDown)
+
+    return () => {
+      container.removeEventListener('wheel', onWheel)
+      container.removeEventListener('touchstart', onTouchStart)
+      container.removeEventListener('touchmove', onTouchMove)
+      container.removeEventListener('touchend', onTouchEnd)
+      container.removeEventListener('touchcancel', onTouchEnd)
+      container.removeEventListener('keydown', onKeyDown)
+    }
+  }, [clearSmoothScrollGuard])
+
+  // Keep pinned to latest message when inner content grows (images, transcripts, translations, reactions),
+  // container resizes, or the mobile virtual keyboard / composer changes height
+  useEffect(() => {
+    const container = scrollRef.current
+    const inner = innerRef.current
+    if (!container) return
+    lastClientHeightRef.current = container.clientHeight
+    lastScrollHeightRef.current = container.scrollHeight
+    lastScrollTopRef.current = container.scrollTop
+
+    const handleResizeOrGrowth = () => {
+      const el = scrollRef.current
+      if (!el) return
+      if (pendingScrollAnchorRef.current) return
+
+      if (stickToBottomRef.current && !isUpwardInputActive()) {
+        pinScrollToBottomNow(el)
+      } else {
         lastClientHeightRef.current = el.clientHeight
-        if (stickToBottomRef.current) {
-          scrollContainerToBottom(false)
-        }
-        syncViewportRange()
-      })
+        lastScrollHeightRef.current = el.scrollHeight
+      }
+      syncViewportRange()
     }
 
     const vv = window.visualViewport
-    vv?.addEventListener('resize', pinIfStuck)
+    vv?.addEventListener('resize', handleResizeOrGrowth)
 
     const ro =
       typeof ResizeObserver !== 'undefined'
         ? new ResizeObserver(() => {
-            pinIfStuck()
+            handleResizeOrGrowth()
           })
         : null
     ro?.observe(container)
+    if (inner) {
+      ro?.observe(inner)
+    }
 
     return () => {
-      if (rafId !== null) window.cancelAnimationFrame(rafId)
-      vv?.removeEventListener('resize', pinIfStuck)
+      vv?.removeEventListener('resize', handleResizeOrGrowth)
       ro?.disconnect()
     }
-  }, [scrollContainerToBottom, syncViewportRange])
+  }, [isUpwardInputActive, pinScrollToBottomNow, syncViewportRange])
 
   // Scroll to active search hit when navigating search results (auto-expanding window if hit is older)
   useEffect(() => {
@@ -631,32 +833,106 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+    if (pendingScrollAnchorRef.current) return
+
+    const prevScrollTop = lastScrollTopRef.current
+    const prevScrollHeight = lastScrollHeightRef.current
+    const prevClientHeight = lastClientHeightRef.current
+
+    const scrollTop = el.scrollTop
+    const scrollHeight = el.scrollHeight
+    const clientHeight = el.clientHeight
+    const distFromBottom = Math.max(0, scrollHeight - scrollTop - clientHeight)
+
     // If container height just shrank (e.g. mobile keyboard opened) while anchored to bottom,
     // immediately re-pin instead of clearing stickToBottomRef.
-    const prevHeight = lastClientHeightRef.current
-    if (prevHeight > 0 && el.clientHeight < prevHeight - 4 && stickToBottomRef.current) {
-      lastClientHeightRef.current = el.clientHeight
-      el.scrollTop = el.scrollHeight
+    if (prevClientHeight > 0 && clientHeight < prevClientHeight - 4 && stickToBottomRef.current) {
+      pinScrollToBottomNow(el)
+      syncViewportRange()
       return
     }
-    lastClientHeightRef.current = el.clientHeight
 
-    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    const atBottom = distFromBottom <= 64
-    stickToBottomRef.current = atBottom
-    setShowJumpBtn(!atBottom && el.scrollHeight > el.clientHeight + 120)
-    if (atBottom && unseenBelow > 0) {
-      setUnseenBelow(0)
-      engine.markChannelRead()
+    // Protect active "Jump to latest" smooth scroll from prematurely unsticking mid-animation
+    if (smoothScrollToBottomRef.current) {
+      const movedUp = scrollTop < prevScrollTop - UNSTICK_DELTA_PX
+      if (movedUp || isUpwardInputActive()) {
+        clearSmoothScrollGuard()
+        if (distFromBottom > 48) {
+          stickToBottomRef.current = false
+        }
+      } else {
+        if (distFromBottom <= 8) {
+          clearSmoothScrollGuard()
+        }
+        stickToBottomRef.current = true
+        lastScrollTopRef.current = scrollTop
+        lastScrollHeightRef.current = scrollHeight
+        lastClientHeightRef.current = clientHeight
+        setShowJumpBtn(false)
+        if (unseenBelow > 0) {
+          setUnseenBelow(0)
+          engine.markChannelRead()
+        }
+        syncViewportRange()
+        return
+      }
+    }
+
+    const scrolledUp = scrollTop < prevScrollTop - UNSTICK_DELTA_PX
+    const scrolledDownOrHeld = scrollTop >= prevScrollTop - UNSTICK_DELTA_PX
+    const heightGrew = prevScrollHeight > 0 && scrollHeight > prevScrollHeight + 1
+
+    if (stickToBottomRef.current) {
+      if (scrolledUp && distFromBottom > 48) {
+        // Genuine upward scroll: unstick immediately so scrolling up never fights the user
+        stickToBottomRef.current = false
+      } else if (scrolledDownOrHeld && heightGrew && !isUpwardInputActive()) {
+        // Height grew beneath an anchored viewport without upward input: stay cleanly pinned
+        pinScrollToBottomNow(el)
+        setShowJumpBtn(false)
+        if (unseenBelow > 0) {
+          setUnseenBelow(0)
+          engine.markChannelRead()
+        }
+        syncViewportRange()
+        return
+      } else if (distFromBottom > STICKY_REENGAGE_PX) {
+        // Fallback unstick (e.g. scrollbar thumb drag upward or programmatic jump)
+        stickToBottomRef.current = false
+      }
+    } else if (distFromBottom <= STICKY_REENGAGE_PX && scrolledDownOrHeld) {
+      // Scrolled back down into the sticky bottom band: re-engage cleanly
+      stickToBottomRef.current = true
+      lastUpwardInputAtRef.current = 0
+      touchDraggingUpRef.current = false
+    }
+
+    lastScrollTopRef.current = scrollTop
+    lastScrollHeightRef.current = scrollHeight
+    lastClientHeightRef.current = clientHeight
+
+    const isStuck = stickToBottomRef.current
+    if (isStuck) {
+      setShowJumpBtn(false)
+      if (unseenBelow > 0) {
+        setUnseenBelow(0)
+        engine.markChannelRead()
+      }
+    } else {
+      setShowJumpBtn(
+        (distFromBottom > JUMP_BTN_THRESHOLD_PX &&
+          scrollHeight > clientHeight + JUMP_BTN_THRESHOLD_PX) ||
+          unseenBelow > 0
+      )
     }
 
     // Auto-expand earlier messages smoothly when scrolled near the top
     const now = Date.now()
     if (
       hiddenEarlierCount > 0 &&
-      !atBottom &&
-      el.scrollTop <= 48 &&
-      el.scrollHeight > el.clientHeight + 80 &&
+      !isStuck &&
+      scrollTop <= 48 &&
+      scrollHeight > clientHeight + 80 &&
       now - streamSwitchedAtRef.current > 250 &&
       now - lastAutoExpandAtRef.current > 250
     ) {
@@ -665,10 +941,21 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     }
 
     syncViewportRange()
-  }, [unseenBelow, engine, hiddenEarlierCount, loadEarlierMessages, syncViewportRange])
+  }, [
+    unseenBelow,
+    engine,
+    hiddenEarlierCount,
+    loadEarlierMessages,
+    clearSmoothScrollGuard,
+    isUpwardInputActive,
+    pinScrollToBottomNow,
+    syncViewportRange,
+  ])
 
   const scrollToLatest = useCallback(() => {
     stickToBottomRef.current = true
+    lastUpwardInputAtRef.current = 0
+    touchDraggingUpRef.current = false
     setShowJumpBtn(false)
     setUnseenBelow(0)
     scrollContainerToBottom(true)
@@ -945,7 +1232,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const sourceLanguage = translator.settings.sourceLanguage || 'Auto'
   const outgoingEnabled = translator.settings.outgoingEnabled
   const outgoingLanguage = translator.settings.outgoingLanguage
-  const underlyingCollapsed = translator.settings.underlyingCollapsed
   const explicitSourceLang = sourceLanguage !== 'Auto' ? sourceLanguage : undefined
   const scopeKey = `${streamKey}|${myLanguage}|${sourceLanguage}|${translator.modelKey}`
   const baselineKey = `${streamKey}|${translatorEnabled ? '1' : '0'}`
@@ -1007,8 +1293,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     if (!translatorEnabled || recentTextsForHint.length === 0) return null
     return detectRoomDominantLanguage(recentTextsForHint, myLanguage)
   }, [translatorEnabled, recentTextsForHint, myLanguage])
-
-  const effectiveSourceLabel = explicitSourceLang ?? roomHintLang ?? null
 
   // Immediately cancel stale worker jobs on room/language/model/enabled change
   useEffect(() => {
@@ -1354,7 +1638,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   className="ag-translator-model-status ready ag-desktop-only"
                   title={`${translator.modelLabel} · On-device translation`}
                 >
-                  <Columns2 size={11} />
+                  <Languages size={11} />
                   <span>
                     {translatorShortLabel}
                     {translator.runtimeDevice
@@ -1363,27 +1647,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   </span>
                 </span>
               )}
-
-              <button
-                type="button"
-                className={`ag-translator-pill-btn ${!underlyingCollapsed ? 'active' : ''}`}
-                onClick={() => updateSettings({ underlyingCollapsed: !underlyingCollapsed })}
-                title={
-                  underlyingCollapsed
-                    ? 'Show Original column'
-                    : 'Hide Original column'
-                }
-                aria-label={
-                  underlyingCollapsed
-                    ? 'Show Original column'
-                    : 'Hide Original column'
-                }
-              >
-                {underlyingCollapsed ? <PanelRightOpen size={13} /> : <PanelRightClose size={13} />}
-                <span className="ag-hide-xs">
-                  {underlyingCollapsed ? 'Show Original' : 'Hide Original'}
-                </span>
-              </button>
 
               <button
                 type="button"
@@ -1410,7 +1673,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
       <div
         ref={scrollRef}
-        className={`ag-stream-scroll ${translatorEnabled ? 'is-translator-active' : ''}`}
+        className="ag-stream-scroll"
         onScroll={handleScroll}
         onClick={(e) => {
           const target = e.target as HTMLElement | null
@@ -1425,7 +1688,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         aria-live="polite"
         aria-relevant="additions"
       >
-        <div className="ag-stream-inner">
+        <div ref={innerRef} className="ag-stream-inner">
           {displayMessages.length === 0 ? (
             isDm && dmThread ? (
               /* Serene Encrypted DM Empty State */
@@ -1555,26 +1818,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
               })()
             )
           ) : (
-            <div className={translatorEnabled ? 'ag-translator-grid-wrap' : undefined}>
-              {translatorEnabled && (
-                <div
-                  className={`ag-translator-col-heads ${underlyingCollapsed ? 'collapsed' : ''}`}
-                  aria-hidden="true"
-                >
-                  <div className="ag-translator-col-head">
-                    <Languages size={12} />
-                    <span className="truncate">My Language · {myLanguage}</span>
-                  </div>
-                  {!underlyingCollapsed && (
-                    <div className="ag-translator-col-head underlying">
-                      <span className="truncate">
-                        {effectiveSourceLabel ? `Original · ${effectiveSourceLabel}` : 'Original'}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
-
+            <div>
               {hiddenEarlierCount > 0 && (
                 <div
                   className="ag-load-earlier-wrap"
@@ -1724,15 +1968,19 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 const senderCanZap =
                   !msg.isOwn && !msg.isSystem && engine.zaps.canZapPeer(msg.pubkey)
                 const zapTotalSats = !msg.isSystem ? (engine.zaps.zapTotalsByEventId[msg.id] ?? 0) : 0
+                const zapReceipts = !msg.isSystem
+                  ? engine.zaps.zapReceiptsByEventId[msg.id]
+                  : undefined
 
-                // Compute Left-column translation state when Translator Mode is active
+                // Compute single-column translation state + fine-print side inlay when Translator Mode is active
                 let displayContentOverride: string | undefined
+                let originalContentInlay: string | undefined
                 let translationStatus: 'idle' | 'pending' | 'loading' | 'done' | 'error' | undefined
                 let translationError: string | undefined
                 let translationBadge: string | undefined
                 let onRetryTranslation: (() => void) | undefined
 
-                if (translatorEnabled && !msg.isSystem) {
+                if (translatorEnabled && !msg.isSystem && !msg.isBlockedPlaceholder) {
                   if (msg.id.startsWith('pending-')) {
                     if (outgoingEnabled && msg.deliveryStatus === 'sending') {
                       translationStatus = 'loading'
@@ -1749,6 +1997,14 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       displayContentOverride = outgoingOrig.originalText
                       translationStatus = 'done'
                       translationBadge = spec.badge
+                      const cleanSent = extractCleanMessageText(msg)
+                      if (
+                        cleanSent &&
+                        cleanSent.trim().toLowerCase() !==
+                          outgoingOrig.originalText.trim().toLowerCase()
+                      ) {
+                        originalContentInlay = cleanSent
+                      }
                     } else if (spec.mode === 'translate' && spec.cacheKey && spec.textToTranslate) {
                       const tEntry = translations[spec.cacheKey]
                       if (spec.badge) {
@@ -1757,6 +2013,16 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       if (tEntry?.status === 'done' && tEntry.text) {
                         displayContentOverride = tEntry.text
                         translationStatus = 'done'
+                        const origText = spec.textToTranslate.trim()
+                        const dispText = tEntry.text.trim()
+                        if (
+                          origText &&
+                          dispText &&
+                          !tEntry.sameLanguage &&
+                          origText.toLowerCase() !== dispText.toLowerCase()
+                        ) {
+                          originalContentInlay = origText
+                        }
                         if (
                           !explicitSourceLang &&
                           !spec.sourceLang &&
@@ -1797,76 +2063,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   }
                 }
 
-                const sharedMessageProps = {
-                  message: msg,
-                  grouped,
-                  isLive,
-                  isMentioned,
-                  isSearchActive: activeSearchMessageId === msg.id,
-                  highlightQuery: searchQuery,
-                  knownHandles,
-                  showBridgeBadges: engine.settings.showBridgeBadges,
-                  isDmMode: isDm,
-                  isEncryptedContext,
-                  isSenderTrusted: engine.isTrusted(msg.pubkey),
-                  isSenderExplicitlyTrusted: !msg.isOwn && engine.isExplicitlyTrusted(msg.pubkey),
-                  canLoadVoiceMemo: engine.canLoadVoiceMemo(msg.pubkey),
-                  fetchVoiceMemoBlob: engine.fetchVoiceMemoBlob,
-                  fetchImageAttachmentBlob: engine.fetchImageAttachmentBlob,
-                  autoTranscribe: engine.transcription.autoTranscribe,
-                  memoTranscript,
-                  transcriptionModelStatus: engine.transcription.modelStatus,
-                  transcriptionDownloadProgress: engine.transcription.downloadProgress,
-                  activeTranscriptionModelLabel: engine.transcription.activeModel.label,
-                  onTranscribeMemo: engine.transcription.transcribeVoiceMemo,
-                  onOpenLightbox,
-                  onTrustSender: handleTrustSender,
-                  onUntrustSender: handleUntrustSender,
-                  onBlockSender: handleBlockSender,
-                  onStartDm,
-                  onStartCall: handleStartCallSender,
-                  onMentionAuthor: onMentionPeer,
-                  onReply: !isDm ? handleReplyUnified : undefined,
-                  onReact: !isDm ? handleReactUnified : undefined,
-                  resolveReactorName: !isDm ? resolveReactorName : undefined,
-                  onDelete:
-                    isServer &&
-                    !msg.isSystem &&
-                    !msg.isBlockedPlaceholder &&
-                    engine.servers.canDeleteMessages
-                      ? handleDeleteServerMessage
-                      : undefined,
-                  onInspectAuthor: handleInspectAuthor,
-                  onTuneGeohash: onTuneChannel,
-                  onClickMention,
-                  onJumpToMessage: handleJumpToMessage,
-                  onCopyText: () => engine.pushToast('info', 'Copied to clipboard'),
-                  onNotify: (title: string) => engine.pushToast('info', title),
-                  contentFilter: engine.contentFilter,
-                  senderAvatarUrl: engine.getProfilePicture(msg.pubkey),
-                  senderLightningAddress: senderLud16,
-                  canZapSender: senderCanZap,
-                  zapTotalSats,
-                  onOpenZap,
-                  onClaimCashuToken,
-                  compactTranslatorRow: translatorEnabled,
-                }
-
-                const messageNode = (
-                  <MessageItem
-                    {...sharedMessageProps}
-                    actionsRevealed={activeActionMsgId === msg.id}
-                    onToggleActions={setActiveActionMsgId}
-                    displayContentOverride={displayContentOverride}
-                    translationStatus={translationStatus}
-                    translationLoadingLabel={translatorEnabled ? translationLoadingLabel : undefined}
-                    translationError={translationError}
-                    translationBadge={translationBadge}
-                    onRetryTranslation={onRetryTranslation}
-                    underlyingCollapsed={underlyingCollapsed}
-                  />
-                )
-
                 return (
                   <React.Fragment key={msg.id}>
                     {showDateDivider && (
@@ -1881,26 +2077,73 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       </div>
                     )}
 
-                    {translatorEnabled && !msg.isSystem ? (
-                      <div
-                        className={`ag-translator-pair ${underlyingCollapsed ? 'collapsed' : ''} ${grouped ? 'grouped' : ''}`}
-                      >
-                        <div className="ag-translator-cell translated">{messageNode}</div>
-
-                        {!underlyingCollapsed && (
-                          <div className="ag-translator-cell original" aria-label="Original chat message">
-                            <MessageItem
-                              {...sharedMessageProps}
-                              actionsRevealed={activeActionMsgId === `${msg.id}-orig`}
-                              onToggleActions={handleToggleOriginalActions}
-                              isOriginalColumn
-                            />
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      messageNode
-                    )}
+                    <MessageItem
+                      message={msg}
+                      grouped={grouped}
+                      isLive={isLive}
+                      isMentioned={isMentioned}
+                      isSearchActive={activeSearchMessageId === msg.id}
+                      highlightQuery={searchQuery}
+                      knownHandles={knownHandles}
+                      showBridgeBadges={engine.settings.showBridgeBadges}
+                      allowUntrustedLinks={engine.settings.allowUntrustedLinks}
+                      isDmMode={isDm}
+                      isEncryptedContext={isEncryptedContext}
+                      isSenderTrusted={engine.isTrusted(msg.pubkey)}
+                      isSenderExplicitlyTrusted={!msg.isOwn && engine.isExplicitlyTrusted(msg.pubkey)}
+                      canLoadVoiceMemo={engine.canLoadVoiceMemo(msg.pubkey)}
+                      fetchVoiceMemoBlob={engine.fetchVoiceMemoBlob}
+                      fetchImageAttachmentBlob={engine.fetchImageAttachmentBlob}
+                      autoTranscribe={engine.transcription.autoTranscribe}
+                      memoTranscript={memoTranscript}
+                      transcriptionModelStatus={engine.transcription.modelStatus}
+                      transcriptionDownloadProgress={engine.transcription.downloadProgress}
+                      activeTranscriptionModelLabel={engine.transcription.activeModel.label}
+                      onTranscribeMemo={engine.transcription.transcribeVoiceMemo}
+                      onOpenLightbox={onOpenLightbox}
+                      onTrustSender={handleTrustSender}
+                      onUntrustSender={handleUntrustSender}
+                      onBlockSender={handleBlockSender}
+                      onStartDm={onStartDm}
+                      onStartCall={handleStartCallSender}
+                      onMentionAuthor={onMentionPeer}
+                      onReply={!isDm ? handleReplyUnified : undefined}
+                      onReact={!isDm ? handleReactUnified : undefined}
+                      resolveReactorName={resolveReactorName}
+                      onDelete={
+                        isServer &&
+                        !msg.isSystem &&
+                        !msg.isBlockedPlaceholder &&
+                        engine.servers.canDeleteMessages
+                          ? handleDeleteServerMessage
+                          : undefined
+                      }
+                      onInspectAuthor={handleInspectAuthor}
+                      onTuneGeohash={onTuneChannel}
+                      onClickMention={onClickMention}
+                      onJumpToMessage={handleJumpToMessage}
+                      onCopyText={() => engine.pushToast('info', 'Copied to clipboard')}
+                      onNotify={(title: string) => engine.pushToast('info', title)}
+                      contentFilter={engine.contentFilter}
+                      senderAvatarUrl={engine.getProfilePicture(msg.pubkey)}
+                      senderLightningAddress={senderLud16}
+                      canZapSender={senderCanZap}
+                      zapTotalSats={zapTotalSats}
+                      zapReceipts={zapReceipts}
+                      onOpenZap={onOpenZap}
+                      onClaimCashuToken={onClaimCashuToken}
+                      actionsRevealed={activeActionMsgId === msg.id}
+                      onToggleActions={setActiveActionMsgId}
+                      displayContentOverride={displayContentOverride}
+                      originalContentInlay={originalContentInlay}
+                      translationStatus={translationStatus}
+                      translationLoadingLabel={translatorEnabled ? translationLoadingLabel : undefined}
+                      translationError={translationError}
+                      translationBadge={translationBadge}
+                      onRetryTranslation={onRetryTranslation}
+                      compactTranslatorRow={translatorEnabled}
+                      underlyingCollapsed
+                    />
                   </React.Fragment>
                 )
               })}

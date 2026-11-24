@@ -10,6 +10,7 @@ import type {
   ZapReceiptSummary,
   ZapTarget,
 } from '../types/wallet.ts'
+import { AGORA_PROFILE_RELAYS } from '../lib/agoraProtocol.ts'
 import { normalizeMintUrl } from '../lib/cashuMints.ts'
 import { deriveWalletP2pkPubkeyHex } from '../lib/cashuWallet.ts'
 import { bytesToHex, type IdentityManager } from '../lib/identity.ts'
@@ -85,11 +86,7 @@ const FOCUS_SWEEP_THROTTLE_MS = 15_000
 const STARTUP_AUTOPUB_DELAY_MS = 5000
 const SESSION_AUTOPUB_KIND0_KEY = 'agnostr:v2:zap_autopub_kind0'
 const SESSION_AUTOPUB_10019_KEY = 'agnostr:v2:zap_autopub_10019'
-const FALLBACK_PROFILE_RELAYS = [
-  'wss://purplepag.es',
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-]
+const FALLBACK_PROFILE_RELAYS = [...AGORA_PROFILE_RELAYS]
 
 function readSessionFlag(key: string): string | null {
   try {
@@ -225,6 +222,10 @@ export function useZaps(options: UseZapsOptions): ZapEngine {
     return relays.length > 0 ? Array.from(new Set(relays)) : FALLBACK_PROFILE_RELAYS
   }, [])
 
+  const getProfileLookupRelays = useCallback((): string[] => {
+    return Array.from(new Set([...getActiveRelays(), ...AGORA_PROFILE_RELAYS]))
+  }, [getActiveRelays])
+
   const ingestPeerLightningAddress = useCallback(
     (pubkey: string, lud16: string | null | undefined) => {
       if (!pubkey || !/^[0-9a-f]{64}$/i.test(pubkey)) return
@@ -309,7 +310,7 @@ export function useZaps(options: UseZapsOptions): ZapEngine {
       if (existingPromise) return await existingPromise
 
       const promise = new Promise<string | null>((resolve) => {
-        const relays = getActiveRelays()
+        const relays = getProfileLookupRelays()
         let newestEvent: NostrEvent | null = null
         let settled = false
         let eoseCount = 0
@@ -375,7 +376,7 @@ export function useZaps(options: UseZapsOptions): ZapEngine {
         inFlightLookupsRef.current.delete(pk)
       }
     },
-    [getActiveRelays, ingestPeerLightningAddress, relayPool]
+    [getProfileLookupRelays, ingestPeerLightningAddress, relayPool]
   )
 
   const lookupPeerNutzapInfo = useCallback(
@@ -397,7 +398,7 @@ export function useZaps(options: UseZapsOptions): ZapEngine {
       if (existingPromise) return await existingPromise
 
       const promise = new Promise<NutzapInfoRecord | null>((resolve) => {
-        const relays = getActiveRelays()
+        const relays = getProfileLookupRelays()
         let newestRecord: NutzapInfoRecord | null = null
         let settled = false
         let eoseCount = 0
@@ -453,7 +454,7 @@ export function useZaps(options: UseZapsOptions): ZapEngine {
         inFlightNutzapLookupsRef.current.delete(pk)
       }
     },
-    [getActiveRelays, ingestPeerNutzapInfo, relayPool]
+    [getProfileLookupRelays, ingestPeerNutzapInfo, relayPool]
   )
 
   const publishProfileLightningAddress = useCallback(

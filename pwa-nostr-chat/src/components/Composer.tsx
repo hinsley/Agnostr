@@ -31,7 +31,8 @@ import {
 import { formatBitchatChannelLabel } from '../lib/bitchatChannel'
 import { KeyedFifoQueue } from '../lib/sendQueue'
 import { useBackHandler } from '../hooks/useBackNavigation'
-import { identiconDataUrl, pubkeyToColor } from '../utils/identicon'
+import { pubkeyToColor } from '../utils/identicon'
+import { AvatarImg } from './AvatarImg'
 import { CameraCaptureModal } from './CameraCaptureModal'
 import { VoiceRecorderBar, type VoicePreviewTranscript } from './VoiceRecorderBar'
 
@@ -300,6 +301,17 @@ export const Composer: React.FC<ComposerProps> = ({
   useEffect(() => {
     setSelectedIndex(0)
   }, [autocomplete.type, acQuery])
+
+  const { ensureProfilePictures } = engine
+  const mentionPubkeysKey = useMemo(() => {
+    if (autocomplete.type !== 'mention') return ''
+    return autocomplete.items.map((p) => p.pubkey.toLowerCase()).join(',')
+  }, [autocomplete])
+
+  useEffect(() => {
+    if (!mentionPubkeysKey) return
+    ensureProfilePictures(mentionPubkeysKey.split(','))
+  }, [mentionPubkeysKey, ensureProfilePictures])
 
   const applyCommandCompletion = (cmd: SlashCommandDef) => {
     const needsArg = cmd.usage.includes('<') || cmd.usage.includes('[')
@@ -1107,10 +1119,13 @@ export const Composer: React.FC<ComposerProps> = ({
                 }
               >
                 <div className="ag-ac-left">
-                  <img
-                    src={identiconDataUrl(peer.pubkey)}
+                  <AvatarImg
+                    pubkey={peer.pubkey}
+                    pictureUrl={engine.getProfilePicture(peer.pubkey)}
                     alt=""
-                    className="ag-ac-avatar"
+                    width={24}
+                    height={24}
+                    className="ag-ac-avatar ag-mention-avatar"
                   />
                   <span style={{ fontWeight: 600, color: pubkeyToColor(peer.pubkey) }}>
                     {peer.displayHandle}
@@ -1231,7 +1246,7 @@ export const Composer: React.FC<ComposerProps> = ({
           </div>
         )}
 
-        {/* Sleek Full-Width Slack/Linear Input Bar OR Voice Recorder Bar */}
+        {/* Sleek Full-Width Input Bar OR Voice Recorder Bar */}
         {voiceMode ? (
           <VoiceRecorderBar
             isDm={isViolet}

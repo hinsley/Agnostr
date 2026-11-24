@@ -637,7 +637,7 @@ export class AmailStorage {
   }
 
   /* ------------------------------------------------------------------------
-     Relay Vault & ACK Tombstone Management (Briar Anti-Flood Quota)
+     Relay Vault & ACK Tombstone Management (Mesh Anti-Flood Quota)
      ------------------------------------------------------------------------ */
 
   /**

@@ -265,7 +265,7 @@ export function parseLightningPayload(raw: string): ParsedLightningPayload | nul
 export function buildLightningAddressTag(addr: string | null | undefined): string[] | null {
   const normalized = normalizeLightningAddress(addr)
   if (!normalized) return null
-  return ['lud16', normalized]
+  return [normalized.includes('@') ? 'lud16' : 'lud06', normalized]
 }
 
 /**
@@ -327,6 +327,7 @@ export function buildProfileMetadataTemplate(params: {
     }
   } else {
     delete payload.lud16
+    delete payload.lud06
   }
 
   return {

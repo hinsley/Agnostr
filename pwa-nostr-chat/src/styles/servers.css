@@ -1,6 +1,6 @@
 /* ==========================================================================
-   Agnostr Unified App Rail, Discord-Native Server Sidebar & Server Modals
-   Theme-adaptive via tokens.css across phosphor | amber | obsidian | daylight
+   Agnostr Unified App Rail, Group Channel Sidebar & Group Modals
+   Theme-adaptive via tokens.css across phosphor | amber | indigo | daylight
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
@@ -884,9 +884,9 @@
 }
 
 /* --------------------------------------------------------------------------
-   Discord-Native Server Sidebar (Desktop & Mobile Right Split Column)
+   Group Channel Sidebar (Desktop & Mobile Right Split Column)
    -------------------------------------------------------------------------- */
-.ag-srv-discord-pane {
+.ag-srv-pane-pane {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
@@ -896,7 +896,7 @@
   background-color: var(--bg-surface);
 }
 
-.ag-srv-discord-header {
+.ag-srv-pane-header {
   flex: 0 0 auto;
   width: 100%;
   height: var(--header-h);
@@ -912,11 +912,11 @@
   transition: background-color var(--dur-fast) ease;
 }
 
-.ag-srv-discord-header:hover {
+.ag-srv-pane-header:hover {
   background-color: var(--bg-hover);
 }
 
-.ag-srv-discord-head-left {
+.ag-srv-pane-head-left {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -924,28 +924,28 @@
   flex: 1 1 auto;
 }
 
-.ag-srv-discord-kind {
+.ag-srv-pane-kind {
   color: var(--text-muted);
   flex-shrink: 0;
 }
 
-.ag-srv-discord-kind.dm {
+.ag-srv-pane-kind.dm {
   color: var(--dm-accent);
 }
 
-.ag-srv-discord-name {
+.ag-srv-pane-name {
   font-size: 15px;
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--text-primary);
 }
 
-.ag-srv-discord-caret {
+.ag-srv-pane-caret {
   color: var(--text-muted);
   flex-shrink: 0;
 }
 
-.ag-srv-discord-scroll {
+.ag-srv-pane-scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -958,13 +958,13 @@
   gap: 14px;
 }
 
-.ag-srv-discord-section {
+.ag-srv-pane-section {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.ag-srv-discord-cat {
+.ag-srv-pane-cat {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -972,7 +972,7 @@
   padding: 0 4px 3px;
 }
 
-.ag-srv-discord-cat-toggle {
+.ag-srv-pane-cat-toggle {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -986,11 +986,11 @@
   transition: color var(--dur-fast) ease;
 }
 
-.ag-srv-discord-cat-toggle:hover {
+.ag-srv-pane-cat-toggle:hover {
   color: var(--text-secondary);
 }
 
-.ag-srv-discord-cat-add {
+.ag-srv-pane-cat-add {
   width: 22px;
   height: 22px;
   border-radius: var(--radius-xs);
@@ -1003,19 +1003,19 @@
     color var(--dur-fast) ease;
 }
 
-.ag-srv-discord-cat-add:hover {
+.ag-srv-pane-cat-add:hover {
   background-color: var(--bg-hover);
   color: var(--text-primary);
 }
 
-/* Discord-Style Voice Lounge Row & Nested Live Participants */
-.ag-srv-discord-voice-group {
+/* Voice Lounge Row & Nested Live Participants */
+.ag-srv-pane-voice-group {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.ag-srv-discord-voice-row {
+.ag-srv-pane-voice-row {
   display: flex;
   align-items: center;
   gap: 2px;
@@ -1023,15 +1023,15 @@
   transition: background-color var(--dur-fast) ease;
 }
 
-.ag-srv-discord-voice-row:hover {
+.ag-srv-pane-voice-row:hover {
   background-color: var(--bg-hover);
 }
 
-.ag-srv-discord-voice-row.in-call {
+.ag-srv-pane-voice-row.in-call {
   background-color: var(--accent-soft);
 }
 
-.ag-srv-discord-voice-btn {
+.ag-srv-pane-voice-btn {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
@@ -1046,42 +1046,42 @@
   transition: color var(--dur-fast) ease;
 }
 
-.ag-srv-discord-voice-btn:hover:not(:disabled) {
+.ag-srv-pane-voice-btn:hover:not(:disabled) {
   color: var(--text-primary);
 }
 
-.ag-srv-discord-voice-btn:disabled {
+.ag-srv-pane-voice-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.ag-srv-discord-voice-row.in-call .ag-srv-discord-voice-btn {
+.ag-srv-pane-voice-row.in-call .ag-srv-pane-voice-btn {
   color: var(--text-primary);
   font-weight: 600;
 }
 
-.ag-srv-discord-voice-icon {
+.ag-srv-pane-voice-icon {
   color: var(--text-muted);
   flex-shrink: 0;
 }
 
-.ag-srv-discord-voice-row.in-call .ag-srv-discord-voice-icon {
+.ag-srv-pane-voice-row.in-call .ag-srv-pane-voice-icon {
   color: var(--accent);
 }
 
-.ag-srv-discord-voice-name {
+.ag-srv-pane-voice-name {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.ag-srv-discord-voice-count {
+.ag-srv-pane-voice-count {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
   flex-shrink: 0;
 }
 
-.ag-srv-discord-voice-leave {
+.ag-srv-pane-voice-leave {
   width: 26px;
   height: 26px;
   margin-right: 4px;
@@ -1094,18 +1094,18 @@
   transition: background-color var(--dur-fast) ease;
 }
 
-.ag-srv-discord-voice-leave:hover {
+.ag-srv-pane-voice-leave:hover {
   background-color: var(--status-danger-soft);
 }
 
-.ag-srv-discord-voice-users {
+.ag-srv-pane-voice-users {
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 2px 4px 4px 24px;
 }
 
-.ag-srv-discord-voice-user {
+.ag-srv-pane-voice-user {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1114,7 +1114,7 @@
   min-width: 0;
 }
 
-.ag-srv-discord-voice-avatar {
+.ag-srv-pane-voice-avatar {
   width: 22px;
   height: 22px;
   border-radius: 6px;
@@ -1123,7 +1123,7 @@
   background-color: var(--bg-canvas);
 }
 
-.ag-srv-discord-voice-uname {
+.ag-srv-pane-voice-uname {
   font-size: 12.5px;
   font-weight: 500;
   line-height: 1.25;
@@ -1131,7 +1131,7 @@
 }
 
 /* Minimal Calm Empty State for Servers */
-.ag-srv-discord-empty {
+.ag-srv-pane-empty {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
@@ -1142,7 +1142,7 @@
   text-align: center;
 }
 
-.ag-srv-discord-empty h3 {
+.ag-srv-pane-empty h3 {
   margin: 0;
   font-size: 14.5px;
   font-weight: 600;
@@ -1197,7 +1197,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   Mobile Discord 2-Column Split Server Drawer (< 868px)
+   Mobile 2-Column Split Group Drawer (< 868px)
    [56px Vertical Server Strip | Selected Server Channels & Voice]
    -------------------------------------------------------------------------- */
 .ag-srv-mobile-split {
@@ -1894,7 +1894,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   Bottom User Dock Quick Profile Card Popover (Discord-inspired, 4-theme matte)
+   Bottom User Dock Quick Profile Card Popover (4-theme matte)
    -------------------------------------------------------------------------- */
 .ag-profile-bar-btn.active {
   background-color: var(--bg-hover);
@@ -2266,7 +2266,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   Mobile Responsive Server Modal & Discord Drawer Adjustments (< 868px)
+   Mobile Responsive Group Modal & Sidebar Drawer Adjustments (< 868px)
    -------------------------------------------------------------------------- */
 @media (max-width: 867px) {
   .ag-srv-modal {
@@ -2276,12 +2276,12 @@
   .ag-srv-modal .ag-input,
   .ag-srv-modal .ag-textarea,
   .ag-srv-modal select,
-  .ag-srv-discord-pane .ag-srv-inline-input,
+  .ag-srv-pane-pane .ag-srv-inline-input,
   .ag-qp-name-input {
     font-size: 16px;
   }
 
-  .ag-srv-discord-voice-btn {
+  .ag-srv-pane-voice-btn {
     min-height: 40px;
   }
 }

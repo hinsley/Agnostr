@@ -177,7 +177,7 @@ import { useZaps } from './useZaps.ts'
 const THEME_META_COLORS: Record<ThemeId, string> = {
   phosphor: '#090c0a',
   amber: '#0d0a07',
-  obsidian: '#09090f',
+  indigo: '#09090f',
   daylight: '#f4f5f2',
 }
 
@@ -1225,7 +1225,24 @@ export function useAgnostrEngine(): AgnostrEngine {
             }
           }
         }
-        const combined = sortChannelMessagesWithPending([...prev, hydrated], 'pending-bitchat-')
+        const backfilledPrev = prev.map((m) => {
+          if (!hydrated.isOwn && m.pubkey.toLowerCase() === pk) {
+            const needsAgnostr = hydrated.isAgnostrClient && !m.isAgnostrClient
+            const needsClient = Boolean(hydrated.clientName && m.clientName !== hydrated.clientName)
+            if (needsAgnostr || needsClient) {
+              return {
+                ...m,
+                ...(needsAgnostr ? { isAgnostrClient: true } : {}),
+                ...(hydrated.clientName ? { clientName: hydrated.clientName } : {}),
+              }
+            }
+          }
+          return m
+        })
+        const combined = sortChannelMessagesWithPending(
+          [...backfilledPrev, hydrated],
+          'pending-bitchat-'
+        )
         return backfillReplyReferences(combined).slice(-200)
       })
 
@@ -1502,7 +1519,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (ev.kind === KIND_EPHEMERAL_REACTION) {
             const parsed = parseReactionEvent(ev, gh)
             if (!parsed || parsed.geohash !== gh) return
-            const evClient = parseClientTag(ev.tags)
+            const evClient = parseClientTag(ev.tags, ev.kind)
             const isAgnostr = isAgnostrClientTag(ev.tags)
             if (evClient || isAgnostr) {
               applyObservedClientHint(pk, evClient, isAgnostr, gh)
@@ -1534,7 +1551,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (!isTopic && ev.kind === KIND_GEOHASH_PRESENCE) {
             const evGh = extractGeohashTag(ev.tags)
             if (evGh !== gh) return
-            const evClient = parseClientTag(ev.tags)
+            const evClient = parseClientTag(ev.tags, ev.kind)
             const isAgnostr = isAgnostrClientTag(ev.tags)
             presenceTracker.recordActivity({
               geohash: gh,
@@ -1590,7 +1607,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                     seenAtSec: isHistoryReplay ? ev.created_at : Math.floor(Date.now() / 1000),
                     nickname: getTagValue(ev.tags, 'n'),
                     isTeleported: hasTagPair(ev.tags, 't', 'teleport'),
-                    clientName: parseClientTag(ev.tags),
+                    clientName: parseClientTag(ev.tags, ev.kind),
                     isAgnostrClient: isAgnostrClientTag(ev.tags),
                   })
                   refreshPeers(gh)
@@ -1833,7 +1850,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
           const parsed = parseLocationNoteEvent(ev, gh, ownPubkeysRef.current)
           if (!parsed || parsed.geohash !== gh) return
-          const noteClient = parseClientTag(ev.tags)
+          const noteClient = parseClientTag(ev.tags, ev.kind)
           const noteIsAgnostr = isAgnostrClientTag(ev.tags)
           if (noteClient || noteIsAgnostr) {
             applyObservedClientHint(notePk, noteClient, noteIsAgnostr, gh)
@@ -2303,7 +2320,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     zapsIngestEventTagsRef.current = zapsEngine.ingestEventTags
   }, [zapsEngine.ingestEventTags])
 
-  // Discord-like Servers (Instant Virtual Public/E2EE + NIP-29 Relay Communities)
+  // Group Servers (Instant Virtual Public/E2EE + NIP-29 Relay Communities)
   const {
     engine: serversEngine,
     activeServerRelays,
@@ -2396,7 +2413,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     pushToast,
   })
 
-  // Amail — E2EE Briar-Inspired Store-and-Forward Meshnet Snailmail
+  // Agmail — E2EE Store-and-Forward Meshnet Mail
   const notifyAmailChangedRef = useRef<() => void>(() => {})
   const handleAmailLocalChange = useCallback(() => {
     notifyAmailChangedRef.current()

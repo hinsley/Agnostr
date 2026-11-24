@@ -1,6 +1,6 @@
 /* ==========================================================================
    Agora — Native Nostr Public Square & Social Feed Workspace
-   Theme-adaptive across Carbon (phosphor), Indigo (obsidian), Stone (amber), Light (daylight)
+   Theme-adaptive across Carbon (phosphor), Indigo (indigo), Stone (amber), Light (daylight)
    3-column desktop (>=1180px), 2-column tablet (868-1179px), crisp single-column mobile (<=867px)
    0px horizontal overflow; visual-viewport & safe-area aware.
    ========================================================================== */
@@ -1186,6 +1186,13 @@
 
 .ag-agora-ext-link:hover {
   text-decoration: underline;
+}
+
+.ag-agora-zap-tooltip-icon {
+  color: var(--status-warn);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* Inline Post & Quoted Note Translation Footer */

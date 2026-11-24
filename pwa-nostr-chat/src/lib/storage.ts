@@ -101,6 +101,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   broadcastClientTag: true,
   strictWhitelistMode: false,
   allowUntrustedVoiceMemos: true,
+  allowUntrustedLinks: false,
 }
 
 function safeGet(key: string): string | null {
@@ -142,7 +143,7 @@ export function loadSettings(): AppSettings {
     theme:
       parsed.theme === 'phosphor' ||
       parsed.theme === 'amber' ||
-      parsed.theme === 'obsidian' ||
+      parsed.theme === 'indigo' ||
       parsed.theme === 'daylight'
         ? parsed.theme
         : DEFAULT_SETTINGS.theme,
@@ -172,6 +173,10 @@ export function loadSettings(): AppSettings {
       typeof parsed.allowUntrustedVoiceMemos === 'boolean'
         ? parsed.allowUntrustedVoiceMemos
         : DEFAULT_SETTINGS.allowUntrustedVoiceMemos,
+    allowUntrustedLinks:
+      typeof parsed.allowUntrustedLinks === 'boolean'
+        ? parsed.allowUntrustedLinks
+        : DEFAULT_SETTINGS.allowUntrustedLinks,
   }
 }
 

@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
@@ -59,7 +60,8 @@ import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
-import { identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
+import { pubkeyToColor } from '../utils/identicon.ts'
+import { AvatarImg } from './AvatarImg.tsx'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 
 export interface CallStageProps {
@@ -325,6 +327,7 @@ function safeEncodeNpub(pubkey: string): string {
 
 function ParticipantTile({
   participant,
+  avatarUrl,
   compact,
   shielded,
   screenVideo = false,
@@ -336,6 +339,7 @@ function ParticipantTile({
   onContextMenu,
 }: {
   participant: CallParticipant
+  avatarUrl?: string
   compact: boolean
   shielded: boolean
   screenVideo?: boolean
@@ -547,9 +551,9 @@ function ParticipantTile({
       >
         <div className="ag-call-shield-body">
           <div className="ag-call-shield-avatar-wrap">
-            <img
-              src={identiconDataUrl(participant.pubkey)}
-              alt=""
+            <AvatarImg
+              pubkey={participant.pubkey}
+              pictureUrl={avatarUrl}
               width={compact || stripMode ? 30 : 40}
               height={compact || stripMode ? 30 : 40}
               className="ag-call-shield-avatar"
@@ -695,9 +699,9 @@ function ParticipantTile({
                 aria-hidden="true"
               />
             )}
-            <img
-              src={identiconDataUrl(participant.pubkey)}
-              alt=""
+            <AvatarImg
+              pubkey={participant.pubkey}
+              pictureUrl={avatarUrl}
               width={avatarSize}
               height={avatarSize}
               className="ag-call-avatar"
@@ -814,6 +818,23 @@ export function CallStage({
   const promptCopyTimerRef = useRef<number | null>(null)
   const endedTranscript = transcription.endedCallTranscript
   const endedTranscriptId = endedTranscript?.id ?? null
+
+  // Prefetch verified kind: 0 profile pictures for all active call participants
+  const callParticipantPubkeysKey = useMemo(() => {
+    if (!activeCall) return ''
+    const set = new Set<string>()
+    for (const p of activeCall.participants) {
+      const pk = p.pubkey.trim().toLowerCase()
+      if (/^[0-9a-f]{64}$/.test(pk)) set.add(pk)
+    }
+    return Array.from(set).sort().join(',')
+  }, [activeCall])
+
+  const ensureProfilePictures = engine.ensureProfilePictures
+  useEffect(() => {
+    if (!callParticipantPubkeysKey) return
+    ensureProfilePictures(callParticipantPubkeysKey.split(','))
+  }, [callParticipantPubkeysKey, ensureProfilePictures])
 
   useEffect(() => {
     setPromptCopied(false)
@@ -1590,6 +1611,7 @@ export function CallStage({
       <ParticipantTile
         key={item.participant.pubkey}
         participant={item.participant}
+        avatarUrl={engine.getProfilePicture(item.participant.pubkey)}
         compact={opts?.compact ?? (!expanded && count > 2)}
         shielded={item.shielded}
         screenVideo={screenVideo}

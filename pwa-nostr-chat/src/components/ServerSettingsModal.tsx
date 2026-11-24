@@ -25,7 +25,8 @@ import {
 import type { AgnostrEngine } from '../types/protocol.ts'
 import type { ServersEngine, ServerSummary } from '../types/servers.ts'
 import type { SoundCue } from '../utils/sound.ts'
-import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import { AvatarImg } from './AvatarImg.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 
 export type ServerSettingsTab = 'overview' | 'channels' | 'members' | 'bans'
@@ -158,6 +159,28 @@ export function ServerSettingsModal({
         c.pubkey.toLowerCase().includes(q),
     )
   }, [engine.dmThreads, engine.trustedPubkeys, engine.peers, engine.identity, dmSearch])
+
+  // Prefetch verified kind: 0 profile pictures for visible contacts, moderators, members & bans
+  const visibleAvatarPubkeysKey = useMemo(() => {
+    if (!liveServer) return ''
+    const set = new Set<string>()
+    const addPk = (raw?: string | null) => {
+      if (!raw) return
+      const pk = raw.trim().toLowerCase()
+      if (/^[0-9a-f]{64}$/.test(pk)) set.add(pk)
+    }
+    for (const c of dmContacts) addPk(c.pubkey)
+    for (const pk of liveServer.moderators) addPk(pk)
+    for (const m of servers.members) addPk(m.pubkey)
+    for (const pk of liveServer.bannedPubkeys) addPk(pk)
+    return Array.from(set).sort().join(',')
+  }, [liveServer, dmContacts, servers.members])
+
+  const ensureProfilePictures = engine.ensureProfilePictures
+  useEffect(() => {
+    if (!visibleAvatarPubkeysKey) return
+    ensureProfilePictures(visibleAvatarPubkeysKey.split(','))
+  }, [visibleAvatarPubkeysKey, ensureProfilePictures])
 
   if (!liveServer) return null
 
@@ -470,9 +493,9 @@ export function ServerSettingsModal({
                         const busy = sendingDmPubkey === contact.pubkey
                         return (
                           <div key={contact.pubkey} className="ag-whitelist-row">
-                            <img
-                              src={identiconDataUrl(contact.pubkey)}
-                              alt=""
+                            <AvatarImg
+                              pubkey={contact.pubkey}
+                              pictureUrl={engine.getProfilePicture(contact.pubkey)}
                               className="ag-whitelist-avatar"
                               width={26}
                               height={26}
@@ -717,9 +740,9 @@ export function ServerSettingsModal({
                   <div className="ag-whitelist-list">
                     {liveServer.moderators.map((pk) => (
                       <div key={pk} className="ag-whitelist-row">
-                        <img
-                          src={identiconDataUrl(pk)}
-                          alt=""
+                        <AvatarImg
+                          pubkey={pk}
+                          pictureUrl={engine.getProfilePicture(pk)}
                           className="ag-whitelist-avatar"
                           width={26}
                           height={26}
@@ -760,9 +783,9 @@ export function ServerSettingsModal({
                       const isMod = m.isAdmin || m.roles.includes('mod')
                       return (
                         <div key={m.pubkey} className="ag-whitelist-row">
-                          <img
-                            src={identiconDataUrl(m.pubkey)}
-                            alt=""
+                          <AvatarImg
+                            pubkey={m.pubkey}
+                            pictureUrl={engine.getProfilePicture(m.pubkey)}
                             className="ag-whitelist-avatar"
                             width={26}
                             height={26}
@@ -877,9 +900,9 @@ export function ServerSettingsModal({
                 <div className="ag-whitelist-list">
                   {liveServer.bannedPubkeys.map((pk) => (
                     <div key={pk} className="ag-whitelist-row">
-                      <img
-                        src={identiconDataUrl(pk)}
-                        alt=""
+                      <AvatarImg
+                        pubkey={pk}
+                        pictureUrl={engine.getProfilePicture(pk)}
                         className="ag-whitelist-avatar"
                         width={26}
                         height={26}

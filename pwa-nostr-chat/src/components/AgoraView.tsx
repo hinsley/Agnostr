@@ -72,6 +72,7 @@ import { identiconDataUrl, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { AvatarImg } from './AvatarImg.tsx'
 import type { LightboxImagePayload } from './ImageLightboxModal.tsx'
+import { requestUntrustedLinkOpen } from './UntrustedLinkModal.tsx'
 import '../styles/agora.css'
 
 export interface AgoraViewProps {
@@ -729,14 +730,44 @@ const AgoraQuotedNoteCard: React.FC<{
               )
             }
             if (tok.type === 'link') {
+              const warnUntrustedLinks =
+                note.pubkey.toLowerCase() !== agora.myPubkey.toLowerCase() &&
+                !engine.isTrusted(note.pubkey) &&
+                !engine.settings.allowUntrustedLinks
               return (
                 <a
                   key={idx}
                   href={tok.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="ag-agora-ext-link"
-                  onClick={(e) => e.stopPropagation()}
+                  className={`ag-agora-ext-link${warnUntrustedLinks ? ' ag-untrusted-link' : ''}`}
+                  title={
+                    warnUntrustedLinks
+                      ? 'Untrusted sender — click to review link before opening'
+                      : undefined
+                  }
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (warnUntrustedLinks) {
+                      e.preventDefault()
+                      requestUntrustedLinkOpen({
+                        url: tok.url,
+                        senderHandle: authorName,
+                        senderPubkey: note.pubkey,
+                      })
+                    }
+                  }}
+                  onAuxClick={(e) => {
+                    if (warnUntrustedLinks && e.button === 1) {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      requestUntrustedLinkOpen({
+                        url: tok.url,
+                        senderHandle: authorName,
+                        senderPubkey: note.pubkey,
+                      })
+                    }
+                  }}
                 >
                   {tok.display}
                 </a>
@@ -864,8 +895,24 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   const { agora, translator } = engine
   const [menuOpen, setMenuOpen] = useState(false)
   const [repostMenuOpen, setRepostMenuOpen] = useState(false)
+  const [zapTooltip, setZapTooltip] = useState<{
+    left: number
+    top: number
+    placement: 'above' | 'below'
+  } | null>(null)
   const menuWrapRef = useRef<HTMLDivElement | null>(null)
   const repostWrapRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!zapTooltip) return
+    const dismiss = () => setZapTooltip(null)
+    window.addEventListener('scroll', dismiss, true)
+    window.addEventListener('resize', dismiss)
+    return () => {
+      window.removeEventListener('scroll', dismiss, true)
+      window.removeEventListener('resize', dismiss)
+    }
+  }, [zapTooltip])
 
   useEffect(() => {
     if (!menuOpen && !repostMenuOpen) return
@@ -1275,14 +1322,44 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                       )
                     }
                     if (tok.type === 'link') {
+                      const warnUntrustedLinks =
+                        !isSelf &&
+                        !engine.isTrusted(note.pubkey) &&
+                        !engine.settings.allowUntrustedLinks
                       return (
                         <a
                           key={idx}
                           href={tok.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="ag-agora-ext-link"
-                          onClick={(e) => e.stopPropagation()}
+                          className={`ag-agora-ext-link${warnUntrustedLinks ? ' ag-untrusted-link' : ''}`}
+                          title={
+                            warnUntrustedLinks
+                              ? 'Untrusted sender — click to review link before opening'
+                              : undefined
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (warnUntrustedLinks) {
+                              e.preventDefault()
+                              requestUntrustedLinkOpen({
+                                url: tok.url,
+                                senderHandle: authorName,
+                                senderPubkey: note.pubkey,
+                              })
+                            }
+                          }}
+                          onAuxClick={(e) => {
+                            if (warnUntrustedLinks && e.button === 1) {
+                              e.preventDefault()
+                              e.stopPropagation()
+                              requestUntrustedLinkOpen({
+                                url: tok.url,
+                                senderHandle: authorName,
+                                senderPubkey: note.pubkey,
+                              })
+                            }
+                          }}
                         >
                           {tok.display}
                         </a>
@@ -1512,15 +1589,112 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
             <button
               type="button"
               className={`ag-agora-act-btn zap${stats.zappedByMe ? ' is-zapped' : ''}`}
-              onClick={handleZap}
-              aria-label="Zap"
-              title={stats.zapSats > 0 ? `${stats.zapSats.toLocaleString()} sats zapped` : 'Zap'}
+              onClick={() => {
+                setZapTooltip(null)
+                handleZap()
+              }}
+              onMouseEnter={(e) => {
+                const breakdown = stats.zapBreakdown
+                if (stats.zapSats <= 0 || !breakdown || breakdown.length === 0) return
+                const rect = e.currentTarget.getBoundingClientRect()
+                const placement: 'above' | 'below' = rect.top < 76 ? 'below' : 'above'
+                const top = placement === 'below' ? rect.bottom + 8 : rect.top - 8
+                const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+                const left = Math.max(120, Math.min(vw - 120, rect.left + rect.width / 2))
+                setZapTooltip({ left, top, placement })
+                const toFetch = breakdown
+                  .slice(0, 5)
+                  .map((z) => z.pubkey)
+                  .filter((pk) => /^[0-9a-f]{64}$/i.test(pk))
+                if (toFetch.length > 0) {
+                  agora.ensureProfiles(toFetch)
+                }
+              }}
+              onMouseLeave={() => setZapTooltip(null)}
+              onFocus={(e) => {
+                const breakdown = stats.zapBreakdown
+                if (stats.zapSats <= 0 || !breakdown || breakdown.length === 0) return
+                const rect = e.currentTarget.getBoundingClientRect()
+                const placement: 'above' | 'below' = rect.top < 76 ? 'below' : 'above'
+                const top = placement === 'below' ? rect.bottom + 8 : rect.top - 8
+                const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+                const left = Math.max(120, Math.min(vw - 120, rect.left + rect.width / 2))
+                setZapTooltip({ left, top, placement })
+                const toFetch = breakdown
+                  .slice(0, 5)
+                  .map((z) => z.pubkey)
+                  .filter((pk) => /^[0-9a-f]{64}$/i.test(pk))
+                if (toFetch.length > 0) {
+                  agora.ensureProfiles(toFetch)
+                }
+              }}
+              onBlur={() => setZapTooltip(null)}
+              aria-label={
+                stats.zapSats > 0 ? `Zap (${stats.zapSats.toLocaleString()} sats zapped)` : 'Zap'
+              }
+              title={
+                stats.zapSats > 0 && stats.zapBreakdown && stats.zapBreakdown.length > 0
+                  ? undefined
+                  : stats.zapSats > 0
+                    ? `${stats.zapSats.toLocaleString()} sats zapped`
+                    : 'Zap'
+              }
             >
               <Zap size={15} fill={stats.zappedByMe ? 'currentColor' : 'none'} />
               {stats.zapSats > 0 && (
                 <span className="tabular">{formatCompactCount(stats.zapSats)}</span>
               )}
             </button>
+
+            {zapTooltip &&
+              stats.zapSats > 0 &&
+              stats.zapBreakdown &&
+              stats.zapBreakdown.length > 0 &&
+              typeof document !== 'undefined' &&
+              (() => {
+                const sorted = [...stats.zapBreakdown].sort(
+                  (a, b) => b.sats - a.sats || (b.byMe ? 1 : 0) - (a.byMe ? 1 : 0),
+                )
+                const visible = sorted.slice(0, 5)
+                const extraCount = Math.max(0, sorted.length - visible.length)
+                const myPkLower = agora.myPubkey.toLowerCase()
+                const entries = visible.map((z) => {
+                  const who =
+                    z.byMe || z.pubkey.toLowerCase() === myPkLower
+                      ? 'You'
+                      : /^[0-9a-f]{64}$/i.test(z.pubkey)
+                        ? getProfileDisplayName(agora.getProfile(z.pubkey), z.pubkey)
+                        : 'Anonymous'
+                  return `${who} · ${z.sats.toLocaleString()} sats`
+                })
+                return createPortal(
+                  <div
+                    className={`ag-reaction-tooltip is-${zapTooltip.placement}`}
+                    role="tooltip"
+                    style={{
+                      left: `${zapTooltip.left}px`,
+                      top: `${zapTooltip.top}px`,
+                    }}
+                  >
+                    <span
+                      className="ag-reaction-tooltip-emoji ag-agora-zap-tooltip-icon"
+                      aria-hidden="true"
+                    >
+                      <Zap size={14} fill="currentColor" />
+                    </span>
+                    <div className="ag-reaction-tooltip-body">
+                      <span className="ag-reaction-tooltip-names">{entries.join(', ')}</span>
+                      {extraCount > 0 && (
+                        <span className="ag-reaction-tooltip-more">
+                          {' '}
+                          and {extraCount} more
+                        </span>
+                      )}
+                    </div>
+                  </div>,
+                  document.body,
+                )
+              })()}
 
             <button
               type="button"
@@ -3274,19 +3448,51 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                   )}
 
                   <div className="ag-agora-profile-meta-row">
-                    {profileTargetWebsite && (
-                      <a
-                        href={profileTargetWebsite}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="ag-agora-profile-meta-item ag-agora-ext-link"
-                      >
-                        <Link2 size={13} />
-                        <span className="truncate">
-                          {profileTargetWebsite.replace(/^https?:\/\//i, '').replace(/\/+$/, '')}
-                        </span>
-                      </a>
-                    )}
+                    {profileTargetWebsite && (() => {
+                      const profilePk = agora.profileView!.pubkey
+                      const warnProfileLink =
+                        !isMyProfileOpen &&
+                        !engine.isTrusted(profilePk) &&
+                        !engine.settings.allowUntrustedLinks
+                      return (
+                        <a
+                          href={profileTargetWebsite}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={`ag-agora-profile-meta-item ag-agora-ext-link${warnProfileLink ? ' ag-untrusted-link' : ''}`}
+                          title={
+                            warnProfileLink
+                              ? 'Untrusted profile — click to review link before opening'
+                              : undefined
+                          }
+                          onClick={(e) => {
+                            if (warnProfileLink) {
+                              e.preventDefault()
+                              requestUntrustedLinkOpen({
+                                url: profileTargetWebsite,
+                                senderHandle: profileTargetName,
+                                senderPubkey: profilePk,
+                              })
+                            }
+                          }}
+                          onAuxClick={(e) => {
+                            if (warnProfileLink && e.button === 1) {
+                              e.preventDefault()
+                              requestUntrustedLinkOpen({
+                                url: profileTargetWebsite,
+                                senderHandle: profileTargetName,
+                                senderPubkey: profilePk,
+                              })
+                            }
+                          }}
+                        >
+                          <Link2 size={13} />
+                          <span className="truncate">
+                            {profileTargetWebsite.replace(/^https?:\/\//i, '').replace(/\/+$/, '')}
+                          </span>
+                        </a>
+                      )
+                    })()}
                     {profileTarget?.lud16 && (
                       <span className="ag-agora-profile-meta-item">
                         <Zap size={13} />

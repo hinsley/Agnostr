@@ -84,6 +84,12 @@ export interface AgoraFeedItem {
   sortAt: number
 }
 
+export interface AgoraZapperSummary {
+  pubkey: string
+  sats: number
+  byMe?: boolean
+}
+
 export interface AgoraNoteStats {
   likes: number
   likedByMe: boolean
@@ -93,6 +99,7 @@ export interface AgoraNoteStats {
   zapSats: number
   zapCount: number
   zappedByMe: boolean
+  zapBreakdown?: AgoraZapperSummary[]
 }
 
 export type AgoraContentToken =

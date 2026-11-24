@@ -125,7 +125,7 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
   {
     name: 'theme',
     aliases: [],
-    usage: '/theme <phosphor | amber | obsidian | daylight>',
+    usage: '/theme <phosphor | amber | indigo | daylight>',
     description: 'Switch visual theme immediately',
     category: 'system',
   },
@@ -550,7 +550,7 @@ export async function executeSlashCommand(
     }
 
     case 'theme': {
-      const valid: ThemeId[] = ['phosphor', 'amber', 'obsidian', 'daylight']
+      const valid: ThemeId[] = ['phosphor', 'amber', 'indigo', 'daylight']
       const next = args.toLowerCase() as ThemeId
       if (!valid.includes(next)) {
         ctx.addSystemMessage(`Available themes: ${valid.join(', ')}`)

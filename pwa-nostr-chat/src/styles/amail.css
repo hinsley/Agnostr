@@ -1,6 +1,6 @@
 /* ==========================================================================
-   Amail — Superhuman × Apple Mail × Linear Sleek Borderless UI
-   Theme-adaptive across Carbon (phosphor), Indigo (obsidian), Stone (amber), Light (daylight)
+   Agmail — Sleek Borderless Encrypted Mail UI
+   Theme-adaptive across Carbon (phosphor), Indigo (indigo), Stone (amber), Light (daylight)
    Zero green accents; visual-viewport safe on mobile; 0px horizontal overflow.
    ========================================================================== */
 
@@ -863,7 +863,7 @@
   background-color: var(--bg-surface);
 }
 
-/* Mail List (Superhuman-Style Rows) */
+/* Mail List (Clean Borderless Rows) */
 .ag-amail-list-pane {
   flex: 1 1 auto;
   min-height: 0;
@@ -1124,7 +1124,7 @@
   padding: 1.25rem 0;
 }
 
-/* Thread Reader (Airy, Borderless Superhuman Layout) */
+/* Thread Reader (Airy, Borderless Layout) */
 .ag-amail-reader {
   flex: 1 1 auto;
   min-height: 0;

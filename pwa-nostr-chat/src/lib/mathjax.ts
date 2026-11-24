@@ -74,7 +74,7 @@ async function getMathJaxConverter(): Promise<MathJaxConverter> {
       import('mathjax-full/js/output/svg.js'),
       import('mathjax-full/js/adaptors/liteAdaptor.js'),
       import('mathjax-full/js/handlers/html.js'),
-      // Register safe Obsidian/LaTeX TeX packages ONLY (explicitly excluding html/action/require)
+      // Register safe Markdown/LaTeX TeX packages ONLY (explicitly excluding html/action/require)
       import('mathjax-full/js/input/tex/base/BaseConfiguration.js'),
       import('mathjax-full/js/input/tex/ams/AmsConfiguration.js'),
       import('mathjax-full/js/input/tex/newcommand/NewcommandConfiguration.js'),

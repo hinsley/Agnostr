@@ -17,6 +17,7 @@ import type {
   AgoraThreadState,
   AgoraTrendingHashtag,
   AgoraUploadedMedia,
+  AgoraZapperSummary,
 } from '../types/agora.ts'
 import type { ToastLevel } from '../types/protocol.ts'
 import {
@@ -61,6 +62,7 @@ import { verifyEventCached } from '../lib/bitchatProtocol.ts'
 import { normalizeRelayUrl } from '../lib/geoRelays.ts'
 import { encodeNpubSafe, type IdentityManager } from '../lib/identity.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
+import { normalizeLightningAddress } from '../lib/zaps.ts'
 
 export const AGORA_PROFILES_STORAGE_KEY = 'agnostr:v2:agora_profiles'
 export const AGORA_BOOKMARKS_STORAGE_KEY = 'agnostr:v2:agora_bookmarks'
@@ -104,7 +106,7 @@ interface NoteStatsBucket {
   likers: Set<string>
   reposters: Set<string>
   replyIds: Set<string>
-  zapReceipts: Map<string, { sats: number; byMe: boolean }>
+  zapReceipts: Map<string, { sats: number; byMe: boolean; senderPubkey?: string }>
   optimisticZapSats: number
   optimisticZapCount: number
   optimisticZappedByMe: boolean
@@ -129,15 +131,50 @@ function bucketToStats(bucket: NoteStatsBucket, myPubkey: string): AgoraNoteStat
   let receiptSats = 0
   let myReceiptSats = 0
   let myReceiptCount = 0
+  const bySender = new Map<string, { sats: number; byMe: boolean }>()
+
   for (const r of bucket.zapReceipts.values()) {
     receiptSats += r.sats
     if (r.byMe) {
       myReceiptSats += r.sats
       myReceiptCount += 1
     }
+    const senderKey = r.senderPubkey ? r.senderPubkey.toLowerCase() : r.byMe ? myPubkey : ''
+    const prev = bySender.get(senderKey)
+    if (prev) {
+      prev.sats += r.sats
+      if (r.byMe) prev.byMe = true
+    } else {
+      bySender.set(senderKey, { sats: r.sats, byMe: r.byMe })
+    }
   }
   const extraZapSats = Math.max(0, bucket.optimisticZapSats - myReceiptSats)
   const extraZapCount = Math.max(0, bucket.optimisticZapCount - myReceiptCount)
+
+  if (extraZapSats > 0 && myPubkey) {
+    const prev = bySender.get(myPubkey)
+    if (prev) {
+      prev.sats += extraZapSats
+      prev.byMe = true
+    } else {
+      bySender.set(myPubkey, { sats: extraZapSats, byMe: true })
+    }
+  }
+
+  const zapBreakdown: AgoraZapperSummary[] | undefined =
+    bySender.size > 0
+      ? Array.from(bySender.entries())
+          .map(([pubkey, entry]) => ({
+            pubkey,
+            sats: entry.sats,
+            ...(entry.byMe ? { byMe: true } : {}),
+          }))
+          .sort((a, b) => {
+            if (b.sats !== a.sats) return b.sats - a.sats
+            if (Boolean(b.byMe) !== Boolean(a.byMe)) return a.byMe ? -1 : 1
+            return a.pubkey.localeCompare(b.pubkey)
+          })
+      : undefined
 
   return {
     likes: bucket.likers.size,
@@ -148,7 +185,26 @@ function bucketToStats(bucket: NoteStatsBucket, myPubkey: string): AgoraNoteStat
     zapSats: receiptSats + extraZapSats,
     zapCount: bucket.zapReceipts.size + extraZapCount,
     zappedByMe: myReceiptCount > 0 || bucket.optimisticZappedByMe,
+    zapBreakdown,
   }
+}
+
+function sameZapBreakdown(
+  a: readonly AgoraZapperSummary[] | undefined,
+  b: readonly AgoraZapperSummary[] | undefined
+): boolean {
+  if (a === b) return true
+  if (!a || !b || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (
+      a[i].pubkey !== b[i].pubkey ||
+      a[i].sats !== b[i].sats ||
+      Boolean(a[i].byMe) !== Boolean(b[i].byMe)
+    ) {
+      return false
+    }
+  }
+  return true
 }
 
 function sanitizeHttpsPictureUrl(raw: unknown): string | undefined {
@@ -169,10 +225,16 @@ function parseVerifiedProfileEvent(ev: NostrEvent): AgoraProfile | null {
   const parsed = parseAgoraProfile(ev)
   if (!parsed) return null
   const verifiedPubkey = ev.pubkey.toLowerCase()
+  const rawLud06 =
+    typeof parsed.rawJson?.lud06 === 'string'
+      ? normalizeLightningAddress(parsed.rawJson.lud06)
+      : null
+  const resolvedLud16 = normalizeLightningAddress(parsed.lud16) ?? rawLud06 ?? parsed.lud16
   return {
     ...parsed,
     pubkey: verifiedPubkey,
     picture: sanitizeHttpsPictureUrl(parsed.picture),
+    lud16: resolvedLud16,
   }
 }
 
@@ -198,7 +260,7 @@ function loadCachedProfiles(): Record<string, AgoraProfile> {
         picture: sanitizeHttpsPictureUrl(entry.picture),
         banner: sanitizeHttpUrl(entry.banner),
         nip05: typeof entry.nip05 === 'string' ? entry.nip05.slice(0, 160) : undefined,
-        lud16: typeof entry.lud16 === 'string' ? entry.lud16.slice(0, 160) : undefined,
+        lud16: typeof entry.lud16 === 'string' ? entry.lud16.slice(0, 512) : undefined,
         website: sanitizeHttpUrl(entry.website, true),
         updatedAt:
           typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
@@ -430,6 +492,24 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
   )
   const profilesRef = useRef<Record<string, AgoraProfile>>(profilesByPubkey)
   profilesRef.current = profilesByPubkey
+
+  // Hydrate cached profile Lightning addresses (lud16 / lud06) into the Zap engine on mount
+  // so peers with cached profiles (including Nymchat & Glub.chat users) are immediately zappable.
+  const hydratedCachedLud16Ref = useRef(false)
+  const hasDiscoverLud16 = Boolean(options.onDiscoverProfileLud16)
+  useEffect(() => {
+    if (hydratedCachedLud16Ref.current || !hasDiscoverLud16) return
+    const discover = onDiscoverLud16Ref.current
+    if (!discover) return
+    hydratedCachedLud16Ref.current = true
+    for (const profile of Object.values(profilesRef.current)) {
+      if (!profile.lud16) continue
+      const normalized = normalizeLightningAddress(profile.lud16)
+      if (normalized) {
+        discover(profile.pubkey, normalized)
+      }
+    }
+  }, [hasDiscoverLud16])
 
   const [notesById, setNotesById] = useState<Record<string, AgoraNote>>({})
   const notesRef = useRef<Record<string, AgoraNote>>(notesById)
@@ -728,7 +808,8 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
           old.replies !== computed.replies ||
           old.zapSats !== computed.zapSats ||
           old.zapCount !== computed.zapCount ||
-          old.zappedByMe !== computed.zappedByMe
+          old.zappedByMe !== computed.zappedByMe ||
+          !sameZapBreakdown(old.zapBreakdown, computed.zapBreakdown)
         ) {
           next[id] = computed
           changed = true
@@ -1016,6 +1097,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
               bucket.zapReceipts.set(zap.id, {
                 sats: zap.amountSats,
                 byMe: zap.senderPubkey === myPubkeyRef.current,
+                senderPubkey: zap.senderPubkey,
               })
               dirtyStatsIdsRef.current.add(zap.targetEventId)
               scheduleStatsStateFlush()

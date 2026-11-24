@@ -6,7 +6,7 @@ Zero-knowledge Web Push bridge for [Agnostr](https://agnostr.com), built on Clou
 
 - **Zero plaintext for private messages & calls**: DMs (`dm`), DM calls (`dm-call`), Agmail (`agmail`), and call cancellations (`call-cancel`) are delivered as blind push pokes — the worker never receives or stores private message content or private Nostr keys.
 - **Instant delivery + background fallback**:
-  - `POST /poke` delivers immediate sub-second Web Push notifications for DMs, calls, Agmail, and Geo Radio mentions.
+  - `POST /poke` delivers immediate sub-second Web Push notifications for DMs, calls, Agmail, and Bitchat mentions.
   - A 1-minute Cloudflare Cron Trigger (`* * * * *`) polls public Nostr relays as a fallback for offline / third-party-client events (`kind:1059` gift wraps, `kind:4` legacy DMs, `kind:9` server chat, `kind:20000` geo chat).
 - **Free-tier safe**: Deduplication uses the Cloudflare edge `caches.default` Cache API (zero KV writes per message), and expired `404`/`410` browser endpoints are pruned automatically.
 

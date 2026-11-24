@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertTriangle,
@@ -13,16 +13,44 @@ import {
 } from 'lucide-react'
 import type { PendingTrustRequest } from '../types/protocol.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
-import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import { AvatarImg } from './AvatarImg.tsx'
 
 export interface TrustConfirmModalProps {
   request: PendingTrustRequest | null
+  avatarUrl?: string
   onConfirm: () => void
   onCancel: () => void
 }
 
+function readVerifiedCachedPicture(pubkey: string | undefined): string | undefined {
+  if (!pubkey || typeof localStorage === 'undefined') return undefined
+  const pk = pubkey.trim().toLowerCase()
+  if (!/^[0-9a-f]{64}$/.test(pk)) return undefined
+  try {
+    const raw = localStorage.getItem('agnostr:v2:agora_profiles')
+    if (!raw) return undefined
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return undefined
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue
+      const entry = item as { pubkey?: unknown; picture?: unknown }
+      if (typeof entry.pubkey === 'string' && entry.pubkey.toLowerCase() === pk) {
+        if (typeof entry.picture === 'string' && /^https:\/\//i.test(entry.picture.trim())) {
+          return entry.picture.trim()
+        }
+        return undefined
+      }
+    }
+  } catch {
+    // Ignore storage parse failures
+  }
+  return undefined
+}
+
 export function TrustConfirmModal({
   request,
+  avatarUrl,
   onConfirm,
   onCancel,
 }: TrustConfirmModalProps) {
@@ -30,6 +58,11 @@ export function TrustConfirmModal({
   const [copiedNpub, setCopiedNpub] = useState(false)
   const copyTimerRef = useRef<number | null>(null)
   const open = Boolean(request)
+  const requestPubkey = request?.pubkey
+  const resolvedAvatarUrl = useMemo(
+    () => avatarUrl ?? readVerifiedCachedPicture(requestPubkey),
+    [avatarUrl, requestPubkey],
+  )
 
   // Android / PWA Back button cancels trust confirmation
   useBackHandler(open, onCancel)
@@ -134,9 +167,9 @@ export function TrustConfirmModal({
 
         {/* Identity Verification Chip */}
         <div className="ag-trust-confirm-id-row">
-          <img
-            src={identiconDataUrl(request.pubkey)}
-            alt=""
+          <AvatarImg
+            pubkey={request.pubkey}
+            pictureUrl={resolvedAvatarUrl}
             width={30}
             height={30}
             className="ag-trust-confirm-avatar"

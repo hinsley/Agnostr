@@ -90,11 +90,13 @@ import {
   revokeVoicePreviewUrl,
 } from '../lib/voiceRecorder.ts'
 import { RichMessageContent } from '../utils/markdown.tsx'
-import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
+import { AvatarImg } from './AvatarImg.tsx'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 import { ImageAttachmentCard } from './ImageAttachmentCard.tsx'
 import type { LightboxImagePayload } from './ImageLightboxModal.tsx'
+import { requestUntrustedLinkOpen } from './UntrustedLinkModal.tsx'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer.tsx'
 import '../styles/amail.css'
 
@@ -686,6 +688,7 @@ export function AmailView({
   const [meshFeedback, setMeshFeedback] = useState<string | null>(null)
 
   const recipLinesWrapRef = useRef<HTMLDivElement | null>(null)
+  const readerScrollRef = useRef<HTMLDivElement | null>(null)
   const openFreshComposerRef = useRef<((opts?: ComposerInitOpts) => void) | null>(null)
 
   const hideTooltip = useCallback(() => {
@@ -1390,7 +1393,7 @@ export function AmailView({
     [amail.messages, selectedMessageId],
   )
 
-  // Show all messages in the canonical thread chronologically, deduplicating self-mail sibling pairs
+  // Show all messages in the canonical thread reverse-chronologically (latest at top), deduplicating self-mail sibling pairs
   const threadMessages = useMemo(() => {
     if (!selectedMessage) return []
     if (selectedMessage.folder === 'drafts') return [selectedMessage]
@@ -1410,8 +1413,53 @@ export function AmailView({
       section === 'sent' ||
       (selectedMessage.direction === 'out' && selectedMessage.folder === 'sent')
     const deduped = dedupeThreadMessages(rawSiblings, preferOut, selectedMessage.id)
-    return deduped.length > 0 ? deduped : [selectedMessage]
+    const list = deduped.length > 0 ? deduped : [selectedMessage]
+    return [...list].sort((a, b) => {
+      if (b.sentAt !== a.sentAt) return b.sentAt - a.sentAt
+      if (a.inReplyTo && baseMailId(a.inReplyTo) === baseMailId(b.id)) return -1
+      if (b.inReplyTo && baseMailId(b.inReplyTo) === baseMailId(a.id)) return 1
+      return b.updatedAt - a.updatedAt
+    })
   }, [amail.messages, selectedMessage, canonicalThreadMap, section])
+
+  const selectedThreadId = selectedMessage
+    ? (canonicalThreadMap.get(selectedMessage.id) ?? selectedMessage.id)
+    : null
+  const topThreadMessageId = threadMessages[0]?.id ?? null
+
+  // Snap reader scroll to top when opening a thread or when a newer reply/message lands at top
+  useLayoutEffect(() => {
+    if (!open || !selectedMessageId || composing) return
+    if (readerScrollRef.current) {
+      readerScrollRef.current.scrollTop = 0
+    }
+  }, [open, selectedMessageId, selectedThreadId, topThreadMessageId, threadMessages.length, composing])
+
+  // Prefetch verified kind: 0 profile pictures for visible Agmail participants, recipients & contacts
+  const ensureProfilePictures = engine.ensureProfilePictures
+  const visibleAmailPubkeys = useMemo(() => {
+    if (!open) return [] as string[]
+    const pks = new Set<string>([myPubkey])
+    for (const c of mergedContacts) {
+      if (c.pubkey) pks.add(c.pubkey.toLowerCase())
+    }
+    for (const m of threadMessages) {
+      if (m.fromPubkey) pks.add(m.fromPubkey.toLowerCase())
+      if (m.toPubkey) pks.add(m.toPubkey.toLowerCase())
+      for (const r of m.toRecipients ?? []) pks.add(r.pubkey.toLowerCase())
+      for (const r of m.ccRecipients ?? []) pks.add(r.pubkey.toLowerCase())
+      for (const r of m.bccRecipients ?? []) pks.add(r.pubkey.toLowerCase())
+    }
+    for (const r of toRecipients) pks.add(r.pubkey.toLowerCase())
+    for (const r of ccRecipients) pks.add(r.pubkey.toLowerCase())
+    for (const r of bccRecipients) pks.add(r.pubkey.toLowerCase())
+    return Array.from(pks)
+  }, [open, myPubkey, mergedContacts, threadMessages, toRecipients, ccRecipients, bccRecipients])
+
+  useEffect(() => {
+    if (!open || visibleAmailPubkeys.length === 0) return
+    ensureProfilePictures(visibleAmailPubkeys)
+  }, [open, visibleAmailPubkeys, ensureProfilePictures])
 
   // Build autocomplete matches for active recipient field (including top `Me (Yourself)` entry)
   const getAutocompleteForField = useCallback(
@@ -2897,7 +2945,7 @@ export function AmailView({
 
   const renderReader = (msg: AmailMessage) => {
     const tKey = canonicalThreadMap.get(msg.id)
-    const latestMsg = threadMessages[threadMessages.length - 1] ?? msg
+    const latestMsg = threadMessages[0] ?? msg
     const readerSectionMessages = (() => {
       if (!tKey || msg.folder === 'drafts') return [msg]
       const inThread = amail.messages.filter(
@@ -2927,7 +2975,9 @@ export function AmailView({
     const showReplyAll = canReplyAll(latestMsg)
     const isStarred =
       threadMessages.some((m) => m.isStarred) || readerSectionMessages.some((m) => m.isStarred)
-    const displaySubject = formatThreadSubject(threadMessages[0]?.subject || msg.subject)
+    const displaySubject = formatThreadSubject(
+      threadMessages[threadMessages.length - 1]?.subject || threadMessages[0]?.subject || msg.subject,
+    )
     const isPickerOpen = folderPicker?.pickerKey === readerPickerKey
 
     return (
@@ -3046,7 +3096,7 @@ export function AmailView({
           </div>
         </div>
 
-        <div className="ag-amail-reader-scroll">
+        <div className="ag-amail-reader-scroll" ref={readerScrollRef}>
           <div className="ag-amail-reader-head">
             <h2 className="ag-amail-reader-subject">{displaySubject}</h2>
             <div className="ag-amail-reader-meta-row">
@@ -3080,8 +3130,9 @@ export function AmailView({
                 <article key={item.id} className="ag-amail-message-block">
                   <header className="ag-amail-msg-meta">
                     <div className="ag-amail-msg-sender-wrap">
-                      <img
-                        src={identiconDataUrl(item.fromPubkey)}
+                      <AvatarImg
+                        pubkey={item.fromPubkey}
+                        pictureUrl={engine.getProfilePicture(item.fromPubkey)}
                         alt=""
                         width={34}
                         height={34}
@@ -3224,17 +3275,47 @@ export function AmailView({
                     </div>
                   </header>
 
-                  {(item.body.trim().length > 0 || !(item.attachments && item.attachments.length > 0)) && (
-                    <div className="ag-amail-msg-body">
-                      <RichMessageContent
-                        content={item.body}
-                        onTuneGeohash={(gh) => {
-                          engine.tuneGeohash(gh)
-                          onClose()
-                        }}
-                      />
-                    </div>
-                  )}
+                  {(item.body.trim().length > 0 || !(item.attachments && item.attachments.length > 0)) && (() => {
+                    const warnUntrustedLinks =
+                      item.direction !== 'out' &&
+                      !fromIsSelf &&
+                      !engine.isTrusted(item.fromPubkey) &&
+                      !engine.settings.allowUntrustedLinks
+
+                    const handleBodyLinkEvent = (e: ReactMouseEvent<HTMLDivElement>, isAux = false) => {
+                      if (!warnUntrustedLinks) return
+                      if (isAux && e.button !== 1) return
+                      const anchor = (e.target as HTMLElement | null)?.closest(
+                        'a[href]',
+                      ) as HTMLAnchorElement | null
+                      const href = anchor?.getAttribute('href') ?? ''
+                      if (anchor && /^https?:\/\//i.test(href)) {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        requestUntrustedLinkOpen({
+                          url: href,
+                          senderHandle: item.fromName,
+                          senderPubkey: item.fromPubkey,
+                        })
+                      }
+                    }
+
+                    return (
+                      <div
+                        className={`ag-amail-msg-body${warnUntrustedLinks ? ' ag-amail-untrusted-body' : ''}`}
+                        onClick={(e) => handleBodyLinkEvent(e, false)}
+                        onAuxClick={(e) => handleBodyLinkEvent(e, true)}
+                      >
+                        <RichMessageContent
+                          content={item.body}
+                          onTuneGeohash={(gh) => {
+                            engine.tuneGeohash(gh)
+                            onClose()
+                          }}
+                        />
+                      </div>
+                    )
+                  })()}
 
                   {item.attachments && item.attachments.length > 0 && (() => {
                     const msgAttachments = item.attachments
@@ -3456,8 +3537,9 @@ export function AmailView({
               const isSelf = r.pubkey.toLowerCase() === myPubkey
               return (
                 <span key={`${field}-${r.pubkey}`} className="ag-amail-recip-chip">
-                  <img
-                    src={identiconDataUrl(r.pubkey)}
+                  <AvatarImg
+                    pubkey={r.pubkey}
+                    pictureUrl={engine.getProfilePicture(r.pubkey)}
                     alt=""
                     width={16}
                     height={16}
@@ -3539,8 +3621,9 @@ export function AmailView({
                     setActiveRecipientField(null)
                   }}
                 >
-                  <img
-                    src={identiconDataUrl(c.pubkey)}
+                  <AvatarImg
+                    pubkey={c.pubkey}
+                    pictureUrl={engine.getProfilePicture(c.pubkey)}
                     alt=""
                     width={24}
                     height={24}
@@ -4112,8 +4195,9 @@ export function AmailView({
             )
             return (
               <div key={c.pubkey} role="listitem" className="ag-amail-contact-item">
-                <img
-                  src={identiconDataUrl(c.pubkey)}
+                <AvatarImg
+                  pubkey={c.pubkey}
+                  pictureUrl={engine.getProfilePicture(c.pubkey)}
                   alt=""
                   width={34}
                   height={34}

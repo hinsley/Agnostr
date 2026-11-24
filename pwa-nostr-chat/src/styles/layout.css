@@ -206,7 +206,7 @@ body,
   flex-shrink: 0;
 }
 
-/* Full-Width Message Stream Container (Linear × Discord × Slack) */
+/* Full-Width Message Stream Container */
 .ag-stream-wrap {
   flex: 1 1 auto;
   min-height: 0;
@@ -233,7 +233,7 @@ body,
   flex-direction: column;
 }
 
-/* Full-Width Slack/Linear Composer Dock */
+/* Full-Width Composer Dock */
 .ag-composer-dock {
   flex: 0 0 auto;
   position: relative;

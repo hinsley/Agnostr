@@ -5,7 +5,7 @@ export interface AgnostrLogoProps {
   size?: number
   /**
    * 'mark' renders the theme-adaptive 2-shape geometric A (arch in currentColor, floating pill in var(--accent)).
-   * 'badge' renders the full obsidian squircle app icon matching /icon.svg.
+   * 'badge' renders the full dark squircle app icon matching /icon.svg.
    */
   variant?: 'mark' | 'badge'
   className?: string

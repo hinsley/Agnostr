@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
@@ -22,7 +22,6 @@ import {
   ShieldCheck,
   ShieldOff,
   Smile,
-  SmilePlus,
   Trash2,
   User,
   Video,
@@ -35,7 +34,8 @@ import type {
   MemoTranscriptState,
   TranscriptionModelStatus,
 } from '../types/transcription'
-import type { CashuTokenPreview, ZapTarget } from '../types/wallet'
+import type { CashuTokenPreview, ZapReceiptSummary, ZapTarget } from '../types/wallet'
+import { clientAvatarRingClass } from '../lib/bitchatProtocol'
 import { decodeCashuTokenPreview, extractCashuTokensFromText } from '../lib/cashuWallet'
 import { usePinnedReactions } from '../lib/reactionEmojis'
 import { pubkeyToColor, formatHandle } from '../utils/identicon'
@@ -43,6 +43,7 @@ import { RichMessageContent } from '../utils/markdown'
 import { AvatarImg } from './AvatarImg'
 import { useContextMenu, type ContextMenuItem, type ContextMenuReaction } from './ContextMenu'
 import { ReactionPickerPopover } from './ReactionPickerPopover'
+import { requestUntrustedLinkOpen } from './UntrustedLinkModal'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
 import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
 
@@ -106,6 +107,7 @@ export interface MessageItemProps {
   highlightQuery?: string
   knownHandles?: readonly string[]
   showBridgeBadges: boolean
+  allowUntrustedLinks?: boolean
   isDmMode?: boolean
   isEncryptedContext?: boolean
   isSenderTrusted: boolean
@@ -149,10 +151,12 @@ export interface MessageItemProps {
   senderLightningAddress?: string | null
   canZapSender?: boolean
   zapTotalSats?: number
+  zapReceipts?: readonly ZapReceiptSummary[]
   onOpenZap?: (target: ZapTarget) => void
   onClaimCashuToken?: (token: string) => void
-  // Double-Column Translator Mode overrides
+  // Single-Column Translator Mode overrides
   displayContentOverride?: string
+  originalContentInlay?: string
   translationStatus?: 'idle' | 'pending' | 'loading' | 'done' | 'error'
   translationLoadingLabel?: string
   translationError?: string
@@ -174,6 +178,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     highlightQuery,
     knownHandles,
     showBridgeBadges,
+    allowUntrustedLinks = false,
     isDmMode = false,
     isEncryptedContext = false,
     isSenderTrusted,
@@ -210,9 +215,11 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     senderLightningAddress = null,
     canZapSender: canZapSenderProp,
     zapTotalSats = 0,
+    zapReceipts,
     onOpenZap,
     onClaimCashuToken,
     displayContentOverride,
+    originalContentInlay,
     translationStatus,
     translationLoadingLabel,
     translationError,
@@ -227,13 +234,21 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     const [expandedPickerAnchor, setExpandedPickerAnchor] = useState<DOMRect | null>(null)
     const [copied, setCopied] = useState(false)
     const quickPickerWrapRef = useRef<HTMLDivElement | null>(null)
+    const messageBodyRef = useRef<HTMLDivElement | null>(null)
     const [hoveredReaction, setHoveredReaction] = useState<{
       emoji: string
       left: number
       top: number
       placement: 'above' | 'below'
     } | null>(null)
+    const [hoveredZap, setHoveredZap] = useState<{
+      left: number
+      top: number
+      placement: 'above' | 'below'
+    } | null>(null)
     const { openContextMenu } = useContextMenu()
+
+    const warnUntrustedLinks = !message.isOwn && !isSenderTrusted && !allowUntrustedLinks
 
     const myActiveEmojis = useMemo(
       () => message.reactions.filter((r) => r.reactedByMe).map((r) => r.emoji),
@@ -269,6 +284,10 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       setHoveredReaction(null)
     }, [])
 
+    const hideZapTooltip = useCallback(() => {
+      setHoveredZap(null)
+    }, [])
+
     const showReactionTooltip = useCallback((emoji: string, el: HTMLElement) => {
       const rect = el.getBoundingClientRect()
       const vw = window.innerWidth || 390
@@ -284,15 +303,80 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
         placement === 'above'
           ? Math.max(10, rect.top - 8)
           : Math.min(vh - 10, rect.bottom + 8)
+      setHoveredZap(null)
       setHoveredReaction({ emoji, left, top, placement })
     }, [])
 
+    const showZapTooltip = useCallback((el: HTMLElement) => {
+      const rect = el.getBoundingClientRect()
+      const vw = window.innerWidth || 390
+      const vh = window.innerHeight || 800
+      const placement: 'above' | 'below' = rect.top < 140 ? 'below' : 'above'
+      const halfMax = 120
+      const rawCenter = rect.left + rect.width / 2
+      const left =
+        vw <= halfMax * 2 + 20
+          ? vw / 2
+          : Math.max(10 + halfMax, Math.min(vw - 10 - halfMax, rawCenter))
+      const top =
+        placement === 'above'
+          ? Math.max(10, rect.top - 8)
+          : Math.min(vh - 10, rect.bottom + 8)
+      setHoveredReaction(null)
+      setHoveredZap({ left, top, placement })
+    }, [])
+
     useEffect(() => {
-      if (!hoveredReaction) return
-      const onScroll = () => setHoveredReaction(null)
+      if (!hoveredReaction && !hoveredZap) return
+      const onScroll = () => {
+        setHoveredReaction(null)
+        setHoveredZap(null)
+      }
       window.addEventListener('scroll', onScroll, { capture: true, passive: true })
       return () => window.removeEventListener('scroll', onScroll, { capture: true })
-    }, [hoveredReaction])
+    }, [hoveredReaction, hoveredZap])
+
+    const zapTooltipContent = useMemo(() => {
+      if (!hoveredZap || zapTotalSats <= 0) return null
+      const totalsByKey = new Map<
+        string,
+        { label: string; isSelf: boolean; totalSats: number }
+      >()
+
+      for (const receipt of zapReceipts ?? []) {
+        const sats = Math.max(0, Math.round(receipt.amountSats || 0))
+        if (sats <= 0) continue
+        const rawPk = receipt.senderPubkey?.trim().toLowerCase() || ''
+        if (!rawPk) {
+          const prev = totalsByKey.get('__anon__')
+          if (prev) {
+            prev.totalSats += sats
+          } else {
+            totalsByKey.set('__anon__', { label: 'Anonymous', isSelf: false, totalSats: sats })
+          }
+          continue
+        }
+        const existing = totalsByKey.get(rawPk)
+        if (existing) {
+          existing.totalSats += sats
+        } else {
+          const resolved = resolveReactorName ? resolveReactorName(rawPk) : `anon${rawPk.slice(-4)}`
+          const isSelf = resolved === 'You'
+          const label = isSelf ? 'You' : resolved.startsWith('@') ? resolved : `@${resolved}`
+          totalsByKey.set(rawPk, { label, isSelf, totalSats: sats })
+        }
+      }
+
+      const sorted = Array.from(totalsByKey.values()).sort((a, b) => {
+        if (b.totalSats !== a.totalSats) return b.totalSats - a.totalSats
+        if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1
+        return a.label.localeCompare(b.label)
+      })
+
+      const visibleEntries = sorted.slice(0, 5)
+      const extraCount = Math.max(0, sorted.length - visibleEntries.length)
+      return { visibleEntries, extraCount, totalSats: zapTotalSats }
+    }, [hoveredZap, zapTotalSats, zapReceipts, resolveReactorName])
 
     const activeHoveredReaction = useMemo(() => {
       if (!hoveredReaction) return null
@@ -358,6 +442,36 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       }
       return previews
     }, [message.isSystem, rawVisibleContent])
+
+    // Annotate external http(s) links inside message text when sender is untrusted
+    useLayoutEffect(() => {
+      const root = messageBodyRef.current
+      if (!root) return
+      const anchors = root.querySelectorAll<HTMLAnchorElement>(
+        'a.ag-md-link:not(.ag-md-link-internal)'
+      )
+      for (const anchor of anchors) {
+        const rawHref = (anchor.getAttribute('href') || '').trim()
+        if (!/^https?:\/\//i.test(rawHref)) continue
+        if (warnUntrustedLinks) {
+          if (anchor.dataset.origTitle === undefined) {
+            anchor.dataset.origTitle = anchor.getAttribute('title') ?? ''
+          }
+          anchor.classList.add('ag-untrusted-link')
+          anchor.setAttribute('title', 'Untrusted sender — click to review link before opening')
+        } else {
+          anchor.classList.remove('ag-untrusted-link')
+          if (anchor.dataset.origTitle !== undefined) {
+            if (anchor.dataset.origTitle) {
+              anchor.setAttribute('title', anchor.dataset.origTitle)
+            } else {
+              anchor.removeAttribute('title')
+            }
+            delete anchor.dataset.origTitle
+          }
+        }
+      }
+    }, [warnUntrustedLinks, message.content, displayContentOverride, originalContentInlay])
 
     // System notice row (left-aligned with subtle accent rail)
     if (message.isSystem) {
@@ -486,7 +600,6 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       isMentioned ? 'is-mentioned' : '',
       isSearchActive ? 'is-search-active' : '',
       actionsRevealed || pickerOpen || Boolean(expandedPickerAnchor) ? 'actions-open' : '',
-      compactTranslatorRow ? 'is-translator-row' : '',
     ]
       .filter(Boolean)
       .join(' ')
@@ -520,6 +633,12 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             onSelect: () => {
               if (isInternalHref) {
                 window.location.hash = rawHref
+              } else if (warnUntrustedLinks && /^https?:\/\//i.test(resolvedUrl)) {
+                requestUntrustedLinkOpen({
+                  url: resolvedUrl,
+                  senderHandle: handle.full,
+                  senderPubkey: message.pubkey,
+                })
               } else {
                 window.open(resolvedUrl, '_blank', 'noopener,noreferrer')
               }
@@ -781,6 +900,29 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       })
     }
 
+    const avatarRingClass = clientAvatarRingClass(message.clientName, message.isAgnostrClient)
+
+    const interceptUntrustedLinkClick = (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!warnUntrustedLinks) return
+      const target = e.target as HTMLElement | null
+      const anchor = target?.closest('a[href]') as HTMLAnchorElement | null
+      if (!anchor || anchor.classList.contains('ag-md-link-internal')) return
+      const rawHref = (anchor.getAttribute('href') || '').trim()
+      if (!/^https?:\/\//i.test(rawHref)) return
+      e.preventDefault()
+      e.stopPropagation()
+      requestUntrustedLinkOpen({
+        url: anchor.href || rawHref,
+        senderHandle: handle.full,
+        senderPubkey: message.pubkey,
+      })
+    }
+
+    const interceptUntrustedLinkAuxClick = (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!warnUntrustedLinks || e.button !== 1) return
+      interceptUntrustedLinkClick(e)
+    }
+
     return (
       <article
         id={isOriginalColumn ? `msg-${message.id}-orig` : `msg-${message.id}`}
@@ -804,7 +946,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 alt=""
                 width={34}
                 height={34}
-                className={`ag-stream-avatar ${message.isAgnostrClient ? 'ag-avatar-agnostr' : ''}`}
+                className={`ag-stream-avatar ${avatarRingClass}`}
                 loading="lazy"
               />
             </button>
@@ -895,12 +1037,16 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             </button>
           )}
 
-          {/* Full-Width Message Text Body (with optional Translator Mode) */}
+          {/* Full-Width Message Text Body (with optional Single-Column Translator Side Inlay) */}
           {(visibleContent.length > 0 ||
             translationStatus === 'loading' ||
             translationStatus === 'pending' ||
             translationStatus === 'error') && (
-            <>
+            <div
+              ref={messageBodyRef}
+              onClickCapture={interceptUntrustedLinkClick}
+              onAuxClickCapture={interceptUntrustedLinkAuxClick}
+            >
               {hideRawUntranslatedBody ? (
                 translationStatus === 'loading' ? (
                   <div className="ag-translator-inline-status">
@@ -913,13 +1059,30 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                   </div>
                 ) : null
               ) : visibleContent.length > 0 ? (
-                <RichMessageContent
-                  content={visibleContent}
-                  onTuneGeohash={onTuneGeohash}
-                  onClickMention={onClickMention}
-                  highlightQuery={highlightQuery}
-                  knownHandles={knownHandles}
-                />
+                originalContentInlay ? (
+                  <div className="ag-msg-translation-row">
+                    <div className="ag-msg-translated-main">
+                      <RichMessageContent
+                        content={visibleContent}
+                        onTuneGeohash={onTuneGeohash}
+                        onClickMention={onClickMention}
+                        highlightQuery={highlightQuery}
+                        knownHandles={knownHandles}
+                      />
+                    </div>
+                    <aside className="ag-msg-original-inlay" aria-label="Original message">
+                      {originalContentInlay}
+                    </aside>
+                  </div>
+                ) : (
+                  <RichMessageContent
+                    content={visibleContent}
+                    onTuneGeohash={onTuneGeohash}
+                    onClickMention={onClickMention}
+                    highlightQuery={highlightQuery}
+                    knownHandles={knownHandles}
+                  />
+                )
               ) : null}
 
               {translationBadge && (
@@ -956,7 +1119,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                   )}
                 </div>
               )}
-            </>
+            </div>
           )}
 
           {/* Inline Cashu Ecash Token Claim Cards */}
@@ -1064,14 +1227,21 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
               {zapTotalSats > 0 && (
                 <button
                   type="button"
-                  className="ag-zap-receipt-pill tabular"
-                  onClick={canZapSender ? handleTriggerZap : undefined}
-                  disabled={!canZapSender}
-                  title={
+                  className={`ag-zap-receipt-pill tabular ${!canZapSender ? 'is-readonly' : ''}`}
+                  aria-disabled={!canZapSender || undefined}
+                  aria-label={
                     canZapSender
-                      ? `${zapTotalSats.toLocaleString()} sats zapped · Click to zap @${handle.base}`
+                      ? `${zapTotalSats.toLocaleString()} sats zapped — click to zap @${handle.base}`
                       : `${zapTotalSats.toLocaleString()} sats zapped`
                   }
+                  onClick={() => {
+                    hideZapTooltip()
+                    if (canZapSender) handleTriggerZap()
+                  }}
+                  onMouseEnter={(e) => showZapTooltip(e.currentTarget)}
+                  onMouseLeave={hideZapTooltip}
+                  onFocus={(e) => showZapTooltip(e.currentTarget)}
+                  onBlur={hideZapTooltip}
                 >
                   <Zap size={12} fill="currentColor" />
                   <span>{zapTotalSats.toLocaleString()}</span>
@@ -1097,25 +1267,53 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                     <span className="ag-reaction-count tabular">{rx.count}</span>
                   </button>
                 ))}
-              {!isDmMode && onReact && message.reactions.length > 0 && (
-                <button
-                  type="button"
-                  className="ag-reaction-pill ag-reaction-add-pill"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    hideReactionTooltip()
-                    setPickerOpen(false)
-                    setExpandedPickerAnchor(e.currentTarget.getBoundingClientRect())
-                  }}
-                  title="Add reaction"
-                  aria-label="Add reaction"
-                >
-                  <SmilePlus size={13} />
-                </button>
-              )}
             </div>
           )}
         </div>
+
+        {/* Unclipped Floating Portal Tooltip Showing Zap Breakdown (Greatest -> Least, Top 5) */}
+        {hoveredZap &&
+          zapTooltipContent &&
+          typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              className={`ag-reaction-tooltip ag-zap-tooltip is-${hoveredZap.placement}`}
+              role="tooltip"
+              style={{
+                left: `${hoveredZap.left}px`,
+                top: `${hoveredZap.top}px`,
+              }}
+            >
+              <span className="ag-reaction-tooltip-emoji ag-zap-tooltip-icon" aria-hidden="true">
+                <Zap size={13} fill="currentColor" />
+              </span>
+              <div className="ag-reaction-tooltip-body">
+                {zapTooltipContent.visibleEntries.length > 0 ? (
+                  <div className="ag-zap-tooltip-list">
+                    {zapTooltipContent.visibleEntries.map((entry, idx) => (
+                      <span key={`${entry.label}-${idx}`} className="ag-zap-tooltip-row tabular">
+                        <span className="ag-reaction-tooltip-names">{entry.label}</span>
+                        <span className="ag-reaction-tooltip-more">
+                          {' '}
+                          · {entry.totalSats.toLocaleString()} sats
+                        </span>
+                      </span>
+                    ))}
+                    {zapTooltipContent.extraCount > 0 && (
+                      <span className="ag-reaction-tooltip-more">
+                        and {zapTooltipContent.extraCount} more
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <span className="ag-reaction-tooltip-more tabular">
+                    {zapTooltipContent.totalSats.toLocaleString()} sats zapped
+                  </span>
+                )}
+              </div>
+            </div>,
+            document.body
+          )}
 
         {/* Unclipped Floating Portal Tooltip Showing Who Reacted */}
         {hoveredReaction &&
