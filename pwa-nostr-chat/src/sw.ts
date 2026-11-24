@@ -284,7 +284,7 @@ swSelf.addEventListener('push', (event) => {
         data.tag ||
         (data.serverId ? `agnostr-srvcall-${data.serverId.slice(0, 12)}` : 'agnostr-srvcall')
       const options: ExtendedNotificationOptions = {
-        body: payload.body || 'A group call started in one of your servers',
+        body: payload.body || 'A group call started in one of your groups',
         icon: APP_ICON,
         badge: APP_ICON,
         tag,
@@ -297,7 +297,7 @@ swSelf.addEventListener('push', (event) => {
         ],
         data: { ...data, tag },
       }
-      await showSwNotificationSafe(payload.title || 'Server Call Active', options)
+      await showSwNotificationSafe(payload.title || 'Group Call Active', options)
       return
     }
 
@@ -320,6 +320,21 @@ swSelf.addEventListener('push', (event) => {
         data: { ...data, tag },
       }
       await showSwNotificationSafe(payload.title || 'Geo Radio Call Active', options)
+      return
+    }
+
+    if (data.category === 'agmail') {
+      const tag = data.tag || 'agnostr-agmail'
+      const options: ExtendedNotificationOptions = {
+        body: payload.body || 'You received an encrypted Agmail',
+        icon: APP_ICON,
+        badge: APP_ICON,
+        tag,
+        renotify: true,
+        vibrate: [140, 80, 140],
+        data: { ...data, tag },
+      }
+      await showSwNotificationSafe(payload.title || 'New Agmail', options)
       return
     }
 

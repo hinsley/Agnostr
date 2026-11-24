@@ -20,8 +20,30 @@ export type NotificationCategory =
   | 'server-call'
   | 'geo-message'
   | 'geo-call'
+  | 'agmail'
   | 'location-note'
   | 'test'
+
+export interface PushPokePayload {
+  recipientPubkeys: string[]
+  category:
+    | 'dm'
+    | 'dm-call'
+    | 'server-message'
+    | 'server-call'
+    | 'geo-message'
+    | 'geo-call'
+    | 'agmail'
+    | 'call-cancel'
+  eventId?: string
+  callId?: string
+  mediaType?: 'audio' | 'video'
+  serverId?: string
+  channelId?: string
+  geohash?: string
+  senderName?: string
+  preview?: string
+}
 
 export interface NotificationSettings {
   enabled: boolean
@@ -86,9 +108,12 @@ export interface NotificationEngine {
   pushStatus: PushSubscriptionStatus
   pushError: string | null
   pushEndpoint: string | null
+  isUsingDefaultBridge: boolean
   connectPushBridge: (
     bridgeUrlOverride?: string,
     vapidKeyOverride?: string
   ) => Promise<boolean>
   disconnectPushBridge: () => Promise<void>
+  sendTestPush: () => Promise<{ ok: boolean; detail: string }>
+  pokeRecipients: (payload: PushPokePayload) => void
 }

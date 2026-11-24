@@ -192,7 +192,7 @@ export function IncomingCallBanner({
             {incoming.callerDisplayHandle}
           </div>
           <div className="ag-incoming-subtitle truncate">
-            {isDm ? ringingSubtitle : `Server Group Call · ${isVideo ? 'Video' : 'Voice'}`}
+            {isDm ? ringingSubtitle : `Group Call · ${isVideo ? 'Video' : 'Voice'}`}
           </div>
           <div className="ag-incoming-badges">
             <span className="ag-badge ag-badge-accent">

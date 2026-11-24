@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ToastLevel } from '../types/protocol.ts'
 import {
-  DEFAULT_TRANSLATOR_MODEL_KEY,
   DEFAULT_TRANSLATOR_SETTINGS,
+  getDefaultTranslatorModelKey,
+  resolveInitialOpusModelId,
   TRANSLATOR_CACHE_KEY,
   TRANSLATOR_MODELS,
   translationCacheKey,
@@ -10,6 +11,7 @@ import {
   type TranslateMessageOptions,
   type TranslationEntry,
   type TranslatorEngine,
+  type TranslatorJobPriority,
   type TranslatorModelKey,
   type TranslatorModelStatus,
   type TranslatorRuntimeDevice,
@@ -106,9 +108,12 @@ function normalizeLanguageName(raw: unknown, fallback: string): string {
   return trimmed || fallback
 }
 
-function normalizeModelKey(raw: unknown): TranslatorModelKey {
-  if (raw === 'nllb200' || raw === 'm2m100') return raw
-  return DEFAULT_TRANSLATOR_MODEL_KEY
+function normalizeModelKey(
+  raw: unknown,
+  fallback: TranslatorModelKey = getDefaultTranslatorModelKey()
+): TranslatorModelKey {
+  if (raw === 'opus' || raw === 'nllb200' || raw === 'm2m100') return raw
+  return fallback
 }
 
 function isLegacyOrBrokenCacheUrl(url: string): boolean {
@@ -121,6 +126,65 @@ function isLegacyOrBrokenCacheUrl(url: string): boolean {
     ((lower.includes('m2m100_418m') || lower.includes('m2m100%5f418m')) &&
       lower.includes('_q4f16.onnx'))
   )
+}
+
+function matchesActiveModelCacheUrl(
+  lowerUrl: string,
+  modelKey: TranslatorModelKey
+): boolean {
+  if (isLegacyOrBrokenCacheUrl(lowerUrl)) return false
+  if (modelKey === 'opus') {
+    return lowerUrl.includes('opus-mt-')
+  }
+  if (modelKey === 'm2m100') {
+    return lowerUrl.includes('m2m100')
+  }
+  return lowerUrl.includes('nllb-200')
+}
+
+async function inspectTranslatorModelCache(
+  activeModelKey: TranslatorModelKey
+): Promise<{ isModelCached: boolean; cachedModelBytes: number }> {
+  if (typeof caches === 'undefined') {
+    return { isModelCached: false, cachedModelBytes: 0 }
+  }
+  try {
+    const exists = await caches.has(TRANSLATOR_CACHE_KEY)
+    if (!exists) {
+      return { isModelCached: false, cachedModelBytes: 0 }
+    }
+    const cache = await caches.open(TRANSLATOR_CACHE_KEY)
+    const keys = await cache.keys()
+    let matchedActiveOnnx = 0
+    let totalOnnxBytes = 0
+
+    for (const req of keys) {
+      const lowerUrl = req.url.toLowerCase()
+      if (!lowerUrl.includes('.onnx') || isLegacyOrBrokenCacheUrl(lowerUrl)) {
+        continue
+      }
+      if (matchesActiveModelCacheUrl(lowerUrl, activeModelKey)) {
+        matchedActiveOnnx += 1
+      }
+      try {
+        const res = await cache.match(req)
+        const contentLength = res?.headers?.get('content-length')
+        const parsedBytes = contentLength ? Number.parseInt(contentLength, 10) : 0
+        if (Number.isFinite(parsedBytes) && parsedBytes > 0) {
+          totalOnnxBytes += parsedBytes
+        }
+      } catch {
+        // Never read response bodies into RAM; ignore header read failures
+      }
+    }
+
+    return {
+      isModelCached: matchedActiveOnnx >= 2,
+      cachedModelBytes: totalOnnxBytes,
+    }
+  } catch {
+    return { isModelCached: false, cachedModelBytes: 0 }
+  }
 }
 
 async function evictLegacyTranslatorCaches(): Promise<void> {
@@ -143,13 +207,14 @@ async function evictLegacyTranslatorCaches(): Promise<void> {
 }
 
 function loadTranslatorSettings(): TranslatorSettings {
+  const defaultModel = getDefaultTranslatorModelKey()
   const raw = safeStorageGet(PREFS_STORAGE_KEY)
-  if (!raw) return { ...DEFAULT_TRANSLATOR_SETTINGS }
+  if (!raw) return { ...DEFAULT_TRANSLATOR_SETTINGS, model: defaultModel }
   try {
     const parsed = JSON.parse(raw) as Partial<TranslatorSettings>
     return {
       enabled: Boolean(parsed.enabled),
-      model: normalizeModelKey(parsed.model),
+      model: normalizeModelKey(parsed.model, defaultModel),
       sourceLanguage: normalizeLanguageName(
         parsed.sourceLanguage,
         DEFAULT_TRANSLATOR_SETTINGS.sourceLanguage
@@ -166,7 +231,7 @@ function loadTranslatorSettings(): TranslatorSettings {
       underlyingCollapsed: Boolean(parsed.underlyingCollapsed),
     }
   } catch {
-    return { ...DEFAULT_TRANSLATOR_SETTINGS }
+    return { ...DEFAULT_TRANSLATOR_SETTINGS, model: defaultModel }
   }
 }
 
@@ -369,6 +434,9 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
   const [webGpuSupported, setWebGpuSupported] = useState<boolean>(() =>
     hasInitialWebGpuApi()
   )
+  const [isModelCached, setIsModelCached] = useState<boolean>(false)
+  const [cachedModelBytes, setCachedModelBytes] = useState<number>(0)
+  const [storagePersisted, setStoragePersisted] = useState<boolean>(false)
 
   const initialPersistedTranslations = useMemo(
     () => loadTranslationCache(settings.model),
@@ -417,10 +485,12 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
   const workerRef = useRef<Worker | null>(null)
   const pendingRef = useRef<Map<string, PendingWorkerRequest>>(new Map())
   const inFlightByKeyRef = useRef<Map<string, Promise<string | null>>>(new Map())
-  const loadPromiseRef = useRef<{ modelId: string; promise: Promise<boolean> } | null>(null)
+  const loadPromiseRef = useRef<{ modelKey: TranslatorModelKey; promise: Promise<boolean> } | null>(null)
+  const loadedModelKeyRef = useRef<TranslatorModelKey | null>(null)
   const loadedModelIdRef = useRef<string | null>(null)
   const reqSeqRef = useRef<number>(0)
   const idleTeardownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const persistRequestedRef = useRef<boolean>(false)
 
   const clearIdleTeardownTimer = useCallback(() => {
     if (idleTeardownTimerRef.current !== null) {
@@ -429,7 +499,42 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
     }
   }, [])
 
-  // Verify actual WebGPU adapter availability + silently evict legacy LFM3 cache on mount
+  const refreshModelCacheStatus = useCallback(
+    async (modelKeyOverride?: TranslatorModelKey) => {
+      const targetKey = modelKeyOverride ?? settingsRef.current.model
+      const info = await inspectTranslatorModelCache(targetKey)
+      // Only commit if active model hasn't switched while inspecting Cache Storage
+      if (settingsRef.current.model !== targetKey) return
+      setIsModelCached(info.isModelCached)
+      setCachedModelBytes(info.cachedModelBytes)
+    },
+    []
+  )
+
+  const requestPersistentStorage = useCallback(async () => {
+    if (persistRequestedRef.current) return
+    persistRequestedRef.current = true
+    try {
+      const storage = typeof navigator !== 'undefined' ? navigator.storage : undefined
+      if (!storage) return
+      if (typeof storage.persisted === 'function') {
+        const already = await storage.persisted()
+        if (already) {
+          setStoragePersisted(true)
+          return
+        }
+      }
+      if (typeof storage.persist === 'function') {
+        const granted = await storage.persist()
+        setStoragePersisted(Boolean(granted))
+      }
+    } catch {
+      // Ignore storage persistence restrictions
+    }
+  }, [])
+
+  // Verify actual WebGPU adapter availability, read persistent storage status,
+  // silently evict legacy LFM3/broken cache entries, and inspect cached ONNX weights on mount
   useEffect(() => {
     let cancelled = false
     const probe = async () => {
@@ -447,13 +552,28 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         if (!cancelled) setWebGpuSupported(false)
       }
     }
+    const checkPersisted = async () => {
+      try {
+        if (typeof navigator !== 'undefined' && typeof navigator.storage?.persisted === 'function') {
+          const persisted = await navigator.storage.persisted()
+          if (!cancelled) setStoragePersisted(Boolean(persisted))
+        }
+      } catch {
+        // Ignore storage query errors
+      }
+    }
     void probe()
+    void checkPersisted()
     safeStorageRemove(LEGACY_V2_TRANSLATIONS_STORAGE_KEY)
-    void evictLegacyTranslatorCaches()
+    void evictLegacyTranslatorCaches().then(() => {
+      if (!cancelled) {
+        void refreshModelCacheStatus(settingsRef.current.model)
+      }
+    })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [refreshModelCacheStatus])
 
   const nextRequestId = useCallback((prefix: string): string => {
     reqSeqRef.current += 1
@@ -464,6 +584,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
     clearIdleTeardownTimer()
     const w = workerRef.current
     workerRef.current = null
+    loadedModelKeyRef.current = null
     loadedModelIdRef.current = null
     loadPromiseRef.current = null
 
@@ -602,7 +723,8 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       if (!msg || typeof msg !== 'object') return
 
       if (msg.type === 'status') {
-        if (msg.modelId !== activeModelRef.current.id) return
+        // Match by modelKey (not strict modelId) so dynamic Opus-MT pair IDs update status cleanly
+        if (msg.modelKey !== activeModelRef.current.key) return
         setModelStatus(msg.status)
         modelStatusRef.current = msg.status
         if (typeof msg.progress === 'number') {
@@ -615,11 +737,14 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
           setRuntimeDevice(msg.runtimeDevice)
         }
         if (msg.status === 'ready') {
+          loadedModelKeyRef.current = msg.modelKey
           loadedModelIdRef.current = msg.modelId
           setModelError(null)
           setDownloadProgress(100)
           setDownloadFile(null)
+          void refreshModelCacheStatus(msg.modelKey)
         } else if (msg.status === 'error') {
+          loadedModelKeyRef.current = null
           loadedModelIdRef.current = null
           setModelError(msg.error ?? 'Failed to load local translation model.')
         } else if (msg.status === 'downloading') {
@@ -659,7 +784,8 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       pendingRef.current.delete(msg.requestId)
 
       if (msg.type === 'result') {
-        if (msg.modelId === activeModelRef.current.id) {
+        if (msg.modelKey === activeModelRef.current.key) {
+          loadedModelKeyRef.current = msg.modelKey
           loadedModelIdRef.current = msg.modelId
           setRuntimeDevice(msg.runtimeDevice)
           if (modelStatusRef.current !== 'ready') {
@@ -668,6 +794,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
             setDownloadProgress(100)
             setDownloadFile(null)
             setModelError(null)
+            void refreshModelCacheStatus(msg.modelKey)
           }
         }
 
@@ -776,7 +903,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         }
       }
     },
-    [scheduleIdleWorkerTeardown]
+    [refreshModelCacheStatus, scheduleIdleWorkerTeardown]
   )
 
   const ensureWorker = useCallback((): Worker => {
@@ -792,6 +919,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
     worker.onmessage = handleWorkerMessage
     worker.onerror = (ev) => {
       const errMsg = ev.message || 'Translator worker crashed.'
+      loadedModelKeyRef.current = null
       loadedModelIdRef.current = null
       loadPromiseRef.current = null
       setModelStatus('error')
@@ -830,15 +958,31 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
 
   const preloadModel = useCallback(async (): Promise<boolean> => {
     const model = activeModelRef.current
-    if (loadedModelIdRef.current === model.id && workerRef.current) {
+    const targetModelId =
+      model.key === 'opus'
+        ? resolveInitialOpusModelId(
+            settingsRef.current.myLanguage,
+            settingsRef.current.sourceLanguage
+          )
+        : model.id
+
+    if (
+      loadedModelKeyRef.current === model.key &&
+      (model.key === 'opus'
+        ? Boolean(loadedModelIdRef.current)
+        : loadedModelIdRef.current === targetModelId) &&
+      workerRef.current
+    ) {
       setModelStatus('ready')
       modelStatusRef.current = 'ready'
       setDownloadProgress(100)
       return true
     }
-    if (loadPromiseRef.current && loadPromiseRef.current.modelId === model.id) {
+    if (loadPromiseRef.current && loadPromiseRef.current.modelKey === model.key) {
       return await loadPromiseRef.current.promise
     }
+
+    void requestPersistentStorage()
 
     const promise = (async (): Promise<boolean> => {
       try {
@@ -853,14 +997,14 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         return await new Promise<boolean>((resolve) => {
           pendingRef.current.set(requestId, {
             kind: 'load',
-            modelId: model.id,
+            modelId: targetModelId,
             resolve,
           })
           const payload: TranslatorWorkerInMessage = {
             type: 'load',
             requestId,
             modelKey: model.key,
-            modelId: model.id,
+            modelId: targetModelId,
           }
           worker.postMessage(payload)
         })
@@ -872,16 +1016,16 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         setModelError(errMsg)
         return false
       } finally {
-        if (loadPromiseRef.current?.modelId === model.id) {
+        if (loadPromiseRef.current?.modelKey === model.key) {
           loadPromiseRef.current = null
         }
         scheduleIdleWorkerTeardown()
       }
     })()
 
-    loadPromiseRef.current = { modelId: model.id, promise }
+    loadPromiseRef.current = { modelKey: model.key, promise }
     return await promise
-  }, [ensureWorker, nextRequestId, scheduleIdleWorkerTeardown])
+  }, [ensureWorker, nextRequestId, requestPersistentStorage, scheduleIdleWorkerTeardown])
 
   const updateSettings = useCallback(
     (patch: Partial<TranslatorSettings>) => {
@@ -951,8 +1095,9 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         translationsRef.current = merged
         setTranslations(merged)
         setCachedTranslationCount(Object.keys(rehydrated).length)
+        void refreshModelCacheStatus(next.model)
 
-        if (loadedModelIdRef.current !== TRANSLATOR_MODELS[next.model].id) {
+        if (loadedModelKeyRef.current !== next.model) {
           loadPromiseRef.current = null
           setModelStatus('idle')
           modelStatusRef.current = 'idle'
@@ -976,7 +1121,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         void preloadModel()
       }
     },
-    [cancelScope, preloadModel]
+    [cancelScope, preloadModel, refreshModelCacheStatus]
   )
 
   const recordOutgoingOriginal = useCallback(
@@ -1079,6 +1224,11 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       if (inFlight) return inFlight
 
       const model = activeModelRef.current
+      void requestPersistentStorage()
+      const targetModelId =
+        model.key === 'opus'
+          ? resolveInitialOpusModelId(resolvedLang, explicitSource ?? 'Auto')
+          : model.id
       let promiseRef: Promise<string | null> | null = null
       const promise = new Promise<string | null>((resolve) => {
         try {
@@ -1107,17 +1257,22 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
             resolve,
           })
 
+          const priority: TranslatorJobPriority =
+            options?.priority === 'live' || options?.priority === 'visible'
+              ? options.priority
+              : 'normal'
+
           const payload: TranslatorWorkerInMessage = {
             type: 'translate',
             requestId,
             modelKey: model.key,
-            modelId: model.id,
+            modelId: targetModelId,
             text,
             targetLang: resolvedLang,
             sourceLang: explicitSource,
             roomHintLang: options?.roomHintLang ?? null,
             scopeKey: options?.scopeKey,
-            priority: options?.priority ?? 'normal',
+            priority,
           }
           worker.postMessage(payload)
         } catch (err) {
@@ -1148,7 +1303,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       inFlightByKeyRef.current.set(cacheKey, promise)
       return promise
     },
-    [ensureWorker, nextRequestId]
+    [ensureWorker, nextRequestId, requestPersistentStorage]
   )
 
   const translateOutgoingText = useCallback(
@@ -1171,6 +1326,11 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       }
 
       const model = activeModelRef.current
+      void requestPersistentStorage()
+      const targetModelId =
+        model.key === 'opus'
+          ? resolveInitialOpusModelId(resolvedTarget, resolvedSource)
+          : model.id
       const worker = ensureWorker()
       const requestId = nextRequestId('out')
 
@@ -1185,7 +1345,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
           type: 'translate',
           requestId,
           modelKey: model.key,
-          modelId: model.id,
+          modelId: targetModelId,
           text,
           sourceLang: resolvedSource,
           targetLang: resolvedTarget,
@@ -1194,7 +1354,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         worker.postMessage(payload)
       })
     },
-    [ensureWorker, nextRequestId]
+    [ensureWorker, nextRequestId, requestPersistentStorage]
   )
 
   const clearTranslationCache = useCallback(() => {
@@ -1237,10 +1397,13 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         await caches.delete(TRANSLATOR_CACHE_KEY)
       }
       await evictLegacyTranslatorCaches()
+      setIsModelCached(false)
+      setCachedModelBytes(0)
+      await refreshModelCacheStatus(settingsRef.current.model)
       pushToastRef.current?.(
         'info',
         'Translator model cache cleared',
-        'Cached M2M-100 / NLLB-200 translation weights were removed from browser storage.'
+        'Cached Opus-MT / M2M-100 / NLLB-200 translation weights were removed from browser storage.'
       )
     } catch {
       pushToastRef.current?.(
@@ -1249,7 +1412,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         'Browser storage prevented removing cached translation model weights.'
       )
     }
-  }, [terminateWorker])
+  }, [refreshModelCacheStatus, terminateWorker])
 
   const resetAll = useCallback(() => {
     terminateWorker()
@@ -1258,7 +1421,10 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
     safeStorageRemove(LEGACY_V2_TRANSLATIONS_STORAGE_KEY)
     safeStorageRemove(OUTGOING_ORIGINALS_STORAGE_KEY)
 
-    const defaults = { ...DEFAULT_TRANSLATOR_SETTINGS }
+    const defaults: TranslatorSettings = {
+      ...DEFAULT_TRANSLATOR_SETTINGS,
+      model: getDefaultTranslatorModelKey(),
+    }
     settingsRef.current = defaults
     activeModelRef.current = TRANSLATOR_MODELS[defaults.model]
     setSettings(defaults)
@@ -1278,7 +1444,8 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
     setDownloadFile(null)
     setRuntimeDevice(null)
     setModelError(null)
-  }, [terminateWorker])
+    void refreshModelCacheStatus(defaults.model)
+  }, [refreshModelCacheStatus, terminateWorker])
 
   return useMemo<TranslatorEngine>(
     () => ({
@@ -1294,6 +1461,9 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       runtimeDevice,
       modelError,
       webGpuSupported,
+      isModelCached,
+      cachedModelBytes,
+      storagePersisted,
       preloadModel,
       clearModelCache,
       translations,
@@ -1316,6 +1486,9 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       runtimeDevice,
       modelError,
       webGpuSupported,
+      isModelCached,
+      cachedModelBytes,
+      storagePersisted,
       preloadModel,
       clearModelCache,
       translations,

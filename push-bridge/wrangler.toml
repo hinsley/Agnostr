@@ -1,0 +1,15 @@
+name = "agnostr-push"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+workers_dev = true
+
+[vars]
+VAPID_PUBLIC_KEY = "BE9QkU-IRUe-sR41iijQzlEVp9XISMeBLcCyH5dEyaUtlNkxzUNtfnra_5ALcTxHuRDIdbPerGC06VjSgOjtjHE"
+VAPID_SUBJECT = "mailto:push@agnostr.com"
+
+[[kv_namespaces]]
+binding = "PUSH_KV"
+id = "b7b2e726ce964ea1a894f5015f4964c9"
+
+[triggers]
+crons = ["* * * * *"]

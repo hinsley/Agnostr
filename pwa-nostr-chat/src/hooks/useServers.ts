@@ -1419,7 +1419,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         finished = true
         setExploringRelay(false)
         if (foundMap.size === 0) {
-          setExploreError('No public NIP-29 communities returned by this relay.')
+          setExploreError('No public NIP-29 groups returned by this relay.')
         }
       }
 
@@ -1502,7 +1502,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     async (input: CreateVirtualServerInput): Promise<ServerSummary | null> => {
       const name = input.name.trim().slice(0, 48)
       if (!name || !pool) {
-        pushToast('warning', 'Server name required', 'Enter a name for your new server.')
+        pushToast('warning', 'Group name required', 'Enter a name for your new group.')
         return null
       }
 
@@ -1543,14 +1543,14 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
         pushToast(
           ok ? 'success' : 'warning',
-          `${server.encrypted ? 'E2EE ' : ''}Server "${server.name}" created`,
+          `${server.encrypted ? 'E2EE ' : ''}Group "${server.name}" created`,
           ok
             ? `Manifest published across core relays. Share your invite link to add members.`
             : 'Saved locally; manifest will sync when relays reconnect.'
         )
         return server
       } catch (err) {
-        pushToast('error', 'Failed to create server', err instanceof Error ? err.message : 'Signing error')
+        pushToast('error', 'Failed to create group', err instanceof Error ? err.message : 'Signing error')
         return null
       } finally {
         setCreating(false)
@@ -1624,7 +1624,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
         setJoinedServers((prev) => [server, ...prev.filter((s) => s.id !== server.id)])
         setActiveView({ type: 'server', serverId: server.id, channelId: groupId })
-        pushToast('success', `NIP-29 Community "${name}" created`, `Hosted on ${new URL(relayUrl).host}`)
+        pushToast('success', `NIP-29 Group "${name}" created`, `Hosted on ${new URL(relayUrl).host}`)
         return server
       } catch (err) {
         pushToast('error', 'NIP-29 creation error', err instanceof Error ? err.message : 'Unable to create group')
@@ -1754,7 +1754,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
       // Virtual Server join
       if (invite.encrypted && !invite.key) {
-        pushToast('warning', 'Missing E2EE key', 'This private server invite is missing its encryption key.')
+        pushToast('warning', 'Missing E2EE key', 'This private group invite is missing its encryption key.')
         return null
       }
 
@@ -1796,8 +1796,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       clearPendingInvite()
       pushToast(
         'success',
-        `Joined ${server.encrypted ? 'E2EE ' : ''}server "${server.name}"`,
-        server.encrypted ? 'End-to-end AES-256-GCM key imported locally.' : 'Syncing server channels & history.'
+        `Joined ${server.encrypted ? 'E2EE ' : ''}group "${server.name}"`,
+        server.encrypted ? 'End-to-end AES-256-GCM key imported locally.' : 'Syncing group channels & history.'
       )
       return server
     },
@@ -1809,7 +1809,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       const server = joinedServersRef.current.find((s) => s.id === serverId)
       const link = buildInviteLink(serverId)
       if (!server || !link) return false
-      const msg = `You're invited to join ${server.encrypted ? 'E2EE private ' : ''}server "${server.name}" on Agnostr:\n${link.url}`
+      const msg = `You're invited to join ${server.encrypted ? 'E2EE private ' : ''}group "${server.name}" on Agnostr:\n${link.url}`
       const ok = await sendDirectMessage(recipientPubkey, msg)
       if (ok) {
         pushToast('success', 'Invite sent via Encrypted DM', `Delivered invite for "${server.name}".`)
@@ -1843,7 +1843,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       if (activeView.type === 'server' && activeView.serverId === serverId) {
         setActiveView({ type: 'channel', geohash: activeGeohash })
       }
-      pushToast('info', `Left "${target.name}"`, 'Removed from your server rail.')
+      pushToast('info', `Left "${target.name}"`, 'Removed from your groups rail.')
     },
     [pool, identityManager, activeView, setActiveView, activeGeohash, pushToast]
   )
@@ -2016,7 +2016,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
         if (!ok) {
           const reason =
-            res.rejectedRelays[0]?.reason || 'No connected server relay accepted the message.'
+            res.rejectedRelays[0]?.reason || 'No connected group relay accepted the message.'
           pushToast('error', 'Message failed to send', reason)
         }
         return ok
@@ -2284,7 +2284,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               if (identityManager.getWipeGeneration() === wipeGen) {
                 pushToast(
                   'error',
-                  'Server voice memo failed',
+                  'Group voice memo failed',
                   err instanceof Error ? err.message : 'Upload error'
                 )
               }
@@ -2422,7 +2422,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               if (identityManager.getWipeGeneration() === wipeGen) {
                 pushToast(
                   'error',
-                  'Server image upload failed',
+                  'Group image upload failed',
                   err instanceof Error ? err.message : 'Upload error'
                 )
               }
@@ -2590,7 +2590,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         if (ok) pushToast('success', successMsg)
         return ok
       } catch (err) {
-        pushToast('error', 'Failed to update server manifest', err instanceof Error ? err.message : 'Signing error')
+        pushToast('error', 'Failed to update group manifest', err instanceof Error ? err.message : 'Signing error')
         return false
       }
     },
@@ -2615,7 +2615,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             icon: patch.icon?.trim().slice(0, 4) || s.icon,
             accentColor: patch.accentColor || s.accentColor,
           }),
-          'Server details updated'
+          'Group details updated'
         )
       }
 
@@ -2680,7 +2680,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       const target = joinedServersRef.current.find((s) => s.id === serverId)
       if (!target || target.kind !== 'virtual') return false
       if (target.channels.length <= 1) {
-        pushToast('warning', 'Cannot delete last channel', 'A server must keep at least one channel.')
+        pushToast('warning', 'Cannot delete last channel', 'A group must keep at least one channel.')
         return false
       }
       const nextChannels = target.channels.filter((c) => c.id !== channelId)
@@ -2793,7 +2793,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             moderators: s.moderators.filter((m) => m !== pk),
             bannedPubkeys: Array.from(new Set([...s.bannedPubkeys, pk])),
           }),
-          `Banned #${pk.slice(-6)} from server`
+          `Banned #${pk.slice(-6)} from group`
         )
         recomputeServerUnreads()
         return ok

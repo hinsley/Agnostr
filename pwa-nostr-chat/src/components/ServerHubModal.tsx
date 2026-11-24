@@ -208,7 +208,7 @@ export function ServerHubModal({
     e.preventDefault()
     const cleanName = nameDraft.trim()
     if (!cleanName) {
-      setCreateError('Give your server a name')
+      setCreateError('Give your group a name')
       return
     }
     setCreateError(null)
@@ -256,7 +256,7 @@ export function ServerHubModal({
       onJoinedServer?.(created)
       onClose()
     } else {
-      setCreateError('Failed to publish server manifest. Check relay connectivity.')
+      setCreateError('Failed to publish group manifest. Check relay connectivity.')
     }
   }
 
@@ -277,7 +277,7 @@ export function ServerHubModal({
         onJoinedServer?.(joined)
         onClose()
       } else {
-        setJoinError('Could not join server from this invite.')
+        setJoinError('Could not join group from this invite.')
       }
     } finally {
       setJoiningInvite(false)
@@ -331,24 +331,24 @@ export function ServerHubModal({
         <div className="ag-srv-modal-head">
           <div className="ag-srv-modal-title-group">
             <h2 id="ag-srv-hub-title" className="ag-srv-modal-title">
-              Servers
+              Groups
             </h2>
             <p className="ag-srv-modal-sub">
-              Create, join, or browse communities.
+              Create, join, or browse groups.
             </p>
           </div>
           <button
             type="button"
             className="ag-icon-btn-sm"
             onClick={handleDismiss}
-            aria-label="Close server hub"
+            aria-label="Close groups hub"
           >
             <X size={15} />
           </button>
         </div>
 
         {/* 3 Primary Tabs */}
-        <div className="ag-segmented ag-srv-hub-tabs" role="tablist" aria-label="Server hub sections">
+        <div className="ag-segmented ag-srv-hub-tabs" role="tablist" aria-label="Groups hub sections">
           <button
             type="button"
             role="tab"
@@ -360,7 +360,7 @@ export function ServerHubModal({
             }}
           >
             <Sparkles size={12} />
-            <span>Create Server</span>
+            <span>Create Group</span>
           </button>
           <button
             type="button"
@@ -396,13 +396,13 @@ export function ServerHubModal({
           {tab === 'create' && (
             <form className="ag-srv-form" onSubmit={(e) => void handleCreateSubmit(e)}>
               {/* Mode Selector */}
-              <div className="ag-srv-mode-grid" role="radiogroup" aria-label="Server type">
+              <div className="ag-srv-mode-grid" role="radiogroup" aria-label="Group type">
                 <button
                   type="button"
                   role="radio"
                   aria-checked={createMode === 'virtual-e2ee'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-e2ee' ? 'active e2ee' : ''}`}
-                  title="Encrypted invite-only server"
+                  title="Encrypted invite-only group"
                   onClick={() => {
                     setCreateMode('virtual-e2ee')
                     setIconDraft('🔐')
@@ -423,7 +423,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'virtual-public'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-public' ? 'active' : ''}`}
-                  title="Open public server"
+                  title="Open public group"
                   onClick={() => {
                     setCreateMode('virtual-public')
                     setIconDraft('📡')
@@ -444,7 +444,7 @@ export function ServerHubModal({
                   role="radio"
                   aria-checked={createMode === 'nip29'}
                   className={`ag-srv-mode-card ${createMode === 'nip29' ? 'active nip29' : ''}`}
-                  title="Relay-hosted moderated community"
+                  title="Relay-hosted moderated group"
                   onClick={() => {
                     setCreateMode('nip29')
                     setIconDraft('🛰️')
@@ -465,7 +465,7 @@ export function ServerHubModal({
               <div className="ag-srv-field-row">
                 <div>
                   <label className="ag-field-label" htmlFor="ag-srv-name-input">
-                    Server Name
+                    Group Name
                   </label>
                   <input
                     id="ag-srv-name-input"
@@ -664,10 +664,10 @@ export function ServerHubModal({
                       <Sparkles size={14} />
                       <span>
                         {createMode === 'virtual-e2ee'
-                          ? 'Create Private Server'
+                          ? 'Create Private Group'
                           : createMode === 'nip29'
-                            ? 'Create Hosted Community'
-                            : 'Create Public Server'}
+                            ? 'Create Hosted Group'
+                            : 'Create Public Group'}
                       </span>
                     </>
                   )}
@@ -820,7 +820,7 @@ export function ServerHubModal({
                   ) : (
                     <>
                       <Link2 size={14} />
-                      <span>Join Server</span>
+                      <span>Join Group</span>
                     </>
                   )}
                 </button>
@@ -926,7 +926,7 @@ export function ServerHubModal({
                 ) : filteredExploredGroups.length === 0 ? (
                   <div className="ag-empty-panel">
                     <Users size={20} className="ag-empty-icon" />
-                    <p className="ag-empty-title">No communities found</p>
+                    <p className="ag-empty-title">No groups found</p>
                     <p className="ag-empty-sub">
                       Try another relay above or clear your search.
                     </p>

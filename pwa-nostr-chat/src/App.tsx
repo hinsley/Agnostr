@@ -1725,7 +1725,7 @@ export function App() {
         const stamp = new Date().toISOString().slice(0, 10)
         if (format === 'json') {
           file = {
-            filename: `agnostr-server-${slug}-${stamp}.json`,
+            filename: `agnostr-group-${slug}-${stamp}.json`,
             mimeType: 'application/json;charset=utf-8',
             content: JSON.stringify(
               {
@@ -1746,7 +1746,7 @@ export function App() {
         } else {
           const lines = [
             `# ${activeServer.name} — #${activeChannel.name}`,
-            `Exported ${new Date().toISOString()} (${activeServer.kind === 'nip29' ? 'Hosted Community' : activeServer.encrypted ? 'Private Encrypted Server' : 'Public Server'})`,
+            `Exported ${new Date().toISOString()} (${activeServer.kind === 'nip29' ? 'Hosted Group' : activeServer.encrypted ? 'Private Encrypted Group' : 'Public Group'})`,
             '',
             ...engine.servers.messages.map((m) => {
               const ts = new Date(m.createdAt * 1000).toISOString()
@@ -1756,7 +1756,7 @@ export function App() {
             }),
           ]
           file = {
-            filename: `agnostr-server-${slug}-${stamp}.md`,
+            filename: `agnostr-group-${slug}-${stamp}.md`,
             mimeType: 'text/markdown;charset=utf-8',
             content: lines.join('\n'),
           }

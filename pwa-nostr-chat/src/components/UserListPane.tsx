@@ -495,7 +495,7 @@ export function UserListPane({
       ) {
         items.push({
           id: 'ban',
-          label: 'Ban from Server',
+          label: 'Ban from Group',
           icon: <Ban size={14} />,
           danger: true,
           onSelect: () => {

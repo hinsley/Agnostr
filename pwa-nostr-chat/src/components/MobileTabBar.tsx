@@ -80,20 +80,20 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
           {serverMentions > 0 ? (
             <span
               className="ag-mtab-badge ping tabular"
-              aria-label={`${serverMentions} server pings`}
+              aria-label={`${serverMentions} group pings`}
             >
               {formatBadgeCount(serverMentions)}
             </span>
           ) : serverUnread > 0 ? (
             <span
               className="ag-mtab-badge unread tabular"
-              aria-label={`${serverUnread} unread server messages`}
+              aria-label={`${serverUnread} unread group messages`}
             >
               {formatBadgeCount(serverUnread)}
             </span>
           ) : null}
         </span>
-        <span className="ag-mtab-label">Servers</span>
+        <span className="ag-mtab-label">Groups</span>
       </button>
 
       <button

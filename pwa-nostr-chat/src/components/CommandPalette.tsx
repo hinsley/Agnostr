@@ -333,16 +333,16 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       for (const chan of srv.channels) {
         list.push({
           id: `srv-${srv.id}-${chan.id}`,
-          group: 'Servers & Channels',
+          group: 'Groups & Channels',
           title: `${srv.name} › #${chan.name}`,
           subtitle:
             chan.topic ||
             (srv.kind === 'nip29'
-              ? srv.relayUrl?.replace(/^wss?:\/\//i, '') ?? 'Hosted community'
+              ? srv.relayUrl?.replace(/^wss?:\/\//i, '') ?? 'Hosted group'
               : srv.encrypted
-                ? 'Private encrypted server'
-                : 'Public server'),
-          keywords: `server channel ${srv.name} ${chan.name} #${chan.name} ${srv.kind} ${srv.encrypted ? 'e2ee encrypted private' : 'public'}`,
+                ? 'Private encrypted group'
+                : 'Public group'),
+          keywords: `group server channel ${srv.name} ${chan.name} #${chan.name} ${srv.kind} ${srv.encrypted ? 'e2ee encrypted private' : 'public'}`,
           badge: srv.kind === 'nip29' ? 'HOSTED' : srv.encrypted ? 'PRIVATE' : undefined,
           icon: srv.encrypted ? (
             <Lock size={15} style={{ color: 'var(--dm-accent)' }} />
@@ -506,7 +506,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         group: 'Actions',
         title: 'Join Voice Lounge',
         subtitle: `${srv.name} (${count}/${engine.calls.maxParticipants})`,
-        keywords: 'join server voice video call lounge webrtc p2p talk',
+        keywords: 'join group server voice video call lounge webrtc p2p talk',
         badge: `${count}/${engine.calls.maxParticipants}`,
         icon: <Phone size={15} />,
         run: () => {
@@ -697,9 +697,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       {
         id: 'act-create-join-server',
         group: 'Actions',
-        title: 'New or Join Server',
-        subtitle: 'Create a private encrypted server or join with an invite link',
-        keywords: 'create join server new invite e2ee private public',
+        title: 'New or Join Group',
+        subtitle: 'Create a private encrypted group or join with an invite link',
+        keywords: 'create join group server new invite e2ee private public',
         icon: <Plus size={15} />,
         run: () => {
           onClose()
@@ -709,8 +709,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       {
         id: 'act-browse-nip29',
         group: 'Actions',
-        title: 'Browse Communities',
-        subtitle: 'Explore public relay communities',
+        title: 'Browse Groups',
+        subtitle: 'Explore public relay groups',
         keywords: 'browse explore nip29 communities groups relays servers',
         icon: <Server size={15} />,
         run: () => {
@@ -760,7 +760,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             ? 'Send a live test push alert to this device'
             : engine.notifications.isIosRequiresInstall
               ? 'Add Agnostr to your Home Screen first to enable iOS push alerts'
-              : 'Allow push notifications for DMs, servers, rooms, and calls',
+              : 'Allow push notifications for DMs, groups, rooms, and calls',
         keywords: 'notifications push alerts enable test permission bell',
         badge:
           engine.notifications.permission === 'granted'
@@ -851,7 +851,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             : engine.deviceSync.enabled
               ? `Background sync active (${engine.deviceSync.deviceLabel})`
               : 'Sync paused — enable and sync now',
-        keywords: 'sync linked devices multi device multi-device background crdt servers messages nip44',
+        keywords: 'sync linked devices multi device multi-device background crdt groups servers messages nip44',
         badge:
           engine.deviceSync.onlineSiblingCount > 0
             ? `${engine.deviceSync.onlineSiblingCount} ONLINE`
@@ -964,7 +964,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         title: 'Notification Settings',
         subtitle:
           engine.notifications.permission === 'granted' && engine.notifications.settings.enabled
-            ? 'Push alerts ON · DMs, DM call ringing, servers & Geo Radio'
+            ? 'Push alerts ON · DMs, DM call ringing, groups & Geo Radio'
             : 'Configure push alerts, DM call ringing & optional Web Push bridge',
         keywords: 'notifications settings push alerts ringtone call ringing vapid bridge bell',
         badge:
@@ -1242,7 +1242,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 entries[clampedIdx]?.run()
               }
             }}
-            placeholder="Search rooms, servers, #geohash, #topic, or actions…"
+            placeholder="Search rooms, groups, #geohash, #topic, or actions…"
           />
           <kbd className="ag-kbd">ESC</kbd>
         </div>

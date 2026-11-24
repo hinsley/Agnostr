@@ -65,6 +65,7 @@ import {
   getRecordingQualitySpec,
 } from '../lib/callRecorder.ts'
 import { DEFAULT_TRANSCRIPTION_MODEL_ID } from '../lib/transcriptionModels.ts'
+import { DEFAULT_PUSH_BRIDGE_URL, DEFAULT_VAPID_PUBLIC_KEY } from '../lib/storage.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { radioAudio, type SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
@@ -326,18 +327,14 @@ export function SettingsModal({
   const [trustLabelDraft, setTrustLabelDraft] = useState('')
   const [trustFeedback, setTrustFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
 
-  // Notifications & optional Web Push bridge drafts
+  // Notifications & Web Push bridge drafts
   const [requestingNotifPerm, setRequestingNotifPerm] = useState(false)
   const [testingNotif, setTestingNotif] = useState(false)
+  const [testingBgPush, setTestingBgPush] = useState(false)
   const [notifTestFeedback, setNotifTestFeedback] = useState<{ ok: boolean; msg: string } | null>(
     null,
   )
-  const [bridgeOpen, setBridgeOpen] = useState(() =>
-    Boolean(
-      engine.notifications.settings.pushBridgeUrl ||
-        engine.notifications.pushStatus === 'connected',
-    ),
-  )
+  const [bridgeOpen, setBridgeOpen] = useState(() => engine.notifications.pushStatus === 'error')
   const [bridgeUrlDraft, setBridgeUrlDraft] = useState(
     () => engine.notifications.settings.pushBridgeUrl,
   )
@@ -345,6 +342,14 @@ export function SettingsModal({
     () => engine.notifications.settings.vapidPublicKey,
   )
   const [bridgeFeedback, setBridgeFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
+
+  useEffect(() => {
+    setBridgeUrlDraft(engine.notifications.settings.pushBridgeUrl)
+  }, [engine.notifications.settings.pushBridgeUrl])
+
+  useEffect(() => {
+    setVapidKeyDraft(engine.notifications.settings.vapidPublicKey)
+  }, [engine.notifications.settings.vapidPublicKey])
 
   // Calls TURN & Transcription drafts
   const [turnUrlDraft, setTurnUrlDraft] = useState(() => engine.calls.turnConfig?.url ?? '')
@@ -714,6 +719,30 @@ export function SettingsModal({
     onPlaySound?.('click')
     await engine.notifications.disconnectPushBridge()
     setBridgeFeedback({ ok: true, msg: 'Disconnected background push device' })
+  }
+
+  const handleUseBuiltinPushBridge = async () => {
+    if (engine.notifications.pushStatus === 'connecting') return
+    setBridgeFeedback(null)
+    onPlaySound?.('click')
+    setBridgeUrlDraft(DEFAULT_PUSH_BRIDGE_URL)
+    setVapidKeyDraft(DEFAULT_VAPID_PUBLIC_KEY)
+    engine.notifications.updateSettings({
+      pushBridgeUrl: DEFAULT_PUSH_BRIDGE_URL,
+      vapidPublicKey: DEFAULT_VAPID_PUBLIC_KEY,
+    })
+    if (engine.notifications.permission === 'granted' && engine.notifications.isPushSupported) {
+      const ok = await engine.notifications.connectPushBridge(
+        DEFAULT_PUSH_BRIDGE_URL,
+        DEFAULT_VAPID_PUBLIC_KEY,
+      )
+      if (ok) {
+        setBridgeFeedback({ ok: true, msg: 'Connected to built-in push bridge' })
+        onPlaySound?.('tune')
+      }
+    } else {
+      setBridgeFeedback({ ok: true, msg: 'Switched to built-in push bridge' })
+    }
   }
 
   const handleSaveLightningAddress = async (e: FormEvent) => {
@@ -1090,7 +1119,7 @@ export function SettingsModal({
                 <span>Silent Background Sync</span>
               </span>
               <span className="ag-set-toggle-desc">
-                Encrypted sync for servers, friends, notes, pins, Agmail, and messages.
+                Encrypted sync for groups, friends, notes, pins, Agmail, and messages.
               </span>
             </div>
             <input
@@ -1337,7 +1366,9 @@ export function SettingsModal({
             ? { cls: 'ag-badge-danger', label: 'Error' }
             : notif.pushStatus === 'unsupported'
               ? { cls: 'ag-badge-muted', label: 'Unavailable' }
-              : { cls: 'ag-badge-muted', label: 'Optional' }
+              : notif.isUsingDefaultBridge
+                ? { cls: 'ag-badge-muted', label: 'Built-in' }
+                : { cls: 'ag-badge-muted', label: 'Disconnected' }
 
     const handleEnableNotificationsClick = () => {
       if (requestingNotifPerm) return
@@ -1381,6 +1412,26 @@ export function SettingsModal({
           }
         })
         .finally(() => setTestingNotif(false))
+    }
+
+    const handleTestBackgroundPushClick = () => {
+      if (testingBgPush) return
+      setTestingBgPush(true)
+      setNotifTestFeedback(null)
+      void notif
+        .sendTestPush()
+        .then((res) => {
+          if (res.ok) {
+            onPlaySound?.('tune')
+            setNotifTestFeedback({ ok: true, msg: res.detail || 'Test background push sent' })
+          } else {
+            setNotifTestFeedback({
+              ok: false,
+              msg: res.detail || 'Could not send background push',
+            })
+          }
+        })
+        .finally(() => setTestingBgPush(false))
     }
 
     const handleTestRingtoneClick = () => {
@@ -1568,15 +1619,15 @@ export function SettingsModal({
 
             <div className="ag-set-notif-seg-row">
               <div className="ag-set-notif-row-copy">
-                <span className="ag-set-notif-row-title">Server Messages</span>
+                <span className="ag-set-notif-row-title">Group Messages</span>
                 <span className="ag-set-notif-row-desc">
-                  Messages across your joined servers and channels
+                  Messages across your joined groups and channels
                 </span>
               </div>
               <div
                 className="ag-segmented ag-set-notif-seg"
                 role="radiogroup"
-                aria-label="Server message notifications"
+                aria-label="Group message notifications"
               >
                 {NOTIF_FILTER_MODES.map((mode) => (
                   <button
@@ -1598,9 +1649,9 @@ export function SettingsModal({
 
             <label className="ag-set-notif-row">
               <div className="ag-set-notif-row-copy">
-                <span className="ag-set-notif-row-title">Room &amp; Community Calls</span>
+                <span className="ag-set-notif-row-title">Room &amp; Group Calls</span>
                 <span className="ag-set-notif-row-desc">
-                  Alert when peers start a group call in a Server channel or Geo Radio room
+                  Alert when peers start a group call in a Group channel or Geo Radio room
                 </span>
               </div>
               <input
@@ -1726,6 +1777,27 @@ export function SettingsModal({
               <span>Send Test Notification</span>
             </button>
 
+            {notif.isPushSupported && (
+              <button
+                type="button"
+                className="ag-btn ag-btn-secondary ag-btn-sm"
+                disabled={
+                  testingBgPush ||
+                  !notif.isSupported ||
+                  notif.permission === 'denied' ||
+                  notif.isIosRequiresInstall
+                }
+                onClick={handleTestBackgroundPushClick}
+              >
+                {testingBgPush ? (
+                  <Loader2 size={14} className="ag-spin" />
+                ) : (
+                  <BellRing size={14} />
+                )}
+                <span>Test Background Push</span>
+              </button>
+            )}
+
             <button
               type="button"
               className="ag-btn ag-btn-secondary ag-btn-sm"
@@ -1747,7 +1819,7 @@ export function SettingsModal({
           )}
         </div>
 
-        {/* Collapsible Optional Background Web Push Server */}
+        {/* Collapsible Background Push Bridge */}
         <div className="ag-set-bridge-card">
           <button
             type="button"
@@ -1760,9 +1832,7 @@ export function SettingsModal({
           >
             <span className="ag-set-bridge-toggle-left">
               <Server size={15} className="ag-set-bridge-icon" />
-              <span className="ag-set-bridge-title">
-                Background Web Push Server (Optional)
-              </span>
+              <span className="ag-set-bridge-title">Background Push Bridge</span>
             </span>
             <span className="ag-set-bridge-toggle-right">
               <span className={`ag-badge ${pushStatusBadge.cls}`}>{pushStatusBadge.label}</span>
@@ -1776,7 +1846,8 @@ export function SettingsModal({
           {bridgeOpen && (
             <div className="ag-set-bridge-body">
               <p className="ag-set-helper">
-                Connect a self-hosted push bridge to wake a closed or locked phone.
+                Agnostr’s built-in push bridge (agnostr-push) is pre-configured automatically to
+                wake this device when closed. You can also enter a custom server below.
               </p>
 
               <form className="ag-set-subform" onSubmit={(e) => void handleConnectPushBridge(e)}>
@@ -1786,7 +1857,7 @@ export function SettingsModal({
                   autoCapitalize="none"
                   autoCorrect="off"
                   className="ag-input mono"
-                  placeholder="https://push.example.com"
+                  placeholder={DEFAULT_PUSH_BRIDGE_URL}
                   value={bridgeUrlDraft}
                   onChange={(e) => {
                     setBridgeUrlDraft(e.target.value)
@@ -1827,6 +1898,18 @@ export function SettingsModal({
                           : 'Connect Device'}
                     </span>
                   </button>
+
+                  {(!notif.isUsingDefaultBridge ||
+                    bridgeUrlDraft.trim().replace(/\/+$/, '') !== DEFAULT_PUSH_BRIDGE_URL) && (
+                    <button
+                      type="button"
+                      className="ag-btn ag-btn-secondary ag-btn-sm"
+                      disabled={notif.pushStatus === 'connecting'}
+                      onClick={() => void handleUseBuiltinPushBridge()}
+                    >
+                      Use Built-in Bridge
+                    </button>
+                  )}
 
                   {(notif.pushStatus === 'connected' || notif.pushEndpoint) && (
                     <button
@@ -2466,6 +2549,8 @@ export function SettingsModal({
     const trs = tr.settings
     const isDownloading = tr.modelStatus === 'downloading'
     const pct = Math.max(0, Math.min(100, Math.round(tr.downloadProgress)))
+    const cachedMb =
+      tr.cachedModelBytes > 0 ? Math.max(1, Math.round(tr.cachedModelBytes / (1024 * 1024))) : 0
 
     const statusBadge =
       tr.modelStatus === 'ready'
@@ -2482,7 +2567,9 @@ export function SettingsModal({
           ? { cls: 'ag-badge-warn', text: `Loading ${pct}%` }
           : tr.modelStatus === 'error'
             ? { cls: 'ag-badge-danger', text: 'Error' }
-            : { cls: 'ag-badge-muted', text: 'On-demand' }
+            : tr.isModelCached
+              ? { cls: 'ag-badge-accent', text: 'Cached locally' }
+              : { cls: 'ag-badge-muted', text: 'On-demand' }
 
     const srcSelectVal =
       !trs.sourceLanguage || trs.sourceLanguage.toLowerCase() === 'auto'
@@ -2500,7 +2587,12 @@ export function SettingsModal({
         : trs.outgoingLanguage
 
     const activeModelMeta = TRANSLATOR_MODELS[trs.model] ?? TRANSLATOR_MODELS.m2m100
-    const modelOptions: readonly TranslatorModelKey[] = ['m2m100', 'nllb200']
+    const modelOptions: readonly TranslatorModelKey[] = ['opus', 'm2m100', 'nllb200']
+    const modelSizeLabels: Record<TranslatorModelKey, string> = {
+      opus: '~107 MB',
+      m2m100: '~603 MB',
+      nllb200: '~853 MB',
+    }
 
     return (
       <div className="ag-set-pane-stack">
@@ -2539,8 +2631,20 @@ export function SettingsModal({
           )}
 
           <p className="ag-set-helper">
-            On-device translation ({tr.modelSizeHint}) — messages stay on your device.
+            On-device translation ({tr.modelSizeHint}) — messages stay on your device.{' '}
+            Downloaded weights stay cached locally until you clear them.
           </p>
+
+          {(cachedMb > 0 || tr.storagePersisted) && (
+            <p className="ag-set-sync-meta" style={{ margin: 0 }}>
+              {[
+                cachedMb > 0 ? `${cachedMb} MB saved` : null,
+                tr.storagePersisted ? 'Persistent storage active' : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          )}
 
           <div className="ag-set-ai-actions">
             <button
@@ -2569,7 +2673,9 @@ export function SettingsModal({
                   ? `Loading ${pct}%`
                   : tr.modelStatus === 'ready'
                     ? 'Model Ready'
-                    : 'Preload Model'}
+                    : tr.isModelCached && tr.modelStatus === 'idle'
+                      ? 'Load Cached Model'
+                      : 'Preload Model'}
               </span>
             </button>
 
@@ -2580,7 +2686,13 @@ export function SettingsModal({
               onClick={() => void handleClearTranslatorModelCache()}
             >
               <Trash2 size={13} />
-              <span>{trClearingCache ? 'Clearing…' : 'Clear Model Cache'}</span>
+              <span>
+                {trClearingCache
+                  ? 'Clearing…'
+                  : cachedMb > 0
+                    ? `Clear Model Cache (${cachedMb} MB)`
+                    : 'Clear Model Cache'}
+              </span>
             </button>
 
             <button
@@ -2612,14 +2724,15 @@ export function SettingsModal({
 
         {/* Translation Model Selector */}
         <div className="ag-set-scope-item">
-          <div className="ag-set-label-row">
+          <div className="ag-set-label-row" style={{ flexWrap: 'wrap', rowGap: '0.18rem' }}>
             <span className="ag-set-scope-title">Translation Model</span>
-            <span className="ag-set-scope-default">Default: M2M-100</span>
+            <span className="ag-set-scope-default">Mobile default: Opus-MT · Desktop: M2M-100</span>
           </div>
           <div
             className="ag-segmented"
             role="radiogroup"
             aria-label="Translation model"
+            style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}
           >
             {modelOptions.map((key) => {
               const opt = TRANSLATOR_MODELS[key]
@@ -2632,6 +2745,7 @@ export function SettingsModal({
                   disabled={isDownloading}
                   aria-checked={active}
                   className={active ? 'active' : ''}
+                  style={{ minWidth: 0, lineHeight: 1.25, textAlign: 'center' }}
                   onClick={() => {
                     if (active) return
                     setTrFeedback(null)
@@ -2639,9 +2753,8 @@ export function SettingsModal({
                     onPlaySound?.('click')
                   }}
                 >
-                  {key === 'm2m100'
-                    ? `${opt.shortLabel} · ~603 MB`
-                    : `${opt.shortLabel} · ~853 MB`}
+                  {opt.shortLabel} ·{' '}
+                  <span style={{ whiteSpace: 'nowrap' }}>{modelSizeLabels[key]}</span>
                 </button>
               )
             })}
@@ -3387,7 +3500,7 @@ export function SettingsModal({
 
         <p className="ag-set-helper">
           <Lock size={12} style={{ verticalAlign: '-2px', marginRight: 4 }} />
-          DM and private server media are encrypted before upload.
+          DM and private group media are encrypted before upload.
         </p>
 
         {blossomServers.length > 0 && (

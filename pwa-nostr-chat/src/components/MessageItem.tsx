@@ -154,6 +154,7 @@ export interface MessageItemProps {
   onRetryTranslation?: () => void
   compactTranslatorRow?: boolean
   underlyingCollapsed?: boolean
+  isOriginalColumn?: boolean
 }
 
 export const MessageItem: React.FC<MessageItemProps> = React.memo(
@@ -211,6 +212,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onRetryTranslation,
     compactTranslatorRow = false,
     underlyingCollapsed = false,
+    isOriginalColumn = false,
   }) => {
     const [pickerOpen, setPickerOpen] = useState(false)
     const [copied, setCopied] = useState(false)
@@ -730,7 +732,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
     return (
       <article
-        id={`msg-${message.id}`}
+        id={isOriginalColumn ? `msg-${message.id}-orig` : `msg-${message.id}`}
         className={rowClasses}
         onClick={handleRowClick}
         onContextMenu={handleContextMenu}
@@ -1120,25 +1122,6 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 </div>
               )}
             </div>
-          )}
-
-          {canZapSender && (
-            <button
-              type="button"
-              className="ag-msg-act-btn zap"
-              onClick={() => {
-                handleTriggerZap()
-                onToggleActions(null)
-              }}
-              title={
-                senderLightningAddress
-                  ? `Zap @${handle.base} (${senderLightningAddress})`
-                  : `Zap @${handle.base} (Nutzap)`
-              }
-              aria-label={`Zap ${handle.base}`}
-            >
-              <Zap size={14} />
-            </button>
           )}
 
           {!isDmMode && onReply && (

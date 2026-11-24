@@ -2,9 +2,15 @@
 
 import {
   DEFAULT_TRANSLATOR_MODEL_KEY,
+  OPUS_DEFAULT_FROM_EN_MODEL,
+  OPUS_DEFAULT_TO_EN_MODEL,
+  OPUS_FROM_EN_MODELS,
+  OPUS_TO_EN_MODELS,
   resolveLanguageCodes,
   TRANSLATOR_CACHE_KEY,
   TRANSLATOR_MODELS,
+  type ResolvedLanguageCodes,
+  type TranslatorJobPriority,
   type TranslatorModelDtype,
   type TranslatorModelKey,
   type TranslatorModelStatus,
@@ -12,7 +18,7 @@ import {
 } from '../types/translator.ts'
 import { detectLanguageDetailed, isNonTranslatableText } from './languageDetect.ts'
 
-export type TranslatorJobPriority = 'high' | 'visible' | 'normal'
+export type { TranslatorJobPriority }
 
 export type TranslatorWorkerInMessage =
   | {
@@ -79,15 +85,48 @@ interface TranslationOutputItemLike {
   translation_text?: string
 }
 
+interface TensorLike {
+  data: ArrayLike<number | bigint>
+  dims: number[]
+}
+
+interface TokenizerLike {
+  (
+    text: string,
+    options?: Record<string, unknown>
+  ): {
+    input_ids: TensorLike
+    attention_mask?: TensorLike
+  }
+  language_codes?: string[]
+  unk_token_id?: number
+  _tokenizer?: {
+    token_to_id?: (token: string) => number | undefined
+  }
+  convert_tokens_to_ids?: (token: string) => number | undefined
+  batch_decode?: (
+    sequences: unknown,
+    options?: Record<string, unknown>
+  ) => string[] | string
+}
+
 interface TranslationPipelineLike {
   (
     text: string,
     options?: Record<string, unknown>
   ): Promise<TranslationOutputItemLike | TranslationOutputItemLike[]>
-  tokenizer?: {
-    language_codes?: string[]
+  model?: {
+    forward?: (...args: unknown[]) => Promise<unknown>
+    generate?: (options: Record<string, unknown>) => Promise<unknown>
   }
+  tokenizer?: TokenizerLike
   dispose?: () => Promise<void>
+}
+
+interface InterruptableCriteriaLike {
+  interrupted: boolean
+  interrupt: () => void
+  reset: () => void
 }
 
 interface ProgressEventLike {
@@ -131,9 +170,14 @@ const INFERENCE_TIMEOUT_MS = 30_000
 const LEGACY_TRANSFORMERS_CACHE_KEY = 'transformers-cache'
 
 // Verified encoder + decoder ONNX byte totals from HuggingFace live probe:
+// Opus-MT q8: ~107 MiB (~112 MB per language pair)
 // M2M-100 q8: 274.5 + 328.2 = 602.7 MiB (~632 MB)
 // NLLB-200 q8: 399.7 + 453.5 = 853.2 MiB (~895 MB); q4f16: 583.9 + 611.9 = 1,195.9 MiB (~1,254 MB)
 const EXPECTED_MODEL_BYTES: Record<TranslatorModelKey, Record<TranslatorModelDtype, number>> = {
+  opus: {
+    q8: 112_000_000,
+    q4f16: 112_000_000,
+  },
   m2m100: {
     q8: 632_000_000,
     q4f16: 729_000_000,
@@ -142,6 +186,18 @@ const EXPECTED_MODEL_BYTES: Record<TranslatorModelKey, Record<TranslatorModelDty
     q8: 895_000_000,
     q4f16: 1_254_000_000,
   },
+}
+
+const ENGLISH_RESOLVED: ResolvedLanguageCodes = {
+  name: 'English',
+  m2mCode: 'en',
+  nllbCode: 'eng_Latn',
+  opusCode: 'eng',
+}
+
+function normalizeWorkerModelKey(raw: unknown): TranslatorModelKey {
+  if (raw === 'opus' || raw === 'nllb200' || raw === 'm2m100') return raw
+  return DEFAULT_TRANSLATOR_MODEL_KEY
 }
 
 const COMPACT_SCRIPT_RE = /[\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0E00-\u0E7F]/
@@ -154,7 +210,90 @@ let legacyEvictionStarted = false
 const queue: QueuedJob[] = []
 const cancelledRequestIds = new Set<string>()
 let activeJob: QueuedJob | null = null
+let activeStoppingCriteria: InterruptableCriteriaLike | null = null
+let activePreempted = false
+let activeCancelled = false
 let processing = false
+
+const wrappedForwardModels = new WeakSet<object>()
+const yieldResolvers: Array<() => void> = []
+let yieldChannel: MessageChannel | null = null
+
+function yieldToMacrotask(): Promise<void> {
+  if (typeof MessageChannel !== 'undefined') {
+    if (!yieldChannel) {
+      yieldChannel = new MessageChannel()
+      yieldChannel.port1.onmessage = () => {
+        const next = yieldResolvers.shift()
+        if (next) next()
+      }
+    }
+    return new Promise<void>((resolve) => {
+      yieldResolvers.push(resolve)
+      yieldChannel?.port2.postMessage(null)
+    })
+  }
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 0)
+  })
+}
+
+function closeYieldChannel(): void {
+  if (yieldChannel) {
+    try {
+      yieldChannel.port1.close()
+      yieldChannel.port2.close()
+    } catch {
+      // Ignore close errors
+    }
+    yieldChannel = null
+  }
+  while (yieldResolvers.length > 0) {
+    const resolve = yieldResolvers.shift()
+    if (resolve) resolve()
+  }
+}
+
+function jobPriorityRank(job: Pick<QueuedJob, 'type' | 'priority'>): number {
+  if (job.type === 'load') return -1
+  if (job.priority === 'high') return 0
+  if (job.priority === 'live') return 1
+  if (job.priority === 'visible') return 2
+  return 3
+}
+
+function shouldYieldBetweenTokens(): boolean {
+  return (
+    activeStoppingCriteria !== null &&
+    activeJob !== null &&
+    activeJob.type === 'translate' &&
+    jobPriorityRank(activeJob) > 0 &&
+    !activePreempted &&
+    !activeCancelled
+  )
+}
+
+/**
+ * In single-threaded WASM (`proxy: false`), `session.run()` resolves on the microtask queue,
+ * which can starve `self.onmessage` until all decoder tokens finish. Yielding a ~0.03ms
+ * `MessageChannel` macrotask after each decoder step lets incoming `'high'`/`'live'` jobs
+ * and `cancelScope` calls fire `activeStoppingCriteria.interrupt()` mid-generation.
+ */
+function installCooperativeTokenYield(pipe: TranslationPipelineLike): void {
+  const model = pipe.model
+  if (!model || typeof model.forward !== 'function' || wrappedForwardModels.has(model)) {
+    return
+  }
+  wrappedForwardModels.add(model)
+  const originalForward = model.forward
+  model.forward = async function (this: unknown, ...args: unknown[]) {
+    const out = await originalForward.apply(this, args)
+    if (shouldYieldBetweenTokens()) {
+      await yieldToMacrotask()
+    }
+    return out
+  }
+}
 
 function postOut(msg: TranslatorWorkerOutMessage): void {
   self.postMessage(msg)
@@ -394,8 +533,7 @@ async function ensureModel(
 ): Promise<ActiveModelHandle> {
   void evictLegacyCacheOnce()
 
-  const modelKey: TranslatorModelKey =
-    rawModelKey === 'nllb200' ? 'nllb200' : DEFAULT_TRANSLATOR_MODEL_KEY
+  const modelKey = normalizeWorkerModelKey(rawModelKey)
   const modelId = rawModelId || TRANSLATOR_MODELS[modelKey].id
 
   if (
@@ -407,11 +545,14 @@ async function ensureModel(
     return activeHandle
   }
 
+  // Phone-safe RAM budget: keep strictly 1 active ONNX session in RAM while leaving
+  // all previously downloaded model weights permanently cached in Cache Storage.
   await disposeActiveModel()
 
   const mod = await getTransformersModule()
 
   // Empirically verified runtime matrix:
+  // - Opus-MT Lite: ALWAYS WASM q8 (~107 MiB/pair, phone-safe RAM, fast).
   // - M2M-100: ALWAYS WASM q8 (602.7 MiB, 260–650 ms/msg, 100% accurate).
   //   Never WebGPU q4f16/fp16 (FP16 collapse outputs "."/"¿ ¿,") or WebGPU q8 (3× slower).
   // - NLLB-200: WebGPU q4f16 when WebGPU+shader-f16 passes 1-shot sanity check (207–440 ms/msg),
@@ -450,6 +591,7 @@ async function ensureModel(
           continue
         }
       }
+      installCooperativeTokenYield(pipe)
       activeHandle = {
         modelKey,
         modelId,
@@ -614,7 +756,8 @@ async function translateProseChunk(
   handle: ActiveModelHandle,
   prose: string,
   srcCode: string,
-  tgtCode: string
+  tgtCode: string,
+  stoppingCriteria: InterruptableCriteriaLike | null
 ): Promise<string> {
   if (!prose.trim() || !/\p{L}/u.test(prose.replace(/XZ\d+ZX/g, ''))) {
     return prose
@@ -623,16 +766,152 @@ async function translateProseChunk(
   const translatedParts: string[] = []
   // Strictly batch=1 sequential (batching corrupts M2M-100 attention & runs 4.4× slower)
   for (const chunk of chunks) {
+    if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
+      return ''
+    }
     const maxNewTokens = computeMaxNewTokens(chunk)
-    const out = await handle.pipe(chunk, {
+    const pipeOptions: Record<string, unknown> = {
       src_lang: srcCode,
       tgt_lang: tgtCode,
       num_beams: 1,
       max_new_tokens: maxNewTokens,
       repetition_penalty: 1.12,
       no_repeat_ngram_size: 4,
-    })
+    }
+    if (stoppingCriteria) {
+      pipeOptions.stopping_criteria = stoppingCriteria
+    }
+    const out = await handle.pipe(chunk, pipeOptions)
+    if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
+      return ''
+    }
     const result = extractTranslationText(out)
+    translatedParts.push(result || chunk)
+  }
+  return translatedParts.join(' ')
+}
+
+async function translateOpusDirectProseChunk(
+  handle: ActiveModelHandle,
+  prose: string,
+  stoppingCriteria: InterruptableCriteriaLike | null
+): Promise<string> {
+  if (!prose.trim() || !/\p{L}/u.test(prose.replace(/XZ\d+ZX/g, ''))) {
+    return prose
+  }
+  const chunks = splitLongProse(prose)
+  const translatedParts: string[] = []
+  for (const chunk of chunks) {
+    if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
+      return ''
+    }
+    const maxNewTokens = computeMaxNewTokens(chunk)
+    const pipeOptions: Record<string, unknown> = {
+      num_beams: 1,
+      max_new_tokens: maxNewTokens,
+      repetition_penalty: 1.12,
+      no_repeat_ngram_size: 4,
+    }
+    if (stoppingCriteria) {
+      pipeOptions.stopping_criteria = stoppingCriteria
+    }
+    const out = await handle.pipe(chunk, pipeOptions)
+    if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
+      return ''
+    }
+    const result = extractTranslationText(out)
+    translatedParts.push(result || chunk)
+  }
+  return translatedParts.join(' ')
+}
+
+function lookupOpusEnMulLangTokenId(
+  tokenizer: TokenizerLike,
+  target: ResolvedLanguageCodes
+): number | null {
+  const candidates: string[] = [`>>${target.opusCode}<<`]
+  if (target.opusCode.includes('_')) {
+    candidates.push(`>>${target.opusCode.split('_')[0]}<<`)
+  }
+  const unkId = typeof tokenizer.unk_token_id === 'number' ? tokenizer.unk_token_id : -1
+  for (const tag of candidates) {
+    const id =
+      tokenizer._tokenizer?.token_to_id?.(tag) ??
+      tokenizer.convert_tokens_to_ids?.(tag)
+    if (typeof id === 'number' && Number.isInteger(id) && id >= 0 && id !== unkId) {
+      return id
+    }
+  }
+  return null
+}
+
+/**
+ * Translates via `Xenova/opus-mt-en-mul` by prepending the exact target language token ID
+ * (e.g. `>>por<<`, `>>pol<<`, `>>tur<<`) directly onto `input_ids` — raw string prefixing
+ * splits the tag into subwords and produces garbled output.
+ */
+async function translateOpusEnMulProseChunk(
+  mod: typeof import('@huggingface/transformers'),
+  handle: ActiveModelHandle,
+  prose: string,
+  target: ResolvedLanguageCodes,
+  stoppingCriteria: InterruptableCriteriaLike | null
+): Promise<string> {
+  if (!prose.trim() || !/\p{L}/u.test(prose.replace(/XZ\d+ZX/g, ''))) {
+    return prose
+  }
+  const tokenizer = handle.pipe.tokenizer
+  const model = handle.pipe.model
+  if (
+    !tokenizer ||
+    typeof tokenizer !== 'function' ||
+    typeof tokenizer.batch_decode !== 'function' ||
+    !model ||
+    typeof model.generate !== 'function'
+  ) {
+    throw new Error('Opus-MT multilingual tokenizer/model interface is unavailable.')
+  }
+
+  const langTokenId = lookupOpusEnMulLangTokenId(tokenizer, target)
+  if (langTokenId === null) {
+    throw new Error(
+      `Opus-MT Lite does not support translating into ${target.name}. Switch to M2M-100 or NLLB-200 in Settings → Translator.`
+    )
+  }
+
+  const chunks = splitLongProse(prose)
+  const translatedParts: string[] = []
+  for (const chunk of chunks) {
+    if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
+      return ''
+    }
+    const encoded = tokenizer(chunk, { padding: true, truncation: true })
+    const origIds = Array.from(encoded.input_ids.data, (v) => BigInt(v))
+    const nextIds = new BigInt64Array([BigInt(langTokenId), ...origIds])
+    const nextMask = new BigInt64Array(nextIds.length).fill(1n)
+
+    const input_ids = new mod.Tensor('int64', nextIds, [1, nextIds.length])
+    const attention_mask = new mod.Tensor('int64', nextMask, [1, nextMask.length])
+    const maxNewTokens = computeMaxNewTokens(chunk)
+
+    const generateOpts: Record<string, unknown> = {
+      input_ids,
+      attention_mask,
+      max_new_tokens: maxNewTokens,
+      num_beams: 1,
+      repetition_penalty: 1.12,
+      no_repeat_ngram_size: 4,
+    }
+    if (stoppingCriteria) {
+      generateOpts.stopping_criteria = stoppingCriteria
+    }
+
+    const outputTokenIds = await model.generate(generateOpts)
+    if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
+      return ''
+    }
+    const decoded = tokenizer.batch_decode(outputTokenIds, { skip_special_tokens: true })
+    const result = (Array.isArray(decoded) ? decoded[0] : decoded)?.trim() ?? ''
     translatedParts.push(result || chunk)
   }
   return translatedParts.join(' ')
@@ -731,12 +1010,77 @@ function buildParagraphSegments(part: string): Array<{ kind: 'raw'; text: string
   return segments
 }
 
+async function translateStructuredText(
+  text: string,
+  translateProseFn: (prose: string) => Promise<string>,
+  effectiveSource: string,
+  stoppingCriteria: InterruptableCriteriaLike | null
+): Promise<TranslationRunOutput> {
+  // Split by fenced code blocks so code blocks stay 100% verbatim
+  const fenceParts = text.split(/(```[\s\S]*?```)/g)
+  const renderedParts: string[] = []
+
+  for (let i = 0; i < fenceParts.length; i++) {
+    if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
+      return {
+        text: '',
+        detectedSourceLang: effectiveSource,
+        sameLanguage: false,
+      }
+    }
+    const part = fenceParts[i]
+    if (!part) continue
+    if (part.startsWith('```') && part.endsWith('```')) {
+      renderedParts.push(part)
+      continue
+    }
+
+    const segments = buildParagraphSegments(part)
+    const outLines: string[] = []
+    for (const seg of segments) {
+      if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
+        return {
+          text: '',
+          detectedSourceLang: effectiveSource,
+          sameLanguage: false,
+        }
+      }
+      if (seg.kind === 'raw') {
+        outLines.push(seg.text)
+        continue
+      }
+      const protectedLine = protectLine(seg.line)
+      if (!protectedLine.prose) {
+        outLines.push(seg.line)
+        continue
+      }
+      const translatedProse = await translateProseFn(protectedLine.prose)
+      if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
+        return {
+          text: '',
+          detectedSourceLang: effectiveSource,
+          sameLanguage: false,
+        }
+      }
+      outLines.push(restoreLine(translatedProse, protectedLine))
+    }
+    renderedParts.push(outLines.join('\n'))
+  }
+
+  return {
+    text: renderedParts.join('').trim(),
+    detectedSourceLang: effectiveSource,
+    sameLanguage: false,
+  }
+}
+
 async function runTranslation(
   handle: ActiveModelHandle,
   text: string,
   targetLang: string,
   sourceLang?: string,
-  roomHintLang?: string | null
+  roomHintLang?: string | null,
+  stoppingCriteria: InterruptableCriteriaLike | null = null
 ): Promise<TranslationRunOutput> {
   const cleanTarget = targetLang.trim() || 'English'
   const { sourceLang: effectiveSource, alreadySameLanguage } = resolveSourceLanguageForMessage(
@@ -766,55 +1110,151 @@ async function runTranslation(
     }
   }
 
-  // Split by fenced code blocks so code blocks stay 100% verbatim
-  const fenceParts = text.split(/(```[\s\S]*?```)/g)
-  const renderedParts: string[] = []
+  return await translateStructuredText(
+    text,
+    (prose) => translateProseChunk(handle, prose, srcCode, tgtCode, stoppingCriteria),
+    effectiveSource,
+    stoppingCriteria
+  )
+}
 
-  for (let i = 0; i < fenceParts.length; i++) {
-    const part = fenceParts[i]
-    if (!part) continue
-    if (part.startsWith('```') && part.endsWith('```')) {
-      renderedParts.push(part)
-      continue
-    }
+interface OpusTranslationRunOutput extends TranslationRunOutput {
+  handle: ActiveModelHandle | null
+}
 
-    const segments = buildParagraphSegments(part)
-    const outLines: string[] = []
-    for (const seg of segments) {
-      if (seg.kind === 'raw') {
-        outLines.push(seg.text)
-        continue
-      }
-      const protectedLine = protectLine(seg.line)
-      if (!protectedLine.prose) {
-        outLines.push(seg.line)
-        continue
-      }
-      const translatedProse = await translateProseChunk(
-        handle,
-        protectedLine.prose,
-        srcCode,
-        tgtCode
-      )
-      outLines.push(restoreLine(translatedProse, protectedLine))
+async function runOpusSingleHop(
+  mod: typeof import('@huggingface/transformers'),
+  text: string,
+  src: ResolvedLanguageCodes,
+  tgt: ResolvedLanguageCodes,
+  effectiveSource: string,
+  stoppingCriteria: InterruptableCriteriaLike
+): Promise<OpusTranslationRunOutput> {
+  const isToEnglish = tgt.m2mCode === 'en'
+  const pairModelId = isToEnglish
+    ? (OPUS_TO_EN_MODELS[src.m2mCode] ?? OPUS_DEFAULT_TO_EN_MODEL)
+    : (OPUS_FROM_EN_MODELS[tgt.m2mCode] ?? OPUS_DEFAULT_FROM_EN_MODEL)
+  const useEnMulTag = !isToEnglish && pairModelId === OPUS_DEFAULT_FROM_EN_MODEL
+
+  // Load/swap outside inference timeout so slow mobile downloads never spuriously time out
+  const pairHandle = await ensureModel('opus', pairModelId, true)
+
+  if (stoppingCriteria.interrupted || activePreempted || activeCancelled) {
+    return {
+      text: '',
+      detectedSourceLang: effectiveSource,
+      sameLanguage: false,
+      handle: pairHandle,
     }
-    renderedParts.push(outLines.join('\n'))
   }
 
+  const out = await withTimeout(
+    translateStructuredText(
+      text,
+      (prose) =>
+        useEnMulTag
+          ? translateOpusEnMulProseChunk(mod, pairHandle, prose, tgt, stoppingCriteria)
+          : translateOpusDirectProseChunk(pairHandle, prose, stoppingCriteria),
+      effectiveSource,
+      stoppingCriteria
+    ),
+    INFERENCE_TIMEOUT_MS,
+    'Translation timed out.',
+    () => stoppingCriteria.interrupt()
+  )
+
   return {
-    text: renderedParts.join('').trim(),
-    detectedSourceLang: effectiveSource,
-    sameLanguage: false,
+    ...out,
+    handle: pairHandle,
   }
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+async function runOpusTranslation(
+  mod: typeof import('@huggingface/transformers'),
+  text: string,
+  targetLang: string,
+  sourceLang: string | undefined,
+  roomHintLang: string | null | undefined,
+  stoppingCriteria: InterruptableCriteriaLike
+): Promise<OpusTranslationRunOutput> {
+  const cleanTarget = targetLang.trim() || 'English'
+  const { sourceLang: effectiveSource, alreadySameLanguage } = resolveSourceLanguageForMessage(
+    text,
+    cleanTarget,
+    sourceLang,
+    roomHintLang
+  )
+
+  if (alreadySameLanguage) {
+    return {
+      text: text.trim(),
+      detectedSourceLang: effectiveSource,
+      sameLanguage: true,
+      handle: activeHandle,
+    }
+  }
+
+  const srcResolved = resolveLanguageCodes(effectiveSource)
+  const tgtResolved = resolveLanguageCodes(cleanTarget)
+
+  // Already in target language: return original text immediately (0 ms, zero model swap!)
+  if (srcResolved.m2mCode === tgtResolved.m2mCode) {
+    return {
+      text: text.trim(),
+      detectedSourceLang: effectiveSource,
+      sameLanguage: true,
+      handle: activeHandle,
+    }
+  }
+
+  // Direct hop when either endpoint is English
+  if (srcResolved.m2mCode === 'en' || tgtResolved.m2mCode === 'en') {
+    return await runOpusSingleHop(
+      mod,
+      text,
+      srcResolved,
+      tgtResolved,
+      effectiveSource,
+      stoppingCriteria
+    )
+  }
+
+  // Clean 2-step English pivot (src -> en -> tgt), keeping strictly 1 model in RAM at a time
+  const toEn = await runOpusSingleHop(
+    mod,
+    text,
+    srcResolved,
+    ENGLISH_RESOLVED,
+    effectiveSource,
+    stoppingCriteria
+  )
+  if (stoppingCriteria.interrupted || activePreempted || activeCancelled || !toEn.text) {
+    return toEn
+  }
+
+  return await runOpusSingleHop(
+    mod,
+    toEn.text,
+    ENGLISH_RESOLVED,
+    tgtResolved,
+    effectiveSource,
+    stoppingCriteria
+  )
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  onTimeout?: () => void
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null
   try {
     return await Promise.race([
       promise,
       new Promise<T>((_, reject) => {
         timer = setTimeout(() => {
+          onTimeout?.()
           reject(new Error(label))
         }, timeoutMs)
       }),
@@ -826,51 +1266,62 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-function priorityRank(priority: TranslatorJobPriority): number {
-  if (priority === 'high') return 0
-  if (priority === 'visible') return 1
-  return 2
+function insertJobAtTierTail(job: QueuedJob): void {
+  const rank = jobPriorityRank(job)
+  const idx = queue.findIndex((item) => jobPriorityRank(item) > rank)
+  if (idx === -1) queue.push(job)
+  else queue.splice(idx, 0, job)
 }
 
-function enqueueTranslateJob(job: QueuedJob): void {
-  const rank = priorityRank(job.priority)
-  if (rank === 0) {
-    const idx = queue.findIndex((item) => item.type !== 'load' && priorityRank(item.priority) > 0)
-    if (idx === -1) queue.push(job)
-    else queue.splice(idx, 0, job)
-    return
-  }
+function requeuePreemptedJobAtTierFront(job: QueuedJob): void {
+  const rank = jobPriorityRank(job)
+  const idx = queue.findIndex((item) => jobPriorityRank(item) >= rank)
+  if (idx === -1) queue.push(job)
+  else queue.splice(idx, 0, job)
+}
 
-  if (rank === 1) {
-    const idx = queue.findIndex((item) => item.type !== 'load' && priorityRank(item.priority) > 1)
-    if (idx === -1) queue.push(job)
-    else queue.splice(idx, 0, job)
-  } else {
-    queue.push(job)
-  }
-
-  // Enforce bounded background queue (prefer dropping oldest 'normal' job first, never 'high')
-  let nonHighCount = 0
+function enforceBackfillQueueCap(): void {
+  // Never evict 'high' (outgoing) or 'live' (incoming) jobs — only evict lowest-priority backfill
+  let backfillCount = 0
   for (const item of queue) {
-    if (item.type === 'translate' && item.priority !== 'high') {
-      nonHighCount += 1
+    if (
+      item.type === 'translate' &&
+      (item.priority === 'visible' || item.priority === 'normal')
+    ) {
+      backfillCount += 1
     }
   }
-  while (nonHighCount > MAX_PENDING_NORMAL_JOBS) {
-    let dropIdx = queue.findIndex(
-      (item) => item.type === 'translate' && item.priority === 'normal'
-    )
+  while (backfillCount > MAX_PENDING_NORMAL_JOBS) {
+    let dropIdx = -1
+    for (let i = queue.length - 1; i >= 0; i -= 1) {
+      const item = queue[i]
+      if (item.type === 'translate' && item.priority === 'normal') {
+        dropIdx = i
+        break
+      }
+    }
     if (dropIdx === -1) {
-      dropIdx = queue.findIndex(
-        (item) => item.type === 'translate' && item.priority === 'visible'
-      )
+      for (let i = queue.length - 1; i >= 0; i -= 1) {
+        const item = queue[i]
+        if (item.type === 'translate' && item.priority === 'visible') {
+          dropIdx = i
+          break
+        }
+      }
     }
     if (dropIdx === -1) break
     const [dropped] = queue.splice(dropIdx, 1)
-    nonHighCount -= 1
+    backfillCount -= 1
     if (dropped) {
       postOut({ type: 'dropped', requestId: dropped.requestId })
     }
+  }
+}
+
+function enqueueTranslateJob(job: QueuedJob): void {
+  insertJobAtTierTail(job)
+  if (job.priority === 'visible' || job.priority === 'normal') {
+    enforceBackfillQueueCap()
   }
 }
 
@@ -882,20 +1333,21 @@ async function processQueue(): Promise<void> {
       const job = queue.shift()
       if (!job) continue
       activeJob = job
+      activePreempted = false
+      activeCancelled = cancelledRequestIds.delete(job.requestId)
+      activeStoppingCriteria = null
       try {
-        if (cancelledRequestIds.delete(job.requestId)) {
-          postOut({ type: 'dropped', requestId: job.requestId })
-          continue
-        }
-
-        const handle = await ensureModel(job.modelKey, job.modelId)
-
-        if (cancelledRequestIds.delete(job.requestId)) {
+        if (activeCancelled) {
           postOut({ type: 'dropped', requestId: job.requestId })
           continue
         }
 
         if (job.type === 'load') {
+          const handle = await ensureModel(job.modelKey, job.modelId)
+          if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+            postOut({ type: 'dropped', requestId: job.requestId })
+            continue
+          }
           postOut({
             type: 'result',
             requestId: job.requestId,
@@ -915,12 +1367,85 @@ async function processQueue(): Promise<void> {
             type: 'result',
             requestId: job.requestId,
             text: '',
-            modelKey: handle.modelKey,
-            modelId: handle.modelId,
-            runtimeDevice: handle.device,
-            dtype: handle.dtype,
+            modelKey: job.modelKey,
+            modelId: activeHandle?.modelId || job.modelId,
+            runtimeDevice: activeHandle?.device ?? 'wasm',
+            dtype: activeHandle?.dtype ?? 'q8',
             sameLanguage: true,
           })
+          continue
+        }
+
+        if (job.modelKey === 'opus') {
+          const mod = await getTransformersModule()
+          const stoppingCriteria: InterruptableCriteriaLike =
+            new mod.InterruptableStoppingCriteria()
+          activeStoppingCriteria = stoppingCriteria
+
+          if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+            postOut({ type: 'dropped', requestId: job.requestId })
+            continue
+          }
+          if (activePreempted) {
+            requeuePreemptedJobAtTierFront(job)
+            continue
+          }
+
+          const opusOut = await runOpusTranslation(
+            mod,
+            sourceText,
+            targetLang,
+            job.sourceLang,
+            job.roomHintLang,
+            stoppingCriteria
+          )
+
+          if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+            postOut({ type: 'dropped', requestId: job.requestId })
+            continue
+          }
+          if (activePreempted || stoppingCriteria.interrupted) {
+            requeuePreemptedJobAtTierFront(job)
+            continue
+          }
+
+          const resolvedHandle = opusOut.handle ?? activeHandle
+          postOut({
+            type: 'result',
+            requestId: job.requestId,
+            text: opusOut.text,
+            modelKey: 'opus',
+            modelId: resolvedHandle?.modelId || job.modelId,
+            runtimeDevice: resolvedHandle?.device ?? 'wasm',
+            dtype: resolvedHandle?.dtype ?? 'q8',
+            detectedSourceLang: opusOut.detectedSourceLang,
+            sameLanguage: opusOut.sameLanguage,
+          })
+          continue
+        }
+
+        const handle = await ensureModel(job.modelKey, job.modelId)
+
+        if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+          postOut({ type: 'dropped', requestId: job.requestId })
+          continue
+        }
+        if (activePreempted) {
+          requeuePreemptedJobAtTierFront(job)
+          continue
+        }
+
+        const mod = await getTransformersModule()
+        const stoppingCriteria: InterruptableCriteriaLike =
+          new mod.InterruptableStoppingCriteria()
+        activeStoppingCriteria = stoppingCriteria
+
+        if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+          postOut({ type: 'dropped', requestId: job.requestId })
+          continue
+        }
+        if (activePreempted) {
+          requeuePreemptedJobAtTierFront(job)
           continue
         }
 
@@ -928,36 +1453,63 @@ async function processQueue(): Promise<void> {
         let finalHandle = handle
         try {
           runOut = await withTimeout(
-            runTranslation(handle, sourceText, targetLang, job.sourceLang, job.roomHintLang),
+            runTranslation(
+              handle,
+              sourceText,
+              targetLang,
+              job.sourceLang,
+              job.roomHintLang,
+              stoppingCriteria
+            ),
             INFERENCE_TIMEOUT_MS,
-            'Translation timed out.'
+            'Translation timed out.',
+            () => stoppingCriteria.interrupt()
           )
         } catch (inferErr) {
+          if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+            postOut({ type: 'dropped', requestId: job.requestId })
+            continue
+          }
+          if (activePreempted) {
+            requeuePreemptedJobAtTierFront(job)
+            continue
+          }
           if (handle.device === 'webgpu') {
             webGpuFailed = true
             finalHandle = await ensureModel(job.modelKey, job.modelId, true)
-            if (cancelledRequestIds.delete(job.requestId)) {
+            if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
               postOut({ type: 'dropped', requestId: job.requestId })
               continue
             }
+            if (activePreempted) {
+              requeuePreemptedJobAtTierFront(job)
+              continue
+            }
+            stoppingCriteria.reset()
             runOut = await withTimeout(
               runTranslation(
                 finalHandle,
                 sourceText,
                 targetLang,
                 job.sourceLang,
-                job.roomHintLang
+                job.roomHintLang,
+                stoppingCriteria
               ),
               INFERENCE_TIMEOUT_MS,
-              'Translation timed out.'
+              'Translation timed out.',
+              () => stoppingCriteria.interrupt()
             )
           } else {
             throw inferErr
           }
         }
 
-        if (cancelledRequestIds.delete(job.requestId)) {
+        if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
           postOut({ type: 'dropped', requestId: job.requestId })
+          continue
+        }
+        if (activePreempted || stoppingCriteria.interrupted) {
+          requeuePreemptedJobAtTierFront(job)
           continue
         }
 
@@ -973,8 +1525,12 @@ async function processQueue(): Promise<void> {
           sameLanguage: runOut.sameLanguage,
         })
       } catch (err) {
-        if (cancelledRequestIds.delete(job.requestId)) {
+        if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
           postOut({ type: 'dropped', requestId: job.requestId })
+          continue
+        }
+        if (activePreempted && job.type === 'translate') {
+          requeuePreemptedJobAtTierFront(job)
           continue
         }
         const message = err instanceof Error ? err.message : 'Local translation failed.'
@@ -996,11 +1552,17 @@ async function processQueue(): Promise<void> {
       } finally {
         if (activeJob?.requestId === job.requestId) {
           activeJob = null
+          activeStoppingCriteria = null
+          activePreempted = false
+          activeCancelled = false
         }
       }
     }
   } finally {
     activeJob = null
+    activeStoppingCriteria = null
+    activePreempted = false
+    activeCancelled = false
     processing = false
   }
 }
@@ -1021,7 +1583,10 @@ self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
     }
     if (activeJob) {
       cancelledRequestIds.add(activeJob.requestId)
+      activeCancelled = true
+      activeStoppingCriteria?.interrupt()
     }
+    closeYieldChannel()
     void disposeActiveModel()
     return
   }
@@ -1043,14 +1608,15 @@ self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
       (!keep || activeJob.scopeKey !== keep)
     ) {
       cancelledRequestIds.add(activeJob.requestId)
+      activeCancelled = true
+      activeStoppingCriteria?.interrupt()
     }
     return
   }
 
   if (msg.type === 'load') {
-    const modelKey: TranslatorModelKey =
-      msg.modelKey === 'nllb200' ? 'nllb200' : DEFAULT_TRANSLATOR_MODEL_KEY
-    queue.unshift({
+    const modelKey = normalizeWorkerModelKey(msg.modelKey)
+    insertJobAtTierTail({
       type: 'load',
       requestId: msg.requestId,
       modelKey,
@@ -1062,8 +1628,7 @@ self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
   }
 
   if (msg.type === 'translate') {
-    const modelKey: TranslatorModelKey =
-      msg.modelKey === 'nllb200' ? 'nllb200' : DEFAULT_TRANSLATOR_MODEL_KEY
+    const modelKey = normalizeWorkerModelKey(msg.modelKey)
     const job: QueuedJob = {
       type: 'translate',
       requestId: msg.requestId,
@@ -1077,6 +1642,18 @@ self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
       scopeKey: msg.scopeKey,
     }
     enqueueTranslateJob(job)
+    // Preempt active lower-priority translation mid-token when a higher-priority job arrives:
+    // 'high' (outgoing send) interrupts 'live'/'visible'/'normal';
+    // 'live' (incoming) interrupts 'visible'/'normal';
+    // 'visible' interrupts 'normal'.
+    if (
+      activeJob &&
+      activeJob.type === 'translate' &&
+      jobPriorityRank(job) < jobPriorityRank(activeJob)
+    ) {
+      activePreempted = true
+      activeStoppingCriteria?.interrupt()
+    }
     void processQueue()
   }
 }

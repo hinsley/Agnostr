@@ -5700,6 +5700,10 @@ img.ag-avatar-agnostr,
   transition: width 160ms ease;
 }
 
+.ag-stream-scroll.is-translator-active {
+  padding-top: 0;
+}
+
 .ag-translator-grid-wrap {
   display: flex;
   flex-direction: column;
@@ -5710,11 +5714,10 @@ img.ag-avatar-agnostr,
 .ag-translator-col-heads {
   position: sticky;
   top: 0;
-  z-index: 4;
+  z-index: 6;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  background-color: var(--bg-glass);
-  backdrop-filter: blur(8px);
+  background-color: var(--bg-surface);
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -5759,51 +5762,8 @@ img.ag-avatar-agnostr,
 }
 
 .ag-translator-cell.original {
-  padding: 6px 14px;
   border-left: 1px solid var(--border-subtle);
   background-color: rgba(128, 136, 152, 0.035);
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-start;
-  gap: 2px;
-}
-
-.ag-translator-pair.grouped .ag-translator-cell.original {
-  padding-top: 2px;
-  padding-bottom: 4px;
-}
-
-.ag-translator-orig-head {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-}
-
-.ag-translator-orig-author {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-
-.ag-translator-orig-time {
-  font-size: 11px;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.ag-translator-orig-body {
-  font-size: 13.5px;
-  line-height: 1.45;
-  color: var(--text-secondary);
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.ag-translator-orig-media {
-  font-size: 12px;
-  font-style: italic;
-  color: var(--text-muted);
 }
 
 .ag-translator-inline-status {
@@ -5957,6 +5917,10 @@ img.ag-avatar-agnostr,
     height: 36px;
   }
 
+  .ag-stream-scroll.is-translator-active {
+    padding-top: 0;
+  }
+
   .ag-translator-bar {
     padding: 6px 10px;
   }
@@ -5997,14 +5961,6 @@ img.ag-avatar-agnostr,
 
   .ag-translator-pair:not(.collapsed) .ag-msg-gutter {
     display: none;
-  }
-
-  .ag-translator-cell.original {
-    padding: 5px 7px;
-  }
-
-  .ag-translator-orig-body {
-    font-size: 12.5px;
   }
 
   .ag-cashu-token-card {

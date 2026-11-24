@@ -169,7 +169,7 @@ function QrShareModalInner({
             <p className="ag-qr-scan-hint">
               {target.kind === 'dm'
                 ? 'Scan with Agnostr or any camera app to open an encrypted DM.'
-                : 'Scan with Agnostr or any camera app to join this community.'}
+                : 'Scan with Agnostr or any camera app to join this group.'}
             </p>
           </div>
 

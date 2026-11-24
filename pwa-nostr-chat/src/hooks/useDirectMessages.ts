@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { PushPokePayload } from '../types/notifications.ts'
 import type {
   DmMessage,
   DmProtocol,
@@ -87,6 +88,7 @@ export interface UseDirectMessagesOptions {
   blockedPubkeys: Set<string>
   identityVersion: number
   onIncomingDm?: (senderHandle: string, preview: string, peerPubkey: string) => void
+  onNotifyPushPoke?: (payload: PushPokePayload) => void
   onError?: (title: string, detail?: string) => void
 }
 
@@ -101,6 +103,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     blockedPubkeys,
     identityVersion,
     onIncomingDm,
+    onNotifyPushPoke,
     onError,
   } = opts
 
@@ -116,6 +119,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   const activeDmPeerRef = useRef<string | null>(activeDmPeer)
   const blockedRef = useRef<Set<string>>(blockedPubkeys)
   const onIncomingRef = useRef(onIncomingDm)
+  const onNotifyPushPokeRef = useRef(onNotifyPushPoke)
   const onErrorRef = useRef(onError)
 
   useLayoutEffect(() => {
@@ -125,6 +129,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   useLayoutEffect(() => {
     dmRelaysRef.current = dmRelays
   }, [dmRelays])
+
+  useLayoutEffect(() => {
+    onNotifyPushPokeRef.current = onNotifyPushPoke
+  }, [onNotifyPushPoke])
 
   useLayoutEffect(() => {
     onErrorRef.current = onError
@@ -559,7 +567,13 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               })
             )
 
-            if (!ok) {
+            if (ok) {
+              onNotifyPushPokeRef.current?.({
+                recipientPubkeys: [pk],
+                category: 'dm',
+                eventId: localMsgId,
+              })
+            } else {
               onErrorRef.current?.(
                 'DM failed to publish',
                 'No DM-capable relay accepted the gift wrap.'
@@ -719,7 +733,13 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               })
             )
 
-            if (!ok) {
+            if (ok) {
+              onNotifyPushPokeRef.current?.({
+                recipientPubkeys: [pk],
+                category: 'dm',
+                eventId: localMsgId,
+              })
+            } else {
               onErrorRef.current?.(
                 'Encrypted voice DM failed',
                 'No DM-capable relay accepted the gift wrap.'
@@ -879,7 +899,13 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               })
             )
 
-            if (!ok) {
+            if (ok) {
+              onNotifyPushPokeRef.current?.({
+                recipientPubkeys: [pk],
+                category: 'dm',
+                eventId: localMsgId,
+              })
+            } else {
               onErrorRef.current?.(
                 'Encrypted image DM failed',
                 'No DM-capable relay accepted the gift wrap.'

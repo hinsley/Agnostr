@@ -494,8 +494,8 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 type="button"
                 className={`ag-circle-btn ${roomInfoOpen ? 'active' : ''}`}
                 onClick={onOpenRoomInfo}
-                title="Server info & members (Cmd+I)"
-                aria-label="Server info"
+                title="Group info & members (Cmd+I)"
+                aria-label="Group info"
               >
                 <Info size={18} />
               </button>

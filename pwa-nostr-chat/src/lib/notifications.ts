@@ -5,6 +5,7 @@ import type {
   NotificationPermissionState,
   NotificationSettings,
   PendingNotificationAction,
+  PushPokePayload,
 } from '../types/notifications.ts'
 import { getPwaSwRegistration } from '../hooks/usePwa.ts'
 import { bytesToHex } from './identity.ts'
@@ -85,6 +86,19 @@ export function urlBase64ToUint8Array(base64Url: string): Uint8Array<ArrayBuffer
     out[i] = raw.charCodeAt(i)
   }
   return out
+}
+
+function arrayBufferToBase64Url(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function normalizeBase64Url(value: string): string {
+  return value.trim().replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
 export function parseNotifyHash(rawHash: string): PendingNotificationAction | null {
@@ -318,11 +332,29 @@ export async function registerWithPushBridge(
     throw new Error('Service Worker is not active yet. Reload once and retry.')
   }
 
+  const normalizedBridge =
+    normalizePushBridgeUrl(params.bridgeUrl) ||
+    params.bridgeUrl.trim().replace(/\/+$/, '')
+
   const resolvedKey =
     params.vapidPublicKey?.trim() ||
-    (await fetchVapidPublicKey(params.bridgeUrl))
+    (await fetchVapidPublicKey(normalizedBridge))
 
   let subscription = await reg.pushManager.getSubscription()
+  if (subscription) {
+    const existingKeyBuf = subscription.options?.applicationServerKey
+    if (existingKeyBuf) {
+      const existingKeyB64 = arrayBufferToBase64Url(existingKeyBuf)
+      if (existingKeyB64 !== normalizeBase64Url(resolvedKey)) {
+        try {
+          await subscription.unsubscribe()
+        } catch {
+          // Proceed to create a fresh subscription with the new VAPID key
+        }
+        subscription = null
+      }
+    }
+  }
   if (!subscription) {
     subscription = await reg.pushManager.subscribe({
       userVisibleOnly: true,
@@ -330,7 +362,7 @@ export async function registerWithPushBridge(
     })
   }
 
-  const endpointUrl = `${params.bridgeUrl}/subscribe`
+  const endpointUrl = `${normalizedBridge}/subscribe`
   const bodyObj = {
     pubkey: params.pubkey.toLowerCase(),
     subscription: subscription.toJSON(),
@@ -417,5 +449,171 @@ export async function unregisterFromPushBridge(opts: {
     } catch {
       // Ignore
     }
+  }
+}
+
+export async function sendTestWebPush(opts: {
+  bridgeUrl: string
+  pubkey: string
+  signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
+}): Promise<{ ok: boolean; delivered: number; failed: number; detail: string }> {
+  const normalized = normalizePushBridgeUrl(opts.bridgeUrl)
+  if (!normalized) {
+    return {
+      ok: false,
+      delivered: 0,
+      failed: 0,
+      detail: 'Push bridge URL must use https:// (or http://localhost).',
+    }
+  }
+
+  const endpointUrl = `${normalized}/test-push`
+  const bodyJson = JSON.stringify({
+    pubkey: opts.pubkey.toLowerCase(),
+  })
+
+  const controller = new AbortController()
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), 12000)
+
+  try {
+    const authHeader = await buildNip98AuthHeader({
+      url: endpointUrl,
+      method: 'POST',
+      bodyJson,
+      signEvent: opts.signEvent,
+    })
+
+    const res = await fetch(endpointUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: authHeader,
+      },
+      body: bodyJson,
+      signal: controller.signal,
+    })
+
+    const rawText = await res.text().catch(() => '')
+    let parsed: {
+      ok?: boolean
+      delivered?: number
+      failed?: number
+      error?: string
+      detail?: string
+    } | null = null
+    if (rawText) {
+      try {
+        parsed = JSON.parse(rawText) as {
+          ok?: boolean
+          delivered?: number
+          failed?: number
+          error?: string
+          detail?: string
+        }
+      } catch {
+        parsed = null
+      }
+    }
+
+    const delivered =
+      typeof parsed?.delivered === 'number' ? parsed.delivered : 0
+    const failed = typeof parsed?.failed === 'number' ? parsed.failed : 0
+
+    if (!res.ok) {
+      const errDetail =
+        parsed?.error ||
+        parsed?.detail ||
+        rawText.slice(0, 120) ||
+        `HTTP ${res.status}`
+      return {
+        ok: false,
+        delivered,
+        failed,
+        detail: `Test push failed (HTTP ${res.status}): ${errDetail}`,
+      }
+    }
+
+    if (delivered > 0) {
+      return {
+        ok: true,
+        delivered,
+        failed,
+        detail: `Background push delivered to ${delivered} device${delivered === 1 ? '' : 's'}${failed > 0 ? ` (${failed} failed)` : ''}.`,
+      }
+    }
+
+    return {
+      ok: false,
+      delivered,
+      failed,
+      detail:
+        parsed?.error ||
+        parsed?.detail ||
+        (failed > 0
+          ? `Push bridge could not reach ${failed} registered device${failed === 1 ? '' : 's'}. Reconnect this device and retry.`
+          : 'No active push subscription registered on bridge yet.'),
+    }
+  } catch (err) {
+    const msg =
+      err instanceof Error ? err.message : 'Unable to reach push bridge.'
+    return {
+      ok: false,
+      delivered: 0,
+      failed: 0,
+      detail: `Test push error: ${msg}`,
+    }
+  } finally {
+    globalThis.clearTimeout(timeoutId)
+  }
+}
+
+export async function sendPushPoke(opts: {
+  bridgeUrl: string
+  signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
+  payload: PushPokePayload
+}): Promise<void> {
+  const normalized = normalizePushBridgeUrl(opts.bridgeUrl)
+  if (!normalized) return
+
+  const recipientPubkeys = Array.from(
+    new Set(
+      (opts.payload.recipientPubkeys || [])
+        .map((pk) => pk.trim().toLowerCase())
+        .filter((pk) => /^[0-9a-f]{64}$/.test(pk))
+    )
+  ).slice(0, 20)
+  if (recipientPubkeys.length === 0) return
+
+  const endpointUrl = `${normalized}/poke`
+  const bodyJson = JSON.stringify({
+    ...opts.payload,
+    recipientPubkeys,
+  })
+
+  const controller = new AbortController()
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), 5000)
+
+  try {
+    const authHeader = await buildNip98AuthHeader({
+      url: endpointUrl,
+      method: 'POST',
+      bodyJson,
+      signEvent: opts.signEvent,
+    })
+
+    await fetch(endpointUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: authHeader,
+      },
+      body: bodyJson,
+      signal: controller.signal,
+      keepalive: true,
+    })
+  } catch {
+    // Fire-and-forget: never block or fail sending messages on push poke errors
+  } finally {
+    globalThis.clearTimeout(timeoutId)
   }
 }

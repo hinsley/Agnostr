@@ -61,7 +61,7 @@ import {
   extractCashuTokenString,
 } from '../lib/cashuWallet.ts'
 import { generateQrSvg } from '../lib/qrCode.ts'
-import { parseLightningPayload } from '../lib/zaps.ts'
+import { lightningAddressToQrPayload, parseLightningPayload } from '../lib/zaps.ts'
 import '../styles/wallet.css'
 
 export interface WalletModalProps {
@@ -152,6 +152,19 @@ function formatTxLabel(type: WalletTransaction['type']): string {
       return 'Nutzap'
     case 'reclaim':
       return 'Reclaimed Ecash'
+  }
+}
+
+function getLightningReceiveQrInfo(
+  address: string | null | undefined
+): { qrPayload: string; lnurl: string } | null {
+  if (!address) return null
+  try {
+    const qrPayload = lightningAddressToQrPayload(address)
+    const lnurl = qrPayload.replace(/^lightning:/i, '').toLowerCase()
+    return { qrPayload, lnurl }
+  } catch {
+    return null
   }
 }
 
@@ -272,6 +285,7 @@ function WalletModalInner({
   )
   const [editingCustomZap, setEditingCustomZap] = useState(false)
   const [savingLud16, setSavingLud16] = useState(false)
+  const [showOverviewZapQr, setShowOverviewZapQr] = useState(false)
 
   // Receive: Ecash
   const [cashuReceiveInput, setCashuReceiveInput] = useState<string>(initNav.cashuReceiveInput)
@@ -282,6 +296,7 @@ function WalletModalInner({
   const [lnReceiveMemo, setLnReceiveMemo] = useState<string>('')
   const [creatingLnQuote, setCreatingLnQuote] = useState(false)
   const [checkingLnQuote, setCheckingLnQuote] = useState(false)
+  const [showPermLnQr, setShowPermLnQr] = useState<boolean>(() => !wallet.activeMintQuote)
 
   // Receive: On-Chain BTC (Boltz v2 Submarine)
   const [subPair, setSubPair] = useState<BoltzSubmarinePairInfo | null>(null)
@@ -290,6 +305,7 @@ function WalletModalInner({
   const [btcReceiveAmount, setBtcReceiveAmount] = useState<string>('50000')
   const [creatingSubSwap, setCreatingSubSwap] = useState(false)
   const [activeSubSwapId, setActiveSubSwapId] = useState<string | null>(null)
+  const [btcQrPlainBySwap, setBtcQrPlainBySwap] = useState<Record<string, boolean>>({})
 
   // Send: Ecash
   const [cashuSendAmount, setCashuSendAmount] = useState<string>('')
@@ -336,6 +352,12 @@ function WalletModalInner({
 
   const canStepBackInSetup =
     setupMode === 'create' || setupMode === 'import' || (setupMode === 'choose' && wallet.initialized)
+
+  const activeZapAddress = zaps.lightningAddress || zaps.builtinLightningAddress
+  const activeZapQr = useMemo(
+    () => getLightningReceiveQrInfo(activeZapAddress),
+    [activeZapAddress]
+  )
 
   const handleBack = useCallback(() => {
     if (setupMode === 'create' || setupMode === 'import') {
@@ -753,6 +775,7 @@ function WalletModalInner({
     setFeedback(null)
     try {
       await wallet.createLightningReceiveQuote(sats, lnReceiveMemo.trim() || undefined)
+      setShowPermLnQr(false)
     } catch (err) {
       setFeedback({
         kind: 'danger',
@@ -1154,6 +1177,9 @@ function WalletModalInner({
   const renderSwapBlock = (swap: BoltzSwapRecord) => {
     const failed = isBoltzSwapFailed(swap.status)
     const active = isBoltzSwapActive(swap)
+    const usePlainBtcAddr = Boolean(btcQrPlainBySwap[swap.id])
+    const btcUriPayload = swap.bip21 || `bitcoin:${swap.address}`
+    const btcQrPayload = usePlainBtcAddr ? swap.address : btcUriPayload
     return (
       <div key={swap.id} className="ag-wallet-tonal">
         <div className="ag-wallet-section-head">
@@ -1168,9 +1194,39 @@ function WalletModalInner({
         {swap.direction === 'submarine' && active && (
           <div className="ag-wallet-qr-wrap">
             <QrBox
-              payload={swap.bip21 || swap.address}
-              label={`Bitcoin deposit QR for ${swap.address}`}
+              payload={btcQrPayload}
+              label={
+                usePlainBtcAddr
+                  ? `Bitcoin address QR for ${swap.address}`
+                  : `Bitcoin deposit payment URI QR for ${swap.address}`
+              }
             />
+            <div
+              className="ag-wallet-qr-mode-toggle"
+              role="group"
+              aria-label="Bitcoin QR format"
+            >
+              <button
+                type="button"
+                className={`ag-wallet-qr-mode-btn${!usePlainBtcAddr ? ' active' : ''}`}
+                aria-pressed={!usePlainBtcAddr}
+                onClick={() =>
+                  setBtcQrPlainBySwap((prev) => ({ ...prev, [swap.id]: false }))
+                }
+              >
+                Payment URI
+              </button>
+              <button
+                type="button"
+                className={`ag-wallet-qr-mode-btn${usePlainBtcAddr ? ' active' : ''}`}
+                aria-pressed={usePlainBtcAddr}
+                onClick={() =>
+                  setBtcQrPlainBySwap((prev) => ({ ...prev, [swap.id]: true }))
+                }
+              >
+                Address only
+              </button>
+            </div>
             <div className="ag-wallet-code-box" title={swap.address}>
               {swap.address}
             </div>
@@ -1183,16 +1239,14 @@ function WalletModalInner({
                 {copiedKey === `addr-${swap.id}` ? <Check size={13} /> : <Copy size={13} />}
                 <span>{copiedKey === `addr-${swap.id}` ? 'Copied' : 'Copy Address'}</span>
               </button>
-              {swap.bip21 && (
-                <button
-                  type="button"
-                  className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
-                  onClick={() => void markCopied(`bip21-${swap.id}`, swap.bip21!)}
-                >
-                  {copiedKey === `bip21-${swap.id}` ? <Check size={13} /> : <Copy size={13} />}
-                  <span>{copiedKey === `bip21-${swap.id}` ? 'Copied' : 'Copy Payment URI'}</span>
-                </button>
-              )}
+              <button
+                type="button"
+                className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+                onClick={() => void markCopied(`bip21-${swap.id}`, btcUriPayload)}
+              >
+                {copiedKey === `bip21-${swap.id}` ? <Check size={13} /> : <Copy size={13} />}
+                <span>{copiedKey === `bip21-${swap.id}` ? 'Copied' : 'Copy Payment URI'}</span>
+              </button>
             </div>
           </div>
         )}
@@ -1664,78 +1718,151 @@ function WalletModalInner({
               </div>
             </div>
 
-            {zaps.zapMode === 'builtin' && !editingCustomZap ? (
+            {!editingCustomZap && activeZapAddress ? (
               <>
                 <div className="ag-wallet-zap-addr-row">
                   <span
                     className="ag-wallet-zap-addr mono"
-                    title={zaps.builtinLightningAddress}
+                    title={activeZapAddress}
                   >
-                    {zaps.builtinLightningAddress}
+                    {activeZapAddress}
                   </span>
                   <div className="ag-wallet-zap-addr-actions">
                     <button
                       type="button"
                       className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
-                      onClick={() =>
-                        void markCopied('zap-addr', zaps.builtinLightningAddress)
-                      }
+                      onClick={() => void markCopied('zap-addr', activeZapAddress)}
                       aria-label="Copy Zap address"
                     >
                       {copiedKey === 'zap-addr' ? <Check size={13} /> : <Copy size={13} />}
                       <span>{copiedKey === 'zap-addr' ? 'Copied' : 'Copy'}</span>
                     </button>
-                    <button
-                      type="button"
-                      className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
-                      disabled={zaps.npubCashSweeping}
-                      onClick={() => void handleCheckZapsNow()}
-                      aria-label="Check for incoming Zaps"
-                    >
-                      <RefreshCw
-                        size={13}
-                        className={zaps.npubCashSweeping ? 'ag-wallet-spin' : undefined}
-                      />
-                      <span>{zaps.npubCashSweeping ? 'Checking…' : 'Check Zaps'}</span>
-                    </button>
+                    {activeZapQr && (
+                      <button
+                        type="button"
+                        className={`ag-wbtn ag-wbtn-secondary ag-wbtn-sm${showOverviewZapQr ? ' active' : ''}`}
+                        onClick={() => setShowOverviewZapQr((prev) => !prev)}
+                        aria-expanded={showOverviewZapQr}
+                        aria-label={showOverviewZapQr ? 'Hide Zap QR code' : 'Show Zap QR code'}
+                      >
+                        <QrCode size={13} />
+                        <span>QR</span>
+                      </button>
+                    )}
+                    {zaps.zapMode === 'builtin' ? (
+                      <button
+                        type="button"
+                        className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
+                        disabled={zaps.npubCashSweeping}
+                        onClick={() => void handleCheckZapsNow()}
+                        aria-label="Check for incoming Zaps"
+                      >
+                        <RefreshCw
+                          size={13}
+                          className={zaps.npubCashSweeping ? 'ag-wallet-spin' : undefined}
+                        />
+                        <span>{zaps.npubCashSweeping ? 'Checking…' : 'Check Zaps'}</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
+                        onClick={() => {
+                          setLud16Draft(zaps.customLightningAddress ?? activeZapAddress)
+                          setEditingCustomZap(true)
+                        }}
+                      >
+                        <span>Edit</span>
+                      </button>
+                    )}
                   </div>
                 </div>
 
-                {zaps.npubCashLastError ? (
-                  <div className="ag-wallet-zap-error" role="status">
-                    <AlertCircle size={13} />
-                    <span>{zaps.npubCashLastError}</span>
+                {showOverviewZapQr && activeZapQr && (
+                  <div className="ag-wallet-zap-qr-panel">
+                    <QrBox
+                      payload={activeZapQr.qrPayload}
+                      label={`Lightning receive QR for ${activeZapAddress}`}
+                    />
+                    <div className="ag-wallet-zap-qr-addr mono" title={activeZapAddress}>
+                      {activeZapAddress}
+                    </div>
+                    <div className="ag-wallet-btn-row" style={{ width: '100%' }}>
+                      <button
+                        type="button"
+                        className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+                        onClick={() => void markCopied('zap-qr-addr', activeZapAddress)}
+                      >
+                        {copiedKey === 'zap-qr-addr' ? <Check size={13} /> : <Copy size={13} />}
+                        <span>{copiedKey === 'zap-qr-addr' ? 'Copied' : 'Copy Address'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+                        onClick={() => void markCopied('zap-qr-lnurl', activeZapQr.lnurl)}
+                      >
+                        {copiedKey === 'zap-qr-lnurl' ? <Check size={13} /> : <Copy size={13} />}
+                        <span>{copiedKey === 'zap-qr-lnurl' ? 'Copied' : 'Copy LNURL'}</span>
+                      </button>
+                    </div>
                   </div>
-                ) : (
-                  <p className="ag-wallet-zap-meta">
-                    {zaps.npubCashLastSweptAt
-                      ? `Checked ${formatRelativeTime(zaps.npubCashLastSweptAt)} · Lightning Zaps & NIP-61 Nutzaps sweep straight into Agwallet`
-                      : 'Lightning Zaps & NIP-61 Nutzaps sweep straight into Agwallet'}
-                  </p>
                 )}
 
-                <div className="ag-wallet-zap-footer">
-                  <label className="ag-wallet-zap-toggle">
-                    <input
-                      type="checkbox"
-                      checked={zaps.npubCashAutoSweep}
-                      onChange={(e) => zaps.setNpubCashAutoSweep(e.target.checked)}
-                    />
-                    <span className="ag-wallet-zap-switch" aria-hidden="true" />
-                    <span>Auto-sweep</span>
-                  </label>
+                {zaps.zapMode === 'builtin' ? (
+                  <>
+                    {zaps.npubCashLastError ? (
+                      <div className="ag-wallet-zap-error" role="status">
+                        <AlertCircle size={13} />
+                        <span>{zaps.npubCashLastError}</span>
+                      </div>
+                    ) : (
+                      <p className="ag-wallet-zap-meta">
+                        {zaps.npubCashLastSweptAt
+                          ? `Checked ${formatRelativeTime(zaps.npubCashLastSweptAt)} · Lightning Zaps & NIP-61 Nutzaps sweep straight into Agwallet`
+                          : 'Lightning Zaps & NIP-61 Nutzaps sweep straight into Agwallet'}
+                      </p>
+                    )}
 
-                  <button
-                    type="button"
-                    className="ag-wbtn ag-wbtn-link"
-                    onClick={() => {
-                      setLud16Draft(zaps.customLightningAddress ?? '')
-                      setEditingCustomZap(true)
-                    }}
-                  >
-                    Use custom address
-                  </button>
-                </div>
+                    <div className="ag-wallet-zap-footer">
+                      <label className="ag-wallet-zap-toggle">
+                        <input
+                          type="checkbox"
+                          checked={zaps.npubCashAutoSweep}
+                          onChange={(e) => zaps.setNpubCashAutoSweep(e.target.checked)}
+                        />
+                        <span className="ag-wallet-zap-switch" aria-hidden="true" />
+                        <span>Auto-sweep</span>
+                      </label>
+
+                      <button
+                        type="button"
+                        className="ag-wbtn ag-wbtn-link"
+                        onClick={() => {
+                          setLud16Draft(zaps.customLightningAddress ?? '')
+                          setEditingCustomZap(true)
+                        }}
+                      >
+                        Use custom address
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="ag-wallet-zap-meta">
+                      Custom Lightning address published to your profile for incoming Zaps
+                    </p>
+                    <div className="ag-wallet-zap-footer">
+                      <button
+                        type="button"
+                        className="ag-wbtn ag-wbtn-link"
+                        disabled={savingLud16 || zaps.publishingProfile}
+                        onClick={() => void handleSwitchToBuiltinZaps()}
+                      >
+                        Switch back to built-in Agwallet Zaps
+                      </button>
+                    </div>
+                  </>
+                )}
               </>
             ) : (
               <>
@@ -1764,7 +1891,7 @@ function WalletModalInner({
                 </div>
 
                 <div className="ag-wallet-zap-footer">
-                  {zaps.zapMode === 'custom' ? (
+                  {zaps.zapMode === 'custom' && (
                     <button
                       type="button"
                       className="ag-wbtn ag-wbtn-link"
@@ -1773,7 +1900,8 @@ function WalletModalInner({
                     >
                       Switch back to built-in Agwallet Zaps
                     </button>
-                  ) : (
+                  )}
+                  {activeZapAddress && (
                     <button
                       type="button"
                       className="ag-wbtn ag-wbtn-link"
@@ -2046,30 +2174,87 @@ function WalletModalInner({
                   {/* Receive: Lightning (NUT-04) */}
                   {receiveMode === 'lightning' && (
                     <section className="ag-wallet-section">
-                      {zaps.builtinLightningAddress && (
+                      {activeZapAddress && (
                         <div className="ag-wallet-perm-zap-strip">
-                          <div className="ag-wallet-perm-zap-copy">
-                            <span className="ag-wallet-perm-zap-label">
-                              Permanent Zap Address
-                            </span>
-                            <span
-                              className="ag-wallet-perm-zap-addr mono"
-                              title={zaps.builtinLightningAddress}
-                            >
-                              {zaps.builtinLightningAddress}
-                            </span>
+                          <div className="ag-wallet-perm-zap-head">
+                            <div className="ag-wallet-perm-zap-copy">
+                              <span className="ag-wallet-perm-zap-label">
+                                Permanent Zap Address
+                              </span>
+                              <span
+                                className="ag-wallet-perm-zap-addr mono"
+                                title={activeZapAddress}
+                              >
+                                {activeZapAddress}
+                              </span>
+                            </div>
+                            <div className="ag-wallet-perm-zap-actions">
+                              <button
+                                type="button"
+                                className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
+                                onClick={() => void markCopied('perm-zap', activeZapAddress)}
+                                aria-label="Copy permanent Zap address"
+                              >
+                                {copiedKey === 'perm-zap' ? <Check size={13} /> : <Copy size={13} />}
+                                <span>{copiedKey === 'perm-zap' ? 'Copied' : 'Copy'}</span>
+                              </button>
+                              {activeZapQr && (
+                                <button
+                                  type="button"
+                                  className={`ag-wbtn ag-wbtn-secondary ag-wbtn-sm${showPermLnQr ? ' active' : ''}`}
+                                  onClick={() => setShowPermLnQr((prev) => !prev)}
+                                  aria-expanded={showPermLnQr}
+                                  aria-label={
+                                    showPermLnQr
+                                      ? 'Hide Lightning address QR'
+                                      : 'Show Lightning address QR'
+                                  }
+                                >
+                                  <QrCode size={13} />
+                                  <span>QR</span>
+                                </button>
+                              )}
+                            </div>
                           </div>
-                          <button
-                            type="button"
-                            className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
-                            onClick={() =>
-                              void markCopied('perm-zap', zaps.builtinLightningAddress)
-                            }
-                            aria-label="Copy permanent Zap address"
-                          >
-                            {copiedKey === 'perm-zap' ? <Check size={13} /> : <Copy size={13} />}
-                            <span>{copiedKey === 'perm-zap' ? 'Copied' : 'Copy'}</span>
-                          </button>
+
+                          {showPermLnQr && activeZapQr && (
+                            <div className="ag-wallet-perm-zap-qr">
+                              <QrBox
+                                payload={activeZapQr.qrPayload}
+                                label={`Lightning receive QR for ${activeZapAddress}`}
+                              />
+                              <div className="ag-wallet-btn-row" style={{ width: '100%' }}>
+                                <button
+                                  type="button"
+                                  className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+                                  onClick={() => void markCopied('perm-zap-addr', activeZapAddress)}
+                                >
+                                  {copiedKey === 'perm-zap-addr' ? (
+                                    <Check size={13} />
+                                  ) : (
+                                    <Copy size={13} />
+                                  )}
+                                  <span>
+                                    {copiedKey === 'perm-zap-addr' ? 'Copied' : 'Copy Address'}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+                                  onClick={() => void markCopied('perm-zap-lnurl', activeZapQr.lnurl)}
+                                >
+                                  {copiedKey === 'perm-zap-lnurl' ? (
+                                    <Check size={13} />
+                                  ) : (
+                                    <Copy size={13} />
+                                  )}
+                                  <span>
+                                    {copiedKey === 'perm-zap-lnurl' ? 'Copied' : 'Copy LNURL'}
+                                  </span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -2100,7 +2285,7 @@ function WalletModalInner({
                             <>
                               <div className="ag-wallet-qr-wrap">
                                 <QrBox
-                                  payload={`lightning:${wallet.activeMintQuote.invoice}`}
+                                  payload={`lightning:${wallet.activeMintQuote.invoice.toUpperCase()}`}
                                   label="Lightning invoice QR code"
                                 />
                                 <div
@@ -2152,7 +2337,10 @@ function WalletModalInner({
                           <button
                             type="button"
                             className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm ag-wbtn-full"
-                            onClick={() => wallet.clearActiveMintQuote()}
+                            onClick={() => {
+                              wallet.clearActiveMintQuote()
+                              setShowPermLnQr(true)
+                            }}
                           >
                             New Invoice
                           </button>

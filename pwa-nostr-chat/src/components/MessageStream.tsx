@@ -34,19 +34,7 @@ import { MessageItem } from './MessageItem'
 import { doesContentMentionUser } from '../lib/bitchatProtocol'
 import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel'
 import { isStuckMediaPlaceholder } from '../lib/storage'
-import { identiconDataUrl, formatHandle, pubkeyToColor } from '../utils/identicon'
-import { RichMessageContent } from '../utils/markdown'
-
-function formatClockShort(unixSec: number): string {
-  try {
-    return new Date(unixSec * 1000).toLocaleTimeString([], {
-      hour: 'numeric',
-      minute: '2-digit',
-    })
-  } catch {
-    return ''
-  }
-}
+import { identiconDataUrl, formatHandle } from '../utils/identicon'
 
 function extractCleanMessageText(msg: GeoMessage): string {
   let text = msg.content.trim()
@@ -133,7 +121,7 @@ export interface MessageStreamProps {
 
 const INITIAL_RENDER_LIMIT = 80
 const LOAD_EARLIER_STEP = 60
-const MAX_ACTIVE_TRANSLATIONS = 10
+const MAX_ACTIVE_BACKFILL = 2
 const DEFAULT_VIEWPORT_TAIL = 20
 
 interface MessageTranslationSpec {
@@ -216,11 +204,25 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   )
   const pendingJumpIdRef = useRef<string | null>(null)
   const visibleCountRef = useRef(0)
+  const translatorBaselineRef = useRef<{
+    key: string
+    existingIds: Set<string>
+    baselineMaxCreatedAt: number
+    startedEmpty: boolean
+  }>({
+    key: '',
+    existingIds: new Set(),
+    baselineMaxCreatedAt: 0,
+    startedEmpty: true,
+  })
   const [renderLimit, setRenderLimit] = useState<number>(INITIAL_RENDER_LIMIT)
   const [viewportRange, setViewportRange] = useState<[number, number]>([0, -1])
   const [showJumpBtn, setShowJumpBtn] = useState(false)
   const [unseenBelow, setUnseenBelow] = useState(0)
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null)
+  const handleToggleOriginalActions = useCallback((id: string | null) => {
+    setActiveActionMsgId(id ? `${id}-orig` : null)
+  }, [])
 
   const syncViewportRange = useCallback(() => {
     const count = visibleCountRef.current
@@ -321,7 +323,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
           nickname: sm.nickname,
           displayHandle: sm.displayHandle,
           content: sm.decryptFailed
-            ? 'Unable to decrypt message — verify you have the latest server invite key.'
+            ? 'Unable to decrypt message — verify you have the latest group invite key.'
             : sm.content,
           createdAt: sm.createdAt,
           tags: sm.tags,
@@ -846,6 +848,38 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const underlyingCollapsed = translator.settings.underlyingCollapsed
   const explicitSourceLang = sourceLanguage !== 'Auto' ? sourceLanguage : undefined
   const scopeKey = `${streamKey}|${myLanguage}|${sourceLanguage}|${translator.modelKey}`
+  const baselineKey = `${streamKey}|${translatorEnabled ? '1' : '0'}`
+
+  // Snapshot previously-existing message IDs & timestamp floor whenever room changes or Translator Mode turns ON
+  useLayoutEffect(() => {
+    if (translatorBaselineRef.current.key === baselineKey) return
+    if (!translatorEnabled) {
+      translatorBaselineRef.current = {
+        key: baselineKey,
+        existingIds: new Set(),
+        baselineMaxCreatedAt: 0,
+        startedEmpty: true,
+      }
+      return
+    }
+    const existingIds = new Set<string>()
+    let maxCreatedAt = 0
+    let nonSystemCount = 0
+    for (const m of displayMessages) {
+      existingIds.add(m.id)
+      if (!m.isSystem) {
+        nonSystemCount += 1
+        if (m.createdAt > maxCreatedAt) maxCreatedAt = m.createdAt
+      }
+    }
+    const nowSec = Math.floor(Date.now() / 1000)
+    translatorBaselineRef.current = {
+      key: baselineKey,
+      existingIds,
+      baselineMaxCreatedAt: nonSystemCount > 0 ? maxCreatedAt : nowSec,
+      startedEmpty: nonSystemCount === 0,
+    }
+  }, [baselineKey, translatorEnabled, displayMessages])
 
   // Sync visible message count & viewport range whenever message window, room, or translator mode changes
   useLayoutEffect(() => {
@@ -888,7 +922,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     }
   }, [cancelScope])
 
-  // Prioritized newest-first sliding window scheduler (MAX_ACTIVE_TRANSLATIONS = 10, no 30-msg cap)
+  // Live-first incoming priority ('live', unthrottled) + low-priority interruptible backfill (MAX_ACTIVE_BACKFILL = 2)
   useEffect(() => {
     if (!translatorEnabled) return
     const total = visibleMessages.length
@@ -904,67 +938,105 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       visEnd = Math.max(visStart, Math.min(total - 1, viewportRange[1]))
     }
 
-    let activeLoadingCount = 0
+    const baseline = translatorBaselineRef.current
+    const liveRecencyFloor = Math.floor(Date.now() / 1000) - 90
+    const isLiveIncoming = (msg: GeoMessage): boolean => {
+      if (baseline.existingIds.has(msg.id)) return false
+      if (msg.createdAt < baseline.baselineMaxCreatedAt - 5) return false
+      if (baseline.startedEmpty && msg.createdAt < liveRecencyFloor) return false
+      return true
+    }
+
+    let activeLiveLoading = 0
+    let activeBackfillLoading = 0
     const seenKeys = new Set<string>()
-    const inspectCandidate = (idx: number): MessageTranslationSpec | null => {
-      const msg = visibleMessages[idx]
-      if (!msg || msg.isSystem || msg.id.startsWith('pending-')) return null
+    const liveCandidates: Array<{ msgId: string; spec: MessageTranslationSpec }> = []
+    const backfillCandidates: Array<{
+      msgId: string
+      spec: MessageTranslationSpec
+      priority: 'visible' | 'normal'
+    }> = []
+
+    // Pass 1 ('live'): ALL untranslated live incoming messages (newest first), never blocked behind backfill cap
+    for (let i = total - 1; i >= 0; i -= 1) {
+      const msg = visibleMessages[i]
+      if (!msg || msg.isSystem || msg.id.startsWith('pending-')) continue
+      if (!isLiveIncoming(msg)) continue
       const spec = resolveMessageTranslationSpec(
         msg,
         originalOutgoingById[msg.id],
         myLanguage,
         explicitSourceLang
       )
-      if (spec.mode !== 'translate' || !spec.cacheKey || !spec.textToTranslate) return null
-      if (seenKeys.has(spec.cacheKey)) return null
+      if (spec.mode !== 'translate' || !spec.cacheKey || !spec.textToTranslate) continue
+      if (seenKeys.has(spec.cacheKey)) continue
       seenKeys.add(spec.cacheKey)
       const entry = translations[spec.cacheKey]
       if (entry?.status === 'loading') {
-        activeLoadingCount += 1
-        return null
+        activeLiveLoading += 1
+        continue
       }
       if (entry?.status === 'done' || entry?.status === 'error') {
-        return null
+        continue
       }
-      return spec
+      liveCandidates.push({ msgId: msg.id, spec })
     }
 
-    const candidates: Array<{
-      msgId: string
-      spec: MessageTranslationSpec
-      priority: 'visible' | 'normal'
-    }> = []
+    for (const cand of liveCandidates) {
+      activeLiveLoading += 1
+      void translateMessage(cand.msgId, cand.spec.textToTranslate!, myLanguage, {
+        sourceLang: cand.spec.sourceLang ?? 'Auto',
+        roomHintLang: cand.spec.sourceLang ? undefined : roomHintLang,
+        scopeKey,
+        priority: 'live',
+      })
+    }
 
-    // Priority 1 ('visible'): viewport items NEWEST -> OLDEST (bottom-to-top)
+    // Pass 2 ('visible' & 'normal' backfill): previously-existing messages strictly NEWEST -> OLDEST
+    const inspectBackfill = (idx: number, priority: 'visible' | 'normal') => {
+      const msg = visibleMessages[idx]
+      if (!msg || msg.isSystem || msg.id.startsWith('pending-')) return
+      if (isLiveIncoming(msg)) return
+      const spec = resolveMessageTranslationSpec(
+        msg,
+        originalOutgoingById[msg.id],
+        myLanguage,
+        explicitSourceLang
+      )
+      if (spec.mode !== 'translate' || !spec.cacheKey || !spec.textToTranslate) return
+      if (seenKeys.has(spec.cacheKey)) return
+      seenKeys.add(spec.cacheKey)
+      const entry = translations[spec.cacheKey]
+      if (entry?.status === 'loading') {
+        activeBackfillLoading += 1
+        return
+      }
+      if (entry?.status === 'done' || entry?.status === 'error') {
+        return
+      }
+      backfillCandidates.push({ msgId: msg.id, spec, priority })
+    }
+
+    // Viewport items NEWEST -> OLDEST ('visible')
     for (let i = visEnd; i >= visStart; i -= 1) {
-      const spec = inspectCandidate(i)
-      if (spec) {
-        candidates.push({ msgId: visibleMessages[i].id, spec, priority: 'visible' })
-      }
+      inspectBackfill(i, 'visible')
     }
-
-    // Priority 2 ('normal'): expand outward from viewport — below viewport first, then above newest -> oldest
-    for (let i = visEnd + 1; i < total; i += 1) {
-      const spec = inspectCandidate(i)
-      if (spec) {
-        candidates.push({ msgId: visibleMessages[i].id, spec, priority: 'normal' })
-      }
+    // Off-screen items strictly NEWEST -> OLDEST ('normal'): below viewport first, then above viewport
+    for (let i = total - 1; i > visEnd; i -= 1) {
+      inspectBackfill(i, 'normal')
     }
     for (let i = visStart - 1; i >= 0; i -= 1) {
-      const spec = inspectCandidate(i)
-      if (spec) {
-        candidates.push({ msgId: visibleMessages[i].id, spec, priority: 'normal' })
-      }
+      inspectBackfill(i, 'normal')
     }
 
-    if (candidates.length === 0) return
+    if (activeLiveLoading > 0 || backfillCandidates.length === 0) return
 
-    let slots = Math.max(0, MAX_ACTIVE_TRANSLATIONS - activeLoadingCount)
-    if (slots <= 0) return
+    let backfillSlots = Math.max(0, MAX_ACTIVE_BACKFILL - activeBackfillLoading)
+    if (backfillSlots <= 0) return
 
-    for (const cand of candidates) {
-      if (slots <= 0) break
-      slots -= 1
+    for (const cand of backfillCandidates) {
+      if (backfillSlots <= 0) break
+      backfillSlots -= 1
       void translateMessage(cand.msgId, cand.spec.textToTranslate!, myLanguage, {
         sourceLang: cand.spec.sourceLang ?? 'Auto',
         roomHintLang: cand.spec.sourceLang ? undefined : roomHintLang,
@@ -1226,7 +1298,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
       <div
         ref={scrollRef}
-        className="ag-stream-scroll"
+        className={`ag-stream-scroll ${translatorEnabled ? 'is-translator-active' : ''}`}
         onScroll={handleScroll}
         onClick={(e) => {
           if (activeActionMsgId && !(e.target as HTMLElement | null)?.closest('.ag-msg-row')) {
@@ -1318,7 +1390,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                         }
                       >
                         <Server size={15} />
-                        <span>Join Community</span>
+                        <span>Join Group</span>
                       </button>
                     )}
                 </div>
@@ -1536,70 +1608,70 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   }
                 }
 
+                const sharedMessageProps = {
+                  message: msg,
+                  grouped,
+                  isLive,
+                  isMentioned,
+                  isSearchActive: activeSearchMessageId === msg.id,
+                  highlightQuery: searchQuery,
+                  knownHandles,
+                  showBridgeBadges: engine.settings.showBridgeBadges,
+                  isDmMode: isDm,
+                  isEncryptedContext,
+                  isSenderTrusted: engine.isTrusted(msg.pubkey),
+                  isSenderExplicitlyTrusted: !msg.isOwn && engine.isExplicitlyTrusted(msg.pubkey),
+                  fetchVoiceMemoBlob: engine.fetchVoiceMemoBlob,
+                  fetchImageAttachmentBlob: engine.fetchImageAttachmentBlob,
+                  autoTranscribe: engine.transcription.autoTranscribe,
+                  memoTranscript,
+                  transcriptionModelStatus: engine.transcription.modelStatus,
+                  transcriptionDownloadProgress: engine.transcription.downloadProgress,
+                  activeTranscriptionModelLabel: engine.transcription.activeModel.label,
+                  onTranscribeMemo: engine.transcription.transcribeVoiceMemo,
+                  onOpenLightbox,
+                  onTrustSender: handleTrustSender,
+                  onUntrustSender: handleUntrustSender,
+                  onBlockSender: handleBlockSender,
+                  onStartDm,
+                  onStartCall: handleStartCallSender,
+                  onMentionAuthor: onMentionPeer,
+                  onReply: !isDm ? handleReplyUnified : undefined,
+                  onReact: !isDm ? handleReactUnified : undefined,
+                  resolveReactorName: !isDm ? resolveReactorName : undefined,
+                  onDelete:
+                    isServer && !msg.isSystem && (engine.servers.canModerate || msg.isOwn)
+                      ? handleDeleteServerMessage
+                      : undefined,
+                  onInspectAuthor: handleInspectAuthor,
+                  onTuneGeohash: onTuneChannel,
+                  onClickMention,
+                  onJumpToMessage: handleJumpToMessage,
+                  onCopyText: () => engine.pushToast('info', 'Copied to clipboard'),
+                  onNotify: (title: string) => engine.pushToast('info', title),
+                  contentFilter: engine.contentFilter,
+                  senderLightningAddress: senderLud16,
+                  canZapSender: senderCanZap,
+                  zapTotalSats,
+                  onOpenZap,
+                  onClaimCashuToken,
+                  compactTranslatorRow: translatorEnabled,
+                }
+
                 const messageNode = (
                   <MessageItem
-                    message={msg}
-                    grouped={grouped}
-                    isLive={isLive}
-                    isMentioned={isMentioned}
-                    isSearchActive={activeSearchMessageId === msg.id}
+                    {...sharedMessageProps}
                     actionsRevealed={activeActionMsgId === msg.id}
-                    highlightQuery={searchQuery}
-                    knownHandles={knownHandles}
-                    showBridgeBadges={engine.settings.showBridgeBadges}
-                    isDmMode={isDm}
-                    isEncryptedContext={isEncryptedContext}
-                    isSenderTrusted={engine.isTrusted(msg.pubkey)}
-                    isSenderExplicitlyTrusted={!msg.isOwn && engine.isExplicitlyTrusted(msg.pubkey)}
-                    fetchVoiceMemoBlob={engine.fetchVoiceMemoBlob}
-                    fetchImageAttachmentBlob={engine.fetchImageAttachmentBlob}
-                    autoTranscribe={engine.transcription.autoTranscribe}
-                    memoTranscript={memoTranscript}
-                    transcriptionModelStatus={engine.transcription.modelStatus}
-                    transcriptionDownloadProgress={engine.transcription.downloadProgress}
-                    activeTranscriptionModelLabel={engine.transcription.activeModel.label}
-                    onTranscribeMemo={engine.transcription.transcribeVoiceMemo}
-                    onOpenLightbox={onOpenLightbox}
                     onToggleActions={setActiveActionMsgId}
-                    onTrustSender={handleTrustSender}
-                    onUntrustSender={handleUntrustSender}
-                    onBlockSender={handleBlockSender}
-                    onStartDm={onStartDm}
-                    onStartCall={handleStartCallSender}
-                    onMentionAuthor={onMentionPeer}
-                    onReply={!isDm ? handleReplyUnified : undefined}
-                    onReact={!isDm ? handleReactUnified : undefined}
-                    resolveReactorName={!isDm ? resolveReactorName : undefined}
-                    onDelete={
-                      isServer && !msg.isSystem && (engine.servers.canModerate || msg.isOwn)
-                        ? handleDeleteServerMessage
-                        : undefined
-                    }
-                    onInspectAuthor={handleInspectAuthor}
-                    onTuneGeohash={onTuneChannel}
-                    onClickMention={onClickMention}
-                    onJumpToMessage={handleJumpToMessage}
-                    onCopyText={() => engine.pushToast('info', 'Copied to clipboard')}
-                    onNotify={(title) => engine.pushToast('info', title)}
-                    contentFilter={engine.contentFilter}
-                    senderLightningAddress={senderLud16}
-                    canZapSender={senderCanZap}
-                    zapTotalSats={zapTotalSats}
-                    onOpenZap={onOpenZap}
-                    onClaimCashuToken={onClaimCashuToken}
                     displayContentOverride={displayContentOverride}
                     translationStatus={translationStatus}
                     translationLoadingLabel={translatorEnabled ? translationLoadingLabel : undefined}
                     translationError={translationError}
                     translationBadge={translationBadge}
                     onRetryTranslation={onRetryTranslation}
-                    compactTranslatorRow={translatorEnabled}
                     underlyingCollapsed={underlyingCollapsed}
                   />
                 )
-
-                const underlyingText = extractCleanMessageText(msg)
-                const handle = formatHandle(msg.nickname, msg.pubkey)
 
                 return (
                   <React.Fragment key={msg.id}>
@@ -1623,34 +1695,12 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
                         {!underlyingCollapsed && (
                           <div className="ag-translator-cell original" aria-label="Original chat message">
-                            {!grouped && (
-                              <div className="ag-translator-orig-head">
-                                <span
-                                  className="ag-translator-orig-author truncate"
-                                  style={!msg.isOwn ? { color: pubkeyToColor(msg.pubkey) } : undefined}
-                                >
-                                  {handle.base}
-                                </span>
-                                <span className="ag-translator-orig-time tabular">
-                                  {formatClockShort(msg.createdAt)}
-                                </span>
-                              </div>
-                            )}
-                            <div className="ag-translator-orig-body">
-                              {underlyingText ? (
-                                <RichMessageContent
-                                  content={underlyingText}
-                                  onTuneGeohash={onTuneChannel}
-                                  onClickMention={onClickMention}
-                                  highlightQuery={searchQuery}
-                                  knownHandles={knownHandles}
-                                />
-                              ) : msg.voiceMemo ? (
-                                <span className="ag-translator-orig-media">Voice memo</span>
-                              ) : msg.imageAttachment ? (
-                                <span className="ag-translator-orig-media">Image attachment</span>
-                              ) : null}
-                            </div>
+                            <MessageItem
+                              {...sharedMessageProps}
+                              actionsRevealed={activeActionMsgId === `${msg.id}-orig`}
+                              onToggleActions={handleToggleOriginalActions}
+                              isOriginalColumn
+                            />
                           </div>
                         )}
                       </div>

@@ -47,24 +47,70 @@ function bech32HrpExpand(hrp: string): number[] {
   return out
 }
 
-function convertBits(data: number[], fromBits: number, toBits: number): Uint8Array | null {
+function convertBits(
+  data: ArrayLike<number>,
+  fromBits: number,
+  toBits: number,
+  pad = false
+): Uint8Array | null {
   let acc = 0
   let bits = 0
   const maxv = (1 << toBits) - 1
+  const maxAcc = (1 << (fromBits + toBits - 1)) - 1
   const out: number[] = []
-  for (const value of data) {
+  for (let i = 0; i < data.length; i++) {
+    const value = data[i]
     if (value < 0 || value >> fromBits !== 0) return null
-    acc = (acc << fromBits) | value
+    acc = ((acc << fromBits) | value) & maxAcc
     bits += fromBits
     while (bits >= toBits) {
       bits -= toBits
       out.push((acc >>> bits) & maxv)
     }
   }
-  if (bits >= fromBits || ((acc << (toBits - bits)) & maxv) !== 0) {
+  if (pad) {
+    if (bits > 0) {
+      out.push((acc << (toBits - bits)) & maxv)
+    }
+  } else if (bits >= fromBits || ((acc << (toBits - bits)) & maxv) !== 0) {
     return null
   }
   return new Uint8Array(out)
+}
+
+/**
+ * Pure TypeScript Bech32 encoder for HTTPS LNURL endpoint URL -> lowercase `lnurl1...`.
+ */
+export function encodeLnurlBech32(httpsUrl: string): string {
+  const trimmed = httpsUrl.trim()
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error('Invalid URL for LNURL encoding.')
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('LNURL endpoint must use https:// or http://.')
+  }
+
+  const bytes = new TextEncoder().encode(parsed.toString())
+  const words = convertBits(bytes, 8, 5, true)
+  if (!words || words.length === 0) {
+    throw new Error('Failed to encode LNURL Bech32 payload.')
+  }
+
+  const hrp = 'lnurl'
+  const data = Array.from(words)
+  const polymod = bech32Polymod([...bech32HrpExpand(hrp), ...data, 0, 0, 0, 0, 0, 0]) ^ 1
+  const checksum: number[] = []
+  for (let p = 0; p < 6; p++) {
+    checksum.push((polymod >>> (5 * (5 - p))) & 31)
+  }
+
+  let encoded = `${hrp}1`
+  for (const w of data) encoded += BECH32_CHARSET[w]
+  for (const c of checksum) encoded += BECH32_CHARSET[c]
+  return encoded
 }
 
 /**
@@ -316,6 +362,22 @@ export function lightningAddressToLnurlEndpoint(lud16OrLnurl: string): {
   }
   const parsed = new URL(decoded)
   return { url: decoded, domain: parsed.hostname }
+}
+
+/**
+ * Converts a Lightning Address (`user@domain`) or `lnurl1...` into a universally scannable
+ * `lightning:LNURL1...` QR URI payload.
+ */
+export function lightningAddressToQrPayload(lud16OrLnurl: string): string {
+  const normalized = normalizeLightningAddress(lud16OrLnurl)
+  if (!normalized) {
+    throw new Error('Invalid Lightning Address (expected user@domain.com or lnurl1...).')
+  }
+  if (!normalized.includes('@')) {
+    return `lightning:${normalized.toUpperCase()}`
+  }
+  const { url } = lightningAddressToLnurlEndpoint(normalized)
+  return `lightning:${encodeLnurlBech32(url).toUpperCase()}`
 }
 
 interface RawLnurlPayResponse {

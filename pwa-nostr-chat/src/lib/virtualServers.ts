@@ -395,7 +395,7 @@ export async function parseVirtualChatEvent(
   if (server.encrypted) {
     if (!server.encryptionKeyB64) {
       decryptFailed = true
-      text = '[Encrypted message — server key missing]'
+      text = '[Encrypted message — group key missing]'
     } else {
       const dec = await decryptVirtualPayload(server.encryptionKeyB64, event.content)
       if (!dec) {
@@ -571,7 +571,7 @@ export function parseServerInvite(rawInput: string): ServerInvite | null {
           v: 1,
           kind: 'virtual',
           id: p.id,
-          name: p.n.trim().slice(0, 48) || 'Agnostr Server',
+          name: p.n.trim().slice(0, 48) || 'Agnostr Group',
           description: typeof p.d === 'string' ? p.d : undefined,
           icon: typeof p.i === 'string' ? p.i : undefined,
           accentColor: typeof p.c === 'string' ? p.c : undefined,

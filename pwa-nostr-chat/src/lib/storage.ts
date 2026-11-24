@@ -407,6 +407,11 @@ export function loadTranscriptionConfig(): PersistedTranscriptionConfig {
   }
 }
 
+export const DEFAULT_PUSH_BRIDGE_URL =
+  'https://agnostr-push.carterhinsley.workers.dev'
+export const DEFAULT_VAPID_PUBLIC_KEY =
+  'BE9QkU-IRUe-sR41iijQzlEVp9XISMeBLcCyH5dEyaUtlNkxzUNtfnra_5ALcTxHuRDIdbPerGC06VjSgOjtjHE'
+
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   enabled: false,
   dms: true,
@@ -419,8 +424,8 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   ringtoneEnabled: true,
   vibrationEnabled: true,
   showPreviews: true,
-  pushBridgeUrl: '',
-  vapidPublicKey: '',
+  pushBridgeUrl: DEFAULT_PUSH_BRIDGE_URL,
+  vapidPublicKey: DEFAULT_VAPID_PUBLIC_KEY,
 }
 
 function parseFilterMode(
@@ -436,6 +441,22 @@ export function loadNotificationSettings(): NotificationSettings {
     safeGet(KEYS.notifications),
     {}
   )
+  const persistedBridgeUrl =
+    typeof parsed.pushBridgeUrl === 'string'
+      ? parsed.pushBridgeUrl.trim().slice(0, 256)
+      : ''
+  const resolvedBridgeUrl = persistedBridgeUrl || DEFAULT_PUSH_BRIDGE_URL
+  const persistedVapidKey =
+    typeof parsed.vapidPublicKey === 'string'
+      ? parsed.vapidPublicKey.trim().slice(0, 256)
+      : ''
+  const normalizedBridgeUrl = resolvedBridgeUrl.replace(/\/+$/, '')
+  const resolvedVapidKey =
+    persistedVapidKey ||
+    (normalizedBridgeUrl === DEFAULT_PUSH_BRIDGE_URL
+      ? DEFAULT_VAPID_PUBLIC_KEY
+      : '')
+
   return {
     enabled:
       typeof parsed.enabled === 'boolean'
@@ -481,14 +502,8 @@ export function loadNotificationSettings(): NotificationSettings {
       typeof parsed.showPreviews === 'boolean'
         ? parsed.showPreviews
         : DEFAULT_NOTIFICATION_SETTINGS.showPreviews,
-    pushBridgeUrl:
-      typeof parsed.pushBridgeUrl === 'string'
-        ? parsed.pushBridgeUrl.trim().slice(0, 256)
-        : '',
-    vapidPublicKey:
-      typeof parsed.vapidPublicKey === 'string'
-        ? parsed.vapidPublicKey.trim().slice(0, 256)
-        : '',
+    pushBridgeUrl: resolvedBridgeUrl,
+    vapidPublicKey: resolvedVapidKey,
   }
 }
 

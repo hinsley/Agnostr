@@ -817,6 +817,16 @@
   background-color: var(--bg-active);
 }
 
+.ag-wbtn-secondary.active {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ag-wbtn-secondary.active:hover:not(:disabled) {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
 .ag-wbtn-ghost {
   background-color: transparent;
   color: var(--text-secondary);
@@ -918,16 +928,51 @@
 }
 
 .ag-wallet-qr-frame {
-  width: 204px;
+  width: 208px;
   max-width: 100%;
   aspect-ratio: 1;
   background-color: #ffffff;
+  color: #111111;
   border-radius: var(--radius-lg);
-  padding: 0.65rem;
+  padding: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: var(--shadow-md);
+  margin-inline: auto;
+  box-shadow:
+    0 2px 12px rgba(0, 0, 0, 0.14),
+    0 0 0 1px rgba(15, 23, 42, 0.09);
+}
+
+.ag-wallet-qr-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.18rem;
+  padding: 0.18rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-canvas);
+  max-width: 100%;
+}
+
+.ag-wallet-qr-mode-btn {
+  padding: 0.24rem 0.65rem;
+  border-radius: var(--radius-full);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-wallet-qr-mode-btn:hover {
+  color: var(--text-primary);
+}
+
+.ag-wallet-qr-mode-btn.active {
+  background-color: var(--accent-soft);
+  color: var(--accent);
 }
 
 .ag-wallet-qr-svg {
@@ -1266,6 +1311,26 @@
   flex-shrink: 0;
 }
 
+.ag-wallet-zap-qr-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.78rem 0.72rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-canvas);
+  min-width: 0;
+}
+
+.ag-wallet-zap-qr-addr {
+  width: 100%;
+  text-align: center;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
 .ag-wallet-zap-meta {
   margin: 0;
   font-size: 11.5px;
@@ -1347,12 +1412,19 @@
 
 .ag-wallet-perm-zap-strip {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
   gap: 0.65rem;
-  padding: 0.62rem 0.78rem;
+  padding: 0.65rem 0.78rem;
   border-radius: var(--radius-lg);
   background-color: var(--bg-elevated);
+  min-width: 0;
+}
+
+.ag-wallet-perm-zap-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
   min-width: 0;
 }
 
@@ -1376,6 +1448,23 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ag-wallet-perm-zap-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.ag-wallet-perm-zap-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.65rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 65%, transparent);
+  min-width: 0;
 }
 
 /* Zap Modal Nutzap vs Lightning Segmented Toggle */
@@ -1843,7 +1932,8 @@
   }
 
   .ag-wallet-qr-frame {
-    width: 188px;
+    width: 192px;
+    padding: 10px;
   }
 
   .ag-wallet-zap-card {
@@ -1858,13 +1948,30 @@
   }
 
   .ag-wallet-zap-addr-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    width: 100%;
+  }
+
+  .ag-wallet-zap-addr-actions .ag-wbtn {
+    flex: 1 1 auto;
+  }
+
+  .ag-wallet-perm-zap-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.45rem;
+  }
+
+  .ag-wallet-perm-zap-actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.4rem;
     width: 100%;
   }
 
-  .ag-wallet-zap-addr-actions .ag-wbtn {
+  .ag-wallet-perm-zap-actions .ag-wbtn {
     width: 100%;
   }
 }

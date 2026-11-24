@@ -176,7 +176,7 @@ export function RoomInfoSheet({
     activeView.type === 'dm'
       ? 'Contact Info'
       : activeView.type === 'server'
-        ? 'Server Info'
+        ? 'Group Info'
         : 'Room Info'
 
   const handleZoomOut = () => {
@@ -1145,27 +1145,27 @@ export function RoomInfoSheet({
   const renderServerBody = () => {
     const activeServer = servers.activeServer
     if (!activeServer) {
-      return <p className="ag-sheet-empty">No server selected.</p>
+      return <p className="ag-sheet-empty">No group selected.</p>
     }
 
     const modeLabel =
       activeServer.kind === 'nip29'
-        ? 'Relay community'
+        ? 'Hosted group'
         : activeServer.encrypted
-          ? 'Encrypted server'
-          : 'Public server'
+          ? 'Encrypted group'
+          : 'Public group'
 
     const handleCopyInvite = async () => {
       const built = servers.buildInviteLink(activeServer.id)
       if (!built) {
-        engine.pushToast('warning', 'Invite link unavailable for this server')
+        engine.pushToast('warning', 'Invite link unavailable for this group')
         return
       }
       await copyText(
         'invite',
         built.url,
         'Copied invite link',
-        activeServer.encrypted ? 'Includes server key — share only with invited peers' : undefined,
+        activeServer.encrypted ? 'Includes group key — share only with invited peers' : undefined,
       )
     }
 
@@ -1173,14 +1173,14 @@ export function RoomInfoSheet({
       if (!onShowQr) return
       const built = servers.buildInviteLink(activeServer.id)
       if (!built) {
-        engine.pushToast('warning', 'Invite link unavailable for this server')
+        engine.pushToast('warning', 'Invite link unavailable for this group')
         return
       }
       onPlaySound?.('click')
       onShowQr({
         kind: 'server',
         title: activeServer.name,
-        subtitle: activeServer.encrypted ? 'Encrypted community invite' : 'Community invite link',
+        subtitle: activeServer.encrypted ? 'Encrypted group invite' : 'Group invite link',
         url: built.url,
         codeLabel: 'Invite code',
         codeValue: built.code,
@@ -1258,7 +1258,7 @@ export function RoomInfoSheet({
             }}
           >
             <Settings size={17} />
-            <span>Server Settings</span>
+            <span>Group Settings</span>
           </button>
         </div>
 
@@ -1430,7 +1430,7 @@ export function RoomInfoSheet({
             onClick={() => void handleLeave()}
           >
             <LogOut size={15} />
-            <span>{confirmLeave ? 'Tap again to leave server' : 'Leave Server'}</span>
+            <span>{confirmLeave ? 'Tap again to leave group' : 'Leave Group'}</span>
           </button>
         </section>
       </>

@@ -148,7 +148,7 @@ export const AppRail: React.FC<AppRailProps> = ({
       },
       {
         id: `rail-srv-settings-${server.id}`,
-        label: 'Server Settings',
+        label: 'Group Settings',
         icon: <Settings size={14} />,
         onSelect: () => {
           onPlaySound?.('click')
@@ -157,7 +157,7 @@ export const AppRail: React.FC<AppRailProps> = ({
       },
       {
         id: `rail-srv-leave-${server.id}`,
-        label: 'Leave Server',
+        label: 'Leave Group',
         icon: <LogOut size={14} />,
         danger: true,
         dividerBefore: true,
@@ -175,7 +175,7 @@ export const AppRail: React.FC<AppRailProps> = ({
   }
 
   return (
-    <nav className="ag-app-rail ag-desktop-only" aria-label="Workspace and servers">
+    <nav className="ag-app-rail ag-desktop-only" aria-label="Workspace and groups">
       {/* Primary First-Class Workspaces */}
       <div className="ag-rail-group">
         {/* Radio */}
@@ -309,7 +309,7 @@ export const AppRail: React.FC<AppRailProps> = ({
       <div className="ag-rail-divider" aria-hidden="true" />
 
       {/* Discord-Style Vertical Server Squircle Rail */}
-      <div className="ag-rail-servers" onScroll={hideTooltip} role="list" aria-label="Servers">
+      <div className="ag-rail-servers" onScroll={hideTooltip} role="list" aria-label="Groups">
         {engine.servers.joinedServers.map((server) => {
           const active =
             workspace === 'chat' &&
@@ -399,11 +399,11 @@ export const AppRail: React.FC<AppRailProps> = ({
               onPlaySound?.('click')
               onOpenServerHub('create')
             }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Create or join server')}
+            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Create or join group')}
             onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'Create or join server')}
+            onFocus={(e) => showTooltip(e.currentTarget, 'Create or join group')}
             onBlur={hideTooltip}
-            aria-label="Create or join server"
+            aria-label="Create or join group"
           >
             <Plus size={19} strokeWidth={2} />
           </button>

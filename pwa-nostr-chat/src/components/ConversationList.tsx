@@ -639,7 +639,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             onShowQr({
               kind: 'server',
               title: server.name,
-              subtitle: server.encrypted ? 'Encrypted Community Invite' : 'Community Invite',
+              subtitle: server.encrypted ? 'Encrypted Group Invite' : 'Group Invite',
               url: invite.url,
               codeLabel: 'Invite Code',
               codeValue: invite.code,
@@ -652,7 +652,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     items.push(
       {
         id: `srv-settings-${server.id}`,
-        label: 'Server Info & Settings',
+        label: 'Group Info & Settings',
         icon: <Settings size={15} />,
         dividerBefore: true,
         onSelect: () => {
@@ -662,7 +662,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       },
       {
         id: `srv-leave-${server.id}`,
-        label: 'Leave Community',
+        label: 'Leave Group',
         icon: <LogOut size={15} />,
         danger: true,
         dividerBefore: true,
@@ -708,7 +708,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             onShowQr({
               kind: 'server',
               title: server.name,
-              subtitle: server.encrypted ? 'Encrypted Server Invite' : 'Server Invite',
+              subtitle: server.encrypted ? 'Encrypted Group Invite' : 'Group Invite',
               url: invite.url,
               codeLabel: 'Invite Code',
               codeValue: invite.code,
@@ -751,7 +751,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     items.push(
       {
         id: `srv-head-settings-${server.id}`,
-        label: 'Server Settings',
+        label: 'Group Settings',
         icon: <Settings size={14} />,
         dividerBefore: !canAddChannel,
         onSelect: () => {
@@ -761,7 +761,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       },
       {
         id: `srv-head-leave-${server.id}`,
-        label: 'Leave Server',
+        label: 'Leave Group',
         icon: <LogOut size={14} />,
         danger: true,
         dividerBefore: true,
@@ -945,7 +945,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       return (
         <div className="ag-srv-discord-pane">
           <div className="ag-conv-header">
-            <span className="ag-conv-section-title">Servers</span>
+            <span className="ag-conv-section-title">Groups</span>
             <div className="ag-conv-header-actions">
               <button
                 type="button"
@@ -954,8 +954,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   onPlaySound?.('click')
                   onOpenServerHub('create')
                 }}
-                title="Create or join server"
-                aria-label="Create or join server"
+                title="Create or join group"
+                aria-label="Create or join group"
               >
                 <Plus size={17} />
               </button>
@@ -966,7 +966,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             <div className="ag-conv-empty-icon">
               <Users size={22} />
             </div>
-            <h3>No servers yet</h3>
+            <h3>No groups yet</h3>
             <div className="ag-srv-empty-actions">
               <button
                 type="button"
@@ -1072,7 +1072,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               ) : (
                 <UserPlus size={13} />
               )}
-              <span>{joiningNip29ServerId === server.id ? 'Joining…' : 'Join Server'}</span>
+              <span>{joiningNip29ServerId === server.id ? 'Joining…' : 'Join Group'}</span>
             </button>
           )}
 
@@ -1367,7 +1367,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       {activeTab === 'servers' ? (
         isMobileServersSplit ? (
           <div className="ag-srv-mobile-split">
-            <div className="ag-srv-mobile-rail" role="list" aria-label="Servers">
+            <div className="ag-srv-mobile-rail" role="list" aria-label="Groups">
               {joinedServers.map((server) => {
                 const active = selectedServer?.id === server.id
                 const srvUnread = Math.max(
@@ -1446,7 +1446,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     onPlaySound?.('click')
                     onOpenServerHub('create')
                   }}
-                  aria-label="Create or join server"
+                  aria-label="Create or join group"
                 >
                   <Plus size={18} strokeWidth={2} />
                 </button>

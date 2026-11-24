@@ -313,14 +313,14 @@ export function ServerSettingsModal({
             type="button"
             className="ag-icon-btn-sm"
             onClick={onClose}
-            aria-label="Close server settings"
+            aria-label="Close group settings"
           >
             <X size={15} />
           </button>
         </div>
 
         {/* Settings Tabs */}
-        <div className="ag-segmented ag-srv-settings-tabs" role="tablist" aria-label="Server settings tabs">
+        <div className="ag-segmented ag-srv-settings-tabs" role="tablist" aria-label="Group settings tabs">
           <button
             type="button"
             role="tab"
@@ -380,7 +380,7 @@ export function ServerSettingsModal({
                     <div className="ag-privacy-callout">
                       <AlertTriangle size={13} />
                       <span>
-                        This invite includes the <strong>server decryption key</strong>. Share only
+                        This invite includes the <strong>group decryption key</strong>. Share only
                         with invited people.
                       </span>
                     </div>
@@ -412,8 +412,8 @@ export function ServerSettingsModal({
                               kind: 'server',
                               title: liveServer.name,
                               subtitle: liveServer.encrypted
-                                ? 'Encrypted community invite'
-                                : 'Community invite link',
+                                ? 'Encrypted group invite'
+                                : 'Group invite link',
                               url: inviteData.url,
                               codeLabel: 'Invite code',
                               codeValue: inviteData.code,
@@ -520,7 +520,7 @@ export function ServerSettingsModal({
                   <div className="ag-panel-card-head">
                     <div className="ag-panel-card-title">
                       <Server size={13} />
-                      <span>SERVER PROFILE</span>
+                      <span>GROUP PROFILE</span>
                     </div>
                   </div>
                   <form className="ag-srv-form" onSubmit={(e) => void handleSaveMetadata(e)}>
@@ -531,7 +531,7 @@ export function ServerSettingsModal({
                         className="ag-input ag-srv-icon-input"
                         value={iconDraft}
                         onChange={(e) => setIconDraft(e.target.value)}
-                        aria-label="Server icon emoji"
+                        aria-label="Group icon emoji"
                         title="Icon emoji"
                       />
                       <input
@@ -540,8 +540,8 @@ export function ServerSettingsModal({
                         className="ag-input"
                         value={nameDraft}
                         onChange={(e) => setNameDraft(e.target.value)}
-                        placeholder="Server name"
-                        aria-label="Server name"
+                        placeholder="Group name"
+                        aria-label="Group name"
                       />
                     </div>
                     <input
@@ -550,8 +550,8 @@ export function ServerSettingsModal({
                       className="ag-input"
                       value={descDraft}
                       onChange={(e) => setDescDraft(e.target.value)}
-                      placeholder="Server description"
-                      aria-label="Server description"
+                      placeholder="Group description"
+                      aria-label="Group description"
                     />
                     <div className="ag-srv-meta-save-row">
                       <div className="ag-color-swatches">
@@ -585,7 +585,7 @@ export function ServerSettingsModal({
                 <div className="ag-panel-card-head">
                   <div className="ag-panel-card-title ag-tone-danger">
                     <LogOut size={13} />
-                    <span>LEAVE SERVER</span>
+                    <span>LEAVE GROUP</span>
                   </div>
                   <button
                     type="button"
@@ -593,11 +593,11 @@ export function ServerSettingsModal({
                     onClick={() => void handleLeave()}
                   >
                     <LogOut size={13} />
-                    <span>{confirmLeave ? 'Click Again to Leave' : 'Leave Server'}</span>
+                    <span>{confirmLeave ? 'Click Again to Leave' : 'Leave Group'}</span>
                   </button>
                 </div>
                 <p className="ag-field-hint">
-                  Removes this server{liveServer.encrypted ? ' and its local E2EE key' : ''} from
+                  Removes this group{liveServer.encrypted ? ' and its local E2EE key' : ''} from
                   your sidebar.
                 </p>
               </section>
@@ -870,7 +870,7 @@ export function ServerSettingsModal({
                   <ShieldOff size={20} className="ag-empty-icon" />
                   <p className="ag-empty-title">No banned pubkeys</p>
                   <p className="ag-empty-sub">
-                    Banned people are hidden from this server.
+                    Banned people are hidden from this group.
                   </p>
                 </div>
               ) : (

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Filter } from 'nostr-tools'
+import type { PushPokePayload } from '../types/notifications.ts'
 import type {
   ActiveView,
   AgnostrEngine,
@@ -1771,6 +1772,11 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   // Direct Messages (dual-stack: Bitchat v2 + NIP-17)
   const activeDmPeer = activeView.type === 'dm' ? activeView.peerPubkey : null
+  const pokeRecipientsRef = useRef<(payload: PushPokePayload) => void>(() => {})
+  const handlePushPoke = useCallback((payload: PushPokePayload) => {
+    pokeRecipientsRef.current(payload)
+  }, [])
+
   const {
     dmThreads,
     dmClearedAt,
@@ -1796,6 +1802,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     onIncomingDm: (senderHandle, preview) => {
       pushToast('info', `Encrypted DM from ${senderHandle}`, preview)
     },
+    onNotifyPushPoke: handlePushPoke,
     onError: (title, detail) => {
       pushToast('error', title, detail)
     },
@@ -1933,6 +1940,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     allowScreenedUntrustedGroupCalls,
     strictWhitelistMode: settings.strictWhitelistMode,
     getPeerNickname: getCallPeerNickname,
+    onNotifyPushPoke: handlePushPoke,
     pushToast,
   })
 
@@ -1951,6 +1959,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     blockedPubkeys,
     turnConfig: callsEngine.turnConfig,
     onLocalChange: handleAmailLocalChange,
+    onNotifyPushPoke: handlePushPoke,
     pushToast,
   })
 
@@ -2603,7 +2612,40 @@ export function useAgnostrEngine(): AgnostrEngine {
                 { allowBackgroundPersist: true }
               )
 
-              if (!ok) {
+              if (ok) {
+                const pokeSet = new Set<string>()
+                if (replyTarget && !replyTarget.isSystem && replyTarget.pubkey) {
+                  const rpk = replyTarget.pubkey.toLowerCase()
+                  if (/^[0-9a-f]{64}$/.test(rpk) && !ownPubkeysRef.current.has(rpk)) {
+                    pokeSet.add(rpk)
+                  }
+                }
+                const contentMentions = extractMentions(content)
+                if (contentMentions.length > 0) {
+                  const roomPeers = presenceTracker.getPeers(
+                    gh,
+                    ownPubkeysRef.current,
+                    blockedSetRef.current
+                  )
+                  for (const peer of roomPeers) {
+                    const ppk = peer.pubkey.toLowerCase()
+                    if (peer.isSelf || ownPubkeysRef.current.has(ppk)) continue
+                    if (doesContentMentionUser(content, contentMentions, peer.nickname, ppk)) {
+                      pokeSet.add(ppk)
+                    }
+                  }
+                }
+                if (pokeSet.size > 0) {
+                  handlePushPoke({
+                    recipientPubkeys: Array.from(pokeSet),
+                    category: 'geo-message',
+                    eventId: signed.id,
+                    geohash: gh,
+                    senderName: nick,
+                    preview: content.slice(0, 110),
+                  })
+                }
+              } else {
                 pushToast(
                   'error',
                   'Failed to broadcast message',
@@ -2656,6 +2698,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       upsertChannelPreview,
       recordRoomMessage,
       adjustInFlightSend,
+      presenceTracker,
+      handlePushPoke,
       pushToast,
     ]
   )
@@ -2773,7 +2817,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     }
     if (activeView.type === 'server') {
       serversEngine.clearChannelCache()
-      pushToast('info', 'Channel cleared', 'Local server channel cache cleared.')
+      pushToast('info', 'Channel cleared', 'Local group channel cache cleared.')
       return
     }
     const gh = activeGeohashRef.current
@@ -3524,9 +3568,14 @@ export function useAgnostrEngine(): AgnostrEngine {
     ownGeoCallPubkeys,
     relayUrls: notificationRelayUrls,
     pinnedGeohashes: pinnedGeohashList,
+    canAutoSign: identityManager.getMasterKeyMaterial().mode === 'local',
     signEvent: signNotificationEvent,
     pushToast,
   })
+
+  useLayoutEffect(() => {
+    pokeRecipientsRef.current = notificationsEngine.pokeRecipients
+  }, [notificationsEngine.pokeRecipients])
 
   useLayoutEffect(() => {
     notifyGeoMessageRef.current = notifyGeoMessage
@@ -4053,7 +4102,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     pushToast(
       'warning',
       'Panic Wipe Complete',
-      'All local keys, caches, Agmail vault, Agwallet proofs, servers, trusted peers, active calls, and decrypted audio purged. Fresh identity active.'
+      'All local keys, caches, Agmail vault, Agwallet proofs, groups, trusted peers, active calls, and decrypted audio purged. Fresh identity active.'
     )
   }, [
     pool,

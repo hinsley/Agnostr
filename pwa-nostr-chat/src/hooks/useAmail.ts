@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TurnServerConfig } from '../types/calls.ts'
+import type { PushPokePayload } from '../types/notifications.ts'
 import type { ToastLevel, TrustedPeerEntry } from '../types/protocol.ts'
 import {
   DEFAULT_AMAIL_RELAY_SETTINGS,
@@ -48,6 +49,7 @@ export interface UseAmailOptions {
   blockedPubkeys: string[]
   turnConfig?: TurnServerConfig | null
   onLocalChange?: () => void
+  onNotifyPushPoke?: (payload: PushPokePayload) => void
   pushToast?: (level: ToastLevel, title: string, detail?: string) => void
 }
 
@@ -171,6 +173,9 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
   const onLocalChangeRef = useRef(options.onLocalChange)
   onLocalChangeRef.current = options.onLocalChange
+
+  const onNotifyPushPokeRef = useRef(options.onNotifyPushPoke)
+  onNotifyPushPokeRef.current = options.onNotifyPushPoke
 
   const activeNicknameRef = useRef(activeNickname)
   activeNicknameRef.current = activeNickname
@@ -780,6 +785,15 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         for (const capsule of sealedCapsules) {
           const relayed = (await meshRef.current?.publishLocalCapsule(capsule)) ?? 0
           if (relayed > maxRelayed) maxRelayed = relayed
+        }
+
+        // Fire blind 0ms push wake for remote recipients (zero plaintext / zero subject)
+        if (remoteRecipients.length > 0) {
+          onNotifyPushPokeRef.current?.({
+            recipientPubkeys: remoteRecipients.map((r) => r.pubkey),
+            category: 'agmail',
+            eventId: mailId,
+          })
         }
 
         if (maxRelayed > 0) {

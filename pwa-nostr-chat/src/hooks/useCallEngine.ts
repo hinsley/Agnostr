@@ -12,6 +12,7 @@ import {
   type RoomCallPresence,
   type TurnServerConfig,
 } from '../types/calls.ts'
+import type { PushPokePayload } from '../types/notifications.ts'
 import type { ToastLevel } from '../types/protocol.ts'
 import type { ServerSummary } from '../types/servers.ts'
 import { verifyEventCached } from '../lib/bitchatProtocol.ts'
@@ -106,6 +107,7 @@ export interface UseCallEngineParams {
   allowScreenedUntrustedGroupCalls?: boolean
   strictWhitelistMode?: boolean
   getPeerNickname: (pubkey: string) => string | undefined
+  onNotifyPushPoke?: (payload: PushPokePayload) => void
   pushToast: (level: ToastLevel, title: string, detail?: string) => void
 }
 
@@ -128,6 +130,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     isExplicitlyTrusted,
     allowScreenedUntrustedGroupCalls = false,
     getPeerNickname,
+    onNotifyPushPoke,
     pushToast,
   } = params
 
@@ -175,6 +178,9 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
   const getPeerNicknameRef = useRef(getPeerNickname)
   getPeerNicknameRef.current = getPeerNickname
+
+  const onNotifyPushPokeRef = useRef(onNotifyPushPoke)
+  onNotifyPushPokeRef.current = onNotifyPushPoke
 
   const pushToastRef = useRef(pushToast)
   pushToastRef.current = pushToast
@@ -596,6 +602,13 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             callId: current.callId,
             ts: Date.now(),
           })
+          if (action === 'call-cancel') {
+            onNotifyPushPokeRef.current?.({
+              recipientPubkeys: [current.peerPubkey],
+              category: 'call-cancel',
+              callId: current.callId,
+            })
+          }
         } else if (current.mode === 'server' && current.serverId) {
           const roomId = current.roomId ?? DEFAULT_SERVER_VOICE_ROOM_ID
           const server = serversRef.current.find((s) => s.id === current.serverId)
@@ -1154,6 +1167,13 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         ts: Date.now(),
       })
 
+      onNotifyPushPokeRef.current?.({
+        recipientPubkeys: [pk],
+        category: 'dm-call',
+        callId,
+        mediaType: session.mediaType,
+      })
+
       // Periodically re-broadcast call-invite every 3.5s while awaiting pickup so waking/reconnecting PWAs ring reliably
       outgoingRingInviteTimerRef.current = window.setInterval(() => {
         const cur = activeCallRef.current
@@ -1323,7 +1343,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     ): Promise<boolean> => {
       const server = serversRef.current.find((s) => s.id === serverId)
       if (!server) {
-        pushToastRef.current('warning', 'Server not found', 'Join the server before entering its voice lounge.')
+        pushToastRef.current('warning', 'Group not found', 'Join the group before entering its voice lounge.')
         return false
       }
 
