@@ -82,12 +82,13 @@ export function IncomingCallBanner({
   const isFullScreenTakeover = isDm && (isNarrow || isStandalonePwa)
   const animateRing = isRinging && !isRingMuted
 
-  const callTypeLabel = isVideo ? 'Incoming Video Call' : 'Incoming Audio Call'
+  const callTypeLabel = isVideo ? 'Incoming video call' : 'Incoming voice call'
   const ringingSubtitle = isRingMuted
     ? `${callTypeLabel} · Muted`
-    : `${callTypeLabel} · Ringing…`
+    : callTypeLabel
+  const callerName = incoming.callerNickname || incoming.callerDisplayHandle
 
-  // Mobile (<= 640px) & Standalone PWA Full-Screen Incoming DM Call Screen
+  // Mobile (<= 640px) & Standalone PWA Full-Screen Native Incoming Direct Call Screen
   if (isFullScreenTakeover) {
     return (
       <div
@@ -98,7 +99,7 @@ export function IncomingCallBanner({
         aria-labelledby="ag-incoming-caller"
       >
         <div className="ag-incoming-fs-inner">
-          {/* Top Bar: Encryption Pill + Mute Ringer */}
+          {/* Top Bar: Quiet E2EE Pill + Quiet Ringer Mute */}
           <div className="ag-incoming-fs-top">
             <span className="ag-incoming-fs-e2ee">
               <Lock size={12} />
@@ -111,15 +112,15 @@ export function IncomingCallBanner({
                 className={`ag-incoming-mute-pill ${isRingMuted ? 'muted' : ''}`}
                 onClick={onMuteRing}
                 aria-pressed={isRingMuted}
-                aria-label={isRingMuted ? 'Ringer muted' : 'Mute ringer'}
+                aria-label={isRingMuted ? 'Ringer muted' : 'Mute ringtone'}
               >
                 {isRingMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                <span>{isRingMuted ? 'Muted' : 'Mute Ringer'}</span>
+                <span>{isRingMuted ? 'Muted' : 'Mute'}</span>
               </button>
             )}
           </div>
 
-          {/* Center Caller Hero with Pulsing Blue Sonar Halo */}
+          {/* Center Caller Hero with Pulsing Concentric Halo */}
           <div className="ag-incoming-fs-hero">
             <div className="ag-incoming-fs-avatar-wrap">
               {animateRing && (
@@ -131,27 +132,29 @@ export function IncomingCallBanner({
               <AvatarImg
                 pubkey={incoming.callerPubkey}
                 pictureUrl={resolvedCallerAvatarUrl}
-                width={104}
-                height={104}
+                width={116}
+                height={116}
                 className="ag-incoming-fs-avatar"
               />
             </div>
 
             <div className="ag-incoming-fs-identity">
               <h2 id="ag-incoming-caller" className="ag-incoming-fs-name truncate">
-                {incoming.callerNickname || incoming.callerDisplayHandle}
+                {callerName}
               </h2>
-              <p
-                className="ag-incoming-fs-handle truncate"
-                style={{ color: callerColor }}
-              >
-                {incoming.callerDisplayHandle}
-              </p>
+              {incoming.callerDisplayHandle && incoming.callerDisplayHandle !== callerName && (
+                <p
+                  className="ag-incoming-fs-handle truncate"
+                  style={{ color: callerColor }}
+                >
+                  {incoming.callerDisplayHandle}
+                </p>
+              )}
               <p className="ag-incoming-fs-status">{ringingSubtitle}</p>
             </div>
           </div>
 
-          {/* Bottom Tactile Answer / Decline Controls */}
+          {/* Bottom Tactile Decline / Answer Phone Controls */}
           <div className="ag-incoming-fs-controls">
             {isVideo && (
               <button
@@ -160,7 +163,7 @@ export function IncomingCallBanner({
                 onClick={onAcceptAudio}
               >
                 <Phone size={15} />
-                <span>Answer Audio Only</span>
+                <span>Audio Only</span>
               </button>
             )}
 
@@ -172,7 +175,7 @@ export function IncomingCallBanner({
                   onClick={onDecline}
                   aria-label="Decline call"
                 >
-                  <PhoneOff size={26} />
+                  <PhoneOff size={28} />
                 </button>
                 <span className="ag-incoming-fs-btn-label">Decline</span>
               </div>
@@ -182,9 +185,9 @@ export function IncomingCallBanner({
                   type="button"
                   className="ag-incoming-fs-round answer"
                   onClick={isVideo ? onAcceptVideo : onAcceptAudio}
-                  aria-label={isVideo ? 'Answer video call' : 'Answer audio call'}
+                  aria-label={isVideo ? 'Answer video call' : 'Answer voice call'}
                 >
-                  {isVideo ? <Video size={26} /> : <Phone size={26} />}
+                  {isVideo ? <Video size={28} /> : <Phone size={28} />}
                 </button>
                 <span className="ag-incoming-fs-btn-label">Answer</span>
               </div>
@@ -195,7 +198,106 @@ export function IncomingCallBanner({
     )
   }
 
-  // Desktop (> 640px) Elevated Top-Center Ringing Card (and Server Group Call Invite Card)
+  // Desktop (> 640px) Bold Native Incoming 1-on-1 Direct Call Overlay Card
+  if (isDm) {
+    return (
+      <div
+        className={`ag-incoming-dm-card ${animateRing ? 'ringing' : ''}`}
+        role="alertdialog"
+        aria-live="assertive"
+        aria-labelledby="ag-incoming-caller"
+      >
+        <div className="ag-incoming-dm-top">
+          <span className="ag-incoming-fs-e2ee">
+            <Lock size={11} />
+            <span>End-to-end encrypted</span>
+          </span>
+
+          {onMuteRing && (
+            <button
+              type="button"
+              className={`ag-icon-btn-sm ag-incoming-mute-icon ${isRingMuted ? 'muted' : ''}`}
+              onClick={onMuteRing}
+              aria-pressed={isRingMuted}
+              title={isRingMuted ? 'Ringer muted' : 'Mute ringtone'}
+              aria-label={isRingMuted ? 'Ringer muted' : 'Mute ringtone'}
+            >
+              {isRingMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+            </button>
+          )}
+        </div>
+
+        <div className="ag-incoming-dm-hero">
+          <div className="ag-incoming-dm-avatar-wrap">
+            {animateRing && (
+              <>
+                <span className="ag-incoming-fs-halo" aria-hidden="true" />
+                <span className="ag-incoming-fs-halo delay" aria-hidden="true" />
+              </>
+            )}
+            <AvatarImg
+              pubkey={incoming.callerPubkey}
+              pictureUrl={resolvedCallerAvatarUrl}
+              width={88}
+              height={88}
+              className="ag-incoming-dm-avatar"
+            />
+          </div>
+
+          <div className="ag-incoming-dm-identity">
+            <h2 id="ag-incoming-caller" className="ag-incoming-dm-name truncate">
+              {callerName}
+            </h2>
+            {incoming.callerDisplayHandle && incoming.callerDisplayHandle !== callerName && (
+              <p className="ag-incoming-dm-handle truncate" style={{ color: callerColor }}>
+                {incoming.callerDisplayHandle}
+              </p>
+            )}
+            <p className="ag-incoming-dm-status">{ringingSubtitle}</p>
+          </div>
+        </div>
+
+        {isVideo && (
+          <button
+            type="button"
+            className="ag-incoming-dm-audio-only"
+            onClick={onAcceptAudio}
+          >
+            <Phone size={14} />
+            <span>Audio Only</span>
+          </button>
+        )}
+
+        <div className="ag-incoming-dm-btns">
+          <div className="ag-incoming-fs-btn-col">
+            <button
+              type="button"
+              className="ag-incoming-dm-round decline"
+              onClick={onDecline}
+              aria-label="Decline call"
+            >
+              <PhoneOff size={24} />
+            </button>
+            <span className="ag-incoming-fs-btn-label">Decline</span>
+          </div>
+
+          <div className="ag-incoming-fs-btn-col">
+            <button
+              type="button"
+              className="ag-incoming-dm-round answer"
+              onClick={isVideo ? onAcceptVideo : onAcceptAudio}
+              aria-label={isVideo ? 'Answer video call' : 'Answer voice call'}
+            >
+              {isVideo ? <Video size={24} /> : <Phone size={24} />}
+            </button>
+            <span className="ag-incoming-fs-btn-label">Answer</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Server Group Call Invite Card
   return (
     <div
       className={`ag-incoming-call ${animateRing ? 'ringing' : ''}`}
@@ -224,42 +326,15 @@ export function IncomingCallBanner({
             {incoming.callerDisplayHandle}
           </div>
           <div className="ag-incoming-subtitle truncate">
-            {isDm ? ringingSubtitle : `Group Call · ${isVideo ? 'Video' : 'Voice'}`}
+            {`Group Call · ${isVideo ? 'Video' : 'Voice'}`}
           </div>
           <div className="ag-incoming-badges">
             <span className="ag-badge ag-badge-accent">
-              {isDm ? (
-                isVideo ? (
-                  <Video size={10} />
-                ) : (
-                  <Phone size={10} />
-                )
-              ) : (
-                <Users size={10} />
-              )}
-              <span>{isDm ? (isVideo ? 'Video' : 'Audio') : 'Group'}</span>
+              <Users size={10} />
+              <span>Group</span>
             </span>
-            {isDm && (
-              <span className="ag-badge ag-badge-dm">
-                <Lock size={10} />
-                <span>E2EE</span>
-              </span>
-            )}
           </div>
         </div>
-
-        {isDm && onMuteRing && (
-          <button
-            type="button"
-            className={`ag-icon-btn-sm ag-incoming-mute-icon ${isRingMuted ? 'muted' : ''}`}
-            onClick={onMuteRing}
-            aria-pressed={isRingMuted}
-            title={isRingMuted ? 'Ringer muted' : 'Mute ringer'}
-            aria-label={isRingMuted ? 'Ringer muted' : 'Mute ringer'}
-          >
-            {isRingMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
-          </button>
-        )}
       </div>
 
       <div className="ag-incoming-actions">

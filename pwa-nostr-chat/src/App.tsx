@@ -418,6 +418,18 @@ export function App() {
       if (payload.category === 'agmail') {
         setWorkspace('mail')
         setAmailState({ section: 'inbox', composeTo: null })
+      } else if (payload.category.startsWith('agora-')) {
+        setSuiteLauncherOpen(false)
+        setWorkspace('agora')
+        setAmailState({ section: 'inbox', composeTo: null })
+        engine.agora.activate()
+        if (payload.noteId) {
+          engine.agora.closeProfile()
+          void engine.agora.openThreadById(payload.noteId)
+        } else if (payload.peerPubkey) {
+          engine.agora.closeThread()
+          engine.agora.openProfile(payload.peerPubkey)
+        }
       } else {
         setWorkspace('chat')
         setAmailState({ section: 'inbox', composeTo: null })

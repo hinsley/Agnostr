@@ -119,6 +119,16 @@ function normalizePreferences(raw: unknown): StoredPushPreferences {
     ),
     serverCalls: parseFilterOrBool(obj.serverCalls, DEFAULT_PUSH_PREFERENCES.serverCalls),
     geoMessages: parseFilterMode(obj.geoMessages, DEFAULT_PUSH_PREFERENCES.geoMessages),
+    agoraRepliesMentions: parseFilterOrBool(
+      obj.agoraRepliesMentions,
+      DEFAULT_PUSH_PREFERENCES.agoraRepliesMentions
+    ),
+    agoraReactionsReposts: parseFilterOrBool(
+      obj.agoraReactionsReposts,
+      DEFAULT_PUSH_PREFERENCES.agoraReactionsReposts
+    ),
+    agoraZaps: parseFilterOrBool(obj.agoraZaps, DEFAULT_PUSH_PREFERENCES.agoraZaps),
+    agoraFollows: parseFilterOrBool(obj.agoraFollows, DEFAULT_PUSH_PREFERENCES.agoraFollows),
     showPreviews: parseFilterOrBool(obj.showPreviews, DEFAULT_PUSH_PREFERENCES.showPreviews),
   }
 }
@@ -440,6 +450,7 @@ interface PokeRequestBody {
   recipientPubkeys?: unknown
   category?: unknown
   eventId?: unknown
+  noteId?: unknown
   callId?: unknown
   mediaType?: unknown
   serverId?: unknown
@@ -460,6 +471,12 @@ const VALID_POKE_CATEGORIES = new Set<PokeCategory>([
   'agmail',
   'agmail-cc',
   'call-cancel',
+  'agora-reply',
+  'agora-mention',
+  'agora-like',
+  'agora-repost',
+  'agora-zap',
+  'agora-follow',
 ])
 
 function isPokeAllowedByPreferences(
@@ -496,6 +513,16 @@ function isPokeAllowedByPreferences(
       )
     case 'geo-call':
       return prefs.serverCalls || prefs.dmCallRinging || prefs.geoMessages !== 'off'
+    case 'agora-reply':
+    case 'agora-mention':
+      return prefs.agoraRepliesMentions
+    case 'agora-like':
+    case 'agora-repost':
+      return prefs.agoraReactionsReposts
+    case 'agora-zap':
+      return prefs.agoraZaps
+    case 'agora-follow':
+      return prefs.agoraFollows
     case 'test':
       return true
   }
@@ -507,6 +534,7 @@ function buildPokePayload(opts: {
   senderPubkey: string
   senderName?: string
   preview?: string
+  noteId?: string
   callId?: string
   mediaType?: 'audio' | 'video'
   serverId?: string
@@ -518,6 +546,7 @@ function buildPokePayload(opts: {
     category,
     recipientPubkey,
     senderPubkey,
+    noteId,
     callId,
     mediaType,
     serverId,
@@ -546,8 +575,11 @@ function buildPokePayload(opts: {
     const kindWord = mediaType === 'video' ? 'video' : 'voice'
     return {
       title: safeSender ? `Incoming ${kindWord} call · ${safeSender}` : `Incoming ${kindWord} call`,
-      body: `Incoming ${kindWord} call · Tap to accept`,
+      body: `Incoming ${kindWord} call · Tap to answer`,
       tag: callId ? `agnostr-call-${callId}` : 'agnostr-call',
+      renotify: true,
+      requireInteraction: true,
+      vibrate: [500, 220, 500, 220, 700],
       callId,
       data: {
         category: 'dm-call',
@@ -556,6 +588,99 @@ function buildPokePayload(opts: {
         peerPubkey: senderPubkey,
         recipientPubkey,
         callerNickname: safeSender || undefined,
+      },
+    }
+  }
+
+  if (category === 'agora-reply') {
+    return {
+      title: safeSender ? `${safeSender} replied on Agora` : 'New reply on Agora',
+      body: safePreview || 'Someone replied to your post on Agora.',
+      tag: noteId
+        ? `agnostr-agora-reply-${noteId.slice(0, 12)}`
+        : `agnostr-agora-reply-${senderPubkey.slice(0, 12)}`,
+      data: {
+        category: 'agora-reply',
+        noteId,
+        peerPubkey: senderPubkey,
+        recipientPubkey,
+      },
+    }
+  }
+
+  if (category === 'agora-mention') {
+    return {
+      title: safeSender ? `${safeSender} mentioned you on Agora` : 'New mention on Agora',
+      body: safePreview || 'Someone mentioned you on Agora.',
+      tag: noteId
+        ? `agnostr-agora-mention-${noteId.slice(0, 12)}`
+        : `agnostr-agora-mention-${senderPubkey.slice(0, 12)}`,
+      data: {
+        category: 'agora-mention',
+        noteId,
+        peerPubkey: senderPubkey,
+        recipientPubkey,
+      },
+    }
+  }
+
+  if (category === 'agora-like') {
+    return {
+      title: safeSender ? `${safeSender} liked your post` : 'New like on Agora',
+      body: safePreview || 'Someone liked your post on Agora.',
+      tag: noteId
+        ? `agnostr-agora-like-${noteId.slice(0, 12)}`
+        : `agnostr-agora-like-${senderPubkey.slice(0, 12)}`,
+      data: {
+        category: 'agora-like',
+        noteId,
+        peerPubkey: senderPubkey,
+        recipientPubkey,
+      },
+    }
+  }
+
+  if (category === 'agora-repost') {
+    return {
+      title: safeSender ? `${safeSender} reposted your note` : 'New repost on Agora',
+      body: safePreview || 'Someone reposted your note on Agora.',
+      tag: noteId
+        ? `agnostr-agora-repost-${noteId.slice(0, 12)}`
+        : `agnostr-agora-repost-${senderPubkey.slice(0, 12)}`,
+      data: {
+        category: 'agora-repost',
+        noteId,
+        peerPubkey: senderPubkey,
+        recipientPubkey,
+      },
+    }
+  }
+
+  if (category === 'agora-zap') {
+    return {
+      title: safeSender ? `${safeSender} zapped you on Agora` : 'New Zap on Agora',
+      body: safePreview || 'Someone zapped your post on Agora.',
+      tag: noteId
+        ? `agnostr-agora-zap-${noteId.slice(0, 12)}`
+        : `agnostr-agora-zap-${senderPubkey.slice(0, 12)}`,
+      data: {
+        category: 'agora-zap',
+        noteId,
+        peerPubkey: senderPubkey,
+        recipientPubkey,
+      },
+    }
+  }
+
+  if (category === 'agora-follow') {
+    return {
+      title: safeSender ? `${safeSender} followed you on Agora` : 'New follower on Agora',
+      body: 'Tap to view profile on Agora.',
+      tag: `agnostr-agora-follow-${senderPubkey.slice(0, 12)}`,
+      data: {
+        category: 'agora-follow',
+        peerPubkey: senderPubkey,
+        recipientPubkey,
       },
     }
   }
@@ -738,6 +863,7 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  const noteId = isHex64(body.noteId) ? body.noteId.toLowerCase() : undefined
   const callId = typeof body.callId === 'string' ? body.callId.trim().slice(0, 64) : undefined
   const mediaType = body.mediaType === 'video' ? 'video' : body.mediaType === 'audio' ? 'audio' : undefined
   const serverId = typeof body.serverId === 'string' ? body.serverId.trim().slice(0, 96) : undefined
@@ -748,7 +874,7 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
   const isMention = typeof body.isMention === 'boolean' ? body.isMention : undefined
 
   const isCall = category === 'dm-call' || category === 'server-call' || category === 'geo-call' || category === 'call-cancel'
-  const ttlSeconds = isCall ? 60 : 86_400
+  const ttlSeconds = category === 'dm-call' ? 45 : isCall ? 60 : 86_400
   const topic = callId && (category === 'dm-call' || category === 'call-cancel')
     ? `call-${callId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24)}`
     : undefined
@@ -804,6 +930,7 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
         senderPubkey: auth.pubkey,
         senderName,
         preview,
+        noteId,
         callId,
         mediaType,
         serverId,

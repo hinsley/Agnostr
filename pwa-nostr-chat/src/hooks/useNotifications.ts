@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { EventTemplate, VerifiedEvent } from 'nostr-tools'
 import type { GeoCallPresence, IncomingCallOffer, RoomCallPresence } from '../types/calls.ts'
 import type {
+  NotificationCategory,
   NotificationPayloadData,
   NotificationPermissionState,
   NotificationSettings,
@@ -89,6 +90,16 @@ export interface NotifyAmailInput {
   recipientRole: 'to' | 'cc' | 'bcc'
 }
 
+export interface NotifyAgoraInput {
+  id: string
+  kind: 'reply' | 'mention' | 'quote' | 'like' | 'repost' | 'zap' | 'follow'
+  actorPubkey: string
+  actorName: string
+  noteId?: string
+  preview?: string
+  sats?: number
+}
+
 export interface UseNotificationsParams {
   activeView: ActiveView
   activeGeohash: string
@@ -123,6 +134,7 @@ export interface UseNotificationsResult {
   notifyGeoMessage: (input: NotifyGeoMessageInput) => void
   notifyLocationNote: (input: NotifyLocationNoteInput) => void
   notifyAmail: (input: NotifyAmailInput) => boolean
+  notifyAgora: (input: NotifyAgoraInput) => void
   resetAllNotifications: () => void
 }
 
@@ -242,6 +254,7 @@ export function useNotifications(
   const seenGeoRosterKeysRef = useRef<Set<string>>(new Set())
   const rosterBootedRef = useRef<boolean>(false)
   const activeRingingCallIdRef = useRef<string | null>(null)
+  const swRingSafetyTimerRef = useRef<number | null>(null)
 
   const settingsRef = useRef(settings)
   settingsRef.current = settings
@@ -380,15 +393,85 @@ export function useNotifications(
     }
   }, [updateSettings])
 
-  // Listen for Service Worker notification click actions + hash deep links
+  // Listen for Service Worker notification click actions, incoming call ring wakeups, & hash deep links
   useEffect(() => {
+    const clearSwRingTimer = () => {
+      if (swRingSafetyTimerRef.current !== null) {
+        window.clearTimeout(swRingSafetyTimerRef.current)
+        swRingSafetyTimerRef.current = null
+      }
+    }
+
     const onSwMessage = (event: MessageEvent) => {
       const data = event.data as {
         type?: string
         action?: unknown
         payload?: NotificationPayloadData
+        callId?: string
+        peerPubkey?: string
+        recipientPubkey?: string
       } | null
-      if (!data || data.type !== 'AGNOSTR_NOTIFICATION_ACTION' || !data.payload) {
+      if (!data || typeof data !== 'object') return
+
+      if (data.type === 'agnostr-incoming-call-cancel') {
+        const cancelId = typeof data.callId === 'string' ? data.callId : null
+        if (!cancelId || activeRingingCallIdRef.current === cancelId) {
+          clearSwRingTimer()
+          activeRingingCallIdRef.current = null
+          soundEngine.stopIncomingRing()
+          setIsRinging(false)
+          setIsRingMuted(false)
+        }
+        return
+      }
+
+      if (data.type === 'agnostr-incoming-call-ring') {
+        const cfg = settingsRef.current
+        if (!cfg.dmCallRinging) return
+        const targetRecipient =
+          typeof data.recipientPubkey === 'string'
+            ? data.recipientPubkey.trim().toLowerCase()
+            : ''
+        if (
+          targetRecipient &&
+          masterPubkeyRef.current &&
+          targetRecipient !== masterPubkeyRef.current.toLowerCase()
+        ) {
+          return
+        }
+        const callerPk =
+          typeof data.peerPubkey === 'string' ? data.peerPubkey.trim().toLowerCase() : ''
+        if (callerPk) {
+          if (blockedSetRef.current.has(callerPk) || ownPubkeysRef.current.has(callerPk)) return
+          if (!trustedSetRef.current.has(callerPk)) return
+        }
+        const incomingId =
+          typeof data.callId === 'string' && data.callId.trim()
+            ? data.callId.trim()
+            : `sw-ring-${Date.now()}`
+        if (activeRingingCallIdRef.current !== incomingId) {
+          activeRingingCallIdRef.current = incomingId
+          setIsRingMuted(false)
+        }
+        soundEngine.startIncomingRing({
+          playAudio: cfg.ringtoneEnabled,
+          vibrate: cfg.vibrationEnabled,
+        })
+        setIsRinging(true)
+        clearSwRingTimer()
+        swRingSafetyTimerRef.current = window.setTimeout(() => {
+          swRingSafetyTimerRef.current = null
+          if (activeRingingCallIdRef.current === incomingId) {
+            activeRingingCallIdRef.current = null
+            soundEngine.stopIncomingRing()
+            setIsRinging(false)
+            setIsRingMuted(false)
+          }
+        }, 45_000)
+        return
+      }
+
+      if (data.type !== 'AGNOSTR_NOTIFICATION_ACTION' || !data.payload) {
         return
       }
       const rawAction = data.action
@@ -423,6 +506,7 @@ export function useNotifications(
     window.addEventListener('hashchange', onHashChange)
 
     return () => {
+      clearSwRingTimer()
       if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
         navigator.serviceWorker.removeEventListener('message', onSwMessage)
       }
@@ -439,6 +523,10 @@ export function useNotifications(
 
     if (!incomingCall || callerBlocked) {
       if (prevCallId) {
+        if (swRingSafetyTimerRef.current !== null) {
+          window.clearTimeout(swRingSafetyTimerRef.current)
+          swRingSafetyTimerRef.current = null
+        }
         activeRingingCallIdRef.current = null
         soundEngine.stopIncomingRing()
         setIsRinging(false)
@@ -1058,6 +1146,158 @@ export function useNotifications(
     [canSendOsNotification, handleDirectNotificationClick, rememberNotified]
   )
 
+  const notifyAgora = useCallback(
+    (input: NotifyAgoraInput): void => {
+      const cfg = settingsRef.current
+      if (!cfg.enabled) return
+      const actor = input.actorPubkey.trim().toLowerCase()
+      if (!actor) return
+      if (blockedSetRef.current.has(actor) || ownPubkeysRef.current.has(actor)) return
+
+      let category: NotificationCategory
+      let allowed = false
+      switch (input.kind) {
+        case 'reply':
+          category = 'agora-reply'
+          allowed = cfg.agoraRepliesMentions
+          break
+        case 'mention':
+        case 'quote':
+          category = 'agora-mention'
+          allowed = cfg.agoraRepliesMentions
+          break
+        case 'like':
+          category = 'agora-like'
+          allowed = cfg.agoraReactionsReposts
+          break
+        case 'repost':
+          category = 'agora-repost'
+          allowed = cfg.agoraReactionsReposts
+          break
+        case 'zap':
+          category = 'agora-zap'
+          allowed = cfg.agoraZaps
+          break
+        case 'follow':
+          category = 'agora-follow'
+          allowed = cfg.agoraFollows
+          break
+      }
+      if (!allowed) return
+      if (!rememberNotified(`agora:${input.id}`)) return
+
+      const inAgoraFocused =
+        isDocumentFocusedAndVisible() &&
+        typeof document !== 'undefined' &&
+        document.title.includes('Agora — Agnostr')
+      if (inAgoraFocused) return
+
+      if (cfg.soundEnabled) {
+        const chimeKind =
+          input.kind === 'reply' ||
+          input.kind === 'mention' ||
+          input.kind === 'quote' ||
+          input.kind === 'zap'
+            ? 'mention'
+            : 'message'
+        soundEngine.playNotificationChime(chimeKind, {
+          vibrate: cfg.vibrationEnabled,
+        })
+      }
+
+      if (!canSendOsNotification()) return
+
+      const actorLabel = input.actorName.trim() || `anon${actor.slice(-4)}`
+      const preview = input.preview ? truncatePreview(input.preview) : ''
+      const satsLabel =
+        typeof input.sats === 'number' && Number.isFinite(input.sats) && input.sats > 0
+          ? `${Math.round(input.sats).toLocaleString()} sats`
+          : ''
+
+      let title = 'Agora'
+      let body = 'New activity on Agora'
+      if (cfg.showPreviews) {
+        switch (input.kind) {
+          case 'reply':
+            title = `${actorLabel} replied on Agora`
+            body = preview || 'Replied to your post on Agora'
+            break
+          case 'mention':
+            title = `${actorLabel} mentioned you on Agora`
+            body = preview || 'Mentioned you in a post on Agora'
+            break
+          case 'quote':
+            title = `${actorLabel} quoted your post on Agora`
+            body = preview || 'Quoted your post on Agora'
+            break
+          case 'like':
+            title = `${actorLabel} liked your post`
+            body = preview || 'Tap to view post on Agora'
+            break
+          case 'repost':
+            title = `${actorLabel} reposted your note`
+            body = preview || 'Tap to view post on Agora'
+            break
+          case 'zap':
+            title = satsLabel
+              ? `${actorLabel} zapped you ${satsLabel}`
+              : `${actorLabel} zapped you on Agora`
+            body = preview || 'Tap to view on Agora'
+            break
+          case 'follow':
+            title = `${actorLabel} followed you on Agora`
+            body = 'Tap to view profile on Agora'
+            break
+        }
+      } else {
+        switch (input.kind) {
+          case 'reply':
+            title = 'New reply on Agora'
+            break
+          case 'mention':
+          case 'quote':
+            title = 'New mention on Agora'
+            break
+          case 'like':
+            title = 'New like on Agora'
+            break
+          case 'repost':
+            title = 'New repost on Agora'
+            break
+          case 'zap':
+            title = 'New Zap on Agora'
+            break
+          case 'follow':
+            title = 'New follower on Agora'
+            break
+        }
+      }
+
+      const cleanNoteId =
+        input.noteId && /^[0-9a-f]{64}$/i.test(input.noteId.trim())
+          ? input.noteId.trim().toLowerCase()
+          : undefined
+      const tagSeed = cleanNoteId ? cleanNoteId.slice(0, 12) : actor.slice(0, 12)
+
+      void showOsNotification({
+        title,
+        body,
+        tag: `agnostr-${category}-${tagSeed}`,
+        vibrate: cfg.vibrationEnabled ? [120, 70, 120] : undefined,
+        data: {
+          category,
+          noteId: cleanNoteId,
+          peerPubkey: actor,
+          recipientPubkey: masterPubkeyRef.current
+            ? masterPubkeyRef.current.toLowerCase()
+            : undefined,
+        },
+        onDirectClick: handleDirectNotificationClick,
+      })
+    },
+    [canSendOsNotification, handleDirectNotificationClick, rememberNotified]
+  )
+
   const registerBridgeInternal = useCallback(
     async (opts: {
       bridgeUrlOverride?: string
@@ -1455,6 +1695,10 @@ export function useNotifications(
       serverMessages: settings.serverMessages,
       serverCalls: settings.serverCalls,
       geoMessages: settings.geoMessages,
+      agoraRepliesMentions: settings.agoraRepliesMentions,
+      agoraReactionsReposts: settings.agoraReactionsReposts,
+      agoraZaps: settings.agoraZaps,
+      agoraFollows: settings.agoraFollows,
       showPreviews: settings.showPreviews,
       relays: [...relayUrls].slice(0, 12).sort(),
       geohashes: [...pinnedGeohashes].sort(),
@@ -1468,6 +1712,10 @@ export function useNotifications(
     relayUrls,
     settings.agmail,
     settings.agmailCcBcc,
+    settings.agoraFollows,
+    settings.agoraReactionsReposts,
+    settings.agoraRepliesMentions,
+    settings.agoraZaps,
     settings.directPings,
     settings.dmCallRinging,
     settings.dms,
@@ -1695,6 +1943,7 @@ export function useNotifications(
     notifyGeoMessage,
     notifyLocationNote,
     notifyAmail,
+    notifyAgora,
     resetAllNotifications,
   }
 }

@@ -36,7 +36,6 @@ body,
   flex-direction: column;
   width: 100%;
   height: 100%;
-  height: 100dvh;
   overflow: hidden;
   background-color: var(--bg-canvas);
   color: var(--text-primary);
@@ -288,14 +287,22 @@ body,
   .ag-app,
   .ag-shell {
     position: fixed;
-    top: var(--ag-vvt, 0px);
-    left: 0;
+    top: 0;
     right: 0;
+    bottom: 0;
+    left: 0;
     width: 100%;
-    height: var(--ag-vvh, 100dvh);
+    height: auto;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  html[data-keyboard-open='true'] .ag-app,
+  html[data-keyboard-open='true'] .ag-shell {
+    top: var(--ag-vvt, 0px);
+    bottom: auto;
+    height: var(--ag-vvh, 100dvh);
   }
 
   .ag-shell-body {
@@ -481,6 +488,11 @@ body,
   }
 
   .ag-backdrop {
+    inset: 0;
+    height: auto;
+  }
+
+  html[data-keyboard-open='true'] .ag-backdrop {
     top: var(--ag-vvt, 0px);
     bottom: auto;
     height: var(--ag-vvh, 100dvh);

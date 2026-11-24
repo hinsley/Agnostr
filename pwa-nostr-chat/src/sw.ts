@@ -222,6 +222,24 @@ swSelf.addEventListener('push', (event) => {
     const callId = payload.callId || payload.data?.callId
     if (kindAction === 'call-cancel' || kindAction === 'call-end') {
       await closeCallNotifications(callId)
+      try {
+        const cancelClients = await swSelf.clients.matchAll({
+          type: 'window',
+          includeUncontrolled: true,
+        })
+        for (const client of cancelClients) {
+          try {
+            client.postMessage({
+              type: 'agnostr-incoming-call-cancel',
+              callId,
+            })
+          } catch {
+            // Ignore detached window postMessage errors
+          }
+        }
+      } catch {
+        // Ignore
+      }
       return
     }
 
@@ -229,6 +247,11 @@ swSelf.addEventListener('push', (event) => {
     const recipientPubkey =
       typeof rawRecipient === 'string' && /^[0-9a-f]{64}$/i.test(rawRecipient.trim())
         ? rawRecipient.trim().toLowerCase()
+        : undefined
+    const rawNoteId = payload.data?.noteId
+    const noteId =
+      typeof rawNoteId === 'string' && /^[0-9a-f]{64}$/i.test(rawNoteId.trim())
+        ? rawNoteId.trim().toLowerCase()
         : undefined
     const data: NotificationPayloadData = {
       category: payload.data?.category ?? 'dm',
@@ -240,6 +263,7 @@ swSelf.addEventListener('push', (event) => {
       serverId: payload.data?.serverId,
       channelId: payload.data?.channelId,
       geohash: payload.data?.geohash,
+      noteId,
       callerNickname: payload.data?.callerNickname,
     }
 
@@ -280,26 +304,45 @@ swSelf.addEventListener('push', (event) => {
     }
 
     if (data.category === 'dm-call') {
+      // Wake any open client windows immediately so loud phone-style ringtone starts without waiting for relay reconnect
+      if (windowClients.length > 0) {
+        for (const client of windowClients) {
+          try {
+            client.postMessage({
+              type: 'agnostr-incoming-call-ring',
+              callId,
+              mediaType: data.mediaType ?? 'audio',
+              peerPubkey: data.peerPubkey,
+              callerNickname: data.callerNickname,
+              recipientPubkey,
+              ts: Date.now(),
+            })
+          } catch {
+            // Ignore detached window postMessage errors
+          }
+        }
+      }
+
       const tag = callId ? `agnostr-call-${callId}` : 'agnostr-call'
       const options: ExtendedNotificationOptions = {
         body:
           payload.body ||
           (data.mediaType === 'video'
-            ? 'Incoming video call · Tap to accept'
-            : 'Incoming voice call · Tap to accept'),
+            ? 'Incoming video call · Tap to answer'
+            : 'Incoming voice call · Tap to answer'),
         icon: APP_ICON,
         badge: APP_ICON,
         tag,
         renotify: true,
         requireInteraction: true,
-        vibrate: [380, 180, 380, 1000, 380, 180, 380],
+        vibrate: [500, 220, 500, 220, 700],
         actions: [
-          { action: 'answer', title: 'Accept' },
+          { action: 'answer', title: 'Answer' },
           { action: 'decline', title: 'Decline' },
         ],
         data: { ...data, tag },
       }
-      await showSwNotificationSafe(payload.title || 'Incoming DM Call', options)
+      await showSwNotificationSafe(payload.title || 'Incoming Call', options)
       return
     }
 
@@ -359,6 +402,27 @@ swSelf.addEventListener('push', (event) => {
         data: { ...data, tag },
       }
       await showSwNotificationSafe(payload.title || 'New Agmail', options)
+      return
+    }
+
+    if (data.category.startsWith('agora-')) {
+      const tag =
+        data.tag ||
+        (data.noteId
+          ? `agnostr-agora-${data.noteId.slice(0, 12)}`
+          : data.peerPubkey
+            ? `agnostr-agora-${data.peerPubkey.slice(0, 12)}`
+            : 'agnostr-agora')
+      const options: ExtendedNotificationOptions = {
+        body: payload.body || 'New activity on Agora',
+        icon: APP_ICON,
+        badge: APP_ICON,
+        tag,
+        renotify: true,
+        vibrate: [140, 80, 140],
+        data: { ...data, tag },
+      }
+      await showSwNotificationSafe(payload.title || 'Agora', options)
       return
     }
 

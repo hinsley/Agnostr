@@ -469,6 +469,10 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   serverMessages: 'mentions',
   serverCalls: true,
   geoMessages: 'mentions',
+  agoraRepliesMentions: true,
+  agoraReactionsReposts: true,
+  agoraZaps: true,
+  agoraFollows: true,
   soundEnabled: true,
   ringtoneEnabled: true,
   vibrationEnabled: true,
@@ -562,6 +566,22 @@ export function loadNotificationSettings(): NotificationSettings {
         ? parsed.serverCalls
         : DEFAULT_NOTIFICATION_SETTINGS.serverCalls,
     geoMessages,
+    agoraRepliesMentions:
+      typeof parsed.agoraRepliesMentions === 'boolean'
+        ? parsed.agoraRepliesMentions
+        : DEFAULT_NOTIFICATION_SETTINGS.agoraRepliesMentions,
+    agoraReactionsReposts:
+      typeof parsed.agoraReactionsReposts === 'boolean'
+        ? parsed.agoraReactionsReposts
+        : DEFAULT_NOTIFICATION_SETTINGS.agoraReactionsReposts,
+    agoraZaps:
+      typeof parsed.agoraZaps === 'boolean'
+        ? parsed.agoraZaps
+        : DEFAULT_NOTIFICATION_SETTINGS.agoraZaps,
+    agoraFollows:
+      typeof parsed.agoraFollows === 'boolean'
+        ? parsed.agoraFollows
+        : DEFAULT_NOTIFICATION_SETTINGS.agoraFollows,
     soundEnabled:
       typeof parsed.soundEnabled === 'boolean'
         ? parsed.soundEnabled

@@ -1779,8 +1779,9 @@ img.ag-avatar-glubchat,
     z-index: 28;
     width: 100%;
     min-height: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px));
-    padding: 4px 4px max(5px, env(safe-area-inset-bottom, 0px));
-    background-color: var(--bg-glass);
+    padding: 4px 4px max(6px, env(safe-area-inset-bottom, 0px));
+    background-color: var(--bg-surface);
+    background-image: linear-gradient(var(--bg-glass), var(--bg-glass));
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border-top: 1px solid var(--border-subtle);

@@ -25,6 +25,10 @@ export interface StoredPushPreferences {
   serverMessages: PushFilterMode
   serverCalls: boolean
   geoMessages: PushFilterMode
+  agoraRepliesMentions: boolean
+  agoraReactionsReposts: boolean
+  agoraZaps: boolean
+  agoraFollows: boolean
   showPreviews: boolean
 }
 
@@ -53,6 +57,12 @@ export type PushCategory =
   | 'geo-message'
   | 'geo-call'
   | 'agmail'
+  | 'agora-reply'
+  | 'agora-mention'
+  | 'agora-like'
+  | 'agora-repost'
+  | 'agora-zap'
+  | 'agora-follow'
   | 'test'
 
 export type PokeCategory = PushCategory | 'agmail-cc' | 'call-cancel'
@@ -63,6 +73,9 @@ export interface IncomingPushPayload {
   tag?: string
   badgeCount?: number
   forceShow?: boolean
+  renotify?: boolean
+  requireInteraction?: boolean
+  vibrate?: number[]
   action?: string
   type?: string
   callId?: string
@@ -72,9 +85,11 @@ export interface IncomingPushPayload {
     callId?: string
     mediaType?: 'audio' | 'video'
     peerPubkey?: string
+    recipientPubkey?: string
     serverId?: string
     channelId?: string
     geohash?: string
+    noteId?: string
     callerNickname?: string
   }
 }
@@ -88,6 +103,10 @@ export const DEFAULT_PUSH_PREFERENCES: StoredPushPreferences = {
   serverMessages: 'mentions',
   serverCalls: true,
   geoMessages: 'mentions',
+  agoraRepliesMentions: true,
+  agoraReactionsReposts: true,
+  agoraZaps: true,
+  agoraFollows: true,
   showPreviews: true,
 }
 

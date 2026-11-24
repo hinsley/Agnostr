@@ -16,6 +16,14 @@ function getOrientation(layoutW: number, layoutH: number): 'portrait' | 'landsca
   return layoutW > layoutH ? 'landscape' : 'portrait'
 }
 
+function isStandalonePwaMode(): boolean {
+  if (typeof window === 'undefined') return false
+  return Boolean(
+    window.matchMedia?.('(display-mode: standalone)').matches ||
+      (window.navigator as { standalone?: boolean }).standalone === true
+  )
+}
+
 function isTextInputFocused(): boolean {
   if (typeof document === 'undefined') return false
   const el = document.activeElement as HTMLElement | null
@@ -92,8 +100,10 @@ export function useMobileViewport(): void {
       const vv = window.visualViewport
       const layoutW = window.innerWidth || root.clientWidth || 0
       const layoutH = window.innerHeight || root.clientHeight || 0
+      const rootClientH = root.clientHeight || 0
       const vvHeight = vv ? Math.round(vv.height) : layoutH
       const vvOffsetTop = vv ? Math.max(0, Math.round(vv.offsetTop)) : 0
+      const standalone = isStandalonePwaMode()
 
       const orientation = getOrientation(layoutW, layoutH)
       const focusedInput = isTextInputFocused()
@@ -108,7 +118,7 @@ export function useMobileViewport(): void {
 
       // Track full-height baseline per orientation when no keyboard is open,
       // and always grow baseline if the viewport expands (e.g. URL bar hides).
-      const candidateMax = Math.max(layoutH, vvHeight)
+      const candidateMax = Math.max(layoutH, vvHeight, rootClientH)
       if (!focusedInput && vv && Math.abs(layoutH - vvHeight) <= 40) {
         baselineByOrientation[orientation] = Math.max(
           baselineByOrientation[orientation],
@@ -123,7 +133,7 @@ export function useMobileViewport(): void {
       const isMobile =
         layoutW <= MOBILE_MAX_WIDTH ||
         Boolean(window.matchMedia?.('(pointer: coarse)').matches)
-      const baseline = Math.max(layoutH, baselineByOrientation[orientation])
+      const baseline = Math.max(layoutH, rootClientH, baselineByOrientation[orientation])
       const heightDrop = baseline - vvHeight
       const visualDrop = layoutH - vvHeight
       const keyboardOpen =
@@ -132,10 +142,19 @@ export function useMobileViewport(): void {
           heightDrop > KEYBOARD_LARGE_DROP_PX ||
           (focusedInput && heightDrop > KEYBOARD_THRESHOLD_PX))
 
-      root.style.setProperty('--ag-vvh', `${Math.max(120, vvHeight)}px`)
-      root.style.setProperty('--ag-vvt', `${vvOffsetTop}px`)
+      // When keyboard is closed, span the full physical viewport (avoiding iOS standalone
+      // visualViewport truncation that can leave a bottom dead strip on installed PWAs).
+      // When keyboard is open, lock tightly to exact visualViewport height & top offset.
+      const resolvedVvh = keyboardOpen
+        ? Math.max(120, vvHeight)
+        : Math.max(120, vvHeight, layoutH, rootClientH)
+      const resolvedVvt = keyboardOpen ? vvOffsetTop : 0
+
+      root.style.setProperty('--ag-vvh', `${resolvedVvh}px`)
+      root.style.setProperty('--ag-vvt', `${resolvedVvt}px`)
       root.style.setProperty('--ag-mobile-tabbar-h', keyboardOpen ? '0px' : '56px')
       root.dataset.keyboardOpen = keyboardOpen ? 'true' : 'false'
+      root.dataset.standalone = standalone ? 'true' : 'false'
 
       resetStuckWindowScroll()
     }

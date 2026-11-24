@@ -187,6 +187,8 @@ export class WebRtcMesh {
   private selfNickname: string
   private iceServers: RTCIceServer[]
   private callbacks: WebRtcMeshCallbacks
+  private maxRemotePeers: number
+  private allowedPeers: Set<string> | null
 
   private localStream: MediaStream | null = null
   private localAudioTrack: MediaStreamTrack | null = null
@@ -218,12 +220,37 @@ export class WebRtcMesh {
     selfPubkey: string
     selfNickname: string
     turnConfig?: TurnServerConfig | null
+    maxRemotePeers?: number
+    allowedPeers?: ReadonlySet<string> | readonly string[]
     callbacks: WebRtcMeshCallbacks
   }) {
     this.selfPubkey = opts.selfPubkey.toLowerCase()
     this.selfNickname = opts.selfNickname
     this.iceServers = buildIceServers(opts.turnConfig)
     this.callbacks = opts.callbacks
+    const requestedMax =
+      typeof opts.maxRemotePeers === 'number' && Number.isFinite(opts.maxRemotePeers)
+        ? Math.floor(opts.maxRemotePeers)
+        : MAX_REMOTE_PEERS
+    this.maxRemotePeers = Math.max(1, Math.min(MAX_REMOTE_PEERS, requestedMax))
+    if (opts.allowedPeers) {
+      const normalized = new Set<string>()
+      for (const pk of opts.allowedPeers) {
+        const clean = pk.trim().toLowerCase()
+        if (clean && clean !== this.selfPubkey) {
+          normalized.add(clean)
+        }
+      }
+      this.allowedPeers = normalized
+    } else {
+      this.allowedPeers = null
+    }
+  }
+
+  private isPeerAllowed(pubkeyLower: string): boolean {
+    if (!pubkeyLower || pubkeyLower === this.selfPubkey) return false
+    if (this.allowedPeers && !this.allowedPeers.has(pubkeyLower)) return false
+    return true
   }
 
   getLocalMuted(): boolean {
@@ -343,9 +370,9 @@ export class WebRtcMesh {
 
   canAddPeer(pubkey: string): boolean {
     const pk = pubkey.toLowerCase()
-    if (pk === this.selfPubkey) return false
+    if (!this.isPeerAllowed(pk)) return false
     if (this.peers.has(pk)) return true
-    return this.peers.size < MAX_REMOTE_PEERS
+    return this.peers.size < this.maxRemotePeers
   }
 
   hasAnyConnectedPeer(): boolean {
@@ -448,7 +475,7 @@ export class WebRtcMesh {
   connectToPeer(peerPubkey: string, nicknameHint?: string, forceInitiate?: boolean): boolean {
     if (this.disposed) return false
     const pk = peerPubkey.toLowerCase()
-    if (pk === this.selfPubkey) return false
+    if (!this.isPeerAllowed(pk)) return false
 
     const existing = this.peers.get(pk)
     if (existing) {
@@ -462,7 +489,7 @@ export class WebRtcMesh {
       return true
     }
 
-    if (this.peers.size >= MAX_REMOTE_PEERS) {
+    if (this.peers.size >= this.maxRemotePeers) {
       return false
     }
 
@@ -662,6 +689,7 @@ export class WebRtcMesh {
     patch: PeerMetadataPatch
   ): void {
     const pk = peerPubkey.toLowerCase()
+    if (!this.isPeerAllowed(pk)) return
     const entry = this.peers.get(pk)
     if (!entry) {
       const prev = this.prePeerMetadata.get(pk) ?? {}
@@ -701,9 +729,10 @@ export class WebRtcMesh {
   handleRemoteOffer(peerPubkey: string, sdp: string, nicknameHint?: string): Promise<boolean> {
     if (this.disposed) return Promise.resolve(false)
     const pk = peerPubkey.toLowerCase()
+    if (!this.isPeerAllowed(pk)) return Promise.resolve(false)
     if (!this.peers.has(pk)) {
       if (!this.canAddPeer(pk)) {
-        // Hard cap reached (6 participants) — reject cleanly without creating RTCPeerConnection
+        // Hard cap reached (e.g. 1 remote peer for 1-on-1 DM calls or 6 participants for groups) — reject cleanly
         return Promise.resolve(false)
       }
       this.connectToPeer(pk, nicknameHint, false)
@@ -793,6 +822,7 @@ export class WebRtcMesh {
   handleRemoteAnswer(peerPubkey: string, sdp: string): Promise<void> {
     if (this.disposed) return Promise.resolve()
     const pk = peerPubkey.toLowerCase()
+    if (!this.isPeerAllowed(pk)) return Promise.resolve()
     return this.enqueuePeerSignal(pk, async () => {
       if (this.disposed) return
       const entry = this.peers.get(pk)
@@ -821,6 +851,7 @@ export class WebRtcMesh {
   handleRemoteIceBatch(peerPubkey: string, candidates: readonly RTCIceCandidateInit[]): Promise<void> {
     if (this.disposed || candidates.length === 0) return Promise.resolve()
     const pk = peerPubkey.toLowerCase()
+    if (!this.isPeerAllowed(pk)) return Promise.resolve()
     if (!this.peers.has(pk)) {
       // Buffer early ICE candidates that arrive before connectToPeer / offer!
       const list = this.prePeerIce.get(pk) ?? []

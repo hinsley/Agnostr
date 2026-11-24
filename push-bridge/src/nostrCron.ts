@@ -17,7 +17,7 @@ const CRON_RELAYS = [
   'wss://offchain.pub',
 ] as const
 
-const CRON_KINDS = [1059, 1, 9, 20000, 9735, 9321]
+const CRON_KINDS = [1059, 1, 6, 7, 9, 20000, 9735, 9321]
 const RELAY_TIMEOUT_MS = 4_500
 const SEEN_TTL_SECONDS = 600
 const LOOKBACK_SECONDS = 95
@@ -141,9 +141,28 @@ async function queryRelayEvents(
   return events
 }
 
+function extractHexEventTag(tags: string[][], preferLast = false): string | undefined {
+  if (preferLast) {
+    for (let i = tags.length - 1; i >= 0; i -= 1) {
+      const tag = tags[i]
+      if (Array.isArray(tag) && tag[0] === 'e' && typeof tag[1] === 'string' && /^[0-9a-f]{64}$/i.test(tag[1])) {
+        return tag[1].toLowerCase()
+      }
+    }
+    return undefined
+  }
+  for (const tag of tags) {
+    if (Array.isArray(tag) && tag[0] === 'e' && typeof tag[1] === 'string' && /^[0-9a-f]{64}$/i.test(tag[1])) {
+      return tag[1].toLowerCase()
+    }
+  }
+  return undefined
+}
+
 function buildPayloadForEvent(
   ev: NostrEvent,
-  device: StoredDeviceSubscription
+  device: StoredDeviceSubscription,
+  recipientPubkey: string
 ): IncomingPushPayload | null {
   const prefs = device.preferences
   const showPreviews = prefs.showPreviews !== false
@@ -152,6 +171,7 @@ function buildPayloadForEvent(
     showPreviews && typeof ev.content === 'string'
       ? ev.content.trim().replace(/\s+/g, ' ').slice(0, 110)
       : ''
+  const authorPk = ev.pubkey.toLowerCase()
 
   if (ev.kind === 1059) {
     if (!prefs.dms && prefs.agmail === false && prefs.agmailCcBcc === false) return null
@@ -162,20 +182,71 @@ function buildPayloadForEvent(
       data: {
         category: 'dm',
         tag: 'agnostr-dm-wrap',
+        recipientPubkey,
       },
     }
   }
 
   if (ev.kind === 9735 || ev.kind === 9321) {
-    if (!prefs.dms && !prefs.directPings) return null
+    const noteId = extractHexEventTag(ev.tags)
+    if (noteId) {
+      if (prefs.agoraZaps === false) return null
+      return {
+        title: 'New Zap on Agora',
+        body: showPreviews && cleanPreview ? cleanPreview : 'Someone zapped your post on Agora.',
+        tag: `agnostr-agora-zap-${noteId.slice(0, 12)}`,
+        data: {
+          category: 'agora-zap',
+          noteId,
+          peerPubkey: authorPk,
+          recipientPubkey,
+          tag: `agnostr-agora-zap-${noteId.slice(0, 12)}`,
+        },
+      }
+    }
+    if (prefs.agoraZaps === false && !prefs.dms && !prefs.directPings) return null
     return {
       title: 'New Zap received',
       body: showPreviews && cleanPreview ? cleanPreview : 'Someone zapped you on Agnostr.',
       tag: `agnostr-zap-${ev.id.slice(0, 12)}`,
       data: {
-        category: 'dm',
-        peerPubkey: ev.pubkey.toLowerCase(),
+        category: prefs.agoraZaps !== false ? 'agora-zap' : 'dm',
+        peerPubkey: authorPk,
+        recipientPubkey,
         tag: `agnostr-zap-${ev.id.slice(0, 12)}`,
+      },
+    }
+  }
+
+  if (ev.kind === 6) {
+    if (prefs.agoraReactionsReposts === false) return null
+    const noteId = extractHexEventTag(ev.tags)
+    return {
+      title: showPreviews && senderNick ? `${senderNick} reposted your note` : 'New repost on Agora',
+      body: 'Someone reposted your note on Agora.',
+      tag: noteId ? `agnostr-agora-repost-${noteId.slice(0, 12)}` : `agnostr-agora-repost-${ev.id.slice(0, 12)}`,
+      data: {
+        category: 'agora-repost',
+        noteId,
+        peerPubkey: authorPk,
+        recipientPubkey,
+      },
+    }
+  }
+
+  if (ev.kind === 7) {
+    if (typeof ev.content === 'string' && ev.content.trim() === '-') return null
+    if (prefs.agoraReactionsReposts === false) return null
+    const noteId = extractHexEventTag(ev.tags, true)
+    return {
+      title: showPreviews && senderNick ? `${senderNick} liked your post` : 'New like on Agora',
+      body: 'Someone liked your post on Agora.',
+      tag: noteId ? `agnostr-agora-like-${noteId.slice(0, 12)}` : `agnostr-agora-like-${ev.id.slice(0, 12)}`,
+      data: {
+        category: 'agora-like',
+        noteId,
+        peerPubkey: authorPk,
+        recipientPubkey,
       },
     }
   }
@@ -192,12 +263,63 @@ function buildPayloadForEvent(
       data: {
         category: 'server-message',
         serverId,
-        peerPubkey: ev.pubkey.toLowerCase(),
+        peerPubkey: authorPk,
+        recipientPubkey,
       },
     }
   }
 
-  if (ev.kind === 20000 || ev.kind === 1) {
+  if (ev.kind === 1) {
+    const geohash = getTagValue(ev.tags, 'g') || undefined
+    if (!geohash) {
+      // Public Nostr/Agora reply or mention
+      if (prefs.agoraRepliesMentions === false) return null
+      const hasParent = Boolean(extractHexEventTag(ev.tags))
+      const category = hasParent ? 'agora-reply' : 'agora-mention'
+      const noteId = ev.id.toLowerCase()
+      const title =
+        showPreviews && senderNick
+          ? hasParent
+            ? `${senderNick} replied on Agora`
+            : `${senderNick} mentioned you on Agora`
+          : hasParent
+            ? 'New reply on Agora'
+            : 'New mention on Agora'
+      return {
+        title,
+        body:
+          cleanPreview ||
+          (hasParent ? 'Someone replied to your post on Agora.' : 'Someone mentioned you on Agora.'),
+        tag: `agnostr-${category}-${noteId.slice(0, 12)}`,
+        data: {
+          category,
+          noteId,
+          peerPubkey: authorPk,
+          recipientPubkey,
+        },
+      }
+    }
+    const geoMode = prefs.geoMessages as string | boolean | undefined
+    const geoOff = geoMode === 'off' || geoMode === false
+    if (!prefs.directPings && geoOff) return null
+    const title =
+      showPreviews && senderNick
+        ? `${senderNick} mentioned you in #${geohash}`
+        : 'New mention on Agnostr'
+    return {
+      title,
+      body: cleanPreview || 'Someone mentioned or replied to you.',
+      tag: `agnostr-geo-${geohash}`,
+      data: {
+        category: 'geo-message',
+        geohash,
+        peerPubkey: authorPk,
+        recipientPubkey,
+      },
+    }
+  }
+
+  if (ev.kind === 20000) {
     const geoMode = prefs.geoMessages as string | boolean | undefined
     const geoOff = geoMode === 'off' || geoMode === false
     if (!prefs.directPings && geoOff) return null
@@ -215,7 +337,8 @@ function buildPayloadForEvent(
       data: {
         category: 'geo-message',
         geohash,
-        peerPubkey: ev.pubkey.toLowerCase(),
+        peerPubkey: authorPk,
+        recipientPubkey,
       },
     }
   }
@@ -373,7 +496,7 @@ export async function runNostrPushCron(env: Env): Promise<{
       let recordChanged = false
 
       for (const dev of record.devices) {
-        const payload = buildPayloadForEvent(ev, dev)
+        const payload = buildPayloadForEvent(ev, dev, masterPk)
         if (!payload) {
           survivingDevices.push(dev)
           continue

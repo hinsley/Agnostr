@@ -2488,6 +2488,84 @@ export function SettingsModal({
           </div>
         </div>
 
+        {/* Agora Notifications */}
+        <div className={`ag-set-group ${!ns.enabled ? 'ag-set-dimmed' : ''}`}>
+          <span className="ag-set-label">Agora</span>
+          <div className="ag-set-card-list">
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Agora Replies &amp; Mentions</span>
+                <span className="ag-set-notif-row-desc">
+                  Replies, quotes, and @mentions on your Agora posts
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.agoraRepliesMentions}
+                onChange={() => {
+                  notif.updateSettings({ agoraRepliesMentions: !ns.agoraRepliesMentions })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Agora Likes &amp; Reposts</span>
+                <span className="ag-set-notif-row-desc">
+                  Reactions and reposts on your Agora posts
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.agoraReactionsReposts}
+                onChange={() => {
+                  notif.updateSettings({ agoraReactionsReposts: !ns.agoraReactionsReposts })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Agora Zaps</span>
+                <span className="ag-set-notif-row-desc">
+                  Lightning and Cashu zaps received on your Agora posts
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.agoraZaps}
+                onChange={() => {
+                  notif.updateSettings({ agoraZaps: !ns.agoraZaps })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Agora New Followers</span>
+                <span className="ag-set-notif-row-desc">
+                  Alerts when someone follows your Agora profile
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.agoraFollows}
+                onChange={() => {
+                  notif.updateSettings({ agoraFollows: !ns.agoraFollows })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+          </div>
+        </div>
+
         {/* Sound, Ringtone & Privacy */}
         <div className="ag-set-group">
           <span className="ag-set-label">Sound, Ringtone &amp; Privacy</span>

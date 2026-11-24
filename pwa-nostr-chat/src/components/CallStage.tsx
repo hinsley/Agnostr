@@ -13,6 +13,7 @@ import {
   Bluetooth,
   Captions,
   Check,
+  ChevronDown,
   ChevronUp,
   Circle,
   Copy,
@@ -39,6 +40,7 @@ import {
   ShieldCheck,
   Smartphone,
   Square,
+  SwitchCamera,
   Trash2,
   User,
   Users,
@@ -787,6 +789,227 @@ function ParticipantTile({
   )
 }
 
+/**
+ * Hardened video element for 1-on-1 Direct Call full-bleed remote feed & floating self PiP.
+ * Handles iOS Safari / Android PWA async track arrival, autoplay unlock, and optional Safety Filter veil.
+ */
+function DmVideoFeed({
+  stream,
+  pubkey,
+  mirrored = false,
+  contain = false,
+  screenVideo = false,
+  contentFilter,
+  className = '',
+}: {
+  stream: MediaStream | null
+  pubkey: string
+  mirrored?: boolean
+  contain?: boolean
+  screenVideo?: boolean
+  contentFilter?: ContentFilterEngine
+  className?: string
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const screenInFlightRef = useRef(false)
+  const screenSeqRef = useRef(0)
+  const [screenStatus, setScreenStatus] = useState<'screening' | 'safe' | 'flagged'>('screening')
+  const [flagDetail, setFlagDetail] = useState('')
+
+  const liveVideoTrack =
+    stream?.getVideoTracks().find((t) => t.readyState === 'live') ?? null
+  const liveVideoTrackId = liveVideoTrack?.id ?? null
+
+  useEffect(() => {
+    const el = videoRef.current
+    if (!el) return
+
+    let cancelled = false
+    let unlockListener: (() => void) | null = null
+
+    const cleanupUnlock = () => {
+      if (!unlockListener) return
+      window.removeEventListener('pointerdown', unlockListener, true)
+      window.removeEventListener('touchend', unlockListener, true)
+      window.removeEventListener('click', unlockListener, true)
+      unlockListener = null
+    }
+
+    const attemptPlay = () => {
+      if (cancelled || !el.srcObject) return
+      el.muted = true
+      el.playsInline = true
+      const playResult = el.play()
+      if (!playResult || typeof playResult.then !== 'function') return
+      playResult
+        .then(() => {
+          cleanupUnlock()
+        })
+        .catch(() => {
+          if (cancelled || unlockListener) return
+          unlockListener = () => {
+            cleanupUnlock()
+            attemptPlay()
+          }
+          window.addEventListener('pointerdown', unlockListener, { capture: true, once: true })
+          window.addEventListener('touchend', unlockListener, { capture: true, once: true })
+          window.addEventListener('click', unlockListener, { capture: true, once: true })
+        })
+    }
+
+    if (stream && liveVideoTrackId) {
+      const currentSrc = el.srcObject
+      const alreadyAttached =
+        currentSrc instanceof MediaStream &&
+        currentSrc.getVideoTracks().some((t) => t.id === liveVideoTrackId && t.readyState === 'live')
+      if (!alreadyAttached) {
+        el.srcObject = stream
+      }
+      if (!alreadyAttached || el.paused) {
+        attemptPlay()
+      }
+    } else if (el.srcObject) {
+      el.srcObject = null
+      cleanupUnlock()
+    }
+
+    const handleUnmute = () => {
+      if (el.paused) attemptPlay()
+    }
+    liveVideoTrack?.addEventListener('unmute', handleUnmute)
+
+    return () => {
+      cancelled = true
+      cleanupUnlock()
+      liveVideoTrack?.removeEventListener('unmute', handleUnmute)
+    }
+  }, [stream, liveVideoTrackId, liveVideoTrack])
+
+  useEffect(() => {
+    if (!screenVideo || !liveVideoTrackId || !contentFilter) {
+      setScreenStatus('screening')
+      setFlagDetail('')
+      return
+    }
+    let cancelled = false
+    setScreenStatus('screening')
+    setFlagDetail('')
+
+    const sampleAndScreen = async () => {
+      if (cancelled || screenInFlightRef.current) return
+      const el = videoRef.current
+      if (!el || el.readyState < 2 || el.videoWidth <= 0 || el.videoHeight <= 0) return
+
+      const maxDim = 384
+      const scale = Math.min(1, maxDim / Math.max(el.videoWidth, el.videoHeight))
+      const w = Math.max(32, Math.round(el.videoWidth * scale))
+      const h = Math.max(32, Math.round(el.videoHeight * scale))
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.drawImage(el, 0, 0, w, h)
+
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.78)
+      })
+      if (!blob || cancelled) return
+
+      screenInFlightRef.current = true
+      try {
+        const seq = ++screenSeqRef.current
+        const verdict = await contentFilter.screenImageBlob(
+          `dm-call-frame:${pubkey}:${seq}`,
+          blob,
+          { skipCache: true },
+        )
+        if (cancelled) return
+        if (verdict.flagged) {
+          const cats =
+            verdict.categories.length > 0
+              ? verdict.categories
+                  .map((c) => (c === 'nsfw' ? 'NSFW' : c === 'illegal' ? 'Illegal' : 'Custom'))
+                  .join(', ')
+              : verdict.reason || 'Policy'
+          setFlagDetail(cats)
+          setScreenStatus('flagged')
+        } else if (verdict.safe) {
+          setFlagDetail('')
+          setScreenStatus('safe')
+        }
+      } catch {
+        // Keep veiled until a frame clears screening
+      } finally {
+        screenInFlightRef.current = false
+      }
+    }
+
+    const el = videoRef.current
+    const onReady = () => {
+      void sampleAndScreen()
+    }
+    el?.addEventListener('loadeddata', onReady)
+    el?.addEventListener('playing', onReady)
+    const initialTimer = window.setTimeout(() => void sampleAndScreen(), 600)
+    const intervalId = window.setInterval(() => void sampleAndScreen(), 4500)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(initialTimer)
+      window.clearInterval(intervalId)
+      el?.removeEventListener('loadeddata', onReady)
+      el?.removeEventListener('playing', onReady)
+    }
+  }, [screenVideo, liveVideoTrackId, contentFilter, pubkey])
+
+  const veiled = screenVideo && Boolean(liveVideoTrackId) && screenStatus !== 'safe'
+
+  return (
+    <>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className={`${className} ${mirrored ? 'mirrored' : ''} ${contain ? 'contain' : ''} ${
+          veiled ? 'is-veiled' : ''
+        }`}
+      />
+      {veiled && (
+        <div
+          className={`ag-call-video-veil ${screenStatus === 'flagged' ? 'flagged' : ''}`}
+          role="status"
+          aria-live="polite"
+        >
+          {screenStatus === 'flagged' ? (
+            <>
+              <span className="ag-call-veil-icon flagged" aria-hidden="true">
+                <ShieldAlert size={22} />
+              </span>
+              <span className="ag-call-veil-title">
+                Video blocked by Safety Filter · Flagged
+              </span>
+              {flagDetail && <span className="ag-call-veil-sub">{flagDetail}</span>}
+            </>
+          ) : (
+            <>
+              <span className="ag-call-veil-icon" aria-hidden="true">
+                <Loader2 size={20} className="ag-spin" />
+              </span>
+              <span className="ag-call-veil-title">
+                {contentFilter?.modelStatus === 'downloading'
+                  ? `Downloading Safety Filter · ${Math.round(contentFilter.downloadProgress)}%`
+                  : 'Screening video…'}
+              </span>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
+
 export function CallStage({
   calls,
   engine,
@@ -807,6 +1030,9 @@ export function CallStage({
   const [audioMenuOpen, setAudioMenuOpen] = useState(false)
   const [switchingAudioInput, setSwitchingAudioInput] = useState(false)
   const [pinnedVideoPubkey, setPinnedVideoPubkey] = useState<string | null>(null)
+  const [dmMinimizedCallId, setDmMinimizedCallId] = useState<string | null>(null)
+  const [dmPipCorner, setDmPipCorner] = useState<'br' | 'bl' | 'tr' | 'tl'>('br')
+  const [dmCameraRear, setDmCameraRear] = useState(false)
   const [transcriptOpen, setTranscriptOpen] = useState(false)
   const [copiedTranscript, setCopiedTranscript] = useState(false)
   const [promptCopied, setPromptCopied] = useState(false)
@@ -819,10 +1045,14 @@ export function CallStage({
   const endedTranscript = transcription.endedCallTranscript
   const endedTranscriptId = endedTranscript?.id ?? null
 
-  // Prefetch verified kind: 0 profile pictures for all active call participants
+  // Prefetch verified kind: 0 profile pictures for all active call participants (+ DM callee during ringout)
   const callParticipantPubkeysKey = useMemo(() => {
     if (!activeCall) return ''
     const set = new Set<string>()
+    if (activeCall.peerPubkey) {
+      const peerPk = activeCall.peerPubkey.trim().toLowerCase()
+      if (/^[0-9a-f]{64}$/.test(peerPk)) set.add(peerPk)
+    }
     for (const p of activeCall.participants) {
       const pk = p.pubkey.trim().toLowerCase()
       if (/^[0-9a-f]{64}$/.test(pk)) set.add(pk)
@@ -866,12 +1096,21 @@ export function CallStage({
     if (!activeCall) {
       setAudioMenuOpen(false)
       setPinnedVideoPubkey(null)
+      setDmMinimizedCallId(null)
+      setDmCameraRear(false)
       return
     }
     setNowMs(Date.now())
     const id = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => window.clearInterval(id)
   }, [activeCall])
+
+  // If App explicitly toggles expanded ON for an active 1-on-1 DM call, restore full-screen view
+  useEffect(() => {
+    if (expanded && activeCall?.mode === 'dm') {
+      setDmMinimizedCallId(null)
+    }
+  }, [expanded, activeCall?.mode])
 
   // Auto-clear pinned solo video if participant leaves, stops video, or becomes untrusted/shielded
   useEffect(() => {
@@ -897,11 +1136,21 @@ export function CallStage({
     el.scrollTop = el.scrollHeight
   }, [transcriptOpen, transcription.liveCaptions.length])
 
+  const isDmCall = activeCall?.mode === 'dm'
+  const isDmMinimized = Boolean(isDmCall && activeCall && dmMinimizedCallId === activeCall.callId)
+  const isDmFullScreen = Boolean(isDmCall && activeCall && !isDmMinimized)
+
   const isQualityPopoverVisible =
     qualityMenuOpen && Boolean(activeCall) && !activeCall?.localRecording
   const isAudioPopoverVisible = audioMenuOpen && Boolean(activeCall)
 
-  // Android / PWA Back button closes CallStage overlays (LIFO: audio -> quality -> pinned -> transcript)
+  // Android / PWA Back button closes CallStage overlays (LIFO: audio -> quality -> pinned -> transcript -> DM fullscreen minimize)
+  useBackHandler(isDmFullScreen, () => {
+    if (activeCall) {
+      setDmMinimizedCallId(activeCall.callId)
+      if (expanded) onToggleExpand()
+    }
+  })
   useBackHandler(Boolean(activeCall) && transcriptOpen, () => setTranscriptOpen(false))
   useBackHandler(Boolean(activeCall) && Boolean(pinnedVideoPubkey), () => setPinnedVideoPubkey(null))
   useBackHandler(isQualityPopoverVisible, () => setQualityMenuOpen(false))
@@ -933,6 +1182,7 @@ export function CallStage({
     if (
       !activeCall ||
       (!expanded &&
+        !isDmFullScreen &&
         !isAudioPopoverVisible &&
         !isQualityPopoverVisible &&
         !pinnedVideoPubkey &&
@@ -951,6 +1201,9 @@ export function CallStage({
           setPinnedVideoPubkey(null)
         } else if (transcriptOpen) {
           setTranscriptOpen(false)
+        } else if (isDmFullScreen) {
+          setDmMinimizedCallId(activeCall.callId)
+          if (expanded) onToggleExpand()
         } else if (expanded) {
           onToggleExpand()
         }
@@ -960,6 +1213,7 @@ export function CallStage({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [
     expanded,
+    isDmFullScreen,
     activeCall,
     isAudioPopoverVisible,
     isQualityPopoverVisible,
@@ -1197,6 +1451,668 @@ export function CallStage({
     } else {
       onToggleExpand()
     }
+  }
+
+  // Dedicated Native 1-on-1 Direct Call Experience for People / DMs (strictly self + single remotePeer)
+  if (activeCall.mode === 'dm') {
+    const selfParticipant = activeCall.participants.find((p) => p.isSelf) ?? null
+    const remotePeer = activeCall.participants.find((p) => !p.isSelf) ?? null
+    const dmPeerPubkey = remotePeer?.pubkey ?? activeCall.peerPubkey ?? ''
+    const dmPeerName =
+      remotePeer?.nickname || activeCall.title || remotePeer?.displayHandle || 'Direct Call'
+    const dmPeerHandle =
+      remotePeer?.displayHandle && remotePeer.displayHandle !== dmPeerName
+        ? remotePeer.displayHandle
+        : null
+    const dmPeerAvatarUrl = dmPeerPubkey ? engine.getProfilePicture(dmPeerPubkey) : undefined
+    const dmPeerColor = dmPeerPubkey ? pubkeyToColor(dmPeerPubkey) : undefined
+
+    const dmStatusText = isOutgoingRinging
+      ? 'Ringing…'
+      : activeCall.status === 'connecting'
+        ? remotePeer
+          ? 'Connecting…'
+          : 'Calling…'
+        : formatCallDuration(activeCall.connectedAt ?? activeCall.startedAt, nowMs)
+
+    const remoteHasVideo = Boolean(remotePeer && hasParticipantLiveVideo(remotePeer, false))
+    const selfHasVideo = Boolean(selfParticipant && hasParticipantLiveVideo(selfParticipant, false))
+    const isVideoStage =
+      remoteHasVideo || selfHasVideo || activeCall.localCameraOn || activeCall.localScreenSharing
+    const remoteSpeaking = Boolean(remotePeer?.isSpeaking)
+    const remoteLevelScale = remotePeer
+      ? 1 + Math.min(0.38, remotePeer.audioLevel * 0.55)
+      : 1
+    const isRingingOrCalling =
+      isOutgoingRinging || activeCall.status === 'connecting'
+
+    const switchCameraFn = (
+      calls as CallEngine & { switchCamera?: () => Promise<boolean> }
+    ).switchCamera
+    const hasSwitchCamera = typeof switchCameraFn === 'function'
+
+    const handleMinimizeDm = () => {
+      onPlaySound?.('click')
+      setAudioMenuOpen(false)
+      setQualityMenuOpen(false)
+      setDmMinimizedCallId(activeCall.callId)
+      if (expanded) onToggleExpand()
+    }
+
+    const handleExpandDm = () => {
+      onPlaySound?.('click')
+      setDmMinimizedCallId(null)
+    }
+
+    const handleFlipCamera = () => {
+      if (!switchCameraFn) return
+      onPlaySound?.('click')
+      void switchCameraFn().then((ok) => {
+        if (ok) setDmCameraRear((prev) => !prev)
+      })
+    }
+
+    const handleTapPip = () => {
+      onPlaySound?.('click')
+      if (hasSwitchCamera && !activeCall.localScreenSharing) {
+        handleFlipCamera()
+        return
+      }
+      setDmPipCorner((prev) =>
+        prev === 'br' ? 'bl' : prev === 'bl' ? 'tr' : prev === 'tr' ? 'tl' : 'br',
+      )
+    }
+
+    const dmSelectedOutputDevice =
+      calls.audioOutputDevices.find((d) => d.deviceId === calls.selectedAudioOutputId) ?? null
+    const dmSelectedInputDevice =
+      calls.audioInputDevices.find((d) => d.deviceId === calls.selectedAudioInputId) ?? null
+    const dmActiveOutputRoute: AudioRouteKind = dmSelectedOutputDevice
+      ? classifyAudioRoute(dmSelectedOutputDevice.label)
+      : dmSelectedInputDevice && classifyAudioRoute(dmSelectedInputDevice.label) === 'bluetooth'
+        ? 'bluetooth'
+        : 'speaker'
+    const dmHasDefaultOutputEntry = calls.audioOutputDevices.some(
+      (d) => d.deviceId === '' || d.deviceId === 'default',
+    )
+    const dmRecentCaptions = transcription.liveCaptionsEnabled
+      ? transcription.liveCaptions.slice(-3).filter((entry) => nowMs - entry.timestamp < 24_000)
+      : []
+    const screenRemoteVideo = Boolean(
+      remotePeer && contentFilter.shouldScreenCallVideo(remotePeer.pubkey, false),
+    )
+
+    // Minimized Sleek Floating Compact Active-Call Pill
+    if (isDmMinimized) {
+      return (
+        <>
+          {audioSinks}
+          {typeof document !== 'undefined' &&
+            createPortal(
+              <div
+                className={`ag-dm-call-pill ${remoteSpeaking ? 'is-speaking' : ''} ${
+                  isAnyRecording ? 'is-recording' : ''
+                }`}
+                role="region"
+                aria-label={`Active direct call with ${dmPeerName}`}
+              >
+                <button
+                  type="button"
+                  className="ag-dm-call-pill-main"
+                  onClick={handleExpandDm}
+                  title="Return to full-screen call"
+                >
+                  <span className={`ag-dm-call-pill-avatar-wrap ${remoteSpeaking ? 'speaking' : ''}`}>
+                    <AvatarImg
+                      pubkey={dmPeerPubkey}
+                      pictureUrl={dmPeerAvatarUrl}
+                      width={30}
+                      height={30}
+                      className="ag-dm-call-pill-avatar"
+                    />
+                  </span>
+                  <span className="ag-dm-call-pill-copy">
+                    <span className="ag-dm-call-pill-name truncate">{dmPeerName}</span>
+                    <span className="ag-dm-call-pill-status mono">
+                      {isAnyRecording && (
+                        <span className="ag-call-rec-pill-dot" aria-hidden="true" />
+                      )}
+                      <span>{dmStatusText}</span>
+                    </span>
+                  </span>
+                </button>
+
+                <div className="ag-dm-call-pill-actions">
+                  <button
+                    type="button"
+                    className={`ag-dm-call-pill-btn ${activeCall.localMuted ? 'muted' : ''}`}
+                    onClick={handleToggleMute}
+                    aria-pressed={activeCall.localMuted}
+                    aria-label={activeCall.localMuted ? 'Unmute microphone' : 'Mute microphone'}
+                    title={activeCall.localMuted ? 'Unmute' : 'Mute'}
+                  >
+                    {activeCall.localMuted ? <MicOff size={15} /> : <Mic size={15} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="ag-dm-call-pill-btn hangup"
+                    onClick={handleLeave}
+                    aria-label="End call"
+                    title="End call"
+                  >
+                    <PhoneOff size={15} />
+                  </button>
+                </div>
+              </div>,
+              document.body,
+            )}
+        </>
+      )
+    }
+
+    // Full-Screen Native 1-on-1 Direct Call Experience (Audio & Video States)
+    return (
+      <>
+        {audioSinks}
+        {typeof document !== 'undefined' &&
+          createPortal(
+            <section
+              className={`ag-dm-call-view ${isVideoStage ? 'is-video' : 'is-audio'}`}
+              role="dialog"
+              aria-modal="true"
+              aria-label={`Direct call with ${dmPeerName}`}
+            >
+              {/* Full-Bleed Edge-to-Edge Video Layer (when remote video is live) */}
+              {isVideoStage && remoteHasVideo && remotePeer && (
+                <div className="ag-dm-call-video-stage">
+                  <DmVideoFeed
+                    stream={remotePeer.stream}
+                    pubkey={remotePeer.pubkey}
+                    contain={remotePeer.screenSharing}
+                    screenVideo={screenRemoteVideo}
+                    contentFilter={screenRemoteVideo ? contentFilter : undefined}
+                    className="ag-dm-call-remote-video"
+                  />
+                </div>
+              )}
+
+              {/* Subtle Top Header Bar */}
+              <header className={`ag-dm-call-top ${isVideoStage ? 'is-frosted' : ''}`}>
+                <button
+                  type="button"
+                  className="ag-dm-call-min-btn"
+                  onClick={handleMinimizeDm}
+                  aria-label="Minimize call"
+                  title="Minimize to floating pill (Esc)"
+                >
+                  <ChevronDown size={22} />
+                </button>
+
+                <div className="ag-dm-call-top-center">
+                  {isVideoStage ? (
+                    <div className="ag-dm-call-top-identity">
+                      <span className="ag-dm-call-top-name truncate">{dmPeerName}</span>
+                      <span className="ag-dm-call-top-sub mono">
+                        <Lock size={10} aria-hidden="true" />
+                        <span>{dmStatusText}</span>
+                        {remotePeer?.audioMuted && <span>· Muted</span>}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="ag-dm-call-e2ee-pill">
+                      <Lock size={12} aria-hidden="true" />
+                      <span>End-to-end encrypted</span>
+                    </span>
+                  )}
+                  {recBadge}
+                </div>
+
+                <div className="ag-dm-call-top-right">
+                  {/* Audio Output / Mic Selector */}
+                  <div
+                    className={`ag-dm-call-audio-wrap ${isAudioPopoverVisible ? 'open' : ''}`}
+                    ref={audioWrapRef}
+                  >
+                    <button
+                      type="button"
+                      className={`ag-dm-call-top-icon-btn ${
+                        isAudioPopoverVisible || dmActiveOutputRoute !== 'speaker' ? 'active' : ''
+                      }`}
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setAudioMenuOpen((prev) => {
+                          const next = !prev
+                          if (next) void calls.refreshAudioDevices()
+                          return next
+                        })
+                      }}
+                      aria-haspopup="menu"
+                      aria-expanded={isAudioPopoverVisible}
+                      aria-label="Audio output and microphone devices"
+                      title="Audio output & mic"
+                    >
+                      {renderAudioRouteIcon(dmActiveOutputRoute, 17)}
+                    </button>
+
+                    {isAudioPopoverVisible && (
+                      <div
+                        className="ag-call-audio-menu ag-dm-call-audio-menu"
+                        role="menu"
+                        aria-label="Audio output and microphone selection"
+                      >
+                        <div className="ag-call-audio-sec-head mono">AUDIO OUTPUT</div>
+                        {calls.supportsAudioOutputSelection ? (
+                          <div className="ag-call-audio-list">
+                            {!dmHasDefaultOutputEntry && (
+                              <button
+                                type="button"
+                                role="menuitemcheckbox"
+                                aria-checked={calls.selectedAudioOutputId === ''}
+                                className={`ag-call-audio-opt ${
+                                  calls.selectedAudioOutputId === '' ? 'selected' : ''
+                                }`}
+                                onClick={() => {
+                                  calls.selectAudioOutput('')
+                                  onPlaySound?.('click')
+                                  setAudioMenuOpen(false)
+                                }}
+                              >
+                                <span className="ag-call-audio-opt-left">
+                                  <Volume2 size={14} />
+                                  <span className="truncate">System Default</span>
+                                </span>
+                                {calls.selectedAudioOutputId === '' && (
+                                  <Check size={13} className="ag-call-quality-check" />
+                                )}
+                              </button>
+                            )}
+                            {calls.audioOutputDevices.map((dev, idx) => {
+                              const label = formatAudioDeviceLabel(dev, idx, 'audiooutput')
+                              const route = classifyAudioRoute(label)
+                              const selected =
+                                calls.selectedAudioOutputId === dev.deviceId ||
+                                (calls.selectedAudioOutputId === '' && dev.deviceId === 'default')
+                              return (
+                                <button
+                                  key={dev.deviceId || `dm-out-${idx}`}
+                                  type="button"
+                                  role="menuitemcheckbox"
+                                  aria-checked={selected}
+                                  className={`ag-call-audio-opt ${selected ? 'selected' : ''}`}
+                                  onClick={() => {
+                                    calls.selectAudioOutput(dev.deviceId)
+                                    onPlaySound?.('click')
+                                    setAudioMenuOpen(false)
+                                  }}
+                                >
+                                  <span className="ag-call-audio-opt-left">
+                                    {renderAudioRouteIcon(route, 14)}
+                                    <span className="truncate">{label}</span>
+                                  </span>
+                                  {selected && (
+                                    <Check size={13} className="ag-call-quality-check" />
+                                  )}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        ) : !calls.supportsSystemAudioOutputPicker ? (
+                          <p className="ag-call-audio-note">
+                            Speaker &amp; Bluetooth output is routed via your device&apos;s system
+                            audio picker.
+                          </p>
+                        ) : null}
+
+                        {calls.supportsSystemAudioOutputPicker && (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="ag-call-audio-sys-btn"
+                            onClick={() => {
+                              onPlaySound?.('click')
+                              void calls.promptSystemAudioOutput().then((ok) => {
+                                if (ok) setAudioMenuOpen(false)
+                              })
+                            }}
+                          >
+                            <Volume2 size={13} />
+                            <span>Choose System Output…</span>
+                          </button>
+                        )}
+
+                        <div className="ag-call-audio-sec-head mono ag-call-audio-sec-divider">
+                          MICROPHONE / INPUT
+                        </div>
+                        <div className="ag-call-audio-list">
+                          {calls.audioInputDevices.length === 0 ? (
+                            <div className="ag-call-audio-opt selected">
+                              <span className="ag-call-audio-opt-left">
+                                <Mic size={14} />
+                                <span className="truncate">Default Microphone</span>
+                              </span>
+                              <Check size={13} className="ag-call-quality-check" />
+                            </div>
+                          ) : (
+                            calls.audioInputDevices.map((dev, idx) => {
+                              const label = formatAudioDeviceLabel(dev, idx, 'audioinput')
+                              const route = classifyAudioRoute(label)
+                              const selected =
+                                calls.selectedAudioInputId === dev.deviceId ||
+                                (calls.selectedAudioInputId === '' &&
+                                  (dev.deviceId === 'default' || idx === 0))
+                              return (
+                                <button
+                                  key={dev.deviceId || `dm-in-${idx}`}
+                                  type="button"
+                                  role="menuitemcheckbox"
+                                  aria-checked={selected}
+                                  disabled={switchingAudioInput}
+                                  className={`ag-call-audio-opt ${selected ? 'selected' : ''}`}
+                                  onClick={() => {
+                                    if (switchingAudioInput) return
+                                    onPlaySound?.('click')
+                                    setSwitchingAudioInput(true)
+                                    void calls
+                                      .selectAudioInput(dev.deviceId)
+                                      .then((ok) => {
+                                        if (ok) setAudioMenuOpen(false)
+                                      })
+                                      .finally(() => setSwitchingAudioInput(false))
+                                  }}
+                                >
+                                  <span className="ag-call-audio-opt-left">
+                                    {renderAudioRouteIcon(route, 14, true)}
+                                    <span className="truncate">{label}</span>
+                                  </span>
+                                  {selected && (
+                                    <Check size={13} className="ag-call-quality-check" />
+                                  )}
+                                </button>
+                              )
+                            })
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    className={`ag-dm-call-top-icon-btn ${
+                      transcription.liveCaptionsEnabled ? 'active' : ''
+                    }`}
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      transcription.toggleLiveCaptions()
+                    }}
+                    aria-pressed={transcription.liveCaptionsEnabled}
+                    aria-label={
+                      transcription.liveCaptionsEnabled
+                        ? 'Disable live captions'
+                        : 'Enable live captions'
+                    }
+                    title="Live captions"
+                  >
+                    <Captions size={17} />
+                  </button>
+                </div>
+              </header>
+
+              {/* Centered Audio Hero (shown for Audio-Only calls AND while local video waits for remote video) */}
+              {(!isVideoStage || !remoteHasVideo) && (
+                <div className="ag-dm-call-audio-hero">
+                  <div
+                    className={`ag-dm-call-avatar-wrap ${remoteSpeaking ? 'speaking' : ''} ${
+                      isRingingOrCalling ? 'ringing' : ''
+                    }`}
+                  >
+                    {(remoteSpeaking || isRingingOrCalling) && (
+                      <>
+                        <span
+                          className="ag-dm-call-halo"
+                          style={
+                            remoteSpeaking
+                              ? { transform: `scale(${remoteLevelScale})` }
+                              : undefined
+                          }
+                          aria-hidden="true"
+                        />
+                        <span className="ag-dm-call-halo outer" aria-hidden="true" />
+                      </>
+                    )}
+                    <AvatarImg
+                      pubkey={dmPeerPubkey}
+                      pictureUrl={dmPeerAvatarUrl}
+                      width={116}
+                      height={116}
+                      className="ag-dm-call-avatar"
+                    />
+                  </div>
+
+                  <div className="ag-dm-call-identity">
+                    <h2 className="ag-dm-call-peer-name truncate">{dmPeerName}</h2>
+                    {dmPeerHandle && (
+                      <p
+                        className="ag-dm-call-peer-handle truncate"
+                        style={dmPeerColor ? { color: dmPeerColor } : undefined}
+                      >
+                        {dmPeerHandle}
+                      </p>
+                    )}
+                    <p className="ag-dm-call-status tabular">{dmStatusText}</p>
+                    {remotePeer?.audioMuted && (
+                      <span className="ag-dm-call-muted-chip">
+                        <MicOff size={11} />
+                        <span>Muted</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Floating Rounded Self-Camera Picture-in-Picture Preview */}
+              {isVideoStage && selfHasVideo && selfParticipant && (
+                <button
+                  type="button"
+                  className={`ag-dm-call-pip corner-${dmPipCorner}`}
+                  onClick={handleTapPip}
+                  title={
+                    hasSwitchCamera && !activeCall.localScreenSharing
+                      ? 'Tap to flip camera'
+                      : 'Tap to move preview corner'
+                  }
+                  aria-label={
+                    hasSwitchCamera && !activeCall.localScreenSharing
+                      ? 'Flip camera'
+                      : 'Move self video preview corner'
+                  }
+                >
+                  <DmVideoFeed
+                    stream={selfParticipant.stream}
+                    pubkey={selfParticipant.pubkey}
+                    mirrored={!activeCall.localScreenSharing && !dmCameraRear}
+                    contain={activeCall.localScreenSharing}
+                    className="ag-dm-call-pip-video"
+                  />
+                  {activeCall.localMuted && (
+                    <span className="ag-dm-call-pip-muted" aria-label="Your mic is muted">
+                      <MicOff size={11} />
+                    </span>
+                  )}
+                </button>
+              )}
+
+              {/* Live Captions Overlay (above bottom circular dock) */}
+              {transcription.liveCaptionsEnabled &&
+                (dmRecentCaptions.length > 0 ||
+                  transcription.modelStatus === 'downloading' ||
+                  transcription.modelStatus === 'error') && (
+                  <div className="ag-dm-call-cc-dock">
+                    {transcription.modelStatus === 'downloading' && (
+                      <div className="ag-call-cc-status mono" role="status">
+                        <Loader2 size={12} className="ag-spin" />
+                        <span className="truncate">
+                          Loading {transcription.activeModel.label} ·{' '}
+                          {Math.round(transcription.downloadProgress)}%
+                        </span>
+                      </div>
+                    )}
+                    {transcription.modelStatus === 'error' && transcription.modelError && (
+                      <div className="ag-call-cc-status error" role="alert">
+                        <AlertCircle size={12} />
+                        <span className="truncate">{transcription.modelError}</span>
+                      </div>
+                    )}
+                    {dmRecentCaptions.length > 0 && (
+                      <div
+                        className="ag-call-cc-overlay"
+                        role="log"
+                        aria-live="polite"
+                        aria-label="Live call captions"
+                      >
+                        {dmRecentCaptions.map((entry) => (
+                          <div
+                            key={entry.id}
+                            className={`ag-call-cc-line ${
+                              nowMs - entry.timestamp >= 12_000 ? 'fading' : ''
+                            }`}
+                          >
+                            <span
+                              className="ag-call-cc-speaker"
+                              style={{ color: pubkeyToColor(entry.pubkey) }}
+                            >
+                              {entry.nickname ? `@${entry.nickname}` : entry.displayHandle}
+                            </span>
+                            <span className="ag-call-cc-text">{entry.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+              {/* Bottom Floating Circular Phone-Style Action Dock */}
+              <div
+                className={`ag-dm-call-dock ${isVideoStage ? 'is-frosted' : ''}`}
+                role="toolbar"
+                aria-label="Direct call controls"
+              >
+                <div className="ag-dm-call-dock-item">
+                  <button
+                    type="button"
+                    className={`ag-dm-call-round-btn ${activeCall.localMuted ? 'is-active-light' : ''}`}
+                    onClick={handleToggleMute}
+                    aria-pressed={activeCall.localMuted}
+                    aria-label={activeCall.localMuted ? 'Unmute microphone' : 'Mute microphone'}
+                    title={activeCall.localMuted ? 'Unmute microphone' : 'Mute microphone'}
+                  >
+                    {activeCall.localMuted ? <MicOff size={22} /> : <Mic size={22} />}
+                  </button>
+                  <span className="ag-dm-call-dock-label">
+                    {activeCall.localMuted ? 'Unmute' : 'Mute'}
+                  </span>
+                </div>
+
+                <div className="ag-dm-call-dock-item">
+                  <button
+                    type="button"
+                    className={`ag-dm-call-round-btn ${activeCall.localCameraOn ? 'is-active-light' : ''}`}
+                    onClick={handleToggleCamera}
+                    aria-pressed={activeCall.localCameraOn}
+                    aria-label={activeCall.localCameraOn ? 'Turn camera off' : 'Turn camera on'}
+                    title={activeCall.localCameraOn ? 'Turn camera off' : 'Turn camera on'}
+                  >
+                    {activeCall.localCameraOn ? <Video size={22} /> : <VideoOff size={22} />}
+                  </button>
+                  <span className="ag-dm-call-dock-label">Camera</span>
+                </div>
+
+                {hasSwitchCamera && activeCall.localCameraOn && !activeCall.localScreenSharing && (
+                  <div className="ag-dm-call-dock-item">
+                    <button
+                      type="button"
+                      className="ag-dm-call-round-btn"
+                      onClick={handleFlipCamera}
+                      aria-label="Flip camera"
+                      title="Flip camera"
+                    >
+                      <SwitchCamera size={22} />
+                    </button>
+                    <span className="ag-dm-call-dock-label">Flip</span>
+                  </div>
+                )}
+
+                {activeCall.screenShareSupported && (
+                  <div className="ag-dm-call-dock-item ag-desktop-only">
+                    <button
+                      type="button"
+                      className={`ag-dm-call-round-btn ${
+                        activeCall.localScreenSharing ? 'is-active-accent' : ''
+                      }`}
+                      onClick={handleToggleScreen}
+                      aria-pressed={activeCall.localScreenSharing}
+                      aria-label={
+                        activeCall.localScreenSharing ? 'Stop screen share' : 'Share screen'
+                      }
+                      title={activeCall.localScreenSharing ? 'Stop screen share' : 'Share screen'}
+                    >
+                      {activeCall.localScreenSharing ? (
+                        <MonitorOff size={22} />
+                      ) : (
+                        <MonitorUp size={22} />
+                      )}
+                    </button>
+                    <span className="ag-dm-call-dock-label">
+                      {activeCall.localScreenSharing ? 'Stop' : 'Share'}
+                    </span>
+                  </div>
+                )}
+
+                {activeCall.recordingSupported && (
+                  <div className="ag-dm-call-dock-item">
+                    <button
+                      type="button"
+                      className={`ag-dm-call-round-btn ${
+                        activeCall.localRecording ? 'is-recording' : ''
+                      }`}
+                      disabled={togglingRec}
+                      onClick={() => void handleToggleRecording()}
+                      aria-pressed={activeCall.localRecording}
+                      aria-label={
+                        activeCall.localRecording ? 'Stop recording call' : 'Record call'
+                      }
+                      title={activeCall.localRecording ? 'Stop recording' : 'Record call'}
+                    >
+                      {activeCall.localRecording ? (
+                        <Square size={18} fill="currentColor" />
+                      ) : (
+                        <Circle size={19} fill="currentColor" className="ag-call-rec-icon" />
+                      )}
+                    </button>
+                    <span className="ag-dm-call-dock-label">
+                      {activeCall.localRecording ? 'Stop' : 'Record'}
+                    </span>
+                  </div>
+                )}
+
+                <div className="ag-dm-call-dock-item">
+                  <button
+                    type="button"
+                    className="ag-dm-call-round-btn hangup"
+                    onClick={handleLeave}
+                    aria-label="End call"
+                    title="End call"
+                  >
+                    <PhoneOff size={24} />
+                  </button>
+                  <span className="ag-dm-call-dock-label">End</span>
+                </div>
+              </div>
+            </section>,
+            document.body,
+          )}
+      </>
+    )
   }
 
   // Compact Floating Bar when user is browsing another channel/server

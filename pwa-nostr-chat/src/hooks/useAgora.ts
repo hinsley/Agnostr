@@ -19,7 +19,9 @@ import type {
   AgoraUploadedMedia,
   AgoraZapperSummary,
 } from '../types/agora.ts'
+import type { PushPokePayload } from '../types/notifications.ts'
 import type { ToastLevel } from '../types/protocol.ts'
+import type { NotifyAgoraInput } from './useNotifications.ts'
 import {
   AGORA_PROFILE_RELAYS,
   AGORA_SEARCH_RELAYS,
@@ -86,6 +88,8 @@ export interface UseAgoraOptions {
   pushToast?: (level: ToastLevel, title: string, detail?: string) => void
   onDiscoverProfileLud16?: (pubkey: string, lud16: string) => void
   onProfileNameSaved?: (name: string) => void
+  onNotifyAgora?: (input: NotifyAgoraInput) => void
+  onNotifyPushPoke?: (payload: PushPokePayload) => void
 }
 
 interface StoredProfileEntry {
@@ -455,6 +459,12 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
 
   const onProfileNameSavedRef = useRef(options.onProfileNameSaved)
   onProfileNameSavedRef.current = options.onProfileNameSaved
+
+  const onNotifyAgoraRef = useRef(options.onNotifyAgora)
+  onNotifyAgoraRef.current = options.onNotifyAgora
+
+  const onNotifyPushPokeRef = useRef(options.onNotifyPushPoke)
+  onNotifyPushPokeRef.current = options.onNotifyPushPoke
 
   const blossomServersRef = useRef<readonly string[]>(blossomServers)
   blossomServersRef.current = blossomServers
@@ -1273,8 +1283,27 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
   useEffect(() => {
     if (!active || !isHex64(myPubkey)) return
     const relays = socialRelaysRef.current
-    const sinceSec = Math.floor(Date.now() / 1000) - 7 * 86400
+    const subStartSec = Math.floor(Date.now() / 1000)
+    const sinceSec = subStartSec - 7 * 86400
+    let receivedEose = false
     let flushTimer: number | null = null
+
+    const emitLiveAgoraNotif = (
+      createdAtSec: number,
+      input: Omit<NotifyAgoraInput, 'actorName'>
+    ) => {
+      if (createdAtSec < subStartSec - 15) return
+      if (!receivedEose && createdAtSec < subStartSec - 5) return
+      const prof = profilesRef.current[input.actorPubkey]
+      const actorName =
+        prof?.displayName?.trim() ||
+        prof?.name?.trim() ||
+        `anon${input.actorPubkey.slice(-4)}`
+      onNotifyAgoraRef.current?.({
+        ...input,
+        actorName,
+      })
+    }
 
     const flushNotifications = () => {
       flushTimer = null
@@ -1308,6 +1337,9 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         },
       ],
       {
+        onEose: () => {
+          receivedEose = true
+        },
         onEvent: (ev) => {
           const evId = ev.id.toLowerCase()
           if (notifByIdRef.current.has(evId)) return
@@ -1328,6 +1360,14 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             })
             ensureProfiles([actor])
             if (zap.targetEventId) ensureNotes([zap.targetEventId])
+            emitLiveAgoraNotif(zap.createdAt, {
+              id: evId,
+              kind: 'zap',
+              actorPubkey: actor,
+              noteId: zap.targetEventId,
+              preview: zap.comment,
+              sats: zap.amountSats,
+            })
             scheduleFlush()
             return
           }
@@ -1351,6 +1391,13 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             })
             ensureProfiles([actor])
             if (targetId) ensureNotes([targetId])
+            emitLiveAgoraNotif(note.createdAt, {
+              id: evId,
+              kind: note.isReply ? 'reply' : note.quoteIds.length > 0 ? 'quote' : 'mention',
+              actorPubkey: actor,
+              noteId: note.id,
+              preview: note.content.slice(0, 220),
+            })
             scheduleFlush()
             return
           }
@@ -1368,6 +1415,13 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             })
             ensureProfiles([actor])
             ensureNotes([repost.targetNoteId])
+            emitLiveAgoraNotif(repost.repostedAt, {
+              id: evId,
+              kind: 'repost',
+              actorPubkey: actor,
+              noteId: repost.targetNoteId,
+              preview: notesRef.current[repost.targetNoteId]?.content.slice(0, 120),
+            })
             scheduleFlush()
             return
           }
@@ -1391,6 +1445,13 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             })
             ensureProfiles([actor])
             if (targetId) ensureNotes([targetId])
+            emitLiveAgoraNotif(ev.created_at, {
+              id: evId,
+              kind: 'like',
+              actorPubkey: actor,
+              noteId: targetId,
+              preview: targetId ? notesRef.current[targetId]?.content.slice(0, 120) : undefined,
+            })
             scheduleFlush()
           }
         },
@@ -1943,8 +2004,57 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             })
           }
         }
+        const ok = res.acceptedRelays.length > 0 || res.sentCount > 0
+        if (ok) {
+          const myPk = myPubkeyRef.current
+          const myProf = profilesRef.current[myPk]
+          const senderName =
+            myProf?.displayName?.trim() ||
+            myProf?.name?.trim() ||
+            identityManager.getNickname() ||
+            undefined
+          const cleanPreview = content.trim().replace(/\s+/g, ' ').slice(0, 120)
+          const replyAuthor = opts?.replyTo?.pubkey.toLowerCase()
+
+          if (replyAuthor && replyAuthor !== myPk) {
+            onNotifyPushPokeRef.current?.({
+              recipientPubkeys: [replyAuthor],
+              category: 'agora-reply',
+              eventId: signed.id,
+              noteId: signed.id,
+              senderName,
+              preview: cleanPreview || 'Replied to your post on Agora',
+            })
+          }
+
+          const mentionTargets = new Set<string>()
+          if (parsed) {
+            for (const pk of parsed.mentionedPubkeys) {
+              const lower = pk.toLowerCase()
+              if (lower !== myPk && lower !== replyAuthor) mentionTargets.add(lower)
+            }
+          }
+          if (opts?.quoteNote) {
+            const quoteAuthor = opts.quoteNote.pubkey.toLowerCase()
+            if (quoteAuthor !== myPk && quoteAuthor !== replyAuthor) {
+              mentionTargets.add(quoteAuthor)
+            }
+          }
+          if (mentionTargets.size > 0) {
+            onNotifyPushPokeRef.current?.({
+              recipientPubkeys: Array.from(mentionTargets),
+              category: 'agora-mention',
+              eventId: signed.id,
+              noteId: signed.id,
+              senderName,
+              preview:
+                cleanPreview ||
+                (opts?.quoteNote ? 'Quoted your post on Agora' : 'Mentioned you on Agora'),
+            })
+          }
+        }
         return {
-          ok: res.acceptedRelays.length > 0 || res.sentCount > 0,
+          ok,
           eventId: signed.id,
           note: parsed ?? undefined,
           publishedRelays: res.acceptedRelays.length,
@@ -1957,7 +2067,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         setPublishing(false)
       }
     },
-    [flushDirtyStats, getOrCreateBucket, ingestNotesBatch, relayPool, signMasterEvent]
+    [flushDirtyStats, getOrCreateBucket, identityManager, ingestNotesBatch, relayPool, signMasterEvent]
   )
 
   const publishNote = useCallback(
@@ -1998,8 +2108,25 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         const template = buildRepostTemplate(note, relays[0])
         const signed = await signMasterEvent(template)
         const res = await relayPool.publish(relays, signed)
+        const ok = res.acceptedRelays.length > 0 || res.sentCount > 0
+        if (ok && note.pubkey.toLowerCase() !== myPubkeyRef.current) {
+          const myProf = profilesRef.current[myPubkeyRef.current]
+          const senderName =
+            myProf?.displayName?.trim() ||
+            myProf?.name?.trim() ||
+            identityManager.getNickname() ||
+            undefined
+          onNotifyPushPokeRef.current?.({
+            recipientPubkeys: [note.pubkey.toLowerCase()],
+            category: 'agora-repost',
+            eventId: signed.id,
+            noteId: note.id,
+            senderName,
+            preview: note.content.trim().replace(/\s+/g, ' ').slice(0, 100) || undefined,
+          })
+        }
         return {
-          ok: res.acceptedRelays.length > 0 || res.sentCount > 0,
+          ok,
           eventId: signed.id,
           publishedRelays: res.acceptedRelays.length,
         }
@@ -2009,7 +2136,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         return { ok: false, publishedRelays: 0, error: msg }
       }
     },
-    [flushDirtyStats, getOrCreateBucket, relayPool, signMasterEvent]
+    [flushDirtyStats, getOrCreateBucket, identityManager, relayPool, signMasterEvent]
   )
 
   const toggleLike = useCallback(
@@ -2046,6 +2173,22 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         const signed = await signMasterEvent(buildReactionLikeTemplate(note))
         bucket.myLikeEventId = signed.id.toLowerCase()
         await relayPool.publish(writeRelaysRef.current, signed)
+        if (note.pubkey.toLowerCase() !== pk) {
+          const myProf = profilesRef.current[pk]
+          const senderName =
+            myProf?.displayName?.trim() ||
+            myProf?.name?.trim() ||
+            identityManager.getNickname() ||
+            undefined
+          onNotifyPushPokeRef.current?.({
+            recipientPubkeys: [note.pubkey.toLowerCase()],
+            category: 'agora-like',
+            eventId: signed.id,
+            noteId: note.id,
+            senderName,
+            preview: note.content.trim().replace(/\s+/g, ' ').slice(0, 100) || undefined,
+          })
+        }
         return true
       } catch (err) {
         bucket.likers.delete(pk)
@@ -2056,7 +2199,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         return false
       }
     },
-    [flushDirtyStats, getOrCreateBucket, relayPool, signMasterEvent]
+    [flushDirtyStats, getOrCreateBucket, identityManager, relayPool, signMasterEvent]
   )
 
   const toggleBookmark = useCallback(
@@ -2106,6 +2249,20 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         const signed = await signMasterEvent(template)
         myFollowEventRef.current = signed
         await relayPool.publish(writeRelaysRef.current, signed)
+        if (!exists) {
+          const myProf = profilesRef.current[myPubkeyRef.current]
+          const senderName =
+            myProf?.displayName?.trim() ||
+            myProf?.name?.trim() ||
+            identityManager.getNickname() ||
+            undefined
+          onNotifyPushPokeRef.current?.({
+            recipientPubkeys: [pk],
+            category: 'agora-follow',
+            eventId: signed.id,
+            senderName,
+          })
+        }
         return !exists
       } catch (err) {
         followingRef.current = prev
@@ -2115,7 +2272,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         return exists
       }
     },
-    [relayPool, signMasterEvent]
+    [identityManager, relayPool, signMasterEvent]
   )
 
   const updateMyProfile = useCallback(
@@ -2158,14 +2315,32 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     (noteId: string, amountSats: number) => {
       if (!isHex64(noteId) || !Number.isFinite(amountSats) || amountSats <= 0) return
       const id = noteId.toLowerCase()
+      const roundedSats = Math.round(amountSats)
       const bucket = getOrCreateBucket(id)
-      bucket.optimisticZapSats += Math.round(amountSats)
+      bucket.optimisticZapSats += roundedSats
       bucket.optimisticZapCount += 1
       bucket.optimisticZappedByMe = true
       dirtyStatsIdsRef.current.add(id)
       flushDirtyStats()
+
+      const targetNote = notesRef.current[id]
+      if (targetNote && targetNote.pubkey.toLowerCase() !== myPubkeyRef.current) {
+        const myProf = profilesRef.current[myPubkeyRef.current]
+        const senderName =
+          myProf?.displayName?.trim() ||
+          myProf?.name?.trim() ||
+          identityManager.getNickname() ||
+          undefined
+        onNotifyPushPokeRef.current?.({
+          recipientPubkeys: [targetNote.pubkey.toLowerCase()],
+          category: 'agora-zap',
+          noteId: id,
+          senderName,
+          preview: `${roundedSats.toLocaleString()} sats`,
+        })
+      }
     },
-    [flushDirtyStats, getOrCreateBucket]
+    [flushDirtyStats, getOrCreateBucket, identityManager]
   )
 
   const uploadMedia = useCallback(

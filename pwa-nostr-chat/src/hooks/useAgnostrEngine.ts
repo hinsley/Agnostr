@@ -177,6 +177,7 @@ import { formatBitchatPreviewText, useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
 import {
   useNotifications,
+  type NotifyAgoraInput,
   type NotifyAmailInput,
   type NotifyGeoMessageInput,
   type NotifyLocationNoteInput,
@@ -415,7 +416,16 @@ export function useAgnostrEngine(): AgnostrEngine {
     try {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
       const lowerHash = rawHash.toLowerCase()
-      if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=') || lowerHash.startsWith('dm=')) return
+      if (
+        lowerHash.startsWith('invite=') ||
+        lowerHash.startsWith('notify=') ||
+        lowerHash.startsWith('dm=') ||
+        lowerHash === 'agora' ||
+        lowerHash.startsWith('agora=') ||
+        lowerHash.startsWith('post=')
+      ) {
+        return
+      }
       const currentKey = parseBitchatChannelHash(window.location.hash || '')
       const targetHash = formatBitchatChannelHash(activeGeohash)
       if (currentKey !== activeGeohash || window.location.hash !== targetHash) {
@@ -430,7 +440,16 @@ export function useAgnostrEngine(): AgnostrEngine {
     const onHashChange = () => {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
       const lowerHash = rawHash.toLowerCase()
-      if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=') || lowerHash.startsWith('dm=')) return
+      if (
+        lowerHash.startsWith('invite=') ||
+        lowerHash.startsWith('notify=') ||
+        lowerHash.startsWith('dm=') ||
+        lowerHash === 'agora' ||
+        lowerHash.startsWith('agora=') ||
+        lowerHash.startsWith('post=')
+      ) {
+        return
+      }
       const parsed = parseBitchatChannelHash(window.location.hash || '')
       if (parsed) {
         activeGeohashRef.current = parsed
@@ -604,6 +623,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   const notifyGeoMessageRef = useRef<(input: NotifyGeoMessageInput) => void>(() => {})
   const notifyLocationNoteRef = useRef<(input: NotifyLocationNoteInput) => void>(() => {})
   const notifyAmailRef = useRef<(input: NotifyAmailInput) => boolean>(() => true)
+  const notifyAgoraRef = useRef<(input: NotifyAgoraInput) => void>(() => {})
   const seedMemoTranscriptRef = useRef<
     (memoKey: string, text: string, modelLabel?: string) => void
   >(() => {})
@@ -2481,6 +2501,9 @@ export function useAgnostrEngine(): AgnostrEngine {
   const handleAgoraProfileNameSaved = useCallback((name: string) => {
     setNicknameRef.current(name)
   }, [])
+  const handleIncomingAgora = useCallback((input: NotifyAgoraInput) => {
+    notifyAgoraRef.current(input)
+  }, [])
 
   // Agora — Lazy-activated Nostr public social engine (NIP-01/02/10/18/19/25/27/36/50/51/57/65/92)
   const agoraEngine = useAgora({
@@ -2493,6 +2516,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     pushToast,
     onDiscoverProfileLud16: zapsEngine.ingestPeerLightningAddress,
     onProfileNameSaved: handleAgoraProfileNameSaved,
+    onNotifyAgora: handleIncomingAgora,
+    onNotifyPushPoke: handlePushPoke,
   })
 
   // Verified kind: 0 profile pictures strictly keyed by exact pubkey
@@ -4756,6 +4781,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     notifyGeoMessage,
     notifyLocationNote,
     notifyAmail,
+    notifyAgora,
     resetAllNotifications,
   } = useNotifications({
     activeView,
@@ -4807,6 +4833,10 @@ export function useAgnostrEngine(): AgnostrEngine {
   useLayoutEffect(() => {
     notifyAmailRef.current = notifyAmail
   }, [notifyAmail])
+
+  useLayoutEffect(() => {
+    notifyAgoraRef.current = notifyAgora
+  }, [notifyAgora])
 
   const {
     notificationsByProfile,

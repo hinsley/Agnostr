@@ -70,6 +70,9 @@ import { isScreenShareSupported, WebRtcMesh } from '../lib/webrtcMesh.ts'
 
 const RING_TIMEOUT_MS = 45_000
 const OUTGOING_INVITE_REBROADCAST_MS = 3_500
+const OUTGOING_PUSH_POKE_INTERVAL_MS = 12_000
+const MAX_OUTGOING_PUSH_POKES = 3
+const DM_MAX_PARTICIPANTS = 2
 const ROSTER_SWEEP_INTERVAL_MS = 5_000
 const MAX_SEEN_SIGNALS = 600
 
@@ -218,6 +221,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   const endedCallIdsRef = useRef<Set<string>>(new Set())
   const outgoingRingTimerRef = useRef<number | null>(null)
   const outgoingRingInviteTimerRef = useRef<number | null>(null)
+  const outgoingRingPokeTimerRef = useRef<number | null>(null)
   const incomingRingTimerRef = useRef<number | null>(null)
   const roomHeartbeatTimerRef = useRef<number | null>(null)
   const lastRoomPongRef = useRef<number>(0)
@@ -251,11 +255,26 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     if (!mesh || !current) return
 
     const rawMeshParticipants = mesh.getParticipantsSnapshot()
-    // Defense-in-depth: never expose media streams of untrusted peers unless explicitly opted into AI video screening
+    // Defense-in-depth: never expose media streams of untrusted peers unless explicitly opted into AI video screening,
+    // and in 1-on-1 DM calls strictly allow ONLY self + the single DM peerPubkey (max 1 remote peer).
     const allowedMeshParticipants: CallParticipant[] = []
+    const dmTargetPeer = current.mode === 'dm' ? current.peerPubkey?.toLowerCase() : undefined
+    let dmRemoteCount = 0
     for (const p of rawMeshParticipants) {
       if (p.isSelf) {
         allowedMeshParticipants.push({ ...p, isUntrusted: false })
+      } else if (current.mode === 'dm') {
+        const pk = p.pubkey.toLowerCase()
+        if (
+          dmTargetPeer &&
+          pk === dmTargetPeer &&
+          dmRemoteCount < 1 &&
+          isExplicitlyTrustedRef.current(pk) &&
+          !blockedSetRef.current.has(pk)
+        ) {
+          dmRemoteCount += 1
+          allowedMeshParticipants.push({ ...p, isUntrusted: false })
+        }
       } else if (isExplicitlyTrustedRef.current(p.pubkey)) {
         allowedMeshParticipants.push({ ...p, isUntrusted: false })
       } else if (
@@ -353,6 +372,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         window.clearInterval(outgoingRingInviteTimerRef.current)
         outgoingRingInviteTimerRef.current = null
       }
+      if (outgoingRingPokeTimerRef.current !== null) {
+        window.clearInterval(outgoingRingPokeTimerRef.current)
+        outgoingRingPokeTimerRef.current = null
+      }
     }
     const nextConnectedAt =
       nextStatus === 'active' && current.connectedAt === null ? Date.now() : current.connectedAt
@@ -402,6 +425,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     if (outgoingRingInviteTimerRef.current !== null) {
       window.clearInterval(outgoingRingInviteTimerRef.current)
       outgoingRingInviteTimerRef.current = null
+    }
+    if (outgoingRingPokeTimerRef.current !== null) {
+      window.clearInterval(outgoingRingPokeTimerRef.current)
+      outgoingRingPokeTimerRef.current = null
     }
     if (incomingRingTimerRef.current !== null) {
       window.clearTimeout(incomingRingTimerRef.current)
@@ -602,7 +629,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             callId: current.callId,
             ts: Date.now(),
           })
-          if (action === 'call-cancel') {
+          if (action === 'call-cancel' || current.status === 'connecting') {
             onNotifyPushPokeRef.current?.({
               recipientPubkeys: [current.peerPubkey],
               category: 'call-cancel',
@@ -709,10 +736,21 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
           : identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
       const selfNick = identityManager.getNickname()
 
+      const dmPeerLower =
+        sessionMeta.mode === 'dm' && sessionMeta.peerPubkey
+          ? sessionMeta.peerPubkey.toLowerCase()
+          : undefined
+
       const mesh = new WebRtcMesh({
         selfPubkey: selfPk,
         selfNickname: selfNick,
         turnConfig: turnConfigRef.current,
+        ...(sessionMeta.mode === 'dm'
+          ? {
+              maxRemotePeers: 1,
+              allowedPeers: dmPeerLower ? [dmPeerLower] : [],
+            }
+          : {}),
         callbacks: {
           onSendOffer: (targetPk, sdp) => {
             const nick = identityManager.getNickname()
@@ -1150,7 +1188,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
         participants: mesh.getParticipantsSnapshot(),
-        maxParticipants: MAX_CALL_PARTICIPANTS,
+        maxParticipants: DM_MAX_PARTICIPANTS,
       }
       activeCallRef.current = session
       setActiveCall(session)
@@ -1158,21 +1196,55 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       // Wake any sleeping/backed-off signaling relays before sending call-invite (critical on mobile PWA)
       poolRef.current?.ensureRelaysAlive(CALL_SIGNALING_RELAYS)
 
+      const selfNick = identityManager.getNickname()
       void publishDirectSignal(pk, {
         v: 1,
         action: 'call-invite',
         callId,
         media: session.mediaType,
-        nickname: identityManager.getNickname(),
+        nickname: selfNick,
         ts: Date.now(),
       })
 
+      let ringPokeCount = 1
       onNotifyPushPokeRef.current?.({
         recipientPubkeys: [pk],
         category: 'dm-call',
+        eventId: `${callId}:ring:${ringPokeCount}`,
         callId,
         mediaType: session.mediaType,
+        senderName: selfNick,
       })
+
+      // Repeat-ring background Web Push poke every 12s while ringing-out (up to 3 total rings)
+      outgoingRingPokeTimerRef.current = window.setInterval(() => {
+        const cur = activeCallRef.current
+        if (
+          !cur ||
+          cur.callId !== callId ||
+          cur.status !== 'ringing-out' ||
+          ringPokeCount >= MAX_OUTGOING_PUSH_POKES
+        ) {
+          if (outgoingRingPokeTimerRef.current !== null) {
+            window.clearInterval(outgoingRingPokeTimerRef.current)
+            outgoingRingPokeTimerRef.current = null
+          }
+          return
+        }
+        ringPokeCount += 1
+        onNotifyPushPokeRef.current?.({
+          recipientPubkeys: [pk],
+          category: 'dm-call',
+          eventId: `${callId}:ring:${ringPokeCount}`,
+          callId,
+          mediaType: cur.mediaType,
+          senderName: identityManager.getNickname(),
+        })
+        if (ringPokeCount >= MAX_OUTGOING_PUSH_POKES && outgoingRingPokeTimerRef.current !== null) {
+          window.clearInterval(outgoingRingPokeTimerRef.current)
+          outgoingRingPokeTimerRef.current = null
+        }
+      }, OUTGOING_PUSH_POKE_INTERVAL_MS)
 
       // Periodically re-broadcast call-invite every 3.5s while awaiting pickup so waking/reconnecting PWAs ring reliably
       outgoingRingInviteTimerRef.current = window.setInterval(() => {
@@ -1277,7 +1349,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         recordingSupported: isCallRecordingSupported(),
         screenShareSupported: isScreenShareSupported(),
         participants: mesh.getParticipantsSnapshot(),
-        maxParticipants: MAX_CALL_PARTICIPANTS,
+        maxParticipants: DM_MAX_PARTICIPANTS,
       }
       activeCallRef.current = session
       setActiveCall(session)
@@ -1951,7 +2023,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               const active = activeCallRef.current
               const mesh = meshRef.current
               if (!active || !mesh || active.mode !== 'dm' || active.callId !== payload.callId) return
-              if (active.peerPubkey !== sender) return
+              if (active.peerPubkey?.toLowerCase() !== sender) return
 
               if (outgoingRingTimerRef.current !== null) {
                 window.clearTimeout(outgoingRingTimerRef.current)
@@ -1960,6 +2032,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               if (outgoingRingInviteTimerRef.current !== null) {
                 window.clearInterval(outgoingRingInviteTimerRef.current)
                 outgoingRingInviteTimerRef.current = null
+              }
+              if (outgoingRingPokeTimerRef.current !== null) {
+                window.clearInterval(outgoingRingPokeTimerRef.current)
+                outgoingRingPokeTimerRef.current = null
               }
               // Only transition ringing-out -> connecting (never downgrade an already active call)
               if (active.status === 'ringing-out') {
@@ -1986,7 +2062,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               }
               const active = activeCallRef.current
               if (!active || active.mode !== 'dm' || active.callId !== payload.callId) return
-              if (active.peerPubkey !== sender) return
+              if (active.peerPubkey?.toLowerCase() !== sender) return
               const title = active.title
               teardownActiveCall(false)
               pushToastRef.current(
@@ -2003,7 +2079,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 const first = endedCallIdsRef.current.values().next().value
                 if (first) endedCallIdsRef.current.delete(first)
               }
-              if (incomingCallRef.current?.callId === payload.callId && incomingCallRef.current.callerPubkey === sender) {
+              if (incomingCallRef.current?.callId === payload.callId && incomingCallRef.current.callerPubkey.toLowerCase() === sender) {
                 if (incomingRingTimerRef.current !== null) {
                   window.clearTimeout(incomingRingTimerRef.current)
                   incomingRingTimerRef.current = null
@@ -2013,7 +2089,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 return
               }
               const active = activeCallRef.current
-              if (active && active.mode === 'dm' && active.callId === payload.callId && active.peerPubkey === sender) {
+              if (active && active.mode === 'dm' && active.callId === payload.callId && active.peerPubkey?.toLowerCase() === sender) {
                 const title = active.title
                 teardownActiveCall(false)
                 pushToastRef.current('info', 'Call ended', `${title} hung up.`)
@@ -2024,7 +2100,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             const active = activeCallRef.current
             const mesh = meshRef.current
             if (!active || !mesh || active.mode !== 'dm' || active.callId !== payload.callId) return
-            if (active.peerPubkey !== sender) return
+            if (active.peerPubkey?.toLowerCase() !== sender) return
 
             // If callee's offer/ice/media-state overtakes call-accept across relays,
             // treat it as implicit acceptance so caller exits ringing-out and clears ring timers!
@@ -2036,6 +2112,10 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               if (outgoingRingInviteTimerRef.current !== null) {
                 window.clearInterval(outgoingRingInviteTimerRef.current)
                 outgoingRingInviteTimerRef.current = null
+              }
+              if (outgoingRingPokeTimerRef.current !== null) {
+                window.clearInterval(outgoingRingPokeTimerRef.current)
+                outgoingRingPokeTimerRef.current = null
               }
               const nextSession: ActiveCallSession = { ...active, status: 'connecting' }
               activeCallRef.current = nextSession

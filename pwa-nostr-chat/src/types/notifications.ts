@@ -22,6 +22,12 @@ export type NotificationCategory =
   | 'geo-call'
   | 'agmail'
   | 'location-note'
+  | 'agora-reply'
+  | 'agora-mention'
+  | 'agora-like'
+  | 'agora-repost'
+  | 'agora-zap'
+  | 'agora-follow'
   | 'test'
 
 export interface PushPokePayload {
@@ -36,7 +42,14 @@ export interface PushPokePayload {
     | 'agmail'
     | 'agmail-cc'
     | 'call-cancel'
+    | 'agora-reply'
+    | 'agora-mention'
+    | 'agora-like'
+    | 'agora-repost'
+    | 'agora-zap'
+    | 'agora-follow'
   eventId?: string
+  noteId?: string
   callId?: string
   mediaType?: 'audio' | 'video'
   serverId?: string
@@ -57,6 +70,10 @@ export interface NotificationSettings {
   serverMessages: NotificationFilterMode
   serverCalls: boolean
   geoMessages: NotificationFilterMode
+  agoraRepliesMentions: boolean
+  agoraReactionsReposts: boolean
+  agoraZaps: boolean
+  agoraFollows: boolean
   soundEnabled: boolean
   ringtoneEnabled: boolean
   vibrationEnabled: boolean
@@ -76,6 +93,7 @@ export interface NotificationPayloadData {
   serverId?: string
   channelId?: string
   geohash?: string
+  noteId?: string
   callerNickname?: string
 }
 

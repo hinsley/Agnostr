@@ -132,6 +132,11 @@ export function parseNotifyHash(rawHash: string): PendingNotificationAction | nu
       typeof rawRecipient === 'string' && /^[0-9a-f]{64}$/i.test(rawRecipient.trim())
         ? rawRecipient.trim().toLowerCase()
         : undefined
+    const rawNoteId = decoded.payload.noteId
+    const noteId =
+      typeof rawNoteId === 'string' && /^[0-9a-f]{64}$/i.test(rawNoteId.trim())
+        ? rawNoteId.trim().toLowerCase()
+        : undefined
     return {
       action,
       payload: {
@@ -144,6 +149,7 @@ export function parseNotifyHash(rawHash: string): PendingNotificationAction | nu
         serverId: decoded.payload.serverId,
         channelId: decoded.payload.channelId,
         geohash: decoded.payload.geohash,
+        noteId,
         callerNickname: decoded.payload.callerNickname,
       },
       receivedAt: Date.now(),
@@ -427,6 +433,10 @@ export async function registerWithPushBridge(
       serverMessages: params.settings.serverMessages,
       serverCalls: params.settings.serverCalls,
       geoMessages: params.settings.geoMessages,
+      agoraRepliesMentions: params.settings.agoraRepliesMentions,
+      agoraReactionsReposts: params.settings.agoraReactionsReposts,
+      agoraZaps: params.settings.agoraZaps,
+      agoraFollows: params.settings.agoraFollows,
       showPreviews: params.settings.showPreviews,
     },
   }

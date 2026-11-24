@@ -12,6 +12,7 @@ import {
   Bookmark,
   Camera,
   Check,
+  Compass,
   Copy,
   Flame,
   Globe,
@@ -23,9 +24,11 @@ import {
   Link2,
   Loader2,
   Mail,
+  Menu,
   MessageCircle,
   MoreHorizontal,
   PenLine,
+  PenSquare,
   Quote,
   RefreshCw,
   Repeat2,
@@ -73,6 +76,7 @@ import {
   parseAgoraShareUrl,
 } from '../lib/shareLinks.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
+import { useMobileSwipeDrawers } from '../hooks/useMobileSwipeDrawers.ts'
 import { identiconDataUrl, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { AvatarImg } from './AvatarImg.tsx'
@@ -2220,6 +2224,8 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const [manualComposerModal, setManualComposerModal] = useState<ComposerModalState | null>(null)
   const [editProfileOpen, setEditProfileOpen] = useState(false)
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false)
+  const [leftDrawerOpen, setLeftDrawerOpen] = useState(false)
+  const [rightDrawerOpen, setRightDrawerOpen] = useState(false)
   const [searchDraft, setSearchDraft] = useState(agora.searchQuery)
   const [revealedCwIds, setRevealedCwIds] = useState<Set<string>>(() => new Set())
   const [showOriginalKeys, setShowOriginalKeys] = useState<Set<string>>(() => new Set())
@@ -2243,28 +2249,67 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
     }
   }, [initialComposeOpen, onConsumedInitialCompose])
 
+  const closeDrawers = useCallback(() => {
+    setLeftDrawerOpen(false)
+    setRightDrawerOpen(false)
+  }, [])
+
+  const handleLeftDrawerOpenChange = useCallback((open: boolean) => {
+    setLeftDrawerOpen(open)
+    if (open) setRightDrawerOpen(false)
+  }, [])
+
+  const handleRightDrawerOpenChange = useCallback((open: boolean) => {
+    setRightDrawerOpen(open)
+    if (open) setLeftDrawerOpen(false)
+  }, [])
+
+  const {
+    bindRef: agoraStageRef,
+    leftProgress: leftDrawerProgress,
+    rightProgress: rightDrawerProgress,
+    isSwipingLeft: isSwipingLeftDrawer,
+    isSwipingRight: isSwipingRightDrawer,
+  } = useMobileSwipeDrawers({
+    leftOpen: leftDrawerOpen,
+    rightOpen: rightDrawerOpen,
+    disabled: Boolean(activeComposerModal) || editProfileOpen,
+    onLeftOpenChange: handleLeftDrawerOpenChange,
+    onRightOpenChange: handleRightDrawerOpenChange,
+  })
+
   useBackHandler(Boolean(activeComposerModal), closeComposerModal)
   useBackHandler(!activeComposerModal && !editProfileOpen && Boolean(agora.thread), agora.closeThread)
   useBackHandler(
     !activeComposerModal && !editProfileOpen && !agora.thread && Boolean(agora.profileView),
     agora.closeProfile
   )
+  useBackHandler(
+    !activeComposerModal && !editProfileOpen && (leftDrawerOpen || rightDrawerOpen),
+    closeDrawers
+  )
 
   useEffect(() => {
-    if (!activeComposerModal) return
+    if (!activeComposerModal && !leftDrawerOpen && !rightDrawerOpen) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
-        closeComposerModal()
+        if (activeComposerModal) {
+          closeComposerModal()
+        } else if (leftDrawerOpen || rightDrawerOpen) {
+          closeDrawers()
+        }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [activeComposerModal, closeComposerModal])
+  }, [activeComposerModal, leftDrawerOpen, rightDrawerOpen, closeComposerModal, closeDrawers])
 
   const handleSelectTab = useCallback(
     (tab: AgoraFeedTab) => {
       onPlaySound?.('click')
+      setLeftDrawerOpen(false)
+      setRightDrawerOpen(false)
       if (agora.thread) agora.closeThread()
       if (agora.profileView) agora.closeProfile()
       if (agora.searchQuery || agora.activeHashtag) agora.clearSearch()
@@ -2280,6 +2325,8 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const handleOpenProfile = useCallback(
     (pubkey: string) => {
       onPlaySound?.('click')
+      setLeftDrawerOpen(false)
+      setRightDrawerOpen(false)
       if (agora.thread) agora.closeThread()
       agora.openProfile(pubkey)
       streamRef.current?.scrollTo({ top: 0 })
@@ -2290,6 +2337,8 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const handleOpenThread = useCallback(
     (noteId: string) => {
       onPlaySound?.('click')
+      setLeftDrawerOpen(false)
+      setRightDrawerOpen(false)
       agora.openThread(noteId)
       streamRef.current?.scrollTo({ top: 0 })
     },
@@ -2299,6 +2348,8 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const handleSelectHashtag = useCallback(
     (tag: string) => {
       onPlaySound?.('click')
+      setLeftDrawerOpen(false)
+      setRightDrawerOpen(false)
       if (agora.thread) agora.closeThread()
       if (agora.profileView) agora.closeProfile()
       setSearchDraft(`#${tag}`)
@@ -2318,6 +2369,8 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
         return
       }
       onPlaySound?.('click')
+      setLeftDrawerOpen(false)
+      setRightDrawerOpen(false)
       if (agora.thread) agora.closeThread()
       if (agora.profileView) agora.closeProfile()
       void agora.runSearch(q)
@@ -2853,11 +2906,38 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
       })()
     : null
 
+  const drawerScrimProgress = Math.max(leftDrawerProgress, rightDrawerProgress)
+  const isSwipingAnyDrawer = isSwipingLeftDrawer || isSwipingRightDrawer
+
   return (
     <div className="ag-agora-workspace" aria-label="Agora social feed" data-no-swipe="true">
-      <div className="ag-agora-shell">
-        {/* ================= LEFT AGORA SIDEBAR (Desktop >= 868px) ================= */}
-        <aside className="ag-agora-left" aria-label="Agora navigation">
+      <div
+        ref={agoraStageRef}
+        className="ag-agora-shell"
+        style={
+          {
+            '--ag-agora-left-p': String(leftDrawerProgress),
+            '--ag-agora-right-p': String(rightDrawerProgress),
+            '--ag-agora-scrim-p': String(drawerScrimProgress),
+          } as React.CSSProperties
+        }
+      >
+        {/* Interactive Dimmed Scrim for Mobile Left/Right Slide-Over Drawers */}
+        <div
+          className={`ag-agora-drawer-scrim${
+            leftDrawerOpen || rightDrawerOpen ? ' active' : ''
+          }${isSwipingAnyDrawer ? ' is-swiping' : ''}`}
+          onClick={closeDrawers}
+          aria-hidden="true"
+        />
+
+        {/* ================= LEFT AGORA NAV (Desktop >= 868px | Slide-Over Tray <= 867px) ================= */}
+        <aside
+          className={`ag-agora-left ag-agora-left-drawer${leftDrawerOpen ? ' open' : ''}${
+            isSwipingLeftDrawer ? ' is-swiping' : ''
+          }`}
+          aria-label="Agora navigation"
+        >
           <div className="ag-agora-brand">
             <span className="ag-agora-brand-icon" aria-hidden="true">
               <Landmark size={17} />
@@ -2866,6 +2946,14 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
               <span className="ag-agora-brand-title">Agora</span>
               <span className="ag-agora-brand-sub">Nostr public square</span>
             </div>
+            <button
+              type="button"
+              className="ag-agora-icon-btn ag-agora-drawer-close"
+              onClick={() => setLeftDrawerOpen(false)}
+              aria-label="Close Agora navigation"
+            >
+              <X size={17} />
+            </button>
           </div>
 
           <nav className="ag-agora-nav" aria-label="Agora feeds">
@@ -2908,6 +2996,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
             className="ag-agora-compose-cta"
             onClick={() => {
               onPlaySound?.('click')
+              closeDrawers()
               setManualComposerModal({ kind: 'post' })
             }}
           >
@@ -2940,6 +3029,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
               className="ag-agora-identity-edit"
               onClick={() => {
                 onPlaySound?.('click')
+                closeDrawers()
                 setEditProfileOpen(true)
               }}
               title="Edit Profile"
@@ -2952,41 +3042,6 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
 
         {/* ================= CENTER MAIN STREAM ================= */}
         <section className="ag-agora-center" aria-label="Agora stream">
-          {/* Mobile Horizontal Tab Strip (<= 867px) */}
-          <nav className="ag-agora-mobile-tabs" aria-label="Agora tabs">
-            {FEED_NAV_ITEMS.map((item) => {
-              const Icon = item.icon
-              const isActive =
-                !inThread && !inProfile && !inSearch && agora.activeTab === item.id
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`ag-agora-mobile-tab${isActive ? ' active' : ''}`}
-                  aria-current={isActive ? 'page' : undefined}
-                  onClick={() => handleSelectTab(item.id)}
-                >
-                  <Icon size={13} />
-                  <span>{item.mobileLabel}</span>
-                  {item.id === 'notifications' && agora.unreadNotificationCount > 0 && (
-                    <span className="ag-agora-mobile-tab-badge tabular">
-                      {agora.unreadNotificationCount > 99 ? '99+' : agora.unreadNotificationCount}
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-            <button
-              type="button"
-              className={`ag-agora-mobile-tab${isMyProfileOpen ? ' active' : ''}`}
-              aria-current={isMyProfileOpen ? 'page' : undefined}
-              onClick={() => handleOpenProfile(agora.myPubkey)}
-            >
-              <User size={13} />
-              <span>Profile</span>
-            </button>
-          </nav>
-
           {/* Sticky Center Header */}
           <header className="ag-agora-header">
             <div className="ag-agora-header-left">
@@ -3030,42 +3085,68 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                     )}
                   </div>
                 </>
-              ) : agora.activeHashtag ? (
+              ) : (
                 <>
-                  <span className="ag-agora-filter-chip">
-                    <Hash size={12} />
-                    <span className="truncate">{agora.activeHashtag}</span>
-                    <button
-                      type="button"
-                      className="ag-agora-filter-clear"
-                      onClick={handleClearSearch}
-                      aria-label="Clear hashtag filter"
-                    >
-                      <X size={12} />
-                    </button>
-                  </span>
-                </>
-              ) : agora.searchQuery ? (
-                <>
-                  <span className="ag-agora-header-title">
-                    <span>Search</span>
+                  <button
+                    type="button"
+                    className={`ag-agora-icon-btn ag-agora-mobile-menu-btn${
+                      leftDrawerOpen ? ' active' : ''
+                    }`}
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      handleLeftDrawerOpenChange(!leftDrawerOpen)
+                    }}
+                    aria-expanded={leftDrawerOpen}
+                    aria-label={
+                      agora.unreadNotificationCount > 0
+                        ? `Open Agora navigation (${agora.unreadNotificationCount} unread notifications)`
+                        : 'Open Agora navigation'
+                    }
+                    title="Agora navigation"
+                  >
+                    <Menu size={19} />
+                    {agora.unreadNotificationCount > 0 && (
+                      <span className="ag-agora-menu-unread-dot" aria-hidden="true" />
+                    )}
+                  </button>
+
+                  {agora.activeHashtag ? (
                     <span className="ag-agora-filter-chip">
-                      <span className="truncate">{agora.searchQuery}</span>
+                      <Hash size={12} />
+                      <span className="truncate">{agora.activeHashtag}</span>
                       <button
                         type="button"
                         className="ag-agora-filter-clear"
                         onClick={handleClearSearch}
-                        aria-label="Clear search"
+                        aria-label="Clear hashtag filter"
                       >
                         <X size={12} />
                       </button>
                     </span>
-                  </span>
+                  ) : agora.searchQuery ? (
+                    <span className="ag-agora-header-title">
+                      <span>Search</span>
+                      <span className="ag-agora-filter-chip">
+                        <span className="truncate">{agora.searchQuery}</span>
+                        <button
+                          type="button"
+                          className="ag-agora-filter-clear"
+                          onClick={handleClearSearch}
+                          aria-label="Clear search"
+                        >
+                          <X size={12} />
+                        </button>
+                      </span>
+                    </span>
+                  ) : (
+                    <div className="ag-agora-header-titles">
+                      <span className="ag-agora-header-title truncate">
+                        <span className="ag-agora-header-prefix">Agora · </span>
+                        {activeTabTitle}
+                      </span>
+                    </div>
+                  )}
                 </>
-              ) : (
-                <div className="ag-agora-header-titles">
-                  <span className="ag-agora-header-title">Agora · {activeTabTitle}</span>
-                </div>
               )}
             </div>
 
@@ -3140,12 +3221,29 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                 className="ag-agora-icon-btn ag-agora-mobile-compose-btn"
                 onClick={() => {
                   onPlaySound?.('click')
+                  closeDrawers()
                   setManualComposerModal({ kind: 'post' })
                 }}
                 aria-label="New Post"
                 title="New Post"
               >
-                <PenLine size={16} />
+                <PenSquare size={17} />
+              </button>
+
+              <button
+                type="button"
+                className={`ag-agora-icon-btn ag-agora-mobile-discover-btn${
+                  rightDrawerOpen ? ' active' : ''
+                }`}
+                onClick={() => {
+                  onPlaySound?.('click')
+                  handleRightDrawerOpenChange(!rightDrawerOpen)
+                }}
+                aria-expanded={rightDrawerOpen}
+                aria-label="Discover on Agora"
+                title="Discover"
+              >
+                <Compass size={18} />
               </button>
 
               <button
@@ -3806,8 +3904,27 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
           </div>
         </section>
 
-        {/* ================= RIGHT DISCOVERY RAIL (Desktop >= 1180px) ================= */}
-        <aside className="ag-agora-right" aria-label="Discover on Agora">
+        {/* ================= RIGHT DISCOVERY RAIL (Desktop >= 1180px | Slide-Over Tray <= 867px) ================= */}
+        <aside
+          className={`ag-agora-right ag-agora-right-drawer${rightDrawerOpen ? ' open' : ''}${
+            isSwipingRightDrawer ? ' is-swiping' : ''
+          }`}
+          aria-label="Discover on Agora"
+        >
+          <div className="ag-agora-drawer-head">
+            <div className="ag-agora-drawer-head-title">
+              <Compass size={16} aria-hidden="true" />
+              <span>Discover</span>
+            </div>
+            <button
+              type="button"
+              className="ag-agora-icon-btn ag-agora-drawer-close"
+              onClick={() => setRightDrawerOpen(false)}
+              aria-label="Close Discover drawer"
+            >
+              <X size={17} />
+            </button>
+          </div>
           {searchFormEl}
 
           <section className="ag-agora-disc-card" aria-label="Trending topics">
