@@ -27,8 +27,8 @@ import type { ServerHubTab } from './ServerHubModal'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { SettingsTab } from './SettingsModal'
 import { AgnostrLogo } from './AgnostrLogo'
-import { AvatarImg } from './AvatarImg'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu'
+import { UserProfileDock } from './UserProfileDock'
 
 export type ActiveWorkspace = 'chat' | 'agora' | 'mail' | 'wallet'
 
@@ -48,6 +48,7 @@ export interface AppRailProps {
   onOpenServerSettings: (serverId: string, tab?: ServerSettingsTab) => void
   onOpenSearch?: () => void
   onOpenSettings: (tab?: SettingsTab) => void
+  onOpenOwnAgoraProfile?: () => void
   onOpenInstall?: () => void
   onPlaySound?: (cue: SoundCue) => void
 }
@@ -90,6 +91,7 @@ export const AppRail: React.FC<AppRailProps> = ({
   onOpenServerSettings,
   onOpenSearch,
   onOpenSettings,
+  onOpenOwnAgoraProfile,
   onOpenInstall,
   onPlaySound,
 }) => {
@@ -977,36 +979,15 @@ export const AppRail: React.FC<AppRailProps> = ({
         )}
 
         <div className="ag-rail-slot">
-          <button
-            type="button"
-            className={`ag-rail-profile-btn ${settingsActive ? 'active' : ''}`}
-            onClick={() => {
-              onPlaySound?.('click')
-              onOpenSettings('profile')
-            }}
-            onMouseEnter={(e) =>
-              showTooltip(e.currentTarget, profileTooltipLabel, profileTooltipSub)
-            }
-            onMouseLeave={hideTooltip}
-            onFocus={(e) =>
-              showTooltip(e.currentTarget, profileTooltipLabel, profileTooltipSub)
-            }
-            onBlur={hideTooltip}
-            aria-label={profileTooltipLabel}
-          >
-            <AvatarImg
-              pubkey={engine.identity.masterPubkey}
-              pictureUrl={engine.getProfilePicture(engine.identity.masterPubkey)}
-              width={30}
-              height={30}
-              className="ag-rail-profile-img"
-            />
-            {otherProfilesUnread > 0 && (
-              <span className="ag-rail-badge ping tabular">
-                {formatBadgeCount(otherProfilesUnread)}
-              </span>
-            )}
-          </button>
+          <UserProfileDock
+            variant="rail"
+            engine={engine}
+            onOpenSettings={onOpenSettings}
+            onOpenOwnAgoraProfile={onOpenOwnAgoraProfile}
+            onPlaySound={onPlaySound}
+            onTooltipShow={(el) => showTooltip(el, profileTooltipLabel, profileTooltipSub)}
+            onTooltipHide={hideTooltip}
+          />
         </div>
       </div>
 

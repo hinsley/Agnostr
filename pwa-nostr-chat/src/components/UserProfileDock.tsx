@@ -27,21 +27,27 @@ function formatBadgeCount(count: number): string {
 
 export interface UserProfileDockProps {
   engine: AgnostrEngine
+  variant?: 'dock' | 'rail'
   collapsed?: boolean
   pwa?: PwaState
   onOpenSettings: (tab?: SettingsTab) => void
   onOpenOwnAgoraProfile?: () => void
   onOpenInstall?: () => void
+  onTooltipShow?: (el: HTMLElement) => void
+  onTooltipHide?: () => void
   onPlaySound?: (cue: SoundCue) => void
 }
 
 export const UserProfileDock: React.FC<UserProfileDockProps> = ({
   engine,
+  variant = 'dock',
   collapsed = false,
   pwa,
   onOpenSettings,
   onOpenOwnAgoraProfile,
   onOpenInstall,
+  onTooltipShow,
+  onTooltipHide,
   onPlaySound,
 }) => {
   // Quick Profile Card Popover state (toggled from bottom user dock)
@@ -99,10 +105,20 @@ export const UserProfileDock: React.FC<UserProfileDockProps> = ({
 
   const computeQuickProfilePos = useCallback(() => {
     if (typeof window === 'undefined') return null
-    const rect = footerRef.current?.getBoundingClientRect()
     const vw = window.innerWidth
     const vh = window.innerHeight
     const width = Math.min(296, Math.max(220, vw - 16))
+    if (variant === 'rail') {
+      const rect = profileTriggerRef.current?.getBoundingClientRect()
+      if (!rect) {
+        return { left: 78, bottom: 12, width, maxHeight: Math.max(220, Math.min(540, vh - 24)) }
+      }
+      const left = Math.max(8, Math.min(vw - width - 12, Math.round(rect.right + 10)))
+      const bottom = Math.max(12, Math.min(Math.round(vh - rect.bottom), Math.max(12, vh - 120)))
+      const maxHeight = Math.max(220, Math.min(540, vh - bottom - 12, vh - 24))
+      return { left, bottom, width, maxHeight }
+    }
+    const rect = footerRef.current?.getBoundingClientRect()
     if (!rect) {
       return { left: 8, bottom: 68, width, maxHeight: Math.max(220, vh - 80) }
     }
@@ -110,7 +126,7 @@ export const UserProfileDock: React.FC<UserProfileDockProps> = ({
     const bottom = Math.max(12, Math.min(Math.round(vh - rect.top + 8), Math.max(12, vh - 120)))
     const maxHeight = Math.max(220, Math.min(vh - bottom - 12, vh - 24))
     return { left, bottom, width, maxHeight }
-  }, [])
+  }, [variant])
 
   const closeQuickProfile = useCallback(() => {
     setQuickProfileOpen(false)
@@ -126,6 +142,7 @@ export const UserProfileDock: React.FC<UserProfileDockProps> = ({
 
   const handleToggleQuickProfile = useCallback(() => {
     onPlaySound?.('click')
+    onTooltipHide?.()
     setQuickProfileOpen((prev) => {
       if (prev) {
         setQpAvatarMenuOpen(false)
@@ -149,7 +166,7 @@ export const UserProfileDock: React.FC<UserProfileDockProps> = ({
       setPendingDeleteProfile(null)
       return true
     })
-  }, [computeQuickProfilePos, onPlaySound])
+  }, [computeQuickProfilePos, onPlaySound, onTooltipHide])
 
   // Quick Profile Popover outside-click, Escape, and viewport reposition listeners
   useEffect(() => {
@@ -422,74 +439,107 @@ export const UserProfileDock: React.FC<UserProfileDockProps> = ({
 
   return (
     <>
-      {/* Bottom User Dock (Compact Profile + Quiet Status; mobile-only Settings) */}
-      <div ref={footerRef} className="ag-conv-footer">
+      {variant === 'rail' ? (
         <button
           ref={profileTriggerRef}
           type="button"
-          className={`ag-profile-bar-btn ${isQuickProfileVisible ? 'active' : ''}`}
+          className={`ag-rail-profile-btn ${isQuickProfileVisible ? 'active' : ''}`}
           onClick={handleToggleQuickProfile}
-          title="Quick profile"
+          onMouseEnter={(e) => {
+            if (!isQuickProfileVisible) onTooltipShow?.(e.currentTarget)
+          }}
+          onMouseLeave={() => onTooltipHide?.()}
+          onFocus={(e) => {
+            if (!isQuickProfileVisible) onTooltipShow?.(e.currentTarget)
+          }}
+          onBlur={() => onTooltipHide?.()}
+          aria-label={`${engine.identity.nickname} · Profiles & Identity`}
           aria-haspopup="dialog"
           aria-expanded={isQuickProfileVisible}
         >
-          <span className="ag-profile-avatar-wrap">
-            <AvatarImg
-              pubkey={engine.identity.masterPubkey}
-              pictureUrl={engine.getProfilePicture(engine.identity.masterPubkey)}
-              width={30}
-              height={30}
-              className="ag-profile-avatar"
-            />
-            <span
-              className={`ag-profile-status-dot ${engine.connectedRelayCount > 0 ? 'online' : 'reconnecting'}`}
-              aria-hidden="true"
-            />
-          </span>
-          <div className="ag-profile-meta">
-            <span className="ag-profile-name truncate">{engine.identity.nickname}</span>
-            <span className="ag-profile-sub truncate">
-              {engine.connectedRelayCount > 0 ? 'Online' : 'Reconnecting…'}
-            </span>
-          </div>
+          <AvatarImg
+            pubkey={engine.identity.masterPubkey}
+            pictureUrl={engine.getProfilePicture(engine.identity.masterPubkey)}
+            width={30}
+            height={30}
+            className="ag-rail-profile-img"
+          />
           {engine.profiles.otherProfilesUnreadCount > 0 && (
-            <span
-              className="ag-profile-dock-badge tabular"
-              aria-label={`${engine.profiles.otherProfilesUnreadCount} notifications on other profiles`}
-              title={`${engine.profiles.otherProfilesUnreadCount} notification${engine.profiles.otherProfilesUnreadCount === 1 ? '' : 's'} on other profiles`}
-            >
+            <span className="ag-rail-badge ping tabular">
               {formatBadgeCount(engine.profiles.otherProfilesUnreadCount)}
             </span>
           )}
         </button>
+      ) : (
+        /* Bottom User Dock (Compact Profile + Quiet Status; mobile-only Settings) */
+        <div ref={footerRef} className="ag-conv-footer">
+          <button
+            ref={profileTriggerRef}
+            type="button"
+            className={`ag-profile-bar-btn ${isQuickProfileVisible ? 'active' : ''}`}
+            onClick={handleToggleQuickProfile}
+            title="Quick profile"
+            aria-haspopup="dialog"
+            aria-expanded={isQuickProfileVisible}
+          >
+            <span className="ag-profile-avatar-wrap">
+              <AvatarImg
+                pubkey={engine.identity.masterPubkey}
+                pictureUrl={engine.getProfilePicture(engine.identity.masterPubkey)}
+                width={30}
+                height={30}
+                className="ag-profile-avatar"
+              />
+              <span
+                className={`ag-profile-status-dot ${engine.connectedRelayCount > 0 ? 'online' : 'reconnecting'}`}
+                aria-hidden="true"
+              />
+            </span>
+            <div className="ag-profile-meta">
+              <span className="ag-profile-name truncate">{engine.identity.nickname}</span>
+              <span className="ag-profile-sub truncate">
+                {engine.connectedRelayCount > 0 ? 'Online' : 'Reconnecting…'}
+              </span>
+            </div>
+            {engine.profiles.otherProfilesUnreadCount > 0 && (
+              <span
+                className="ag-profile-dock-badge tabular"
+                aria-label={`${engine.profiles.otherProfilesUnreadCount} notifications on other profiles`}
+                title={`${engine.profiles.otherProfilesUnreadCount} notification${engine.profiles.otherProfilesUnreadCount === 1 ? '' : 's'} on other profiles`}
+              >
+                {formatBadgeCount(engine.profiles.otherProfilesUnreadCount)}
+              </span>
+            )}
+          </button>
 
-        <div className="ag-conv-footer-actions ag-mobile-only">
-          {pwa && !pwa.isInstalled && pwa.canPromptInstall && onOpenInstall && (
+          <div className="ag-conv-footer-actions ag-mobile-only">
+            {pwa && !pwa.isInstalled && pwa.canPromptInstall && onOpenInstall && (
+              <button
+                type="button"
+                className="ag-circle-btn ag-dock-icon-btn ag-mobile-only"
+                onClick={onOpenInstall}
+                title="Install App"
+                aria-label="Install Agnostr App"
+              >
+                <Download size={16} aria-hidden="true" />
+              </button>
+            )}
+
             <button
               type="button"
               className="ag-circle-btn ag-dock-icon-btn ag-mobile-only"
-              onClick={onOpenInstall}
-              title="Install App"
-              aria-label="Install Agnostr App"
+              onClick={() => {
+                onPlaySound?.('click')
+                onOpenSettings()
+              }}
+              title="Settings"
+              aria-label="Settings"
             >
-              <Download size={16} aria-hidden="true" />
+              <Settings size={16} aria-hidden="true" />
             </button>
-          )}
-
-          <button
-            type="button"
-            className="ag-circle-btn ag-dock-icon-btn ag-mobile-only"
-            onClick={() => {
-              onPlaySound?.('click')
-              onOpenSettings()
-            }}
-            title="Settings"
-            aria-label="Settings"
-          >
-            <Settings size={16} aria-hidden="true" />
-          </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Sleek Quick Profile Card Popover */}
       {isQuickProfileVisible &&

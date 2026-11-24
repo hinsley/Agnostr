@@ -2233,6 +2233,10 @@ export function App() {
             onOpenServerSettings={handleOpenServerSettings}
             onOpenSearch={handleOpenCommandPalette}
             onOpenSettings={handleOpenSettings}
+            onOpenOwnAgoraProfile={() => {
+              handleSelectWorkspace('agora')
+              engine.agora.openProfile(engine.identity.masterPubkey)
+            }}
             onOpenInstall={handleOpenInstall}
             onPlaySound={playSound}
           />
