@@ -497,16 +497,6 @@ async function screenImageJob(
   scores: Partial<Record<ContentFilterCategory, number>>
   runtimeDevice: ContentFilterRuntimeDevice | null
 }> {
-  if (!rules.filterIllegal && !rules.filterNsfw) {
-    return {
-      safe: true,
-      flagged: false,
-      categories: [],
-      scores: {},
-      runtimeDevice: lastActiveDevice,
-    }
-  }
-
   let model = await ensureImageModel(false)
   const pixels = await decodeImageToRgb224Nchw(blob)
 
@@ -552,12 +542,11 @@ async function screenImageJob(
   const reasons: string[] = []
   const scores: Partial<Record<ContentFilterCategory, number>> = {}
 
-  if (rules.filterIllegal) {
-    scores.illegal = Number(pNsfl.toFixed(4))
-    if (pNsfl >= THRESHOLD_IMAGE_NSFL) {
-      categories.push('illegal')
-      reasons.push('NSFL / graphic violence')
-    }
+  // NSFL / illegal imagery screening is permanently enforced and cannot be bypassed
+  scores.illegal = Number(pNsfl.toFixed(4))
+  if (pNsfl >= THRESHOLD_IMAGE_NSFL) {
+    categories.push('illegal')
+    reasons.push('NSFL / graphic violence')
   }
 
   if (rules.filterNsfw) {

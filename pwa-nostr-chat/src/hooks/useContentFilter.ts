@@ -51,17 +51,21 @@ function detectWebGpuSupport(): boolean {
 }
 
 function computeRulesFingerprint(settings: ContentFilterSettings): string {
-  return [settings.filterNsfw ? '1' : '0', settings.filterIllegal ? '1' : '0'].join('|')
+  return [settings.filterNsfw ? '1' : '0', '1'].join('|')
 }
 
-function hasAnyActiveRule(settings: ContentFilterSettings): boolean {
-  if (!settings.enabled) return false
-  return Boolean(settings.filterNsfw || settings.filterIllegal)
+function hasAnyActiveRule(): boolean {
+  return true
 }
 
-function shouldAutoPreloadModel(settings: ContentFilterSettings): boolean {
-  if (!hasAnyActiveRule(settings)) return false
-  return settings.mediaScope !== 'off' || settings.callVideoMode !== 'trusted-only'
+function shouldAutoPreloadModel(): boolean {
+  return true
+}
+
+function sanitizeMediaScope(scope: unknown): ContentFilterSettings['mediaScope'] {
+  return scope === 'all' || scope === 'untrusted'
+    ? scope
+    : DEFAULT_CONTENT_FILTER_SETTINGS.mediaScope
 }
 
 function isLegacyCacheUrl(url: string): boolean {
@@ -505,9 +509,9 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     pushToastRef.current?.('info', 'Content filter download cancelled')
   }, [terminateWorker])
 
-  // Auto-load the 22.6 MB image safety model on app startup (and whenever protection becomes active while idle)
+  // Auto-load the 22.6 MB image safety model on app startup
   useEffect(() => {
-    if (!shouldAutoPreloadModel(settings)) return
+    if (!shouldAutoPreloadModel()) return
     if (skipNextAutoLoadRef.current) return
     if (modelStatusRef.current !== 'idle') return
     void preloadModel({ silent: true })
@@ -522,13 +526,12 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
         const next: ContentFilterSettings = {
           ...prev,
           ...patch,
+          enabled: true,
+          filterIllegal: true,
+          mediaScope: sanitizeMediaScope(patch.mediaScope ?? prev.mediaScope),
         }
         settingsRef.current = next
         saveContentFilterSettings(next)
-
-        if (!shouldAutoPreloadModel(prev) && shouldAutoPreloadModel(next)) {
-          skipNextAutoLoadRef.current = false
-        }
 
         const nextFp = computeRulesFingerprint(next)
         if (nextFp !== rulesFingerprintRef.current) {
@@ -547,7 +550,6 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
 
   const shouldScreenMedia = useCallback((senderPubkey: string, isSelf: boolean): boolean => {
     const cfg = settingsRef.current
-    if (!hasAnyActiveRule(cfg) || cfg.mediaScope === 'off') return false
     const pk = senderPubkey.toLowerCase()
     if (isSelf || ownPubkeysRef.current.has(pk) || blockedSetRef.current.has(pk)) return false
     if (cfg.mediaScope === 'all') return true
@@ -557,7 +559,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
   const shouldAllowScreenedCallVideo = useCallback(
     (senderPubkey: string, isSelf: boolean): boolean => {
       const cfg = settingsRef.current
-      if (!hasAnyActiveRule(cfg)) return false
+      if (!hasAnyActiveRule()) return false
       if (cfg.callVideoMode !== 'screen-untrusted' && cfg.callVideoMode !== 'screen-all') {
         return false
       }
@@ -570,7 +572,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
 
   const shouldScreenCallVideo = useCallback((senderPubkey: string, isSelf: boolean): boolean => {
     const cfg = settingsRef.current
-    if (!hasAnyActiveRule(cfg) || cfg.callVideoMode === 'trusted-only') return false
+    if (!hasAnyActiveRule() || cfg.callVideoMode === 'trusted-only') return false
     const pk = senderPubkey.toLowerCase()
     if (isSelf || ownPubkeysRef.current.has(pk) || blockedSetRef.current.has(pk)) return false
     if (cfg.callVideoMode === 'screen-all') return true
@@ -622,7 +624,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     const cfg = settingsRef.current
     return {
       filterNsfw: cfg.filterNsfw,
-      filterIllegal: cfg.filterIllegal,
+      filterIllegal: true,
     }
   }, [])
 
@@ -644,17 +646,6 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
 
       const rules = getRulesPayload()
       const fpAtStart = rulesFingerprintRef.current
-      if (!hasAnyActiveRule(settingsRef.current)) {
-        const safeVerdict: ContentFilterVerdict = {
-          status: 'safe',
-          safe: true,
-          flagged: false,
-          categories: [],
-          checkedAt: Date.now(),
-        }
-        if (!skipCache) upsertVerdict(cacheKey, safeVerdict, false)
-        return safeVerdict
-      }
 
       const pendingVerdict: ContentFilterVerdict = {
         status: modelStatusRef.current === 'ready' ? 'scanning' : 'downloading',

@@ -4,7 +4,7 @@ export const CONTENT_FILTER_MODEL_ID = 'OwenElliott/image-safety-classifier-s'
 export const CONTENT_FILTER_MODEL_LABEL = 'Image Safety Classifier (23 MB)'
 export const CONTENT_FILTER_CACHE_NAME = 'content-filter-cache'
 
-export type ContentFilterMediaScope = 'untrusted' | 'all' | 'off'
+export type ContentFilterMediaScope = 'untrusted' | 'all'
 export type ContentFilterCallVideoMode = 'trusted-only' | 'screen-untrusted' | 'screen-all'
 export type ContentFilterCategory = 'nsfw' | 'illegal'
 export type ContentFilterModelStatus = 'idle' | 'downloading' | 'ready' | 'error'
@@ -18,13 +18,13 @@ export type ContentFilterVerdictStatus =
   | 'error'
 
 export interface ContentFilterSettings {
-  /** Master on/off toggle for on-device image safety filtering (default: true) */
+  /** On-device image safety filtering is permanently enforced (always true; non-disableable) */
   enabled: boolean
   /** Flag NSFW / pornographic / sexually explicit imagery (default: true) */
   filterNsfw: boolean
-  /** Flag illegal / NSFL / extreme gore & graphic violence imagery (default: true) */
+  /** Flag illegal / NSFL / extreme gore & graphic violence imagery (permanently enforced true; non-disableable) */
   filterIllegal: boolean
-  /** Incoming image & media interception scope (default: 'untrusted') */
+  /** Incoming image & media interception scope ('untrusted' | 'all'; default: 'untrusted') */
   mediaScope: ContentFilterMediaScope
   /** Incoming call video handling mode (default: 'trusted-only') */
   callVideoMode: ContentFilterCallVideoMode

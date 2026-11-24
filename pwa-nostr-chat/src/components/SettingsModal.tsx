@@ -161,7 +161,6 @@ const NOTIF_FILTER_MODES: readonly { id: NotificationFilterMode; label: string }
 const MEDIA_SCOPE_OPTIONS: readonly { id: ContentFilterMediaScope; label: string }[] = [
   { id: 'untrusted', label: 'Untrusted' },
   { id: 'all', label: 'All' },
-  { id: 'off', label: 'Off' },
 ]
 
 const CALL_VIDEO_MODE_OPTIONS: readonly { id: ContentFilterCallVideoMode; label: string }[] = [
@@ -170,7 +169,7 @@ const CALL_VIDEO_MODE_OPTIONS: readonly { id: ContentFilterCallVideoMode; label:
   { id: 'screen-all', label: 'Screen All' },
 ]
 
-type PendingCfDisableKind = 'master' | 'media-off' | 'nsfw' | 'illegal'
+type PendingCfDisableKind = 'nsfw'
 
 const CF_DISABLE_CONFIRM_COPY: Record<
   PendingCfDisableKind,
@@ -181,37 +180,13 @@ const CF_DISABLE_CONFIRM_COPY: Record<
     patch: Partial<ContentFilterSettings>
   }
 > = {
-  master: {
-    title: 'Turn off image safety filter?',
-    warning:
-      'Turning off protection exposes your device to unscreened NSFW, extreme gore/NSFL, and potentially illegal imagery from untrusted strangers on public relays.',
-    detail:
-      'Public Nostr relays are unmoderated. We strongly recommend keeping the on-device image safety filter enabled at all times.',
-    patch: { enabled: false },
-  },
-  'media-off': {
-    title: 'Stop screening incoming images?',
-    warning:
-      'Setting incoming media screening to Off exposes your device to unscreened NSFW, extreme gore/NSFL, and potentially illegal imagery from untrusted strangers on public relays.',
-    detail:
-      'Without image screening, untrusted media is no longer checked locally before display. Keep this on Untrusted or All for safety.',
-    patch: { mediaScope: 'off' },
-  },
   nsfw: {
     title: 'Disable NSFW / explicit filter?',
     warning:
       'Turning off NSFW filtering exposes your device to unscreened sexually explicit images, nudity, and graphic adult media from untrusted strangers on public relays.',
     detail:
-      'Public relays carry unmoderated media. Keeping NSFW protection enabled prevents surprise explicit imagery.',
+      'Illegal & gore (NSFL) protection always remains on, but public relays carry unmoderated adult media. Keeping NSFW protection enabled prevents surprise explicit imagery.',
     patch: { filterNsfw: false },
-  },
-  illegal: {
-    title: 'Disable illegal & gore (NSFL) filter?',
-    warning:
-      'Turning off illegal & gore filtering disables permanent blocking of extreme gore, severe violence, and potentially illegal imagery from untrusted strangers on public relays.',
-    detail:
-      'This is your strongest on-device safeguard against severe harm on unmoderated relays. Strongly recommended to keep enabled.',
-    patch: { filterIllegal: false },
   },
 }
 
@@ -2305,20 +2280,7 @@ export function SettingsModal({
     const canReloadModel = cf.modelStatus === 'idle' || cf.modelStatus === 'error'
     const pct = Math.max(0, Math.min(100, Math.round(cf.downloadProgress)))
 
-    const isMasterOff = !cfs.enabled
-    const isMediaOff = cfs.mediaScope === 'off'
     const isNsfwOff = !cfs.filterNsfw
-    const isIllegalOff = !cfs.filterIllegal
-    const isProtectionWeakened = isMasterOff || isMediaOff || isNsfwOff || isIllegalOff
-
-    const weakenedTitle =
-      isMasterOff || isMediaOff
-        ? 'Image safety protection is off'
-        : isIllegalOff && isNsfwOff
-          ? 'All image safety filters are off'
-          : isIllegalOff
-            ? 'Illegal & gore (NSFL) protection is off'
-            : 'NSFW / explicit protection is off'
 
     const statusBadge =
       cf.modelStatus === 'ready'
@@ -2344,36 +2306,33 @@ export function SettingsModal({
           ? 'Untrusted call video stays veiled until cleared by the on-device safety filter.'
           : 'All remote call video stays veiled until cleared by the safety filter, re-veiling if flagged.'
 
-    const handleRestoreFullProtection = () => {
+    const handleRestoreNsfwProtection = () => {
       cf.updateSettings({
-        enabled: true,
         filterNsfw: true,
-        filterIllegal: true,
-        mediaScope: cfs.mediaScope === 'off' ? 'untrusted' : cfs.mediaScope,
       })
       onPlaySound?.('click')
     }
 
     return (
       <div className="ag-set-pane-stack">
-        {/* Danger Banner whenever image protection is disabled or weakened */}
-        {isProtectionWeakened && (
+        {/* Warning Banner when optional NSFW / explicit protection is turned off */}
+        {isNsfwOff && (
           <div className="ag-set-cf-danger-banner" role="alert">
             <span className="ag-set-cf-danger-icon" aria-hidden="true">
               <ShieldAlert size={18} />
             </span>
             <div className="ag-set-cf-danger-body">
-              <span className="ag-set-cf-danger-title">{weakenedTitle}</span>
+              <span className="ag-set-cf-danger-title">NSFW / explicit protection is off</span>
               <span className="ag-set-cf-danger-desc">
-                Your device may display unscreened NSFW, extreme gore/NSFL, or illegal imagery from
-                untrusted strangers on public relays. Strongly recommended to keep image filtering
-                on.
+                Your device may display unscreened sexually explicit images, nudity, and adult media
+                from untrusted strangers on public relays. Illegal &amp; gore (NSFL) protection
+                always remains on.
               </span>
               <div className="ag-set-cf-danger-actions">
                 <button
                   type="button"
                   className="ag-btn ag-btn-primary ag-btn-sm"
-                  onClick={handleRestoreFullProtection}
+                  onClick={handleRestoreNsfwProtection}
                 >
                   <ShieldCheck size={13} />
                   <span>Turn Back On</span>
@@ -2418,7 +2377,7 @@ export function SettingsModal({
           )}
 
           <p className="ag-set-helper">
-            Loads automatically on startup and screens images 100% locally via{' '}
+            Always active on startup — screens incoming images 100% locally via{' '}
             {cf.webGpuSupported ? 'WebGPU / WASM' : 'WASM'}.
           </p>
 
@@ -2498,34 +2457,8 @@ export function SettingsModal({
           )}
         </div>
 
-        {/* Master Toggle */}
-        <label className="ag-set-toggle-card">
-          <div className="ag-set-toggle-copy">
-            <span className="ag-set-toggle-title">
-              <ShieldAlert size={16} />
-              <span>Image Safety Filter</span>
-            </span>
-            <span className="ag-set-toggle-desc">
-              Screen incoming images locally before display.
-            </span>
-          </div>
-          <input
-            type="checkbox"
-            className="ag-switch"
-            checked={cfs.enabled}
-            onChange={() => {
-              onPlaySound?.('click')
-              if (cfs.enabled) {
-                setPendingCfDisable('master')
-              } else {
-                cf.updateSettings({ enabled: true })
-              }
-            }}
-          />
-        </label>
-
         {/* Categories */}
-        <div className={`ag-set-group ${!cfs.enabled ? 'ag-set-dimmed' : ''}`}>
+        <div className="ag-set-group">
           <span className="ag-set-label">Categories</span>
 
           <div className="ag-set-stack-sm">
@@ -2541,7 +2474,6 @@ export function SettingsModal({
               <input
                 type="checkbox"
                 className="ag-switch"
-                disabled={!cfs.enabled}
                 checked={cfs.filterNsfw}
                 onChange={() => {
                   onPlaySound?.('click')
@@ -2554,36 +2486,30 @@ export function SettingsModal({
               />
             </label>
 
-            <label className="ag-set-toggle-card">
+            <div className="ag-set-toggle-card" style={{ cursor: 'default' }}>
               <div className="ag-set-toggle-copy">
                 <span className="ag-set-toggle-title">
                   <span>Illegal &amp; Gore (NSFL)</span>
                 </span>
                 <span className="ag-set-toggle-desc">
-                  Permanently block illegal imagery, extreme gore, and severe violence (no reveal
-                  override).
+                  Permanently blocks illegal imagery, extreme gore, and severe violence (cannot be
+                  disabled or revealed).
                 </span>
               </div>
-              <input
-                type="checkbox"
-                className="ag-switch"
-                disabled={!cfs.enabled}
-                checked={cfs.filterIllegal}
-                onChange={() => {
-                  onPlaySound?.('click')
-                  if (cfs.filterIllegal) {
-                    setPendingCfDisable('illegal')
-                  } else {
-                    cf.updateSettings({ filterIllegal: true })
-                  }
-                }}
-              />
-            </label>
+              <span
+                className="ag-badge ag-badge-accent"
+                style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+                aria-label="Illegal and gore protection is always on"
+              >
+                <Lock size={11} aria-hidden="true" />
+                <span>Always on</span>
+              </span>
+            </div>
           </div>
         </div>
 
         {/* Scope */}
-        <div className={`ag-set-group ${!cfs.enabled ? 'ag-set-dimmed' : ''}`}>
+        <div className="ag-set-group">
           <span className="ag-set-label">Scope</span>
 
           <div className="ag-set-scope-list">
@@ -2601,15 +2527,10 @@ export function SettingsModal({
                   <button
                     key={opt.id}
                     type="button"
-                    disabled={!cfs.enabled}
                     aria-pressed={cfs.mediaScope === opt.id}
                     className={cfs.mediaScope === opt.id ? 'active' : ''}
                     onClick={() => {
                       onPlaySound?.('click')
-                      if (opt.id === 'off' && cfs.mediaScope !== 'off') {
-                        setPendingCfDisable('media-off')
-                        return
-                      }
                       cf.updateSettings({ mediaScope: opt.id })
                     }}
                   >
@@ -2633,7 +2554,6 @@ export function SettingsModal({
                   <button
                     key={opt.id}
                     type="button"
-                    disabled={!cfs.enabled}
                     aria-pressed={cfs.callVideoMode === opt.id}
                     className={cfs.callVideoMode === opt.id ? 'active' : ''}
                     onClick={() => {

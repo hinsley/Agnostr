@@ -1064,31 +1064,24 @@ export function saveGeoDirectoryCache(entries: GeoRelayEntry[]): void {
 const MAX_FILTER_VERDICTS = 400
 
 function isValidMediaScope(v: unknown): v is ContentFilterMediaScope {
-  return v === 'untrusted' || v === 'all' || v === 'off'
+  return v === 'untrusted' || v === 'all'
 }
 
 function isValidCallVideoMode(v: unknown): v is ContentFilterCallVideoMode {
   return v === 'trusted-only' || v === 'screen-untrusted' || v === 'screen-all'
 }
 
-export function loadContentFilterSettings(): ContentFilterSettings {
-  const parsed = safeJsonParse<Partial<ContentFilterSettings>>(
-    safeGet(KEYS.contentFilterSettings),
-    {}
-  )
+function sanitizeContentFilterSettings(
+  raw: Partial<ContentFilterSettings> | null | undefined
+): ContentFilterSettings {
+  const parsed = raw && typeof raw === 'object' ? raw : {}
   return {
-    enabled:
-      typeof parsed.enabled === 'boolean'
-        ? parsed.enabled
-        : DEFAULT_CONTENT_FILTER_SETTINGS.enabled,
+    enabled: true,
     filterNsfw:
       typeof parsed.filterNsfw === 'boolean'
         ? parsed.filterNsfw
         : DEFAULT_CONTENT_FILTER_SETTINGS.filterNsfw,
-    filterIllegal:
-      typeof parsed.filterIllegal === 'boolean'
-        ? parsed.filterIllegal
-        : DEFAULT_CONTENT_FILTER_SETTINGS.filterIllegal,
+    filterIllegal: true,
     mediaScope: isValidMediaScope(parsed.mediaScope)
       ? parsed.mediaScope
       : DEFAULT_CONTENT_FILTER_SETTINGS.mediaScope,
@@ -1098,8 +1091,17 @@ export function loadContentFilterSettings(): ContentFilterSettings {
   }
 }
 
+export function loadContentFilterSettings(): ContentFilterSettings {
+  const parsed = safeJsonParse<Partial<ContentFilterSettings>>(
+    safeGet(KEYS.contentFilterSettings),
+    {}
+  )
+  return sanitizeContentFilterSettings(parsed)
+}
+
 export function saveContentFilterSettings(settings: ContentFilterSettings): void {
-  safeSet(KEYS.contentFilterSettings, JSON.stringify(settings))
+  const sanitized = sanitizeContentFilterSettings(settings)
+  safeSet(KEYS.contentFilterSettings, JSON.stringify(sanitized))
 }
 
 interface PersistedFilterVerdictsPayload {
