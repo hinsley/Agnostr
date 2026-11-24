@@ -2222,7 +2222,6 @@ export function App() {
             workspace={workspace}
             listTab={listTab}
             selectedServerId={selectedServerId}
-            mapActive={isBitchatGlobe || radarExpanded}
             settingsActive={settingsState.open}
             pwa={pwa}
             agoraUnread={engine.agora.unreadNotificationCount}
@@ -2232,7 +2231,6 @@ export function App() {
             onSelectServer={handleSelectServer}
             onOpenServerHub={handleOpenServerHub}
             onOpenServerSettings={handleOpenServerSettings}
-            onOpenMap={handleExpandRadar}
             onOpenSearch={handleOpenCommandPalette}
             onOpenSettings={handleOpenSettings}
             onOpenInstall={handleOpenInstall}

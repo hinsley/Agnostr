@@ -10,7 +10,6 @@ import {
   Link2,
   LogOut,
   Mail,
-  Map as MapIcon,
   MessageCircle,
   Plus,
   Search,
@@ -38,7 +37,6 @@ export interface AppRailProps {
   workspace: ActiveWorkspace
   listTab: ListTab
   selectedServerId: string | null
-  mapActive: boolean
   settingsActive: boolean
   pwa?: PwaState
   agoraUnread?: number
@@ -48,7 +46,6 @@ export interface AppRailProps {
   onSelectServer: (serverId: string) => void
   onOpenServerHub: (tab?: ServerHubTab) => void
   onOpenServerSettings: (serverId: string, tab?: ServerSettingsTab) => void
-  onOpenMap: () => void
   onOpenSearch?: () => void
   onOpenSettings: (tab?: SettingsTab) => void
   onOpenInstall?: () => void
@@ -82,7 +79,6 @@ export const AppRail: React.FC<AppRailProps> = ({
   workspace,
   listTab,
   selectedServerId,
-  mapActive,
   settingsActive,
   pwa,
   agoraUnread = 0,
@@ -92,7 +88,6 @@ export const AppRail: React.FC<AppRailProps> = ({
   onSelectServer,
   onOpenServerHub,
   onOpenServerSettings,
-  onOpenMap,
   onOpenSearch,
   onOpenSettings,
   onOpenInstall,
@@ -921,25 +916,6 @@ export const AppRail: React.FC<AppRailProps> = ({
       {/* Bottom Utility Dock */}
       <div className="ag-rail-bottom">
         <div className="ag-rail-divider" aria-hidden="true" />
-
-        <div className="ag-rail-slot">
-          <button
-            type="button"
-            className={`ag-rail-util ${mapActive ? 'active' : ''}`}
-            onClick={() => {
-              onPlaySound?.('click')
-              onOpenMap()
-            }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Bitchat Globe')}
-            onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'Bitchat Globe')}
-            onBlur={hideTooltip}
-            aria-label="Bitchat Globe"
-            aria-pressed={mapActive}
-          >
-            <MapIcon size={17} strokeWidth={mapActive ? 2.1 : 1.8} />
-          </button>
-        </div>
 
         {onOpenSearch && (
           <div className="ag-rail-slot">
