@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { Event as NostrEvent } from 'nostr-tools'
 import type { PulseRoom } from '../types/protocol.ts'
 import {
   extractGeohashTag,
@@ -90,6 +91,7 @@ export interface RecordRoomMessageInput {
   preview: string
   createdAtSec: number
   isAuthoritative?: boolean
+  rawEvent?: NostrEvent
 }
 
 interface PulseMessageRecord {
@@ -101,6 +103,7 @@ interface PulseMessageRecord {
   tsMs: number
   seq: number
   isAuthoritative: boolean
+  rawEvent?: NostrEvent
 }
 
 function comparePulseMessages(a: PulseMessageRecord, b: PulseMessageRecord): number {
@@ -126,6 +129,7 @@ export interface UseGlobalPulseOptions {
   strictWhitelistMode?: boolean
   priorityChannels?: readonly string[]
   onObserveClientTag?: (pubkey: string, clientName: string | undefined, isAgnostr: boolean) => void
+  onLiveRoomEvent?: (roomKey: string, event: NostrEvent) => void
 }
 
 const EMPTY_SET = new Set<string>()
@@ -143,6 +147,7 @@ export function useGlobalPulse(
     strictWhitelistMode = false,
     priorityChannels,
     onObserveClientTag,
+    onLiveRoomEvent,
   } = options
 
   const priorityChannelsKey = priorityChannels
@@ -172,10 +177,15 @@ export function useGlobalPulse(
     new Set(priorityChannelsKey ? priorityChannelsKey.split(',') : [])
   )
   const onObserveClientTagRef = useRef(onObserveClientTag)
+  const onLiveRoomEventRef = useRef(onLiveRoomEvent)
 
   useLayoutEffect(() => {
     onObserveClientTagRef.current = onObserveClientTag
   }, [onObserveClientTag])
+
+  useLayoutEffect(() => {
+    onLiveRoomEventRef.current = onLiveRoomEvent
+  }, [onLiveRoomEvent])
 
   useLayoutEffect(() => {
     blockedSetRef.current = blockedSet
@@ -250,6 +260,7 @@ export function useGlobalPulse(
         createdAtSec: number
         tsMs: number
         isAuthoritative: boolean
+        rawEvent?: NostrEvent
       }
     ) => {
       if (params.isAuthoritative) {
@@ -280,6 +291,7 @@ export function useGlobalPulse(
             tsMs: params.tsMs,
             seq: bumpedSeq,
             isAuthoritative: params.isAuthoritative || target.isAuthoritative,
+            rawEvent: params.rawEvent ?? target.rawEvent,
           }
           if (dupIdx !== -1) {
             room.messages.splice(dupIdx, 1)
@@ -296,6 +308,9 @@ export function useGlobalPulse(
         if (params.preview) existing.preview = params.preview
         existing.createdAtSec = params.createdAtSec
         existing.tsMs = params.tsMs
+        if (params.rawEvent && !existing.rawEvent) {
+          existing.rawEvent = params.rawEvent
+        }
         if (params.isAuthoritative) {
           existing.isAuthoritative = true
           existing.seq = ++msgSeqRef.current
@@ -312,6 +327,7 @@ export function useGlobalPulse(
         tsMs: params.tsMs,
         seq: ++msgSeqRef.current,
         isAuthoritative: params.isAuthoritative,
+        rawEvent: params.rawEvent,
       })
 
       if (room.messages.length > MAX_ROOM_MESSAGES) {
@@ -517,12 +533,38 @@ export function useGlobalPulse(
         createdAtSec,
         tsMs,
         isAuthoritative: Boolean(input.isAuthoritative),
+        rawEvent: input.rawEvent,
       })
 
       scheduleFlush(Boolean(input.isAuthoritative))
     },
     [ensureRoom, rememberSeenId, scheduleFlush, upsertRoomMessage]
   )
+
+  const getRoomEvents = useCallback((roomKey: string): NostrEvent[] => {
+    const key = roomKey.trim().toLowerCase()
+    if (!key) return []
+    const room = roomsRef.current.get(key)
+    if (!room || room.messages.length === 0) return []
+
+    const cutoff = Date.now() - PULSE_WINDOW_MS
+    const blocked = blockedSetRef.current
+    const trusted = trustedSetRef.current
+    const own = ownPubkeysRef.current
+    const strict = strictWhitelistRef.current
+
+    return room.messages
+      .filter((m): m is PulseMessageRecord & { rawEvent: NostrEvent } => {
+        if (!m.rawEvent) return false
+        if (m.tsMs < cutoff) return false
+        if (blocked.has(m.pubkey)) return false
+        if (strict && !own.has(m.pubkey) && !trusted.has(m.pubkey)) return false
+        return true
+      })
+      .slice()
+      .sort(comparePulseMessages)
+      .map((m) => m.rawEvent)
+  }, [])
 
   const clearRoomMessages = useCallback(
     (geohash: string) => {
@@ -591,6 +633,7 @@ export function useGlobalPulse(
           const nowSec = Math.floor(now / 1000)
           const evSec = Math.min(Math.floor(ev.created_at), nowSec)
           const evMs = evSec * 1000
+          if (!Number.isFinite(evMs) || evMs < now - PULSE_WINDOW_MS) return
 
           const room = ensureRoom(roomKey, evMs)
           room.peers.set(pk, Math.max(room.peers.get(pk) ?? 0, evMs))
@@ -599,21 +642,35 @@ export function useGlobalPulse(
           }
 
           if (ev.kind === KIND_GEOHASH_CHAT || ev.kind === KIND_NAMED_BITCHAT_CHAT) {
-            const preview = formatBitchatPreviewText({
-              content: ev.content,
-              tags: ev.tags,
-            })
-            if (preview) {
-              const sender = getTagValue(ev.tags, 'n')?.trim() || `anon${pk.slice(-4)}`
-              upsertRoomMessage(room, {
-                id: ev.id,
-                pubkey: pk,
-                sender,
-                preview,
-                createdAtSec: evSec,
-                tsMs: evMs,
-                isAuthoritative: false,
+            // Require non-empty trimmed content matching parseGeohashChatEvent / parseNamedBitchatChatEvent
+            // so empty/unparseable events never create ghost previews.
+            const trimmedContent = (ev.content ?? '').trim()
+            if (trimmedContent) {
+              const preview = formatBitchatPreviewText({
+                content: ev.content,
+                tags: ev.tags,
               })
+              if (preview) {
+                const sender = getTagValue(ev.tags, 'n')?.trim() || `anon${pk.slice(-4)}`
+                upsertRoomMessage(room, {
+                  id: ev.id,
+                  pubkey: pk,
+                  sender,
+                  preview,
+                  createdAtSec: evSec,
+                  tsMs: evMs,
+                  isAuthoritative: false,
+                  rawEvent: ev,
+                })
+                const allowedForLive =
+                  !blockedSetRef.current.has(pk) &&
+                  (!strictWhitelistRef.current ||
+                    ownPubkeysRef.current.has(pk) ||
+                    trustedSetRef.current.has(pk))
+                if (allowedForLive) {
+                  onLiveRoomEventRef.current?.(roomKey, ev)
+                }
+              }
             }
           }
 
@@ -648,5 +705,5 @@ export function useGlobalPulse(
     setPulseRooms([])
   }, [])
 
-  return { pulseRooms, recordRoomMessage, clearRoomMessages, clearPulse }
+  return { pulseRooms, recordRoomMessage, getRoomEvents, clearRoomMessages, clearPulse }
 }

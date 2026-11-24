@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { Filter } from 'nostr-tools'
+import type { Event as NostrEvent, Filter } from 'nostr-tools'
 import type { PushPokePayload } from '../types/notifications.ts'
 import type {
   ActiveView,
@@ -663,22 +663,30 @@ export function useAgnostrEngine(): AgnostrEngine {
     },
     []
   )
+  const onLivePulseRoomEventRef = useRef<(roomKey: string, event: NostrEvent) => void>(() => {})
+  const handleLivePulseRoomEvent = useCallback((roomKey: string, event: NostrEvent) => {
+    onLivePulseRoomEventRef.current(roomKey, event)
+  }, [])
 
   // Global Pulse Radar (strictly respects muted/blocked peers & strict whitelist mode)
-  const { pulseRooms, recordRoomMessage, clearRoomMessages, clearPulse } = useGlobalPulse(
-    pool,
-    true,
-    {
-      blockedSet,
-      trustedSet,
-      ownPubkeys,
-      strictWhitelistMode: settings.strictWhitelistMode,
-      priorityChannels,
-      onObserveClientTag: handleObserveGlobalClientTag,
-    }
-  )
+  const {
+    pulseRooms,
+    recordRoomMessage,
+    getRoomEvents: getPulseRoomEvents,
+    clearRoomMessages,
+    clearPulse,
+  } = useGlobalPulse(pool, true, {
+    blockedSet,
+    trustedSet,
+    ownPubkeys,
+    strictWhitelistMode: settings.strictWhitelistMode,
+    priorityChannels,
+    onObserveClientTag: handleObserveGlobalClientTag,
+    onLiveRoomEvent: handleLivePulseRoomEvent,
+  })
 
   // Authoritative per-channel latest visible Bitchat message previews (geo + topic)
+  // Cold-boot skips any channel with 0 persisted messages so stale/evicted rooms never show ghost previews.
   const [channelPreviews, setChannelPreviews] = useState<Record<string, BitchatChannelPreview>>(() => {
     const initial: Record<string, BitchatChannelPreview> = {}
     const keys = Array.from(
@@ -688,8 +696,10 @@ export function useAgnostrEngine(): AgnostrEngine {
       ])
     )
     for (const key of keys) {
+      const storedMsgs = loadChannelMessages(key)
+      if (storedMsgs.length === 0) continue
       const latest = extractLatestVisiblePreview(
-        loadChannelMessages(key),
+        storedMsgs,
         blockedSet,
         trustedSet,
         ownPubkeys,
@@ -1056,6 +1066,178 @@ export function useAgnostrEngine(): AgnostrEngine {
     }
   }, [applyObservedClientHint])
 
+  const parseRetainedPulseEvent = useCallback(
+    (
+      gh: string,
+      ev: NostrEvent,
+      findParent?: (id: string) => GeoMessage | undefined
+    ): GeoMessage | null => {
+      const isTopic = isTopicChannel(gh)
+      if (isTopic && ev.kind !== KIND_NAMED_BITCHAT_CHAT) return null
+      if (!isTopic && ev.kind !== KIND_GEOHASH_CHAT) return null
+      const pk = ev.pubkey.toLowerCase()
+      if (blockedSetRef.current.has(pk)) return null
+
+      const geoPk = identityManager.getKeyMaterialForGeohash(gh).pubkey.toLowerCase()
+      const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const ownSet = new Set<string>(ownPubkeysRef.current)
+      ownSet.add(geoPk)
+      ownSet.add(masterPk)
+
+      const parsed = isTopic
+        ? parseNamedBitchatChatEvent(ev, gh, ownSet, findParent)
+        : parseGeohashChatEvent(ev, gh, ownSet, findParent)
+      if (!parsed || parsed.geohash !== gh) return null
+      if (!parsed.isOwn && strictWhitelistRef.current && !trustedSetRef.current.has(pk)) {
+        return null
+      }
+
+      zapsIngestEventTagsRef.current(pk, ev.tags)
+      const knownClient =
+        parsed.clientName || (!parsed.isOwn ? presenceTracker.getKnownClient(pk) : undefined)
+      const knownAgnostr = Boolean(
+        parsed.isAgnostrClient ||
+          knownClient?.toLowerCase() === AGNOSTR_CLIENT_TAG ||
+          (!parsed.isOwn && presenceTracker.isKnownAgnostrPeer(pk))
+      )
+      if (knownAgnostr || (knownClient && parsed.clientName !== knownClient)) {
+        return {
+          ...parsed,
+          isAgnostrClient: knownAgnostr || parsed.isAgnostrClient,
+          clientName: knownClient ?? parsed.clientName,
+        }
+      }
+      return parsed
+    },
+    [identityManager, presenceTracker]
+  )
+
+  // Live-bridge PULSE_RELAYS events straight into the active Bitchat room when channelRelays miss them
+  useLayoutEffect(() => {
+    onLivePulseRoomEventRef.current = (roomKey, ev) => {
+      const gh = activeGeohashRef.current
+      if (!gh || roomKey.trim().toLowerCase() !== gh.toLowerCase()) return
+
+      const findParent = (id: string) =>
+        messagesChannelRef.current === gh
+          ? messagesRef.current.find((m) => m.id === id)
+          : undefined
+      const parsed = parseRetainedPulseEvent(gh, ev, findParent)
+      if (!parsed) return
+
+      const alreadyInChannel =
+        messagesChannelRef.current === gh &&
+        messagesRef.current.some((m) => m.id === parsed.id)
+      if (alreadyInChannel) return
+
+      const pk = parsed.pubkey.toLowerCase()
+      const nowSec = Math.floor(Date.now() / 1000)
+      const isRecentLive = nowSec - ev.created_at <= 30
+
+      presenceTracker.recordActivity({
+        geohash: gh,
+        pubkey: pk,
+        seenAtSec: isRecentLive ? nowSec : parsed.createdAt,
+        nickname: parsed.nickname,
+        isTeleported: parsed.isTeleported,
+        isMeshBridge: parsed.isMeshBridge,
+        clientName: parsed.clientName,
+        isAgnostrClient: parsed.isAgnostrClient,
+        isMessage: true,
+      })
+      refreshPeers(gh)
+
+      updateChannelMessages(gh, (prev) => {
+        if (prev.some((m) => m.id === parsed.id)) return null
+        let hydrated = parsed
+        if (hydrated.replyTo && (!hydrated.replyTo.preview || !hydrated.replyTo.nickname)) {
+          const parent = prev.find((m) => m.id === hydrated.replyTo!.id)
+          if (parent) {
+            hydrated = {
+              ...hydrated,
+              replyTo: {
+                ...hydrated.replyTo,
+                pubkey: parent.pubkey,
+                nickname: parent.nickname,
+                preview: parent.content.slice(0, 120),
+              },
+            }
+          }
+        }
+        const combined = sortChannelMessagesWithPending([...prev, hydrated], 'pending-bitchat-')
+        return backfillReplyReferences(combined).slice(-200)
+      })
+
+      const parsedPreview = formatBitchatPreviewText({
+        content: parsed.content,
+        hasImage: Boolean(parsed.imageAttachment),
+        hasVoice: Boolean(parsed.voiceMemo),
+        mediaUrl: parsed.imageAttachment?.url ?? parsed.voiceMemo?.url,
+        tags: ev.tags,
+      })
+      if (parsedPreview) {
+        upsertChannelPreview(gh, {
+          id: parsed.id,
+          preview: parsedPreview,
+          sender: parsed.nickname || parsed.displayHandle || `anon${pk.slice(-4)}`,
+          senderPubkey: pk,
+          createdAt: parsed.createdAt,
+        })
+      }
+
+      const alreadyCountedUnread = geoSeenIdsRef.current.has(parsed.id)
+      geoSeenIdsRef.current.add(parsed.id)
+      if (geoSeenIdsRef.current.size > 1200) {
+        const first = geoSeenIdsRef.current.values().next().value
+        if (first) geoSeenIdsRef.current.delete(first)
+      }
+
+      if (isRecentLive && !parsed.isOwn && !blockedSetRef.current.has(pk)) {
+        refreshTrustedPeerLabel(pk, parsed.nickname)
+        const view = activeViewRef.current
+        const isViewingThisGeo = view.type === 'channel' && view.geohash === gh
+        if (!isViewingThisGeo && !alreadyCountedUnread) {
+          setUnreadDividerId((curr) => curr ?? parsed.id)
+          const myNick = identityManager.getNickname()
+          const geoPk = identityManager.getKeyMaterialForGeohash(gh).pubkey
+          const masterPk = identityManager.getMasterKeyMaterial().pubkey
+          const mentionedMe =
+            doesContentMentionUser(parsed.content, parsed.mentions, myNick, geoPk) ||
+            (masterPk !== geoPk &&
+              doesContentMentionUser(parsed.content, parsed.mentions, myNick, masterPk))
+          const repliedToMe = Boolean(
+            parsed.replyTo?.pubkey &&
+              ownPubkeysRef.current.has(parsed.replyTo.pubkey.toLowerCase())
+          )
+          incrementGeoUnread(gh, mentionedMe || repliedToMe, {
+            id: parsed.id,
+            pubkey: pk,
+          })
+          notifyGeoMessageRef.current({
+            id: parsed.id,
+            geohash: gh,
+            senderPubkey: pk,
+            senderHandle: parsed.displayHandle,
+            content: parsed.content,
+            mentionedMe,
+            repliedToMe,
+            hasVoice: Boolean(parsed.voiceMemo),
+            hasImage: Boolean(parsed.imageAttachment),
+          })
+        }
+      }
+    }
+  }, [
+    identityManager,
+    presenceTracker,
+    parseRetainedPulseEvent,
+    refreshPeers,
+    updateChannelMessages,
+    upsertChannelPreview,
+    refreshTrustedPeerLabel,
+    incrementGeoUnread,
+  ])
+
   // Periodic peer online-window refresh (every 15s) & immediate update when trust/block changes
   useEffect(() => {
     refreshPeers(activeGeohash)
@@ -1093,19 +1275,47 @@ export function useAgnostrEngine(): AgnostrEngine {
     const gh = activeGeohash
     const isTopic = isTopicChannel(gh)
     const topicSlug = getTopicSlug(gh)
-    const cached = backfillReplyReferences(
-      loadChannelMessages(gh).filter((m) => !blockedSetRef.current.has(m.pubkey.toLowerCase()))
+    const stored = loadChannelMessages(gh).filter(
+      (m) => !blockedSetRef.current.has(m.pubkey.toLowerCase())
     )
+    const storedIds = new Set<string>(stored.map((m) => m.id))
+    const pulseMsgs: GeoMessage[] = []
+    for (const rawEv of getPulseRoomEvents(gh)) {
+      if (storedIds.has(rawEv.id)) continue
+      const parsedPulse = parseRetainedPulseEvent(gh, rawEv, (id) =>
+        stored.find((m) => m.id === id) ?? pulseMsgs.find((m) => m.id === id)
+      )
+      if (!parsedPulse || storedIds.has(parsedPulse.id)) continue
+      storedIds.add(parsedPulse.id)
+      pulseMsgs.push(parsedPulse)
+      geoSeenIdsRef.current.add(parsedPulse.id)
+    }
+    const cached = backfillReplyReferences(
+      pulseMsgs.length > 0
+        ? sortChannelMessagesWithPending([...stored, ...pulseMsgs], 'pending-bitchat-')
+        : stored
+    ).slice(-200)
+    if (pulseMsgs.length > 0) {
+      saveChannelMessages(gh, cached)
+    }
     setChannelMessagesState((prev) => {
       if (prev.channelKey === gh && prev.items.length > 0) {
-        return prev
+        if (pulseMsgs.length === 0) return prev
+        const existingIds = new Set(prev.items.map((m) => m.id))
+        const extras = pulseMsgs.filter((m) => !existingIds.has(m.id))
+        if (extras.length === 0) return prev
+        const combined = backfillReplyReferences(
+          sortChannelMessagesWithPending([...prev.items, ...extras], 'pending-bitchat-')
+        ).slice(-200)
+        saveChannelMessages(gh, combined)
+        return { channelKey: gh, items: combined }
       }
       return { channelKey: gh, items: cached }
     })
     setReplyingTo(null)
     setUnreadDividerId(null)
 
-    // Seed peers from cached messages (historical seenAt)
+    // Seed peers from cached + hydrated pulse messages (historical seenAt)
     for (const m of cached) {
       if (m.isSystem) continue
       presenceTracker.recordActivity({
@@ -1411,6 +1621,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                 sender: previewSender,
                 preview: parsedPreview,
                 createdAtSec: parsed.createdAt,
+                rawEvent: ev,
               })
             }
 
@@ -1476,6 +1687,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     presenceTracker,
     refreshPeers,
     applyObservedClientHint,
+    getPulseRoomEvents,
+    parseRetainedPulseEvent,
     updateChannelMessages,
     identityManager,
     incrementGeoUnread,
@@ -1682,7 +1895,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           } else {
             gh = extractGeohashTag(ev.tags)
           }
-          if (!gh || !watchedSet.has(gh)) return
+          if (!gh || !watchedSet.has(gh) || gh === activeGeohashRef.current) return
 
           const previewText = formatBitchatPreviewText({
             content: ev.content,
@@ -1692,16 +1905,66 @@ export function useAgnostrEngine(): AgnostrEngine {
 
           const geoPubkey = identityManager.getKeyMaterialForGeohash(gh).pubkey.toLowerCase()
           const masterPubkey = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
-          const isOwnSender =
-            pk === geoPubkey ||
-            pk === masterPubkey ||
-            ownPubkeysRef.current.has(pk)
+          const ownSet = new Set<string>(ownPubkeysRef.current)
+          ownSet.add(geoPubkey)
+          ownSet.add(masterPubkey)
+          const isOwnSender = ownSet.has(pk)
           if (!isOwnSender && strictWhitelistRef.current && !trustedSetRef.current.has(pk)) {
             return
           }
 
+          const existingCached = loadChannelMessages(gh)
+          const parsedPinned =
+            ev.kind === KIND_NAMED_BITCHAT_CHAT
+              ? parseNamedBitchatChatEvent(ev, gh, ownSet, (id) =>
+                  existingCached.find((m) => m.id === id)
+                )
+              : parseGeohashChatEvent(ev, gh, ownSet, (id) =>
+                  existingCached.find((m) => m.id === id)
+                )
+          if (!parsedPinned || parsedPinned.geohash !== gh) return
+
+          zapsIngestEventTagsRef.current(pk, ev.tags)
+          const knownClient =
+            parsedPinned.clientName ||
+            (!isOwnSender ? presenceTracker.getKnownClient(pk) : undefined)
+          const knownAgnostr = Boolean(
+            parsedPinned.isAgnostrClient ||
+              knownClient?.toLowerCase() === AGNOSTR_CLIENT_TAG ||
+              (!isOwnSender && presenceTracker.isKnownAgnostrPeer(pk))
+          )
+          presenceTracker.recordActivity({
+            geohash: gh,
+            pubkey: pk,
+            seenAtSec: !backfillDone ? parsedPinned.createdAt : Math.floor(Date.now() / 1000),
+            nickname: parsedPinned.nickname,
+            isTeleported: parsedPinned.isTeleported,
+            isMeshBridge: parsedPinned.isMeshBridge,
+            clientName: knownClient,
+            isAgnostrClient: knownAgnostr,
+            isMessage: true,
+          })
+
+          // Persist full parsed message for background pinned rooms so opening any pinned room
+          // with a preview ALWAYS displays that exact message immediately (even across reload).
+          if (!existingCached.some((m) => m.id === parsedPinned.id)) {
+            const hydratedPinned: GeoMessage =
+              knownAgnostr || (knownClient && parsedPinned.clientName !== knownClient)
+                ? {
+                    ...parsedPinned,
+                    isAgnostrClient: knownAgnostr || parsedPinned.isAgnostrClient,
+                    clientName: knownClient ?? parsedPinned.clientName,
+                  }
+                : parsedPinned
+            const mergedPinned = backfillReplyReferences(
+              sortChannelMessagesWithPending([...existingCached, hydratedPinned], 'pending-bitchat-')
+            ).slice(-200)
+            saveChannelMessages(gh, mergedPinned)
+          }
+
           const rawNick = getTagValue(ev.tags, 'n')
-          const previewSender = rawNick?.trim() || `anon${pk.slice(-4)}`
+          const previewSender =
+            parsedPinned.nickname || rawNick?.trim() || `anon${pk.slice(-4)}`
 
           // Always keep pinned room activity previews up to date (including media-only
           // events and own same-key messages sent from another device)
@@ -1712,7 +1975,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               preview: previewText,
               sender: previewSender,
               senderPubkey: pk,
-              createdAt: ev.created_at,
+              createdAt: parsedPinned.createdAt,
             },
             { preferExistingOnTie: !backfillDone }
           )
@@ -1722,7 +1985,8 @@ export function useAgnostrEngine(): AgnostrEngine {
             pubkey: pk,
             sender: previewSender,
             preview: previewText,
-            createdAtSec: ev.created_at,
+            createdAtSec: parsedPinned.createdAt,
+            rawEvent: ev,
           })
 
           // Only count unreads & fire notifications for genuinely live, non-own events
@@ -1796,6 +2060,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     watchedPinnedKey,
     watchedPinnedRelaysKey,
     identityManager,
+    presenceTracker,
     incrementGeoUnread,
     refreshTrustedPeerLabel,
     upsertChannelPreview,
