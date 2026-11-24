@@ -376,14 +376,18 @@ export function reconcileLocalSnapshotIntoCrdt(
     changed = true
   }
 
-  // 7. Display Nickname LWW scalar (auto-generated anonXXXX stays at updatedAt = 0 on initial seed)
+  // 7. Display Nickname LWW scalar
+  // On initial seed, stamp auto-anon as 0 and any pre-existing local name as 1 (NOT nowMs)
+  // so a stale pre-import local name beats an empty/auto-anon remote (0) while yielding to
+  // any real explicitly saved synced nickname checkpoint (updatedAt > 1).
   let nextNickname = prev.nickname
   const cleanNick = snapshot.nickname.trim().slice(0, 32)
   if (cleanNick !== prev.nickname.value) {
-    const updatedAt =
-      isInitialSeed && isAutoAnonNickname(cleanNick)
+    const updatedAt = isInitialSeed
+      ? isAutoAnonNickname(cleanNick)
         ? 0
-        : Math.max(nowMs, prev.nickname.updatedAt + 1)
+        : 1
+      : Math.max(nowMs, prev.nickname.updatedAt + 1)
     nextNickname = {
       value: cleanNick,
       updatedAt,

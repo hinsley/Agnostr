@@ -286,6 +286,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   const activeGeohashRef = useRef<string>(activeGeohash)
   const activeBitchatMessagesRef = useRef<GeoMessage[]>(activeBitchatMessages)
   const activeServerMessagesRef = useRef<ServerMessage[]>(activeServerMessages)
+  const pendingAppliedNicknameRef = useRef<{ applied: string; previous: string } | null>(null)
 
   const callbacksRef = useRef({
     onApplyServers,
@@ -761,12 +762,16 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   )
 
   const sendStateToPeer = useCallback(
-    async (targetDeviceId?: string, allowExtensionPrompt = false): Promise<boolean> => {
+    async (
+      targetDeviceId?: string,
+      allowExtensionPrompt = false,
+      force = false
+    ): Promise<boolean> => {
       if (!enabledRef.current) return false
       const key = targetDeviceId ?? '__broadcast__'
       const now = Date.now()
       const lastSent = lastStateSentToPeerRef.current.get(key) ?? 0
-      if (!allowExtensionPrompt && now - lastSent < SIBLING_STATE_COOLDOWN_MS) {
+      if (!allowExtensionPrompt && !force && now - lastSent < SIBLING_STATE_COOLDOWN_MS) {
         return false
       }
       lastStateSentToPeerRef.current.set(key, now)
@@ -899,6 +904,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
               callbacksRef.current.onApplyLightningAddress(merged.lud16.value)
             }
             if (diff.nicknameChanged && merged.nickname.value) {
+              pendingAppliedNicknameRef.current = {
+                applied: merged.nickname.value.trim().slice(0, 32),
+                previous: snapshotRef.current.nickname.trim().slice(0, 32),
+              }
               callbacksRef.current.onApplyNickname(merged.nickname.value)
             }
             if (diff.peerNotesChanged) {
@@ -1321,6 +1330,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     ownerPubkeyRef.current = pk
     crdtRef.current = createEmptyCrdtState()
     crdtInitializedForOwnerRef.current = false
+    pendingAppliedNicknameRef.current = null
     stateRevisionRef.current = 0
     checkpointHydratedRef.current = false
     checkpointDirtyRef.current = false
@@ -1346,6 +1356,22 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   useEffect(() => {
     if (isApplyingRemoteRef.current) return
     const isInitialSeed = !crdtInitializedForOwnerRef.current
+
+    // Prevent a lagged previous-render React `nickname` prop from bouncing back over a freshly-applied remote nickname
+    let effectiveNickname = nickname
+    if (pendingAppliedNicknameRef.current !== null) {
+      const cleanPropNick = nickname.trim().slice(0, 32)
+      const { applied, previous } = pendingAppliedNicknameRef.current
+      if (cleanPropNick === applied) {
+        pendingAppliedNicknameRef.current = null
+      } else if (cleanPropNick === previous) {
+        effectiveNickname = crdtRef.current.nickname.value
+      } else {
+        // User explicitly entered a brand-new local nickname before React flushed the remote value
+        pendingAppliedNicknameRef.current = null
+      }
+    }
+
     const { crdt, changed } = reconcileLocalSnapshotIntoCrdt(
       crdtRef.current,
       {
@@ -1355,7 +1381,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         pinnedChannels,
         dmClearedAt,
         lightningAddress,
-        nickname,
+        nickname: effectiveNickname,
         peerNotes,
         dmPeerNames: activeDmPeerNames,
       },
@@ -1372,12 +1398,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     if (!enabledRef.current) return
     if (!isInitialSeed) {
       scheduleCheckpointPublish()
-      const hasOnlineSibling = linkedDevicesRef.current.some(
-        (d) => Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
-      )
-      if (hasOnlineSibling) {
-        void sendStateToPeer(undefined, false)
-      }
+      void sendStateToPeer(undefined, false, true)
     }
   }, [
     masterPubkey,
@@ -1783,6 +1804,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     setEnabledState(true)
     crdtRef.current = createEmptyCrdtState()
     crdtInitializedForOwnerRef.current = false
+    pendingAppliedNicknameRef.current = null
     stateRevisionRef.current = 0
     checkpointHydratedRef.current = false
     checkpointDirtyRef.current = false

@@ -2055,6 +2055,11 @@ export function useAgnostrEngine(): AgnostrEngine {
     pushToast,
   })
 
+  const setNicknameRef = useRef<(nick: string) => void>(() => {})
+  const handleAgoraProfileNameSaved = useCallback((name: string) => {
+    setNicknameRef.current(name)
+  }, [])
+
   // Agora — Lazy-activated Nostr public social engine (NIP-01/02/10/18/19/25/27/36/50/51/57/65/92)
   const agoraEngine = useAgora({
     relayPool: pool,
@@ -2065,6 +2070,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     blossomServers,
     pushToast,
     onDiscoverProfileLud16: zapsEngine.ingestPeerLightningAddress,
+    onProfileNameSaved: handleAgoraProfileNameSaved,
   })
 
   // Silent Multi-Device Same-Key Background Sync (NIP-44 self-encrypted CRDT + delta messages)
@@ -4304,6 +4310,10 @@ export function useAgnostrEngine(): AgnostrEngine {
     },
     [identityManager]
   )
+
+  useLayoutEffect(() => {
+    setNicknameRef.current = setNickname
+  }, [setNickname])
 
   const setSignMode = useCallback(
     (mode: SignMode) => {

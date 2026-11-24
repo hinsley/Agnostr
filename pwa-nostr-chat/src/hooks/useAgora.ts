@@ -82,6 +82,7 @@ export interface UseAgoraOptions {
   blossomServers: readonly string[]
   pushToast?: (level: ToastLevel, title: string, detail?: string) => void
   onDiscoverProfileLud16?: (pubkey: string, lud16: string) => void
+  onProfileNameSaved?: (name: string) => void
 }
 
 interface StoredProfileEntry {
@@ -363,6 +364,9 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
 
   const onDiscoverLud16Ref = useRef(options.onDiscoverProfileLud16)
   onDiscoverLud16Ref.current = options.onDiscoverProfileLud16
+
+  const onProfileNameSavedRef = useRef(options.onProfileNameSaved)
+  onProfileNameSavedRef.current = options.onProfileNameSaved
 
   const blossomServersRef = useRef<readonly string[]>(blossomServers)
   blossomServersRef.current = blossomServers
@@ -1998,8 +2002,15 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         if (parsed) {
           ingestProfilesBatch([parsed])
         }
+        const ok = res.acceptedRelays.length > 0 || res.sentCount > 0
+        if (ok) {
+          const savedName = (draft.displayName?.trim() || draft.name?.trim() || '').slice(0, 32)
+          if (savedName) {
+            onProfileNameSavedRef.current?.(savedName)
+          }
+        }
         return {
-          ok: res.acceptedRelays.length > 0 || res.sentCount > 0,
+          ok,
           eventId: signed.id,
           publishedRelays: res.acceptedRelays.length,
         }
