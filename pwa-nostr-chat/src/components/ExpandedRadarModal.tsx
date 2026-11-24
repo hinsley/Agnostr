@@ -6,6 +6,7 @@ import {
   Grid3x3,
   Loader2,
   MapPin,
+  MessageSquare,
   Minus,
   Navigation,
   Plus,
@@ -54,6 +55,18 @@ function formatPulseAge(tsMs: number): string {
   return `${Math.floor(mins / 60)}h`
 }
 
+function formatInspectSnippet(preview: string): string {
+  if (!preview) return ''
+  const cleaned = preview
+    .replace(/\bcashu[AB][A-Za-z0-9_+/-]{8,}={0,2}/g, 'Cashu ecash')
+    .replace(/https?:\/\/\S+/gi, 'Link')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!cleaned) return ''
+  if (cleaned.length <= 72) return cleaned
+  return `${cleaned.slice(0, 71).trimEnd()}…`
+}
+
 export function ExpandedRadarModal({
   open,
   engine,
@@ -79,6 +92,7 @@ export function ExpandedRadarModal({
   const [precisionMode, setPrecisionMode] = useState<PrecisionSelection>('auto')
   const [effectivePrecision, setEffectivePrecision] = useState<number>(safeActiveGeo.length)
   const [showSubZones, setShowSubZones] = useState(false)
+  const [showBubbles, setShowBubbles] = useState(true)
   const [pulseDrawerOpen, setPulseDrawerOpen] = useState(false)
   const [searchDraft, setSearchDraft] = useState('')
   const [searchError, setSearchError] = useState<string | null>(null)
@@ -140,6 +154,11 @@ export function ExpandedRadarModal({
       ) ?? null
     )
   }, [geoPulseRooms, inspectedCell.geohash])
+
+  const matchingPulseSnippet = useMemo(
+    () => (matchingPulse?.lastPreview ? formatInspectSnippet(matchingPulse.lastPreview) : ''),
+    [matchingPulse],
+  )
 
   const handleViewportInfoChange = useCallback(
     (info: { zoom: number; effectivePrecision: number }) => {
@@ -282,6 +301,7 @@ export function ExpandedRadarModal({
           precisionMode={precisionMode}
           showSubZones={showSubZones}
           showPulse={true}
+          showBubbles={showBubbles}
           pulseRooms={geoPulseRooms}
           userCoords={location.coords}
           isTeleported={engine.isTeleported}
@@ -329,6 +349,21 @@ export function ExpandedRadarModal({
             >
               <span className="ag-led ag-led-ok ag-led-pulse" />
               <span>{geoPulseRooms.length} live</span>
+            </button>
+
+            <button
+              type="button"
+              className={`ag-radar-top-pill ag-radar-bubbles-pill mono ${showBubbles ? 'active' : ''}`}
+              onClick={() => {
+                onPlaySound?.('click')
+                setShowBubbles((v) => !v)
+              }}
+              aria-pressed={showBubbles}
+              aria-label="Toggle live speech bubbles"
+              title="Toggle live speech bubbles"
+            >
+              <MessageSquare size={13} />
+              <span className="ag-radar-bubble-toggle-label">Bubbles</span>
             </button>
 
             <button
@@ -541,6 +576,16 @@ export function ExpandedRadarModal({
             <span>·</span>
             <span>{formatCoords(inspectedCell.center)}</span>
           </div>
+
+          {matchingPulseSnippet && (
+            <div className="ag-radar-inspect-snippet">
+              <MessageSquare size={12} className="ag-radar-hud-accent" aria-hidden="true" />
+              <span className="ag-radar-inspect-snippet-sender">
+                {matchingPulse?.lastSender?.trim().replace(/^@+/, '') || 'anon'}:
+              </span>
+              <span className="ag-radar-inspect-snippet-text truncate">{matchingPulseSnippet}</span>
+            </div>
+          )}
 
           {!inspectedCell.allowsPresence && (
             <div className="ag-radar-inspect-privacy">
