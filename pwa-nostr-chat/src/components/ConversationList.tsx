@@ -48,7 +48,13 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import type { AgnostrEngine, DmThread, PeerInfo, PulseRoom } from '../types/protocol'
+import type {
+  AgnostrEngine,
+  DmThread,
+  PeerInfo,
+  ProfileAccountRecord,
+  PulseRoom,
+} from '../types/protocol'
 import type { ServerChannel, ServerSummary } from '../types/servers'
 import type { WalletInitialIntent, ZapTarget } from '../types/wallet'
 import type { PwaState } from '../hooks/usePwa'
@@ -69,6 +75,7 @@ import {
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
 import { formatHandle, pubkeyToColor } from '../utils/identicon'
 import { AvatarImg } from './AvatarImg'
+import { DeleteProfileConfirmModal } from './DeleteProfileConfirmModal'
 
 export type ListTab = 'bitchat' | 'dms' | 'servers'
 
@@ -226,7 +233,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const [qpImportSecret, setQpImportSecret] = useState('')
   const [qpProfileError, setQpProfileError] = useState<string | null>(null)
   const [qpProfileBusy, setQpProfileBusy] = useState(false)
-  const [qpConfirmDeleteId, setQpConfirmDeleteId] = useState<string | null>(null)
+  const [pendingDeleteProfile, setPendingDeleteProfile] = useState<ProfileAccountRecord | null>(
+    null
+  )
   const [qpPos, setQpPos] = useState<{
     left: number
     bottom: number
@@ -269,7 +278,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     setQpNewProfileName('')
     setQpImportSecret('')
     setQpProfileError(null)
-    setQpConfirmDeleteId(null)
+    setPendingDeleteProfile(null)
   }, [])
 
   const handleToggleQuickProfile = useCallback(() => {
@@ -283,7 +292,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         setQpNewProfileName('')
         setQpImportSecret('')
         setQpProfileError(null)
-        setQpConfirmDeleteId(null)
+        setPendingDeleteProfile(null)
         return false
       }
       setQpPos(computeQuickProfilePos())
@@ -294,7 +303,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       setQpNewProfileName('')
       setQpImportSecret('')
       setQpProfileError(null)
-      setQpConfirmDeleteId(null)
+      setPendingDeleteProfile(null)
       return true
     })
   }, [computeQuickProfilePos, onPlaySound])
@@ -308,6 +317,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       if (/^[0-9a-f]{64}$/.test(pk)) set.add(pk)
     }
     addPk(engine.identity.masterPubkey)
+    for (const prof of engine.profiles.profiles) addPk(prof.pubkey)
     for (const thread of engine.dmThreads) addPk(thread.peerPubkey)
     for (const entry of engine.trustedPubkeys) addPk(entry.pubkey)
     for (const peer of engine.peers) addPk(peer.pubkey)
@@ -320,6 +330,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     return Array.from(set).sort()
   }, [
     engine.identity.masterPubkey,
+    engine.profiles.profiles,
     engine.dmThreads,
     engine.trustedPubkeys,
     engine.peers,
@@ -338,8 +349,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   useEffect(() => {
     if (!isQuickProfileVisible) return
     const handlePointerDown = (ev: PointerEvent) => {
+      if (pendingDeleteProfile) return
       const target = ev.target as Node | null
       if (!target) return
+      const targetEl = target instanceof Element ? target : target.parentElement
+      if (targetEl?.closest('[data-profile-delete-modal="true"]')) return
       if (qpAvatarMenuOpen && !qpAvatarWrapRef.current?.contains(target)) {
         setQpAvatarMenuOpen(false)
       }
@@ -349,14 +363,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     }
     const handleKeyDown = (ev: KeyboardEvent) => {
       if (ev.key !== 'Escape') return
+      if (pendingDeleteProfile || document.querySelector('[data-profile-delete-modal="true"]')) {
+        return
+      }
       ev.preventDefault()
       ev.stopPropagation()
       if (qpAvatarMenuOpen) {
         setQpAvatarMenuOpen(false)
-        return
-      }
-      if (qpConfirmDeleteId) {
-        setQpConfirmDeleteId(null)
         return
       }
       if (qpProfileForm !== 'none') {
@@ -383,8 +396,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     }
   }, [
     isQuickProfileVisible,
+    pendingDeleteProfile,
     qpAvatarMenuOpen,
-    qpConfirmDeleteId,
     qpProfileForm,
     qpEditingName,
     closeQuickProfile,
@@ -507,7 +520,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     (targetPubkey: string) => {
       if (engine.profiles.switching || qpProfileBusy) return
       setQpProfileError(null)
-      setQpConfirmDeleteId(null)
+      setPendingDeleteProfile(null)
       onPlaySound?.('click')
       void engine.profiles.switchProfile(targetPubkey)
     },
@@ -579,15 +592,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         const deleted = await engine.profiles.deleteProfile(targetPubkey)
         if (deleted) {
           onPlaySound?.('click')
+          engine.pushToast('info', 'Profile removed from this device')
+        } else {
+          setQpProfileError('Could not remove profile.')
         }
       } catch (err) {
         setQpProfileError(err instanceof Error ? err.message : 'Could not remove profile.')
       } finally {
-        setQpConfirmDeleteId(null)
+        setPendingDeleteProfile(null)
         setQpProfileBusy(false)
       }
     },
-    [engine.profiles, qpProfileBusy, onPlaySound]
+    [engine, qpProfileBusy, onPlaySound]
   )
 
   useEffect(() => {
@@ -1449,7 +1465,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     joinedServers.find((s) => s.id === effectiveServerId) ?? joinedServers[0] ?? null
   const isMobileServersSplit = isMobileViewport && activeTab === 'servers'
 
-  const renderDiscordServerPane = (server: ServerSummary | null) => {
+  const renderServerPane = (server: ServerSummary | null) => {
     if (!server) {
       return (
         <div className="ag-srv-pane-pane">
@@ -2202,10 +2218,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               </div>
             </div>
 
-            <div className="ag-srv-mobile-main">{renderDiscordServerPane(selectedServer)}</div>
+            <div className="ag-srv-mobile-main">{renderServerPane(selectedServer)}</div>
           </div>
         ) : (
-          renderDiscordServerPane(selectedServer)
+          renderServerPane(selectedServer)
         )
       ) : (
         <div className="ag-conv-scroll">
@@ -2873,7 +2889,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                             </div>
                           </button>
 
-                          {trusted ? (
+                          {trusted && (
                             <div className="ag-person-row-actions ag-desktop-only">
                               <button
                                 type="button"
@@ -2908,20 +2924,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                                 <Video size={13} />
                               </button>
                             </div>
-                          ) : (
-                            <button
-                              type="button"
-                              className="ag-person-trust-pill"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                onPlaySound?.('click')
-                                engine.trustPubkey(thread.peerPubkey, thread.peerNickname)
-                              }}
-                              title={`Trust ${thread.peerDisplayHandle} as a friend`}
-                            >
-                              <ShieldCheck size={11} />
-                              <span>Trust</span>
-                            </button>
                           )}
 
                           {onCloseDmThread && (
@@ -3343,7 +3345,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       onClick={() => {
                         onPlaySound?.('click')
                         setQpProfileError(null)
-                        setQpConfirmDeleteId(null)
+                        setPendingDeleteProfile(null)
                         setQpImportSecret('')
                         setQpProfileForm((prev) => (prev === 'new' ? 'none' : 'new'))
                       }}
@@ -3358,7 +3360,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       onClick={() => {
                         onPlaySound?.('click')
                         setQpProfileError(null)
-                        setQpConfirmDeleteId(null)
+                        setPendingDeleteProfile(null)
                         setQpNewProfileName('')
                         setQpProfileForm((prev) => (prev === 'import' ? 'none' : 'import'))
                       }}
@@ -3480,7 +3482,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 <div className="ag-qp-profile-list" role="list" aria-label="Saved profiles">
                   {storedProfiles.map((p) => {
                     const isActive = p.id === activeProfileId
-                    const isConfirmingRemove = !isActive && qpConfirmDeleteId === p.id
                     const profileLabel = isActive ? engine.identity.nickname : p.nickname
                     const shortNpub =
                       p.npub.length > 15
@@ -3490,9 +3491,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       <div
                         key={p.id}
                         role="listitem"
-                        className={`ag-qp-profile-row ${isActive ? 'is-active' : ''} ${
-                          isConfirmingRemove ? 'is-confirming' : ''
-                        }`}
+                        className={`ag-qp-profile-row ${isActive ? 'is-active' : ''}`}
                       >
                         <button
                           type="button"
@@ -3510,7 +3509,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                         >
                           <AvatarImg
                             pubkey={p.pubkey}
-                            pictureUrl={isActive ? myPictureUrl : p.picture}
+                            pictureUrl={
+                              isActive
+                                ? myPictureUrl
+                                : (engine.getProfilePicture(p.pubkey) ?? p.picture)
+                            }
                             width={28}
                             height={28}
                             className="ag-qp-profile-avatar"
@@ -3532,47 +3535,22 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           )}
                         </button>
 
-                        {!isActive &&
-                          (isConfirmingRemove ? (
-                            <div
-                              className="ag-qp-profile-confirm"
-                              role="group"
-                              aria-label={`Confirm remove ${profileLabel}`}
-                            >
-                              <span className="ag-qp-profile-confirm-label">Remove?</span>
-                              <button
-                                type="button"
-                                className="ag-qp-confirm-btn danger"
-                                disabled={isProfileActionBusy}
-                                onClick={() => void handleConfirmDeleteProfile(p.pubkey)}
-                              >
-                                Yes
-                              </button>
-                              <button
-                                type="button"
-                                className="ag-qp-confirm-btn"
-                                disabled={isProfileActionBusy}
-                                onClick={() => setQpConfirmDeleteId(null)}
-                              >
-                                No
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              className="ag-qp-profile-remove-btn"
-                              disabled={isProfileActionBusy}
-                              onClick={() => {
-                                onPlaySound?.('click')
-                                setQpProfileError(null)
-                                setQpConfirmDeleteId(p.id)
-                              }}
-                              title={`Remove ${profileLabel}`}
-                              aria-label={`Remove ${profileLabel}`}
-                            >
-                              <Trash2 size={12} aria-hidden="true" />
-                            </button>
-                          ))}
+                        {!isActive && (
+                          <button
+                            type="button"
+                            className="ag-qp-profile-remove-btn"
+                            disabled={isProfileActionBusy}
+                            onClick={() => {
+                              onPlaySound?.('click')
+                              setQpProfileError(null)
+                              setPendingDeleteProfile(p)
+                            }}
+                            title={`Remove ${profileLabel}`}
+                            aria-label={`Remove ${profileLabel}`}
+                          >
+                            <Trash2 size={12} aria-hidden="true" />
+                          </button>
+                        )}
                       </div>
                     )
                   })}
@@ -3582,6 +3560,24 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             document.body
           )
         })()}
+
+      <DeleteProfileConfirmModal
+        profile={pendingDeleteProfile}
+        avatarUrl={
+          pendingDeleteProfile
+            ? (engine.getProfilePicture(pendingDeleteProfile.pubkey) ??
+              pendingDeleteProfile.picture)
+            : undefined
+        }
+        busy={qpProfileBusy}
+        onCancel={() => {
+          if (!qpProfileBusy) {
+            onPlaySound?.('click')
+            setPendingDeleteProfile(null)
+          }
+        }}
+        onConfirm={handleConfirmDeleteProfile}
+      />
     </aside>
   )
 }

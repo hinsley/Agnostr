@@ -44,6 +44,7 @@ import {
   DEVICE_SYNC_ONLINE_TTL_MS,
   DEVICE_SYNC_TAG,
   extractActiveBlocked,
+  extractActiveBlockedPeerNames,
   extractActiveDmPeerNames,
   extractActivePeerNotes,
   extractActiveServers,
@@ -107,6 +108,7 @@ export interface UseDeviceSyncOptions {
   joinedServers: ServerSummary[]
   trustedPubkeys: TrustedPeerEntry[]
   blockedPubkeys: string[]
+  blockedPeerNames?: Record<string, string>
   pinnedChannels: PinnedChannel[]
   dmClearedAt: Record<string, number>
   lightningAddress: string | null
@@ -118,7 +120,7 @@ export interface UseDeviceSyncOptions {
   initialHealCheckpoint?: boolean
   onApplyServers: (servers: ServerSummary[]) => void
   onApplyTrusted: (trusted: TrustedPeerEntry[]) => void
-  onApplyBlocked: (blocked: string[]) => void
+  onApplyBlocked: (blocked: string[], blockedNames?: Record<string, string>) => void
   onApplyPinned: (pinned: PinnedChannel[]) => void
   onApplyDmClearedAt: (clearedAt: Record<string, number>) => number
   onApplyLightningAddress: (addr: string | null) => void
@@ -259,6 +261,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     joinedServers,
     trustedPubkeys,
     blockedPubkeys,
+    blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
     lightningAddress,
@@ -378,6 +381,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     joinedServers,
     trustedPubkeys,
     blockedPubkeys,
+    blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
     lightningAddress,
@@ -435,6 +439,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       joinedServers,
       trustedPubkeys,
       blockedPubkeys,
+      blockedPeerNames,
       pinnedChannels,
       dmClearedAt,
       lightningAddress,
@@ -446,6 +451,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     joinedServers,
     trustedPubkeys,
     blockedPubkeys,
+    blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
     lightningAddress,
@@ -1083,7 +1089,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
               callbacksRef.current.onApplyDmClearedAt(merged.dmClearedAt)
             }
             if (diff.blockedChanged) {
-              callbacksRef.current.onApplyBlocked(extractActiveBlocked(merged))
+              callbacksRef.current.onApplyBlocked(
+                extractActiveBlocked(merged),
+                extractActiveBlockedPeerNames(merged)
+              )
             }
             if (diff.trustedChanged) {
               callbacksRef.current.onApplyTrusted(extractActiveTrusted(merged))
@@ -1590,6 +1599,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         joinedServers,
         trustedPubkeys,
         blockedPubkeys,
+        blockedPeerNames,
         pinnedChannels,
         dmClearedAt,
         lightningAddress,
@@ -1617,6 +1627,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     joinedServers,
     trustedPubkeys,
     blockedPubkeys,
+    blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
     lightningAddress,

@@ -46,7 +46,12 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import type { AgnostrEngine, SignMode, ThemeId } from '../types/protocol.ts'
+import type {
+  AgnostrEngine,
+  ProfileAccountRecord,
+  SignMode,
+  ThemeId,
+} from '../types/protocol.ts'
 import type { LinkedDeviceInfo } from '../types/deviceSync.ts'
 import type {
   ContentFilterCallVideoMode,
@@ -73,6 +78,7 @@ import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { bitchatAudio, type SoundCue } from '../utils/sound.ts'
 import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 import { AvatarImg } from './AvatarImg.tsx'
+import { DeleteProfileConfirmModal } from './DeleteProfileConfirmModal.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 
 export type SettingsTab =
@@ -336,7 +342,9 @@ export function SettingsModal({
   const [importNickDraft, setImportNickDraft] = useState('')
   const [profileFormError, setProfileFormError] = useState<string | null>(null)
   const [profileFormBusy, setProfileFormBusy] = useState(false)
-  const [confirmRemoveProfilePubkey, setConfirmRemoveProfilePubkey] = useState<string | null>(null)
+  const [pendingDeleteProfile, setPendingDeleteProfile] = useState<ProfileAccountRecord | null>(
+    null,
+  )
   const [removingProfilePubkey, setRemovingProfilePubkey] = useState<string | null>(null)
 
   const myProfilePicture = engine.getProfilePicture(identity.masterPubkey)
@@ -435,13 +443,19 @@ export function SettingsModal({
     try {
       const deleted = await engine.profiles.deleteProfile(targetPubkey)
       if (deleted) {
-        setConfirmRemoveProfilePubkey(null)
         onPlaySound?.('click')
         engine.pushToast('info', 'Profile removed from this device')
       } else {
         engine.pushToast('error', 'Unable to remove profile')
       }
+    } catch (err) {
+      engine.pushToast(
+        'error',
+        'Unable to remove profile',
+        err instanceof Error ? err.message : undefined,
+      )
     } finally {
+      setPendingDeleteProfile(null)
       setRemovingProfilePubkey(null)
     }
   }
@@ -661,7 +675,7 @@ export function SettingsModal({
       setImportKeyDraft('')
       setImportNickDraft('')
       setProfileFormError(null)
-      setConfirmRemoveProfilePubkey(null)
+      setPendingDeleteProfile(null)
     }
   }, [open])
 
@@ -686,6 +700,9 @@ export function SettingsModal({
     if (!open) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (pendingDeleteProfile || document.querySelector('[data-profile-delete-modal="true"]')) {
+          return
+        }
         e.preventDefault()
         if (pendingCfDisable) {
           setPendingCfDisable(null)
@@ -706,6 +723,7 @@ export function SettingsModal({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [
     open,
+    pendingDeleteProfile,
     pendingCfDisable,
     rotateConfirmOpen,
     heroAvatarMenuOpen,
@@ -1412,7 +1430,7 @@ export function SettingsModal({
               disabled={engine.profiles.switching}
               onClick={() => {
                 onPlaySound?.('click')
-                setConfirmRemoveProfilePubkey(null)
+                setPendingDeleteProfile(null)
                 setProfileFormError(null)
                 setProfileFormMode((m) => (m === 'create' ? 'none' : 'create'))
               }}
@@ -1428,7 +1446,7 @@ export function SettingsModal({
               disabled={engine.profiles.switching}
               onClick={() => {
                 onPlaySound?.('click')
-                setConfirmRemoveProfilePubkey(null)
+                setPendingDeleteProfile(null)
                 setProfileFormError(null)
                 setProfileFormMode((m) => (m === 'import' ? 'none' : 'import'))
               }}
@@ -1554,9 +1572,6 @@ export function SettingsModal({
               const avatarUrl = isActive
                 ? myProfilePicture
                 : (engine.getProfilePicture(prof.pubkey) ?? prof.picture)
-              const isConfirmingRemove =
-                !isActive && confirmRemoveProfilePubkey === prof.pubkey
-              const isRemovingThis = removingProfilePubkey === prof.pubkey
 
               return (
                 <div
@@ -1607,9 +1622,7 @@ export function SettingsModal({
                           disabled={engine.profiles.switching || removingProfilePubkey !== null}
                           onClick={() => {
                             onPlaySound?.('click')
-                            setConfirmRemoveProfilePubkey((prev) =>
-                              prev === prof.pubkey ? null : prof.pubkey,
-                            )
+                            setPendingDeleteProfile(prof)
                           }}
                           aria-label={`Remove profile ${displayNick}`}
                           title="Remove profile"
@@ -1619,42 +1632,6 @@ export function SettingsModal({
                       </div>
                     )}
                   </div>
-
-                  {isConfirmingRemove && (
-                    <div className="ag-set-profile-confirm" role="alert">
-                      <p className="ag-set-profile-confirm-text">
-                        <AlertTriangle size={14} aria-hidden="true" />
-                        <span>
-                          Remove this profile and all its local chats, groups, Agmail, and wallet
-                          data from this device? Back up its private key first if you want to keep
-                          it.
-                        </span>
-                      </p>
-                      <div className="ag-set-profile-confirm-actions">
-                        <button
-                          type="button"
-                          className="ag-btn ag-btn-secondary ag-btn-xs"
-                          disabled={isRemovingThis}
-                          onClick={() => setConfirmRemoveProfilePubkey(null)}
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          className="ag-set-profile-confirm-danger"
-                          disabled={isRemovingThis}
-                          onClick={() => void handleConfirmDeleteProfile(prof.pubkey)}
-                        >
-                          {isRemovingThis ? (
-                            <Loader2 size={12} className="ag-spin" />
-                          ) : (
-                            <Trash2 size={12} />
-                          )}
-                          <span>{isRemovingThis ? 'Removing…' : 'Remove Profile'}</span>
-                        </button>
-                      </div>
-                    </div>
-                  )}
                 </div>
               )
             })}
@@ -2937,8 +2914,27 @@ export function SettingsModal({
         ) : (
           <div className="ag-set-card-list" role="list">
             {blockedPubkeys.map((pk) => {
+              const pkLower = pk.toLowerCase()
+              const savedName =
+                engine.blockedPeerNames[pkLower]?.trim() ||
+                engine.blockedPeerNames[pk]?.trim() ||
+                ''
               const known = engine.getPeerByPubkey(pk)
-              const label = known?.displayHandle ?? shortPubkey(pk, 10, 6)
+              const knownHandle = known?.displayHandle?.trim() || ''
+              const isGenericHandle =
+                !knownHandle ||
+                /^@?anon[0-9a-f]{4}(?:#[0-9a-f]{4})?$/i.test(knownHandle) ||
+                /^[0-9a-f]{8,}$/i.test(knownHandle)
+              const agoraProfile =
+                engine.agora.getProfile(pkLower) ?? engine.agora.profilesByPubkey[pkLower]
+              const agoraName =
+                agoraProfile?.displayName?.trim() || agoraProfile?.name?.trim() || ''
+              const label =
+                savedName ||
+                (!isGenericHandle ? knownHandle : '') ||
+                agoraName ||
+                knownHandle ||
+                shortPubkey(pk, 10, 6)
               return (
                 <div key={pk} role="listitem" className="ag-set-peer-row">
                   <AvatarImg
@@ -4818,6 +4814,24 @@ export function SettingsModal({
           </div>,
           document.body,
         )}
+
+      <DeleteProfileConfirmModal
+        profile={pendingDeleteProfile}
+        avatarUrl={
+          pendingDeleteProfile
+            ? (engine.getProfilePicture(pendingDeleteProfile.pubkey) ??
+              pendingDeleteProfile.picture)
+            : undefined
+        }
+        busy={removingProfilePubkey !== null}
+        onCancel={() => {
+          if (removingProfilePubkey === null) {
+            onPlaySound?.('click')
+            setPendingDeleteProfile(null)
+          }
+        }}
+        onConfirm={handleConfirmDeleteProfile}
+      />
     </div>
   )
 }

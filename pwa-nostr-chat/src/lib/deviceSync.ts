@@ -245,6 +245,7 @@ export interface LocalSyncSnapshot {
   joinedServers: ServerSummary[]
   trustedPubkeys: TrustedPeerEntry[]
   blockedPubkeys: string[]
+  blockedPeerNames?: Record<string, string>
   pinnedChannels: PinnedChannel[]
   dmClearedAt: Record<string, number>
   lightningAddress: string | null
@@ -400,7 +401,12 @@ export function reconcileLocalSnapshotIntoCrdt(
     }
   }
 
-  // 3. Blocked Peers (LWW-Element-Set)
+  // 3. Blocked Peers (LWW-Element-Set with optional preserved label)
+  const cleanBlockedLabel = (raw: unknown): string | undefined => {
+    if (typeof raw !== 'string') return undefined
+    const trimmed = raw.trim().slice(0, 64)
+    return trimmed || undefined
+  }
   const nextBlocked: Record<string, SyncedBlockedRecord> = { ...prev.blocked }
   const currentBlockedSet = new Set<string>()
   for (const raw of snapshot.blockedPubkeys) {
@@ -410,11 +416,21 @@ export function reconcileLocalSnapshotIntoCrdt(
 
   for (const pk of currentBlockedSet) {
     const existing = nextBlocked[pk]
+    const incomingLabel = cleanBlockedLabel(snapshot.blockedPeerNames?.[pk])
+    const existingLabel = cleanBlockedLabel(existing?.label)
     if (!existing || existing.removedAt >= existing.addedAt) {
+      const resolvedLabel = incomingLabel ?? existingLabel
       nextBlocked[pk] = {
         pubkey: pk,
+        ...(resolvedLabel ? { label: resolvedLabel } : {}),
         addedAt: existing ? Math.max(nowMs, existing.removedAt + 1) : nowMs,
         removedAt: existing?.removedAt ?? 0,
+      }
+      changed = true
+    } else if (incomingLabel && incomingLabel !== existingLabel) {
+      nextBlocked[pk] = {
+        ...existing,
+        label: incomingLabel,
       }
       changed = true
     }
@@ -737,7 +753,12 @@ export function mergeCrdtStates(
     diff.serverOrderChanged = true
   }
 
-  // 2. Merge Blocked Peers
+  // 2. Merge Blocked Peers (preserving non-empty saved label; never letting empty label overwrite)
+  const pickBlockedLabel = (raw: unknown): string | undefined => {
+    if (typeof raw !== 'string') return undefined
+    const clean = raw.trim().slice(0, 64)
+    return clean || undefined
+  }
   const mergedBlocked: Record<string, SyncedBlockedRecord> = {}
   const blockedKeys = new Set([...Object.keys(local.blocked), ...Object.keys(remote.blocked)])
   for (const pk of blockedKeys) {
@@ -748,7 +769,13 @@ export function mergeCrdtStates(
       continue
     }
     if (!a && b) {
-      mergedBlocked[pk] = b
+      const bLabel = b.addedAt > b.removedAt ? pickBlockedLabel(b.label) : undefined
+      mergedBlocked[pk] = {
+        pubkey: pk,
+        ...(bLabel ? { label: bLabel } : {}),
+        addedAt: b.addedAt,
+        removedAt: b.removedAt,
+      }
       diff.blockedChanged = true
       diff.itemsUpdated += 1
       continue
@@ -757,8 +784,21 @@ export function mergeCrdtStates(
 
     const addedAt = Math.max(a.addedAt, b.addedAt)
     const removedAt = Math.max(a.removedAt, b.removedAt)
-    mergedBlocked[pk] = { pubkey: pk, addedAt, removedAt }
-    if (addedAt !== a.addedAt || removedAt !== a.removedAt) {
+    const aLabel = pickBlockedLabel(a.label)
+    const bLabel = pickBlockedLabel(b.label)
+    const mergedLabel =
+      addedAt > removedAt
+        ? b.addedAt > a.addedAt
+          ? (bLabel ?? aLabel)
+          : (aLabel ?? bLabel)
+        : undefined
+    mergedBlocked[pk] = {
+      pubkey: pk,
+      ...(mergedLabel ? { label: mergedLabel } : {}),
+      addedAt,
+      removedAt,
+    }
+    if (addedAt !== a.addedAt || removedAt !== a.removedAt || mergedLabel !== aLabel) {
       diff.blockedChanged = true
       diff.itemsUpdated += 1
     }
@@ -1122,6 +1162,18 @@ export function extractActiveBlocked(crdt: DeviceSyncCrdtState): string[] {
     .map((r) => r.pubkey)
 }
 
+export function extractActiveBlockedPeerNames(crdt: DeviceSyncCrdtState): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const r of Object.values(crdt.blocked)) {
+    if (r.addedAt <= r.removedAt) continue
+    const clean = typeof r.label === 'string' ? r.label.trim().slice(0, 64) : ''
+    if (clean) {
+      out[r.pubkey.toLowerCase()] = clean
+    }
+  }
+  return out
+}
+
 export function extractActivePeerNotes(crdt: DeviceSyncCrdtState): Record<string, string> {
   const out: Record<string, string> = {}
   const entries = Object.entries(crdt.peerNotes ?? {})
@@ -1210,7 +1262,7 @@ export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
       .sort()
       .map((k) => {
         const b = crdt.blocked[k]
-        return [k, b.addedAt, b.removedAt]
+        return [k, b.addedAt, b.removedAt, b.label ?? '']
       }),
     pinned: [crdt.pinned.updatedAt, crdt.pinned.items.map((p) => `${p.geohash}:${p.label ?? ''}`)],
     dmClearedAt: Object.keys(crdt.dmClearedAt)
@@ -1698,7 +1750,9 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
       if (!/^[0-9a-f]{64}$/.test(pk) || !isRecord(val)) continue
       const addedAt = typeof val.addedAt === 'number' && Number.isFinite(val.addedAt) ? val.addedAt : 0
       const removedAt = typeof val.removedAt === 'number' && Number.isFinite(val.removedAt) ? val.removedAt : 0
-      blocked[pk] = { pubkey: pk, addedAt, removedAt }
+      const label =
+        typeof val.label === 'string' && val.label.trim() ? val.label.trim().slice(0, 64) : undefined
+      blocked[pk] = { pubkey: pk, ...(label ? { label } : {}), addedAt, removedAt }
     }
   }
 

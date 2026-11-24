@@ -65,6 +65,7 @@ const KEYS = {
   pinnedChannels: `${PREFIX}pinned_channels`,
   recentChannels: `${PREFIX}recent_channels`,
   blockedPubkeys: `${PREFIX}blocked_pubkeys`,
+  blockedPeerNames: `${PREFIX}blocked_peer_names`,
   trusted: `${PREFIX}trusted`,
   peerNotes: `${PREFIX}peer_notes`,
   blossomServers: `${PREFIX}blossom_servers`,
@@ -254,6 +255,41 @@ export function loadBlockedPubkeys(): string[] {
 
 export function saveBlockedPubkeys(pubkeys: string[]): void {
   safeSet(KEYS.blockedPubkeys, JSON.stringify(Array.from(new Set(pubkeys.map((p) => p.toLowerCase())))))
+}
+
+const MAX_BLOCKED_PEER_NAME_CHARS = 64
+const MAX_BLOCKED_PEER_NAMES = 500
+
+export function loadBlockedPeerNames(): Record<string, string> {
+  const parsed = safeJsonParse<Record<string, unknown>>(safeGet(KEYS.blockedPeerNames), {})
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const out: Record<string, string> = {}
+  let count = 0
+  for (const [rawKey, rawVal] of Object.entries(parsed)) {
+    const pk = rawKey.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawVal !== 'string') continue
+    const clean = rawVal.trim().slice(0, MAX_BLOCKED_PEER_NAME_CHARS)
+    if (!clean) continue
+    out[pk] = clean
+    count += 1
+    if (count >= MAX_BLOCKED_PEER_NAMES) break
+  }
+  return out
+}
+
+export function saveBlockedPeerNames(map: Record<string, string>): void {
+  const out: Record<string, string> = {}
+  let count = 0
+  for (const [rawKey, rawVal] of Object.entries(map)) {
+    const pk = rawKey.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawVal !== 'string') continue
+    const clean = rawVal.trim().slice(0, MAX_BLOCKED_PEER_NAME_CHARS)
+    if (!clean) continue
+    out[pk] = clean
+    count += 1
+    if (count >= MAX_BLOCKED_PEER_NAMES) break
+  }
+  safeSet(KEYS.blockedPeerNames, JSON.stringify(out))
 }
 
 export function loadCustomRelays(): string[] {
@@ -1405,7 +1441,32 @@ export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
         : {},
     blocked:
       rawCrdt.blocked && typeof rawCrdt.blocked === 'object' && !Array.isArray(rawCrdt.blocked)
-        ? rawCrdt.blocked
+        ? (() => {
+            const cleaned: DeviceSyncCrdtState['blocked'] = {}
+            for (const [rawPk, entry] of Object.entries(rawCrdt.blocked)) {
+              const pk = rawPk.trim().toLowerCase()
+              if (!/^[0-9a-f]{64}$/.test(pk) || !entry || typeof entry !== 'object') continue
+              const addedAt =
+                typeof entry.addedAt === 'number' && Number.isFinite(entry.addedAt)
+                  ? entry.addedAt
+                  : 0
+              const removedAt =
+                typeof entry.removedAt === 'number' && Number.isFinite(entry.removedAt)
+                  ? entry.removedAt
+                  : 0
+              const label =
+                typeof entry.label === 'string' && entry.label.trim()
+                  ? entry.label.trim().slice(0, MAX_BLOCKED_PEER_NAME_CHARS)
+                  : undefined
+              cleaned[pk] = {
+                pubkey: pk,
+                ...(label ? { label } : {}),
+                addedAt,
+                removedAt,
+              }
+            }
+            return cleaned
+          })()
         : {},
     pinned:
       rawCrdt.pinned &&

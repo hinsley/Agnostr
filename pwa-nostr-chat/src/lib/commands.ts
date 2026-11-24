@@ -150,6 +150,7 @@ export interface CommandExecutionContext {
   activeGeohash: string
   peers: PeerInfo[]
   blockedPubkeys: string[]
+  blockedPeerNames?: Record<string, string>
   trustedPubkeys: TrustedPeerEntry[]
   strictWhitelistMode: boolean
   setNickname: (nick: string) => void
@@ -417,9 +418,14 @@ export async function executeSlashCommand(
         if (ctx.blockedPubkeys.length === 0) {
           ctx.addSystemMessage('Blocked peers: none')
         } else {
-          ctx.addSystemMessage(
-            `Blocked pubkeys (${ctx.blockedPubkeys.length}): ${ctx.blockedPubkeys.map((p) => `#${p.slice(-6)}`).join(', ')}`
-          )
+          const formatted = ctx.blockedPubkeys.map((p) => {
+            const pk = p.toLowerCase()
+            const saved = ctx.blockedPeerNames?.[pk]?.trim()
+            if (!saved) return `#${pk.slice(-6)}`
+            const suffix4 = `#${pk.slice(-4)}`
+            return saved.toLowerCase().includes(suffix4) ? saved : `${saved} (#${pk.slice(-6)})`
+          })
+          ctx.addSystemMessage(`Blocked peers (${ctx.blockedPubkeys.length}): ${formatted.join(', ')}`)
         }
         return true
       }
@@ -444,13 +450,22 @@ export async function executeSlashCommand(
         return true
       }
       const peer = resolvePeer(args, ctx.peers)
-      const directPk = peer?.pubkey ?? decodePubkeyInput(args)
+      const needle = args.trim().replace(/^@/, '').toLowerCase()
+      const matchedBySavedName =
+        !peer && ctx.blockedPeerNames
+          ? ctx.blockedPubkeys.find((pk) => {
+              const saved = ctx.blockedPeerNames?.[pk.toLowerCase()]?.trim().replace(/^@/, '').toLowerCase()
+              return Boolean(saved && (saved === needle || saved.startsWith(needle)))
+            })
+          : undefined
+      const directPk = peer?.pubkey ?? decodePubkeyInput(args) ?? matchedBySavedName
       if (!directPk || !ctx.blockedPubkeys.includes(directPk)) {
         ctx.addSystemMessage(`"${args}" is not in your block list.`)
         return true
       }
-      ctx.toggleBlockPeer(directPk, peer?.displayHandle)
-      ctx.addSystemMessage(`Unblocked ${peer?.displayHandle ?? directPk.slice(0, 8)}.`)
+      const savedName = ctx.blockedPeerNames?.[directPk.toLowerCase()]?.trim()
+      ctx.toggleBlockPeer(directPk, peer?.displayHandle ?? savedName)
+      ctx.addSystemMessage(`Unblocked ${peer?.displayHandle ?? savedName ?? directPk.slice(0, 8)}.`)
       return true
     }
 

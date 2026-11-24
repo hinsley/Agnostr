@@ -5,6 +5,7 @@ import {
   Check,
   Copy,
   Hash,
+  Landmark,
   Lock,
   Shield,
   ShieldCheck,
@@ -29,6 +30,7 @@ export interface PeerInspectorModalProps {
   onStartDm: (pubkey: string, nickname?: string) => void
   onMentionPeer: (handle: string) => void
   onOpenZap?: (target: ZapTarget) => void
+  onOpenAgoraProfile?: (pubkey: string) => void
 }
 
 function formatLastSeen(unixSec: number): string {
@@ -53,6 +55,7 @@ export function PeerInspectorModal({
   onStartDm,
   onMentionPeer,
   onOpenZap,
+  onOpenAgoraProfile,
 }: PeerInspectorModalProps) {
   const [copiedKey, setCopiedKey] = useState<'npub' | 'hex' | 'lud16' | null>(null)
   const peerPubkey = peer?.pubkey ?? null
@@ -143,6 +146,18 @@ export function PeerInspectorModal({
   const handleTune = (gh: string) => {
     engine.tuneGeohash(gh)
     onClose()
+  }
+
+  const isValidHexPubkey = /^[0-9a-f]{64}$/i.test(livePeer.pubkey)
+  const hasValidNpub = Boolean(
+    (livePeer.npub && /^npub1[02-9ac-hj-np-z]+$/i.test(livePeer.npub)) || isValidHexPubkey,
+  )
+  const canOpenAgoraProfile = Boolean(hasValidNpub && isValidHexPubkey && onOpenAgoraProfile)
+
+  const handleOpenAgoraProfile = () => {
+    if (!canOpenAgoraProfile || !onOpenAgoraProfile) return
+    onClose()
+    onOpenAgoraProfile(livePeer.pubkey.toLowerCase())
   }
 
   const handleDm = () => {
@@ -501,6 +516,17 @@ export function PeerInspectorModal({
             <button type="button" className="ag-btn ag-btn-dm" onClick={handleDm}>
               <Lock size={14} />
               <span>Encrypted DM</span>
+            </button>
+          )}
+          {canOpenAgoraProfile && (
+            <button
+              type="button"
+              className="ag-btn ag-btn-secondary"
+              onClick={handleOpenAgoraProfile}
+              title="View Agora profile"
+            >
+              <Landmark size={14} />
+              <span>Agora Profile</span>
             </button>
           )}
           <button type="button" className="ag-btn ag-btn-secondary" onClick={handleMention}>

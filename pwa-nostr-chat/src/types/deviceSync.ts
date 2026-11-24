@@ -94,6 +94,7 @@ export interface SyncedTrustedRecord {
 /** LWW-Element-Set record for a Muted/Blocked Peer */
 export interface SyncedBlockedRecord {
   pubkey: string
+  label?: string
   addedAt: number
   removedAt: number
 }

@@ -492,6 +492,8 @@ export interface AgnostrEngine {
 
   // Peer moderation & whitelist-based receipt
   blockedPubkeys: string[]
+  /** Saved display names / handles for blocked pubkeys (lowercase 64-hex -> trimmed label) */
+  blockedPeerNames: Record<string, string>
   isPeerBlocked: (pubkey: string) => boolean
   toggleBlockPeer: (pubkey: string, label?: string) => void
   getPeerByPubkey: (pubkey: string) => PeerInfo | null

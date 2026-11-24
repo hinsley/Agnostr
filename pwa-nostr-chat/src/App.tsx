@@ -2574,6 +2574,11 @@ export function App() {
             onStartDm={handleOpenDm}
             onMentionPeer={handleMentionPeer}
             onOpenZap={handleOpenZap}
+            onOpenAgoraProfile={(pubkey) => {
+              setInspectedPeer(null)
+              handleSelectWorkspace('agora')
+              engine.agora.openProfile(pubkey)
+            }}
           />
         </Suspense>
       )}

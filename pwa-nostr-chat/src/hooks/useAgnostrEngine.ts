@@ -128,6 +128,7 @@ import {
   isEphemeralPendingMessage,
   isStuckMediaPlaceholder,
   loadActiveGeohash,
+  loadBlockedPeerNames,
   loadBlockedPubkeys,
   loadBlossomServers,
   loadChannelMessages,
@@ -144,6 +145,7 @@ import {
   loadTrustedPubkeys,
   panicWipeStorage,
   saveActiveGeohash,
+  saveBlockedPeerNames,
   saveBlockedPubkeys,
   saveBlossomServers,
   saveChannelMessages,
@@ -498,6 +500,11 @@ export function useAgnostrEngine(): AgnostrEngine {
   })
   const [blockedPubkeys, setBlockedPubkeys] = useState<string[]>(() => loadBlockedPubkeys())
   const blockedSet = useMemo(() => new Set(blockedPubkeys), [blockedPubkeys])
+  const [blockedPeerNames, setBlockedPeerNames] = useState<Record<string, string>>(() =>
+    loadBlockedPeerNames()
+  )
+  const blockedPeerNamesRef = useRef<Record<string, string>>(blockedPeerNames)
+  blockedPeerNamesRef.current = blockedPeerNames
 
   // Synchronously derive current channel slices on render frame 0 (zero 1-frame stale bleed)
   const messages = useMemo(() => {
@@ -1110,8 +1117,15 @@ export function useAgnostrEngine(): AgnostrEngine {
   const buildBlockedGeoPlaceholder = useCallback(
     (gh: string, ev: NostrEvent): GeoMessage => {
       const pk = ev.pubkey.toLowerCase()
-      const rawNick = getTagValue(ev.tags, 'n') || presenceTracker.getNickname(pk) || ''
-      const cleanNick = rawNick.trim().slice(0, 32) || `anon${pk.slice(-4)}`
+      const rawEventNick = getTagValue(ev.tags, 'n')?.trim() || ''
+      const savedBlockedName = blockedPeerNamesRef.current[pk]?.trim() || ''
+      const trackerNick = presenceTracker.getNickname(pk)?.trim() || ''
+      const rawNick = rawEventNick || savedBlockedName || trackerNick
+      const strippedNick = rawNick
+        .replace(/^@/, '')
+        .replace(/#[0-9a-f]{4}$/i, '')
+        .trim()
+      const cleanNick = strippedNick.slice(0, 32) || `anon${pk.slice(-4)}`
       return {
         id: ev.id,
         geohash: gh,
@@ -2781,13 +2795,29 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const handleApplySyncedBlocked = useCallback(
-    (nextBlocked: string[]) => {
+    (nextBlocked: string[], syncedBlockedNames?: Record<string, string>) => {
       const prevSet = blockedSetRef.current
       const normalized = Array.from(new Set(nextBlocked.map((p) => p.toLowerCase())))
       const nextSet = new Set(normalized)
       blockedSetRef.current = nextSet
       setBlockedPubkeys(normalized)
       saveBlockedPubkeys(normalized)
+
+      const mergedNames: Record<string, string> = {}
+      for (const pk of normalized) {
+        const incoming =
+          typeof syncedBlockedNames?.[pk] === 'string'
+            ? syncedBlockedNames[pk].trim().slice(0, 64)
+            : ''
+        const existing = blockedPeerNamesRef.current[pk]?.trim().slice(0, 64) ?? ''
+        const chosen = incoming || existing
+        if (chosen) {
+          mergedNames[pk] = chosen
+        }
+      }
+      blockedPeerNamesRef.current = mergedNames
+      setBlockedPeerNames(mergedNames)
+      saveBlockedPeerNames(mergedNames)
 
       const newlyBlocked = normalized.filter((pk) => !prevSet.has(pk))
       const newlyUnblocked = Array.from(prevSet).filter((pk) => !nextSet.has(pk))
@@ -3013,6 +3043,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     joinedServers: serversEngine.joinedServers,
     trustedPubkeys,
     blockedPubkeys,
+    blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
     lightningAddress: zapsEngine.lightningAddress,
@@ -3701,9 +3732,103 @@ export function useAgnostrEngine(): AgnostrEngine {
   // Moderation
   const isPeerBlocked = useCallback((pubkey: string) => blockedSet.has(pubkey.toLowerCase()), [blockedSet])
 
+  const resolveBestBlockedLabel = useCallback(
+    (pubkey: string, explicitLabel?: string): string | undefined => {
+      const pk = pubkey.trim().toLowerCase()
+      const clean = (raw?: string | null): string | undefined => {
+        if (typeof raw !== 'string') return undefined
+        const trimmed = raw.trim().slice(0, 64)
+        return trimmed || undefined
+      }
+      const isGeneric = (val: string): boolean => {
+        const lower = val.trim().toLowerCase()
+        if (!lower) return true
+        if (/^@?a(?:gn|n)on(?:[0-9a-f]{4})?(?:#[0-9a-f]{4})?$/i.test(lower)) return true
+        const stripped = lower.replace(/^@/, '').replace(/#[0-9a-f]{4}$/i, '').trim()
+        if (!stripped || isAutoAnonNickname(stripped)) return true
+        if (/^#?[0-9a-f]{4,64}$/i.test(lower)) return true
+        if (/^[0-9a-f]{4,16}[….]{1,3}[0-9a-f]{4,16}$/i.test(lower)) return true
+        if (/^npub1[02-9ac-hj-np-z….]+$/i.test(lower)) return true
+        if (pk && lower.length >= 6 && pk.startsWith(lower)) return true
+        return false
+      }
+      const pickNonGeneric = (raw?: string | null): string | undefined => {
+        const c = clean(raw)
+        return c && !isGeneric(c) ? c : undefined
+      }
+
+      const explicitReal = pickNonGeneric(explicitLabel)
+      if (explicitReal) return explicitReal
+
+      const trackedPeer = presenceTracker.getPeerByPubkey(
+        pk,
+        ownPubkeysRef.current,
+        blockedSetRef.current
+      )
+      const trackedReal =
+        pickNonGeneric(trackedPeer?.displayHandle) ?? pickNonGeneric(trackedPeer?.nickname)
+      if (trackedReal) return trackedReal
+
+      const agoraProfile = agoraEngine.profilesByPubkey[pk]
+      const agoraReal =
+        pickNonGeneric(agoraProfile?.displayName) ?? pickNonGeneric(agoraProfile?.name)
+      if (agoraReal) return agoraReal
+
+      const dmThread = dmThreads.find((t) => t.peerPubkey.toLowerCase() === pk)
+      const dmReal =
+        pickNonGeneric(dmThread?.peerDisplayHandle) ?? pickNonGeneric(dmThread?.peerNickname)
+      if (dmReal) return dmReal
+
+      const serverMember = serversEngine.members.find((m) => m.pubkey.toLowerCase() === pk)
+      const serverReal =
+        pickNonGeneric(serverMember?.displayHandle) ?? pickNonGeneric(serverMember?.nickname)
+      if (serverReal) return serverReal
+
+      const streamMsg = messagesRef.current.find(
+        (m) => !m.isSystem && m.pubkey.toLowerCase() === pk
+      )
+      const msgReal =
+        pickNonGeneric(streamMsg?.displayHandle) ?? pickNonGeneric(streamMsg?.nickname)
+      if (msgReal) return msgReal
+
+      const trustedEntry = trustedPubkeys.find((t) => t.pubkey.toLowerCase() === pk)
+      const trustedReal = pickNonGeneric(trustedEntry?.label)
+      if (trustedReal) return trustedReal
+
+      return clean(explicitLabel)
+    },
+    [
+      presenceTracker,
+      agoraEngine.profilesByPubkey,
+      dmThreads,
+      serversEngine.members,
+      trustedPubkeys,
+    ]
+  )
+
   const toggleBlockPeer = useCallback(
     (pubkey: string, label?: string) => {
       const pk = pubkey.toLowerCase()
+      const wasBlocked = blockedSetRef.current.has(pk)
+      const resolvedLabel = !wasBlocked
+        ? resolveBestBlockedLabel(pk, label)
+        : (blockedPeerNamesRef.current[pk] ?? resolveBestBlockedLabel(pk, label))
+
+      if (!wasBlocked) {
+        if (resolvedLabel) {
+          const nextNames = { ...blockedPeerNamesRef.current, [pk]: resolvedLabel }
+          blockedPeerNamesRef.current = nextNames
+          setBlockedPeerNames(nextNames)
+          saveBlockedPeerNames(nextNames)
+        }
+      } else if (pk in blockedPeerNamesRef.current) {
+        const nextNames = { ...blockedPeerNamesRef.current }
+        delete nextNames[pk]
+        blockedPeerNamesRef.current = nextNames
+        setBlockedPeerNames(nextNames)
+        saveBlockedPeerNames(nextNames)
+      }
+
       setBlockedPubkeys((prev) => {
         const exists = prev.includes(pk)
         const next = exists ? prev.filter((p) => p !== pk) : [...prev, pk]
@@ -3760,7 +3885,11 @@ export function useAgnostrEngine(): AgnostrEngine {
           })
           recomputeGeoUnreads()
           refreshPeers(activeGeohashRef.current)
-          pushToast('info', `Blocked ${label ?? pk.slice(0, 8)}`, 'Their messages are now hidden.')
+          pushToast(
+            'info',
+            `Blocked ${resolvedLabel ?? label ?? pk.slice(0, 8)}`,
+            'Their messages are now hidden.'
+          )
         } else {
           setChannelMessagesState((curr) => {
             const filtered = curr.items.filter(
@@ -3771,12 +3900,12 @@ export function useAgnostrEngine(): AgnostrEngine {
           })
           recomputeGeoUnreads()
           refreshPeers(activeGeohashRef.current)
-          pushToast('info', `Unblocked ${label ?? pk.slice(0, 8)}`)
+          pushToast('info', `Unblocked ${resolvedLabel ?? label ?? pk.slice(0, 8)}`)
         }
         return next
       })
     },
-    [pushToast, recomputeGeoUnreads, refreshPeers, contentFilterEngine]
+    [resolveBestBlockedLabel, pushToast, recomputeGeoUnreads, refreshPeers, contentFilterEngine]
   )
 
   const getPeerByPubkey = useCallback(
@@ -3856,9 +3985,17 @@ export function useAgnostrEngine(): AgnostrEngine {
       setBlockedPubkeys((prev) => {
         if (!prev.includes(pk)) return prev
         const unblocked = prev.filter((p) => p !== pk)
+        blockedSetRef.current = new Set(unblocked)
         saveBlockedPubkeys(unblocked)
         return unblocked
       })
+      if (pk in blockedPeerNamesRef.current) {
+        const nextNames = { ...blockedPeerNamesRef.current }
+        delete nextNames[pk]
+        blockedPeerNamesRef.current = nextNames
+        setBlockedPeerNames(nextNames)
+        saveBlockedPeerNames(nextNames)
+      }
       pushToast(
         'success',
         `Trusted ${cleanLabel ?? `#${pk.slice(-6)}`}`,
@@ -5244,6 +5381,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     setGeoMentionCounts({})
     setRecentChannels([DEFAULT_GEOHASH])
     setBlockedPubkeys([])
+    blockedPeerNamesRef.current = {}
+    setBlockedPeerNames({})
     setTrustedPubkeys([])
     setPeerNotes({})
     pendingTrustRequestRef.current = null
@@ -5319,6 +5458,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           activeGeohash,
           peers,
           blockedPubkeys,
+          blockedPeerNames,
           trustedPubkeys,
           strictWhitelistMode: settings.strictWhitelistMode,
           setNickname,
@@ -5368,6 +5508,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       activeGeohash,
       peers,
       blockedPubkeys,
+      blockedPeerNames,
       trustedPubkeys,
       settings.strictWhitelistMode,
       setNickname,
@@ -5551,6 +5692,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     markChannelRead,
 
     blockedPubkeys,
+    blockedPeerNames,
     isPeerBlocked,
     toggleBlockPeer,
     getPeerByPubkey,
