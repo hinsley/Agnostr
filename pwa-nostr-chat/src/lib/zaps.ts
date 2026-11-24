@@ -14,7 +14,7 @@ export const KIND_PROFILE_METADATA = 0
 export const KIND_ZAP_REQUEST = 9734
 export const KIND_ZAP_RECEIPT = 9735
 
-const LUD16_REGEX = /^[a-z0-9._+-]{1,64}@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i
+const LUD16_REGEX = /^[a-z0-9._+-]{1,128}@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i
 const LNURL_BECH32_REGEX = /^lnurl1[02-9ac-hj-np-z]+$/i
 const BOLT11_REGEX = /^(?:lightning:)?(ln(?:bc|tb|bcrt)[0-9a-z]+)$/i
 
@@ -259,7 +259,7 @@ export function parseLightningPayload(raw: string): ParsedLightningPayload | nul
 }
 
 /**
- * Builds the Nymchat-compatible `['lud16', addr]` tag for outbound messages.
+ * Builds the standard `['lud16', addr]` tag for outbound Nostr messages.
  * Returns `null` if no valid Lightning Address is configured.
  */
 export function buildLightningAddressTag(addr: string | null | undefined): string[] | null {

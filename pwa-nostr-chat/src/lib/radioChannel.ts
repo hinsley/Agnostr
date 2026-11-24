@@ -22,7 +22,7 @@ export const POPULAR_TOPIC_CHANNELS: readonly PopularTopicChannel[] = [
 
 /**
  * Normalizes a raw topic name (with optional leading `#`, `/`, or `topic:`) into a
- * canonical lowercase Nymchat/Bitchat `kind: 23333` `d`-tag slug, or returns null if invalid.
+ * canonical lowercase ephemeral `kind: 23333` `d`-tag slug, or returns null if invalid.
  */
 export function normalizeTopicSlug(raw: string): string | null {
   if (typeof raw !== 'string') return null

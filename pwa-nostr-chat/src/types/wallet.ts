@@ -253,7 +253,7 @@ export interface WalletSyncPayload {
 }
 
 /* --------------------------------------------------------------------------
-   NIP-57 Lightning Zaps & Nymchat Lightning Address Discovery (lud16 / lnurl)
+   NIP-57 Lightning Zaps & Lightning Address Discovery (lud16 / lnurl)
    -------------------------------------------------------------------------- */
 
 export interface LnurlPayMetadata {
@@ -531,6 +531,23 @@ export interface WalletEngine {
     feePaidSats: number
     preimage?: string | null
   }>
+
+  // Native self-custodial Core Blockchain Bitcoin (BIP-84 P2WPKH)
+  btcAddress: string | null
+  btcDerivationPath: string | null
+  btcBalanceConfirmedSats: number
+  btcBalanceUnconfirmedSats: number
+  btcBalanceTotalSats: number
+  btcUtxoCount: number
+  btcRefreshing: boolean
+  btcLastUpdatedAt: number | null
+  btcError: string | null
+  refreshOnchainBtcBalance: () => Promise<void>
+  sendNativeOnchainBtc: (
+    toAddress: string,
+    amountSats: number,
+    feeRateSatVb?: number
+  ) => Promise<{ txid: string; feeSats: number; sentSats: number }>
 
   // On-Chain BTC via Boltz v2 submarine & reverse submarine swaps
   setBoltzApiUrl: (url: string) => void

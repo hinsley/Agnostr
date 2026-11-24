@@ -1467,6 +1467,320 @@
   min-width: 0;
 }
 
+/* Native Core Bitcoin (BIP-84) Receive Card, Overview Pill & Send Fee Selector */
+.ag-wallet-onchain-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  margin-top: 0.15rem;
+  padding: 0.24rem 0.62rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-wallet-onchain-pill svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-wallet-onchain-pill:hover {
+  background-color: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+.ag-wallet-btc-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.72rem;
+  padding: 0.9rem 0.95rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-elevated);
+  min-width: 0;
+}
+
+.ag-wallet-btc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.ag-wallet-btc-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.ag-wallet-btc-head-title svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-wallet-btc-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.ag-wallet-btc-icon-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  background-color: var(--bg-canvas);
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-wallet-btc-icon-btn:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-wallet-btc-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ag-wallet-btc-mempool-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+  padding: 0.2rem 0.46rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-canvas);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-wallet-btc-mempool-link:hover {
+  background-color: var(--accent-soft);
+}
+
+.ag-wallet-btc-card .ag-wallet-code-box {
+  background-color: var(--bg-canvas);
+  user-select: all;
+}
+
+.ag-wallet-btc-amt-row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.ag-wallet-btc-amt-row .ag-wallet-input {
+  background-color: var(--bg-canvas);
+}
+
+.ag-wallet-btc-amt-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.ag-wallet-btc-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.ag-wallet-btc-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.24rem;
+  padding: 0.22rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+}
+
+.ag-wallet-btc-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.32rem;
+  padding: 0.44rem 0.5rem;
+  border-radius: calc(var(--radius-md) - 2px);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
+}
+
+.ag-wallet-btc-mode-btn:hover:not(.active) {
+  color: var(--text-primary);
+}
+
+.ag-wallet-btc-mode-btn.active {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.ag-wallet-btc-mode-btn.active svg {
+  color: var(--accent);
+}
+
+.ag-wallet-fee-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.35rem;
+}
+
+.ag-wallet-fee-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.12rem;
+  padding: 0.46rem 0.35rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  min-width: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-wallet-fee-btn:hover:not(.active) {
+  background-color: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+.ag-wallet-fee-btn.active {
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+}
+
+.ag-wallet-fee-name {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.ag-wallet-fee-rate {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-wallet-fee-btn.active .ag-wallet-fee-rate {
+  color: var(--accent);
+}
+
+.ag-wallet-boltz-expander {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 65%, transparent);
+  min-width: 0;
+}
+
+.ag-wallet-boltz-expander-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.38rem 0.2rem;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-align: left;
+  transition: color var(--dur-fast) ease;
+}
+
+.ag-wallet-boltz-expander-btn:hover {
+  color: var(--text-primary);
+}
+
+.ag-wallet-boltz-expander-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.ag-wallet-tx-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.72rem 0.85rem;
+  border-radius: var(--radius-md);
+  background-color: var(--accent-soft);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.ag-wallet-tx-confirm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-weight: 600;
+}
+
+.ag-wallet-tx-confirm-head-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  color: var(--accent);
+}
+
+.ag-wallet-tx-confirm-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.ag-wallet-tx-confirm-link:hover {
+  text-decoration: underline;
+}
+
 /* Zap Modal Nutzap vs Lightning Segmented Toggle */
 .ag-zap-mode-switch {
   display: grid;
@@ -1973,5 +2287,18 @@
 
   .ag-wallet-perm-zap-actions .ag-wbtn {
     width: 100%;
+  }
+
+  .ag-wallet-btc-card {
+    padding: 0.78rem 0.82rem;
+  }
+
+  .ag-wallet-btc-mode-btn {
+    font-size: 11.5px;
+    padding: 0.42rem 0.35rem;
+  }
+
+  .ag-wallet-fee-btn {
+    padding: 0.42rem 0.25rem;
   }
 }

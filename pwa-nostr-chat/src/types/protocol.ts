@@ -544,7 +544,7 @@ export interface AgnostrEngine {
   // Built-in Multi-Mint Cashu Ecash Wallet + Boltz v2 On-Chain Swaps
   wallet: WalletEngine
 
-  // Nymchat & NIP-57 Lightning Address Discovery + Zaps
+  // NIP-57 Lightning Address Discovery (lud16/lnurl) & Zaps
   zaps: ZapEngine
 
   // Silent Multi-Device Same-Key Background Sync (NIP-44 self-encrypted CRDT + delta messages)

@@ -36,6 +36,9 @@ export default defineConfig({
           if (id.includes('/node_modules/leaflet/')) {
             return 'leaflet'
           }
+          if (id.includes('/node_modules/@scure/base/')) {
+            return 'nostr-core'
+          }
           if (
             id.includes('/node_modules/@cashu/cashu-ts/') ||
             id.includes('/node_modules/@scure/bip39/') ||

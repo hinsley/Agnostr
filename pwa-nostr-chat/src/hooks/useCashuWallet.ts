@@ -21,6 +21,14 @@ import type {
   WalletTransaction,
 } from '../types/wallet.ts'
 import {
+  broadcastBitcoinRawTx,
+  buildAndSignP2wpkhTx,
+  deriveNativeBtcWallet,
+  fetchBitcoinFeeRates,
+  fetchBitcoinOnchainState,
+  type NativeBtcWalletKeys,
+} from '../lib/bitcoinOnchain.ts'
+import {
   BOLTZ_API_URL_STORAGE_KEY,
   BOLTZ_SWAPS_STORAGE_KEY,
   DEFAULT_BOLTZ_API_URL,
@@ -123,8 +131,16 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
   const [busy, setBusy] = useState(false)
   const [lastError, setLastError] = useState<string | null>(null)
 
+  const [btcBalanceConfirmedSats, setBtcBalanceConfirmedSats] = useState(0)
+  const [btcBalanceUnconfirmedSats, setBtcBalanceUnconfirmedSats] = useState(0)
+  const [btcUtxoCount, setBtcUtxoCount] = useState(0)
+  const [btcRefreshing, setBtcRefreshing] = useState(false)
+  const [btcLastUpdatedAt, setBtcLastUpdatedAt] = useState<number | null>(null)
+  const [btcError, setBtcError] = useState<string | null>(null)
+
   const mintPollInFlightRef = useRef(false)
   const swapPollInFlightRef = useRef(false)
+  const btcRefreshInFlightRef = useRef(false)
 
   const commitState = useCallback(
     (
@@ -1771,6 +1787,149 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
   }, [])
 
   /* ------------------------------------------------------------------------
+     Native Self-Custodial Core Blockchain Bitcoin (BIP-84 P2WPKH `bc1q...`)
+     ------------------------------------------------------------------------ */
+
+  const nativeBtc = useMemo<NativeBtcWalletKeys | null>(
+    () =>
+      walletState.initialized
+        ? deriveNativeBtcWallet({
+            mnemonic: walletState.mnemonic,
+            privateKeyHex: walletState.privateKeyHex,
+          })
+        : null,
+    [walletState.initialized, walletState.mnemonic, walletState.privateKeyHex]
+  )
+  const nativeBtcRef = useRef<NativeBtcWalletKeys | null>(nativeBtc)
+  nativeBtcRef.current = nativeBtc
+
+  const btcAddress = nativeBtc?.address ?? null
+  const btcDerivationPath = nativeBtc?.derivationPath ?? null
+  const btcAddressRef = useRef<string | null>(btcAddress)
+  btcAddressRef.current = btcAddress
+
+  const btcBalanceTotalSats = btcBalanceConfirmedSats + btcBalanceUnconfirmedSats
+
+  const refreshOnchainBtcBalance = useCallback(async (): Promise<void> => {
+    const targetAddr = btcAddressRef.current
+    if (!targetAddr) {
+      setBtcBalanceConfirmedSats(0)
+      setBtcBalanceUnconfirmedSats(0)
+      setBtcUtxoCount(0)
+      setBtcLastUpdatedAt(null)
+      setBtcError(null)
+      setBtcRefreshing(false)
+      return
+    }
+    if (btcRefreshInFlightRef.current) return
+    btcRefreshInFlightRef.current = true
+    setBtcRefreshing(true)
+    setBtcError(null)
+    try {
+      const state = await fetchBitcoinOnchainState(targetAddr)
+      if (btcAddressRef.current !== targetAddr) return
+      setBtcBalanceConfirmedSats(state.confirmedSats)
+      setBtcBalanceUnconfirmedSats(state.unconfirmedSats)
+      setBtcUtxoCount(state.utxos.length)
+      setBtcLastUpdatedAt(state.fetchedAt)
+      setBtcError(null)
+    } catch (err) {
+      if (btcAddressRef.current !== targetAddr) return
+      setBtcError(
+        err instanceof Error ? err.message : 'Unable to reach Bitcoin blockchain explorer.'
+      )
+    } finally {
+      btcRefreshInFlightRef.current = false
+      if (btcAddressRef.current === targetAddr) {
+        setBtcRefreshing(false)
+      }
+    }
+  }, [])
+
+  // Passively refresh native on-chain balance once whenever wallet initializes or btcAddress changes
+  useEffect(() => {
+    btcRefreshInFlightRef.current = false
+    setBtcBalanceConfirmedSats(0)
+    setBtcBalanceUnconfirmedSats(0)
+    setBtcUtxoCount(0)
+    setBtcLastUpdatedAt(null)
+    setBtcError(null)
+    setBtcRefreshing(false)
+    if (!btcAddress) return
+    void refreshOnchainBtcBalance()
+  }, [btcAddress, refreshOnchainBtcBalance])
+
+  const sendNativeOnchainBtc = useCallback(
+    async (
+      toAddress: string,
+      amountSats: number,
+      feeRateSatVb?: number
+    ): Promise<{ txid: string; feeSats: number; sentSats: number }> => {
+      const keys = nativeBtcRef.current
+      if (!keys) {
+        throw new Error('Create or import an Agwallet first to send Core Bitcoin.')
+      }
+
+      setBusy(true)
+      setLastError(null)
+      setBtcError(null)
+      try {
+        const liveState = await fetchBitcoinOnchainState(keys.address)
+        if (btcAddressRef.current === keys.address) {
+          setBtcBalanceConfirmedSats(liveState.confirmedSats)
+          setBtcBalanceUnconfirmedSats(liveState.unconfirmedSats)
+          setBtcUtxoCount(liveState.utxos.length)
+          setBtcLastUpdatedAt(liveState.fetchedAt)
+        }
+
+        const resolvedFeeRate =
+          typeof feeRateSatVb === 'number' && Number.isFinite(feeRateSatVb) && feeRateSatVb >= 1
+            ? Math.ceil(feeRateSatVb)
+            : (await fetchBitcoinFeeRates()).halfHourFee
+
+        const built = buildAndSignP2wpkhTx({
+          wallet: keys,
+          utxos: liveState.utxos,
+          toAddress: toAddress.trim(),
+          amountSats,
+          feeRateSatVb: resolvedFeeRate,
+        })
+
+        const txid = await broadcastBitcoinRawTx(built.rawTxHex)
+
+        recordTransaction({
+          type: 'send_btc',
+          status: 'pending',
+          amountSats: built.sentSats,
+          feeSats: built.feeSats,
+          mintUrl: 'bitcoin:onchain',
+          counterparty: toAddress.trim(),
+          memo: 'Core Bitcoin (BIP-84) send',
+          txid,
+        })
+
+        pushToastRef.current?.(
+          'success',
+          `Sent ${built.sentSats.toLocaleString()} sats on-chain`,
+          `Fee: ${built.feeSats.toLocaleString()} sats · ${txid.slice(0, 10)}…`
+        )
+
+        void refreshOnchainBtcBalance()
+        return { txid, feeSats: built.feeSats, sentSats: built.sentSats }
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : 'Failed to broadcast Core Bitcoin transaction.'
+        setLastError(msg)
+        setBtcError(msg)
+        throw new Error(msg)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [recordTransaction, refreshOnchainBtcBalance]
+  )
+
+  /* ------------------------------------------------------------------------
      Proof-Safe Encrypted Multi-Device Sync (`exportSyncState` / `mergeSyncState`)
      ------------------------------------------------------------------------ */
 
@@ -1859,6 +2018,13 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     setActiveQuoteSynced(null)
     setLastError(null)
     setBusy(false)
+    btcRefreshInFlightRef.current = false
+    setBtcBalanceConfirmedSats(0)
+    setBtcBalanceUnconfirmedSats(0)
+    setBtcUtxoCount(0)
+    setBtcRefreshing(false)
+    setBtcLastUpdatedAt(null)
+    setBtcError(null)
   }, [setActiveQuoteSynced])
 
   return useMemo<WalletEngine>(
@@ -1880,6 +2046,17 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       boltzApiUrl,
       busy,
       lastError,
+      btcAddress,
+      btcDerivationPath,
+      btcBalanceConfirmedSats,
+      btcBalanceUnconfirmedSats,
+      btcBalanceTotalSats,
+      btcUtxoCount,
+      btcRefreshing,
+      btcLastUpdatedAt,
+      btcError,
+      refreshOnchainBtcBalance,
+      sendNativeOnchainBtc,
       generateDraftWalletKeys,
       createNewWallet,
       importWalletKeyOrSeed,
@@ -1936,6 +2113,17 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       boltzApiUrl,
       busy,
       lastError,
+      btcAddress,
+      btcDerivationPath,
+      btcBalanceConfirmedSats,
+      btcBalanceUnconfirmedSats,
+      btcBalanceTotalSats,
+      btcUtxoCount,
+      btcRefreshing,
+      btcLastUpdatedAt,
+      btcError,
+      refreshOnchainBtcBalance,
+      sendNativeOnchainBtc,
       generateDraftWalletKeys,
       createNewWallet,
       importWalletKeyOrSeed,

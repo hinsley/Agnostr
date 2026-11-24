@@ -46,6 +46,12 @@ import type {
 } from '../types/wallet.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import {
+  BITCOIN_DUST_LIMIT_SATS,
+  DEFAULT_BITCOIN_FEE_RATES,
+  fetchBitcoinFeeRates,
+  type BitcoinFeeRates,
+} from '../lib/bitcoinOnchain.ts'
+import {
   DEFAULT_BOLTZ_API_URL,
   formatBoltzStatusLabel,
   getMempoolAddressUrl,
@@ -168,6 +174,17 @@ function getLightningReceiveQrInfo(
   }
 }
 
+function buildBip21Uri(address: string, amountSats?: number): string {
+  const cleanAddr = address.trim()
+  if (!amountSats || !Number.isFinite(amountSats) || amountSats <= 0) {
+    return `bitcoin:${cleanAddr}`
+  }
+  const btcStr = (Math.floor(amountSats) / 100_000_000)
+    .toFixed(8)
+    .replace(/\.?0+$/, '')
+  return `bitcoin:${cleanAddr}?amount=${btcStr}`
+}
+
 function QrBox({ payload, label }: { payload: string; label: string }) {
   const [svg, setSvg] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
@@ -226,7 +243,7 @@ function resolveInitialNav(intent?: WalletInitialIntent | null): {
     if (parseLightningPayload(payload)) {
       return {
         tab: intent?.tab ?? 'send',
-        receiveMode: intent?.receiveMode ?? 'cashu',
+        receiveMode: intent?.receiveMode ?? 'lightning',
         sendMode: intent?.sendMode ?? 'lightning',
         cashuReceiveInput: '',
         lnSendInput: payload,
@@ -235,7 +252,7 @@ function resolveInitialNav(intent?: WalletInitialIntent | null): {
   }
   return {
     tab: intent?.tab ?? 'overview',
-    receiveMode: intent?.receiveMode ?? 'cashu',
+    receiveMode: intent?.receiveMode ?? 'lightning',
     sendMode: intent?.sendMode ?? 'cashu',
     cashuReceiveInput: '',
     lnSendInput: '',
@@ -298,7 +315,12 @@ function WalletModalInner({
   const [checkingLnQuote, setCheckingLnQuote] = useState(false)
   const [showPermLnQr, setShowPermLnQr] = useState<boolean>(() => !wallet.activeMintQuote)
 
-  // Receive: On-Chain BTC (Boltz v2 Submarine)
+  // Receive: Native Core Bitcoin (BIP-84) + Optional Boltz v2 Submarine Swap
+  const [nativeBtcQrMode, setNativeBtcQrMode] = useState<'address' | 'bip21'>('address')
+  const [nativeBtcRequestSats, setNativeBtcRequestSats] = useState<string>('')
+  const [showBoltzReceiveSwap, setShowBoltzReceiveSwap] = useState<boolean>(() =>
+    wallet.boltzSwaps.some((s) => s.direction === 'submarine' && isBoltzSwapActive(s))
+  )
   const [subPair, setSubPair] = useState<BoltzSubmarinePairInfo | null>(null)
   const [subPairLoading, setSubPairLoading] = useState(false)
   const [subPairError, setSubPairError] = useState<string | null>(null)
@@ -323,7 +345,27 @@ function WalletModalInner({
   const [preparingMelt, setPreparingMelt] = useState(false)
   const [payingMelt, setPayingMelt] = useState(false)
 
-  // Send: On-Chain BTC (Boltz v2 Reverse Submarine)
+  // Send: Core Bitcoin (BIP-84 Native) + Optional Boltz v2 Reverse Submarine Swap
+  const [btcSendSource, setBtcSendSource] = useState<'core' | 'boltz'>(() =>
+    wallet.btcBalanceTotalSats === 0 &&
+    wallet.boltzSwaps.some((s) => s.direction === 'reverse' && isBoltzSwapActive(s))
+      ? 'boltz'
+      : 'core'
+  )
+  const [nativeBtcSendAddress, setNativeBtcSendAddress] = useState<string>('')
+  const [nativeBtcSendAmount, setNativeBtcSendAmount] = useState<string>('')
+  const [nativeBtcFeePriority, setNativeBtcFeePriority] = useState<
+    'economy' | 'standard' | 'priority'
+  >('standard')
+  const [btcFeeRates, setBtcFeeRates] = useState<BitcoinFeeRates | null>(null)
+  const [btcFeeRatesLoading, setBtcFeeRatesLoading] = useState(false)
+  const [sendingNativeBtc, setSendingNativeBtc] = useState(false)
+  const [nativeBtcSentResult, setNativeBtcSentResult] = useState<{
+    txid: string
+    feeSats: number
+    sentSats: number
+    toAddress: string
+  } | null>(null)
   const [revPair, setRevPair] = useState<BoltzReversePairInfo | null>(null)
   const [revPairLoading, setRevPairLoading] = useState(false)
   const [revPairError, setRevPairError] = useState<string | null>(null)
@@ -358,6 +400,14 @@ function WalletModalInner({
     () => getLightningReceiveQrInfo(activeZapAddress),
     [activeZapAddress]
   )
+
+  const effectiveBtcFeeRates = btcFeeRates ?? DEFAULT_BITCOIN_FEE_RATES
+  const selectedNativeFeeRateSatVb =
+    nativeBtcFeePriority === 'economy'
+      ? effectiveBtcFeeRates.economyFee
+      : nativeBtcFeePriority === 'priority'
+        ? effectiveBtcFeeRates.fastestFee
+        : effectiveBtcFeeRates.halfHourFee
 
   const handleBack = useCallback(() => {
     if (setupMode === 'create' || setupMode === 'import') {
@@ -410,6 +460,18 @@ function WalletModalInner({
     }
   }, [])
 
+  const loadBtcFeeRates = useCallback(async () => {
+    setBtcFeeRatesLoading(true)
+    try {
+      const rates = await fetchBitcoinFeeRates()
+      setBtcFeeRates(rates)
+    } catch {
+      // Fall back quietly to DEFAULT_BITCOIN_FEE_RATES
+    } finally {
+      setBtcFeeRatesLoading(false)
+    }
+  }, [])
+
   const loadSubmarinePair = useCallback(async () => {
     setSubPairLoading(true)
     setSubPairError(null)
@@ -440,58 +502,128 @@ function WalletModalInner({
     (nextTab: WalletModalTab) => {
       setTab(nextTab)
       setFeedback(null)
-      if (nextTab === 'receive' && receiveMode === 'onchain' && !subPair && !subPairLoading) {
-        void loadSubmarinePair()
-      }
-      if (nextTab === 'send' && sendMode === 'onchain' && !revPair && !revPairLoading) {
-        void loadReversePair()
+      if (nextTab === 'send' && sendMode === 'onchain') {
+        if (btcSendSource === 'boltz') {
+          if (!revPair && !revPairLoading) void loadReversePair()
+        } else if (!btcFeeRates && !btcFeeRatesLoading) {
+          void loadBtcFeeRates()
+        }
       }
     },
     [
+      btcFeeRates,
+      btcFeeRatesLoading,
+      btcSendSource,
+      loadBtcFeeRates,
       loadReversePair,
-      loadSubmarinePair,
-      receiveMode,
       revPair,
       revPairLoading,
       sendMode,
-      subPair,
-      subPairLoading,
     ]
   )
 
-  const switchReceiveMode = useCallback(
-    (mode: WalletReceiveMode) => {
-      setReceiveMode(mode)
-      setFeedback(null)
-      if (mode === 'onchain' && !subPair && !subPairLoading) {
-        void loadSubmarinePair()
-      }
-    },
-    [loadSubmarinePair, subPair, subPairLoading]
-  )
+  const switchReceiveMode = useCallback((mode: WalletReceiveMode) => {
+    setReceiveMode(mode)
+    setFeedback(null)
+  }, [])
 
-  const jumpToReceive = useCallback(
-    (mode: WalletReceiveMode) => {
-      setTab('receive')
-      setReceiveMode(mode)
-      setFeedback(null)
-      if (mode === 'onchain' && !subPair && !subPairLoading) {
-        void loadSubmarinePair()
-      }
-    },
-    [loadSubmarinePair, subPair, subPairLoading]
-  )
+  const jumpToReceive = useCallback((mode: WalletReceiveMode) => {
+    setTab('receive')
+    setReceiveMode(mode)
+    setFeedback(null)
+  }, [])
 
   const switchSendMode = useCallback(
     (mode: WalletSendMode) => {
       setSendMode(mode)
       setFeedback(null)
-      if (mode === 'onchain' && !revPair && !revPairLoading) {
-        void loadReversePair()
+      if (mode === 'onchain') {
+        if (btcSendSource === 'boltz') {
+          if (!revPair && !revPairLoading) void loadReversePair()
+        } else if (!btcFeeRates && !btcFeeRatesLoading) {
+          void loadBtcFeeRates()
+        }
       }
     },
-    [loadReversePair, revPair, revPairLoading]
+    [
+      btcFeeRates,
+      btcFeeRatesLoading,
+      btcSendSource,
+      loadBtcFeeRates,
+      loadReversePair,
+      revPair,
+      revPairLoading,
+    ]
   )
+
+  const handleToggleBoltzReceiveSwap = useCallback(() => {
+    setShowBoltzReceiveSwap((prev) => {
+      const next = !prev
+      if (next && !subPair && !subPairLoading) {
+        void loadSubmarinePair()
+      }
+      return next
+    })
+  }, [loadSubmarinePair, subPair, subPairLoading])
+
+  const handleSelectBtcSendSource = useCallback(
+    (nextSource: 'core' | 'boltz') => {
+      setBtcSendSource(nextSource)
+      setFeedback(null)
+      if (nextSource === 'boltz') {
+        if (!revPair && !revPairLoading) void loadReversePair()
+      } else if (!btcFeeRates && !btcFeeRatesLoading) {
+        void loadBtcFeeRates()
+      }
+    },
+    [
+      btcFeeRates,
+      btcFeeRatesLoading,
+      loadBtcFeeRates,
+      loadReversePair,
+      revPair,
+      revPairLoading,
+    ]
+  )
+
+  const handleSendNativeBtc = useCallback(async () => {
+    const dest = nativeBtcSendAddress.trim()
+    const sats = Math.floor(Number.parseInt(nativeBtcSendAmount, 10) || 0)
+    if (!isValidBitcoinAddress(dest)) {
+      setFeedback({
+        kind: 'danger',
+        text: 'Enter a valid Bitcoin address (bc1q…, bc1p…, 1…, or 3…).',
+      })
+      return
+    }
+    if (sats < BITCOIN_DUST_LIMIT_SATS) {
+      setFeedback({
+        kind: 'danger',
+        text: `Minimum on-chain amount is ${BITCOIN_DUST_LIMIT_SATS.toLocaleString()} sats.`,
+      })
+      return
+    }
+    setSendingNativeBtc(true)
+    setFeedback(null)
+    setNativeBtcSentResult(null)
+    try {
+      const res = await wallet.sendNativeOnchainBtc(dest, sats, selectedNativeFeeRateSatVb)
+      setNativeBtcSentResult({ ...res, toAddress: dest })
+      setNativeBtcSendAddress('')
+      setNativeBtcSendAmount('')
+      setFeedback({
+        kind: 'accent',
+        text: `Broadcast ${res.sentSats.toLocaleString()} sats · ${res.feeSats.toLocaleString()} sat fee`,
+      })
+    } catch (err) {
+      setFeedback({
+        kind: 'danger',
+        text: err instanceof Error ? err.message : 'Could not send Bitcoin transaction.',
+      })
+    } finally {
+      setSendingNativeBtc(false)
+    }
+  }, [nativeBtcSendAddress, nativeBtcSendAmount, selectedNativeFeeRateSatVb, wallet])
 
   /* ------------------------------------------------------------------------
      Setup & Key Management Handlers
@@ -1601,6 +1733,16 @@ function WalletModalInner({
                 Total: {wallet.totalBalanceSats.toLocaleString()} sats
               </span>
             )}
+            {wallet.btcBalanceTotalSats > 0 && (
+              <button
+                type="button"
+                className="ag-wallet-onchain-pill tabular"
+                onClick={() => jumpToReceive('onchain')}
+              >
+                <Bitcoin size={12} />
+                <span>On-chain BTC: {wallet.btcBalanceTotalSats.toLocaleString()} sats</span>
+              </button>
+            )}
           </div>
 
           {!embedded && (
@@ -1746,7 +1888,7 @@ function WalletModalInner({
                         aria-label={showOverviewZapQr ? 'Hide Zap QR code' : 'Show Zap QR code'}
                       >
                         <QrCode size={13} />
-                        <span>QR</span>
+                        <span>QR Code</span>
                       </button>
                     )}
                     {zaps.zapMode === 'builtin' ? (
@@ -2057,16 +2199,6 @@ function WalletModalInner({
             <button
               type="button"
               role="tab"
-              aria-selected={receiveMode === 'cashu'}
-              className={`ag-wallet-subtab ${receiveMode === 'cashu' ? 'active' : ''}`}
-              onClick={() => switchReceiveMode('cashu')}
-            >
-              <Coins size={13} />
-              <span>Ecash</span>
-            </button>
-            <button
-              type="button"
-              role="tab"
               aria-selected={receiveMode === 'lightning'}
               className={`ag-wallet-subtab ${receiveMode === 'lightning' ? 'active' : ''}`}
               onClick={() => switchReceiveMode('lightning')}
@@ -2083,6 +2215,16 @@ function WalletModalInner({
             >
               <Bitcoin size={13} />
               <span>Bitcoin</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={receiveMode === 'cashu'}
+              className={`ag-wallet-subtab ${receiveMode === 'cashu' ? 'active' : ''}`}
+              onClick={() => switchReceiveMode('cashu')}
+            >
+              <Coins size={13} />
+              <span>Ecash</span>
             </button>
           </div>
 
@@ -2171,353 +2313,564 @@ function WalletModalInner({
                     </section>
                   )}
 
-                  {/* Receive: Lightning (NUT-04) */}
-                  {receiveMode === 'lightning' && (
-                    <section className="ag-wallet-section">
-                      {activeZapAddress && (
-                        <div className="ag-wallet-perm-zap-strip">
-                          <div className="ag-wallet-perm-zap-head">
-                            <div className="ag-wallet-perm-zap-copy">
-                              <span className="ag-wallet-perm-zap-label">
-                                Permanent Zap Address
-                              </span>
-                              <span
-                                className="ag-wallet-perm-zap-addr mono"
-                                title={activeZapAddress}
-                              >
-                                {activeZapAddress}
-                              </span>
-                            </div>
-                            <div className="ag-wallet-perm-zap-actions">
+                  {/* Receive: Lightning (NUT-04 + Permanent LNURL Address) */}
+                  {receiveMode === 'lightning' && (() => {
+                    const permZapStrip = activeZapAddress ? (
+                      <div className="ag-wallet-perm-zap-strip">
+                        <div className="ag-wallet-perm-zap-head">
+                          <div className="ag-wallet-perm-zap-copy">
+                            <span className="ag-wallet-perm-zap-label">
+                              Permanent Lightning Address
+                            </span>
+                            <span
+                              className="ag-wallet-perm-zap-addr mono"
+                              title={activeZapAddress}
+                            >
+                              {activeZapAddress}
+                            </span>
+                          </div>
+                          <div className="ag-wallet-perm-zap-actions">
+                            <button
+                              type="button"
+                              className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
+                              onClick={() => void markCopied('perm-zap', activeZapAddress)}
+                              aria-label="Copy permanent Lightning address"
+                            >
+                              {copiedKey === 'perm-zap' ? <Check size={13} /> : <Copy size={13} />}
+                              <span>{copiedKey === 'perm-zap' ? 'Copied' : 'Copy'}</span>
+                            </button>
+                            {activeZapQr && (
                               <button
                                 type="button"
-                                className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
-                                onClick={() => void markCopied('perm-zap', activeZapAddress)}
-                                aria-label="Copy permanent Zap address"
+                                className={`ag-wbtn ag-wbtn-secondary ag-wbtn-sm${showPermLnQr ? ' active' : ''}`}
+                                onClick={() => setShowPermLnQr((prev) => !prev)}
+                                aria-expanded={showPermLnQr}
+                                aria-label={
+                                  showPermLnQr
+                                    ? 'Hide Lightning address QR'
+                                    : 'Show Lightning address QR'
+                                }
                               >
-                                {copiedKey === 'perm-zap' ? <Check size={13} /> : <Copy size={13} />}
-                                <span>{copiedKey === 'perm-zap' ? 'Copied' : 'Copy'}</span>
+                                <QrCode size={13} />
+                                <span>{showPermLnQr ? 'Hide QR' : 'Show QR'}</span>
                               </button>
-                              {activeZapQr && (
-                                <button
-                                  type="button"
-                                  className={`ag-wbtn ag-wbtn-secondary ag-wbtn-sm${showPermLnQr ? ' active' : ''}`}
-                                  onClick={() => setShowPermLnQr((prev) => !prev)}
-                                  aria-expanded={showPermLnQr}
-                                  aria-label={
-                                    showPermLnQr
-                                      ? 'Hide Lightning address QR'
-                                      : 'Show Lightning address QR'
-                                  }
-                                >
-                                  <QrCode size={13} />
-                                  <span>QR</span>
-                                </button>
-                              )}
+                            )}
+                          </div>
+                        </div>
+
+                        {showPermLnQr && activeZapQr && (
+                          <div className="ag-wallet-perm-zap-qr">
+                            <QrBox
+                              payload={activeZapQr.qrPayload}
+                              label={`Lightning receive QR for ${activeZapAddress}`}
+                            />
+                            <div className="ag-wallet-zap-qr-addr mono" title={activeZapAddress}>
+                              {activeZapAddress}
+                            </div>
+                            <div className="ag-wallet-btn-row" style={{ width: '100%' }}>
+                              <button
+                                type="button"
+                                className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+                                onClick={() => void markCopied('perm-zap-addr', activeZapAddress)}
+                              >
+                                {copiedKey === 'perm-zap-addr' ? (
+                                  <Check size={13} />
+                                ) : (
+                                  <Copy size={13} />
+                                )}
+                                <span>
+                                  {copiedKey === 'perm-zap-addr' ? 'Copied' : 'Copy Address'}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
+                                onClick={() => void markCopied('perm-zap-lnurl', activeZapQr.lnurl)}
+                              >
+                                {copiedKey === 'perm-zap-lnurl' ? (
+                                  <Check size={13} />
+                                ) : (
+                                  <Copy size={13} />
+                                )}
+                                <span>
+                                  {copiedKey === 'perm-zap-lnurl' ? 'Copied' : 'Copy LNURL'}
+                                </span>
+                              </button>
                             </div>
                           </div>
+                        )}
+                      </div>
+                    ) : null
 
-                          {showPermLnQr && activeZapQr && (
-                            <div className="ag-wallet-perm-zap-qr">
-                              <QrBox
-                                payload={activeZapQr.qrPayload}
-                                label={`Lightning receive QR for ${activeZapAddress}`}
+                    return (
+                      <section className="ag-wallet-section">
+                        {wallet.activeMintQuote ? (
+                          <>
+                            <div className="ag-wallet-section-head">
+                              <span className="ag-wallet-section-title tabular">
+                                {wallet.activeMintQuote.amountSats.toLocaleString()} sats
+                              </span>
+                              <span
+                                className={`ag-wallet-pill ${
+                                  wallet.activeMintQuote.state === 'ISSUED'
+                                    ? 'accent'
+                                    : wallet.activeMintQuote.state === 'EXPIRED'
+                                      ? 'danger'
+                                      : 'warn'
+                                }`}
+                              >
+                                {wallet.activeMintQuote.state === 'ISSUED'
+                                  ? 'Paid'
+                                  : wallet.activeMintQuote.state === 'EXPIRED'
+                                    ? 'Expired'
+                                    : 'Waiting…'}
+                              </span>
+                            </div>
+
+                            {wallet.activeMintQuote.state !== 'ISSUED' ? (
+                              <>
+                                <div className="ag-wallet-qr-wrap">
+                                  <QrBox
+                                    payload={`lightning:${wallet.activeMintQuote.invoice.toUpperCase()}`}
+                                    label="Lightning invoice QR code"
+                                  />
+                                  <div
+                                    className="ag-wallet-code-box"
+                                    title={wallet.activeMintQuote.invoice}
+                                  >
+                                    {wallet.activeMintQuote.invoice}
+                                  </div>
+                                </div>
+
+                                <div className="ag-wallet-btn-row">
+                                  <button
+                                    type="button"
+                                    className="ag-wbtn ag-wbtn-primary ag-wbtn-grow"
+                                    onClick={() =>
+                                      void markCopied('ln-inv', wallet.activeMintQuote!.invoice)
+                                    }
+                                  >
+                                    {copiedKey === 'ln-inv' ? (
+                                      <Check size={14} />
+                                    ) : (
+                                      <Copy size={14} />
+                                    )}
+                                    <span>{copiedKey === 'ln-inv' ? 'Copied' : 'Copy Invoice'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="ag-wbtn ag-wbtn-secondary ag-wbtn-grow"
+                                    disabled={checkingLnQuote}
+                                    onClick={() => void handleManualCheckLnQuote()}
+                                  >
+                                    <RefreshCw
+                                      size={14}
+                                      className={checkingLnQuote ? 'ag-wallet-spin' : undefined}
+                                    />
+                                    <span>Check</span>
+                                  </button>
+                                </div>
+                              </>
+                            ) : (
+                              <div className="ag-wallet-banner accent">
+                                <Check size={15} />
+                                <span>
+                                  {wallet.activeMintQuote.amountSats.toLocaleString()} sats received
+                                </span>
+                              </div>
+                            )}
+
+                            <button
+                              type="button"
+                              className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm ag-wbtn-full"
+                              onClick={() => {
+                                wallet.clearActiveMintQuote()
+                                setShowPermLnQr(true)
+                              }}
+                            >
+                              New Invoice
+                            </button>
+
+                            {permZapStrip}
+                          </>
+                        ) : (
+                          <>
+                            {permZapStrip}
+
+                            <div className="ag-wallet-field">
+                              <span className="ag-wallet-label">Amount (sats)</span>
+                              <div className="ag-wallet-presets">
+                                {RECEIVE_LN_PRESETS.map((amt) => (
+                                  <button
+                                    key={amt}
+                                    type="button"
+                                    className={`ag-wallet-preset-btn ${lnReceiveAmount === String(amt) ? 'active' : ''}`}
+                                    onClick={() => setLnReceiveAmount(String(amt))}
+                                  >
+                                    {amt >= 1000 ? `${amt / 1000}k` : amt}
+                                  </button>
+                                ))}
+                              </div>
+                              <input
+                                type="number"
+                                inputMode="numeric"
+                                min={1}
+                                step={1}
+                                className="ag-wallet-input tabular"
+                                value={lnReceiveAmount}
+                                onChange={(e) => setLnReceiveAmount(e.target.value)}
+                                placeholder="Amount in sats"
                               />
+                            </div>
+
+                            <div className="ag-wallet-field">
+                              <label className="ag-wallet-label" htmlFor="ag-ln-rec-memo">
+                                Note (optional)
+                              </label>
+                              <input
+                                id="ag-ln-rec-memo"
+                                type="text"
+                                maxLength={120}
+                                className="ag-wallet-input"
+                                value={lnReceiveMemo}
+                                onChange={(e) => setLnReceiveMemo(e.target.value)}
+                                placeholder="Optional note"
+                              />
+                            </div>
+
+                            <button
+                              type="button"
+                              className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
+                              disabled={creatingLnQuote}
+                              onClick={() => void handleCreateLnReceiveQuote()}
+                            >
+                              {creatingLnQuote ? (
+                                <Loader2 size={15} className="ag-wallet-spin" />
+                              ) : (
+                                <Zap size={15} />
+                              )}
+                              <span>{creatingLnQuote ? 'Creating…' : 'Create Invoice'}</span>
+                            </button>
+                          </>
+                        )}
+                      </section>
+                    )
+                  })()}
+
+                  {/* Receive: Core Blockchain Bitcoin (BIP-84 Native SegWit) + Optional Boltz Swap */}
+                  {receiveMode === 'onchain' && (() => {
+                    const parsedReqSats = Math.floor(
+                      Number.parseInt(nativeBtcRequestSats, 10) || 0
+                    )
+                    const nativeBip21Uri = wallet.btcAddress
+                      ? buildBip21Uri(
+                          wallet.btcAddress,
+                          parsedReqSats > 0 ? parsedReqSats : undefined
+                        )
+                      : ''
+                    const nativeQrPayload = wallet.btcAddress
+                      ? nativeBtcQrMode === 'bip21'
+                        ? nativeBip21Uri
+                        : wallet.btcAddress
+                      : ''
+                    const boltzExpanded = showBoltzReceiveSwap || Boolean(activeSubSwap)
+
+                    return (
+                      <section className="ag-wallet-section">
+                        {wallet.btcAddress && (
+                          <div className="ag-wallet-btc-card">
+                            <div className="ag-wallet-btc-head">
+                              <span className="ag-wallet-btc-head-title">
+                                <Bitcoin size={14} />
+                                <span>Core Bitcoin Address</span>
+                              </span>
+                              <div className="ag-wallet-btc-head-right">
+                                <span
+                                  className={`ag-wallet-pill tabular ${
+                                    wallet.btcBalanceTotalSats > 0 ? 'accent' : ''
+                                  }`}
+                                >
+                                  {wallet.btcBalanceUnconfirmedSats > 0
+                                    ? `${wallet.btcBalanceConfirmedSats.toLocaleString()} confirmed · +${wallet.btcBalanceUnconfirmedSats.toLocaleString()} pending`
+                                    : `${wallet.btcBalanceConfirmedSats.toLocaleString()} sats`}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="ag-wallet-btc-icon-btn"
+                                  disabled={wallet.btcRefreshing}
+                                  onClick={() => void wallet.refreshOnchainBtcBalance()}
+                                  aria-label="Refresh on-chain Bitcoin balance"
+                                  title="Refresh balance"
+                                >
+                                  <RefreshCw
+                                    size={12}
+                                    className={wallet.btcRefreshing ? 'ag-wallet-spin' : undefined}
+                                  />
+                                </button>
+                                <a
+                                  href={getMempoolAddressUrl(wallet.btcAddress)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="ag-wallet-btc-mempool-link"
+                                >
+                                  <span>Mempool</span>
+                                  <ExternalLink size={10} />
+                                </a>
+                              </div>
+                            </div>
+
+                            <div className="ag-wallet-qr-wrap">
+                              <QrBox
+                                payload={nativeQrPayload}
+                                label={
+                                  nativeBtcQrMode === 'bip21'
+                                    ? `Bitcoin payment URI QR for ${wallet.btcAddress}`
+                                    : `Bitcoin address QR for ${wallet.btcAddress}`
+                                }
+                              />
+
+                              <div
+                                className="ag-wallet-qr-mode-toggle"
+                                role="group"
+                                aria-label="Bitcoin QR format"
+                              >
+                                <button
+                                  type="button"
+                                  className={`ag-wallet-qr-mode-btn${nativeBtcQrMode === 'address' ? ' active' : ''}`}
+                                  aria-pressed={nativeBtcQrMode === 'address'}
+                                  onClick={() => setNativeBtcQrMode('address')}
+                                >
+                                  Address
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`ag-wallet-qr-mode-btn${nativeBtcQrMode === 'bip21' ? ' active' : ''}`}
+                                  aria-pressed={nativeBtcQrMode === 'bip21'}
+                                  onClick={() => setNativeBtcQrMode('bip21')}
+                                >
+                                  Payment URI
+                                </button>
+                              </div>
+
+                              <div className="ag-wallet-btc-amt-row">
+                                <label
+                                  className="ag-wallet-btc-amt-label"
+                                  htmlFor="ag-native-btc-req-amt"
+                                >
+                                  Request amount (sats, optional)
+                                </label>
+                                <input
+                                  id="ag-native-btc-req-amt"
+                                  type="number"
+                                  inputMode="numeric"
+                                  min={1}
+                                  step={1}
+                                  className="ag-wallet-input tabular"
+                                  value={nativeBtcRequestSats}
+                                  onChange={(e) => {
+                                    const next = e.target.value
+                                    setNativeBtcRequestSats(next)
+                                    const sats = Math.floor(Number.parseInt(next, 10) || 0)
+                                    if (sats > 0) setNativeBtcQrMode('bip21')
+                                  }}
+                                  placeholder="e.g. 50000"
+                                />
+                              </div>
+
+                              <div className="ag-wallet-code-box" title={wallet.btcAddress}>
+                                {wallet.btcAddress}
+                              </div>
+
                               <div className="ag-wallet-btn-row" style={{ width: '100%' }}>
                                 <button
                                   type="button"
                                   className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
-                                  onClick={() => void markCopied('perm-zap-addr', activeZapAddress)}
+                                  onClick={() =>
+                                    void markCopied('native-btc-addr', wallet.btcAddress!)
+                                  }
                                 >
-                                  {copiedKey === 'perm-zap-addr' ? (
+                                  {copiedKey === 'native-btc-addr' ? (
                                     <Check size={13} />
                                   ) : (
                                     <Copy size={13} />
                                   )}
                                   <span>
-                                    {copiedKey === 'perm-zap-addr' ? 'Copied' : 'Copy Address'}
+                                    {copiedKey === 'native-btc-addr' ? 'Copied' : 'Copy Address'}
                                   </span>
                                 </button>
                                 <button
                                   type="button"
                                   className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm ag-wbtn-grow"
-                                  onClick={() => void markCopied('perm-zap-lnurl', activeZapQr.lnurl)}
+                                  onClick={() => void markCopied('native-btc-uri', nativeBip21Uri)}
                                 >
-                                  {copiedKey === 'perm-zap-lnurl' ? (
+                                  {copiedKey === 'native-btc-uri' ? (
                                     <Check size={13} />
                                   ) : (
                                     <Copy size={13} />
                                   )}
                                   <span>
-                                    {copiedKey === 'perm-zap-lnurl' ? 'Copied' : 'Copy LNURL'}
+                                    {copiedKey === 'native-btc-uri'
+                                      ? 'Copied'
+                                      : 'Copy Payment URI'}
                                   </span>
                                 </button>
                               </div>
                             </div>
+
+                            <p className="ag-wallet-btc-note">
+                              Native SegWit (BIP-84) address backed up by your 12-word Agwallet
+                              recovery phrase.
+                            </p>
+
+                            {wallet.btcError && (
+                              <div className="ag-wallet-zap-error" role="status">
+                                <AlertCircle size={13} />
+                                <span>{wallet.btcError}</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Collapsible Optional Boltz Swap BTC -> Ecash */}
+                        <div className="ag-wallet-boltz-expander">
+                          <button
+                            type="button"
+                            className="ag-wallet-boltz-expander-btn"
+                            aria-expanded={boltzExpanded}
+                            onClick={handleToggleBoltzReceiveSwap}
+                          >
+                            <span className="ag-wallet-boltz-expander-left">
+                              {boltzExpanded ? (
+                                <ChevronDown size={14} />
+                              ) : (
+                                <ChevronRight size={14} />
+                              )}
+                              <span>Swap BTC → Ecash (Boltz)</span>
+                            </span>
+                            {activeSubSwap && (
+                              <span className="ag-wallet-pill warn">Active swap</span>
+                            )}
+                          </button>
+
+                          {boltzExpanded && (
+                            <>
+                              {activeSubSwap ? (
+                                <>
+                                  {renderSwapBlock(activeSubSwap)}
+                                  <button
+                                    type="button"
+                                    className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm ag-wbtn-full"
+                                    onClick={() => setActiveSubSwapId(null)}
+                                  >
+                                    New Deposit Swap
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <div className="ag-wallet-rate-line">
+                                    <span className="truncate tabular">
+                                      {subPair
+                                        ? `${subPair.minSats.toLocaleString()}–${subPair.maxSats.toLocaleString()} sats · ${subPair.feePercent}% + ${subPair.minerFeeSats.toLocaleString()} sat fee`
+                                        : subPairLoading
+                                          ? 'Loading rates…'
+                                          : 'Bitcoin deposit swap'}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
+                                      disabled={subPairLoading}
+                                      onClick={() => void loadSubmarinePair()}
+                                      aria-label="Refresh swap rates"
+                                      title="Refresh rates"
+                                    >
+                                      <RefreshCw
+                                        size={12}
+                                        className={subPairLoading ? 'ag-wallet-spin' : undefined}
+                                      />
+                                    </button>
+                                  </div>
+
+                                  {subPairError && (
+                                    <div className="ag-wallet-banner warn">
+                                      <AlertCircle size={15} />
+                                      <div>
+                                        <div>{subPairError}</div>
+                                        <button
+                                          type="button"
+                                          className="ag-wbtn ag-wbtn-link"
+                                          style={{ paddingLeft: 0, marginTop: '0.2rem' }}
+                                          onClick={() => {
+                                            setShowAdvancedBoltz(true)
+                                            switchTab('mints')
+                                          }}
+                                        >
+                                          Swap server settings
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  <div className="ag-wallet-field">
+                                    <label className="ag-wallet-label" htmlFor="ag-btc-rec-amt">
+                                      Amount (sats)
+                                    </label>
+                                    <input
+                                      id="ag-btc-rec-amt"
+                                      type="number"
+                                      inputMode="numeric"
+                                      min={subPair?.minSats ?? 25000}
+                                      step={1000}
+                                      className="ag-wallet-input tabular"
+                                      value={btcReceiveAmount}
+                                      onChange={(e) => setBtcReceiveAmount(e.target.value)}
+                                      placeholder="50000"
+                                    />
+                                  </div>
+
+                                  {subEstimate && (
+                                    <div className="ag-wallet-tonal">
+                                      <div className="ag-wallet-kv-list">
+                                        <div className="ag-wallet-kv">
+                                          <span className="ag-wallet-kv-label">
+                                            Est. Bitcoin deposit
+                                          </span>
+                                          <span className="ag-wallet-kv-val tabular">
+                                            {subEstimate.expectedDeposit.toLocaleString()} sats
+                                          </span>
+                                        </div>
+                                        <div className="ag-wallet-kv">
+                                          <span className="ag-wallet-kv-label">Swap fee</span>
+                                          <span className="ag-wallet-kv-val tabular">
+                                            {subEstimate.totalFee.toLocaleString()} sats
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  <button
+                                    type="button"
+                                    className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
+                                    disabled={creatingSubSwap || subPairLoading}
+                                    onClick={() => void handleCreateSubmarineSwap()}
+                                  >
+                                    {creatingSubSwap ? (
+                                      <Loader2 size={15} className="ag-wallet-spin" />
+                                    ) : (
+                                      <Bitcoin size={15} />
+                                    )}
+                                    <span>
+                                      {creatingSubSwap ? 'Generating…' : 'Generate Swap Address'}
+                                    </span>
+                                  </button>
+                                </>
+                              )}
+                            </>
                           )}
                         </div>
-                      )}
-
-                      {wallet.activeMintQuote ? (
-                        <>
-                          <div className="ag-wallet-section-head">
-                            <span className="ag-wallet-section-title tabular">
-                              {wallet.activeMintQuote.amountSats.toLocaleString()} sats
-                            </span>
-                            <span
-                              className={`ag-wallet-pill ${
-                                wallet.activeMintQuote.state === 'ISSUED'
-                                  ? 'accent'
-                                  : wallet.activeMintQuote.state === 'EXPIRED'
-                                    ? 'danger'
-                                    : 'warn'
-                              }`}
-                            >
-                              {wallet.activeMintQuote.state === 'ISSUED'
-                                ? 'Paid'
-                                : wallet.activeMintQuote.state === 'EXPIRED'
-                                  ? 'Expired'
-                                  : 'Waiting…'}
-                            </span>
-                          </div>
-
-                          {wallet.activeMintQuote.state !== 'ISSUED' ? (
-                            <>
-                              <div className="ag-wallet-qr-wrap">
-                                <QrBox
-                                  payload={`lightning:${wallet.activeMintQuote.invoice.toUpperCase()}`}
-                                  label="Lightning invoice QR code"
-                                />
-                                <div
-                                  className="ag-wallet-code-box"
-                                  title={wallet.activeMintQuote.invoice}
-                                >
-                                  {wallet.activeMintQuote.invoice}
-                                </div>
-                              </div>
-
-                              <div className="ag-wallet-btn-row">
-                                <button
-                                  type="button"
-                                  className="ag-wbtn ag-wbtn-primary ag-wbtn-grow"
-                                  onClick={() =>
-                                    void markCopied('ln-inv', wallet.activeMintQuote!.invoice)
-                                  }
-                                >
-                                  {copiedKey === 'ln-inv' ? (
-                                    <Check size={14} />
-                                  ) : (
-                                    <Copy size={14} />
-                                  )}
-                                  <span>{copiedKey === 'ln-inv' ? 'Copied' : 'Copy Invoice'}</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  className="ag-wbtn ag-wbtn-secondary ag-wbtn-grow"
-                                  disabled={checkingLnQuote}
-                                  onClick={() => void handleManualCheckLnQuote()}
-                                >
-                                  <RefreshCw
-                                    size={14}
-                                    className={checkingLnQuote ? 'ag-wallet-spin' : undefined}
-                                  />
-                                  <span>Check</span>
-                                </button>
-                              </div>
-                            </>
-                          ) : (
-                            <div className="ag-wallet-banner accent">
-                              <Check size={15} />
-                              <span>
-                                {wallet.activeMintQuote.amountSats.toLocaleString()} sats received
-                              </span>
-                            </div>
-                          )}
-
-                          <button
-                            type="button"
-                            className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm ag-wbtn-full"
-                            onClick={() => {
-                              wallet.clearActiveMintQuote()
-                              setShowPermLnQr(true)
-                            }}
-                          >
-                            New Invoice
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <div className="ag-wallet-field">
-                            <span className="ag-wallet-label">Amount (sats)</span>
-                            <div className="ag-wallet-presets">
-                              {RECEIVE_LN_PRESETS.map((amt) => (
-                                <button
-                                  key={amt}
-                                  type="button"
-                                  className={`ag-wallet-preset-btn ${lnReceiveAmount === String(amt) ? 'active' : ''}`}
-                                  onClick={() => setLnReceiveAmount(String(amt))}
-                                >
-                                  {amt >= 1000 ? `${amt / 1000}k` : amt}
-                                </button>
-                              ))}
-                            </div>
-                            <input
-                              type="number"
-                              inputMode="numeric"
-                              min={1}
-                              step={1}
-                              className="ag-wallet-input tabular"
-                              value={lnReceiveAmount}
-                              onChange={(e) => setLnReceiveAmount(e.target.value)}
-                              placeholder="Amount in sats"
-                            />
-                          </div>
-
-                          <div className="ag-wallet-field">
-                            <label className="ag-wallet-label" htmlFor="ag-ln-rec-memo">
-                              Note (optional)
-                            </label>
-                            <input
-                              id="ag-ln-rec-memo"
-                              type="text"
-                              maxLength={120}
-                              className="ag-wallet-input"
-                              value={lnReceiveMemo}
-                              onChange={(e) => setLnReceiveMemo(e.target.value)}
-                              placeholder="Optional note"
-                            />
-                          </div>
-
-                          <button
-                            type="button"
-                            className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
-                            disabled={creatingLnQuote}
-                            onClick={() => void handleCreateLnReceiveQuote()}
-                          >
-                            {creatingLnQuote ? (
-                              <Loader2 size={15} className="ag-wallet-spin" />
-                            ) : (
-                              <Zap size={15} />
-                            )}
-                            <span>{creatingLnQuote ? 'Creating…' : 'Create Invoice'}</span>
-                          </button>
-                        </>
-                      )}
-                    </section>
-                  )}
-
-                  {/* Receive: On-Chain BTC */}
-                  {receiveMode === 'onchain' && (
-                    <section className="ag-wallet-section">
-                      {activeSubSwap ? (
-                        <>
-                          {renderSwapBlock(activeSubSwap)}
-                          <button
-                            type="button"
-                            className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm ag-wbtn-full"
-                            onClick={() => setActiveSubSwapId(null)}
-                          >
-                            New Deposit Address
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <div className="ag-wallet-rate-line">
-                            <span className="truncate tabular">
-                              {subPair
-                                ? `${subPair.minSats.toLocaleString()}–${subPair.maxSats.toLocaleString()} sats · ${subPair.feePercent}% + ${subPair.minerFeeSats.toLocaleString()} sat fee`
-                                : subPairLoading
-                                  ? 'Loading rates…'
-                                  : 'Bitcoin deposit swap'}
-                            </span>
-                            <button
-                              type="button"
-                              className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
-                              disabled={subPairLoading}
-                              onClick={() => void loadSubmarinePair()}
-                              aria-label="Refresh swap rates"
-                              title="Refresh rates"
-                            >
-                              <RefreshCw
-                                size={12}
-                                className={subPairLoading ? 'ag-wallet-spin' : undefined}
-                              />
-                            </button>
-                          </div>
-
-                          {subPairError && (
-                            <div className="ag-wallet-banner warn">
-                              <AlertCircle size={15} />
-                              <div>
-                                <div>{subPairError}</div>
-                                <button
-                                  type="button"
-                                  className="ag-wbtn ag-wbtn-link"
-                                  style={{ paddingLeft: 0, marginTop: '0.2rem' }}
-                                  onClick={() => {
-                                    setShowAdvancedBoltz(true)
-                                    switchTab('mints')
-                                  }}
-                                >
-                                  Swap server settings
-                                </button>
-                              </div>
-                            </div>
-                          )}
-
-                          <div className="ag-wallet-field">
-                            <label className="ag-wallet-label" htmlFor="ag-btc-rec-amt">
-                              Amount (sats)
-                            </label>
-                            <input
-                              id="ag-btc-rec-amt"
-                              type="number"
-                              inputMode="numeric"
-                              min={subPair?.minSats ?? 25000}
-                              step={1000}
-                              className="ag-wallet-input tabular"
-                              value={btcReceiveAmount}
-                              onChange={(e) => setBtcReceiveAmount(e.target.value)}
-                              placeholder="50000"
-                            />
-                          </div>
-
-                          {subEstimate && (
-                            <div className="ag-wallet-tonal">
-                              <div className="ag-wallet-kv-list">
-                                <div className="ag-wallet-kv">
-                                  <span className="ag-wallet-kv-label">Est. Bitcoin deposit</span>
-                                  <span className="ag-wallet-kv-val tabular">
-                                    {subEstimate.expectedDeposit.toLocaleString()} sats
-                                  </span>
-                                </div>
-                                <div className="ag-wallet-kv">
-                                  <span className="ag-wallet-kv-label">Swap fee</span>
-                                  <span className="ag-wallet-kv-val tabular">
-                                    {subEstimate.totalFee.toLocaleString()} sats
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          )}
-
-                          <button
-                            type="button"
-                            className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
-                            disabled={creatingSubSwap || subPairLoading}
-                            onClick={() => void handleCreateSubmarineSwap()}
-                          >
-                            {creatingSubSwap ? (
-                              <Loader2 size={15} className="ag-wallet-spin" />
-                            ) : (
-                              <Bitcoin size={15} />
-                            )}
-                            <span>{creatingSubSwap ? 'Generating…' : 'Generate Address'}</span>
-                          </button>
-                        </>
-                      )}
-                    </section>
-                  )}
+                      </section>
+                    )
+                  })()}
                 </>
               )}
 
@@ -2908,137 +3261,397 @@ function WalletModalInner({
                     </section>
                   )}
 
-                  {/* Send: Bitcoin */}
-                  {sendMode === 'onchain' && (
-                    <section className="ag-wallet-section">
-                      {activeRevSwap ? (
-                        <>
-                          {renderSwapBlock(activeRevSwap)}
+                  {/* Send: Bitcoin (Core BIP-84 Native + Optional Boltz Swap) */}
+                  {sendMode === 'onchain' && (() => {
+                    const parsedNativeSendSats = Math.floor(
+                      Number.parseInt(nativeBtcSendAmount, 10) || 0
+                    )
+                    const estNativeMaxFee = Math.ceil(
+                      (10.5 + 68 * Math.max(1, wallet.btcUtxoCount) + 31) *
+                        selectedNativeFeeRateSatVb
+                    )
+                    const maxNativeSendSats = Math.max(
+                      0,
+                      wallet.btcBalanceTotalSats - estNativeMaxFee
+                    )
+                    const canSendNativeBtc =
+                      !sendingNativeBtc &&
+                      isValidBitcoinAddress(nativeBtcSendAddress) &&
+                      parsedNativeSendSats >= BITCOIN_DUST_LIMIT_SATS &&
+                      wallet.btcBalanceTotalSats > 0 &&
+                      parsedNativeSendSats <= wallet.btcBalanceTotalSats
+
+                    return (
+                      <section className="ag-wallet-section">
+                        <div
+                          className="ag-wallet-btc-mode-switch"
+                          role="group"
+                          aria-label="Bitcoin send source"
+                        >
                           <button
                             type="button"
-                            className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm ag-wbtn-full"
-                            onClick={() => setActiveRevSwapId(null)}
+                            className={`ag-wallet-btc-mode-btn${btcSendSource === 'core' ? ' active' : ''}`}
+                            aria-pressed={btcSendSource === 'core'}
+                            onClick={() => handleSelectBtcSendSource('core')}
                           >
-                            New Bitcoin Send
+                            Core Bitcoin
                           </button>
-                        </>
-                      ) : (
-                        <>
-                          <div className="ag-wallet-rate-line">
-                            <span className="truncate tabular">
-                              {revPair
-                                ? `${revPair.minSats.toLocaleString()}–${revPair.maxSats.toLocaleString()} sats · ${revPair.feePercent}% + ${(revPair.lockupMinerFeeSats + revPair.claimMinerFeeSats).toLocaleString()} sat fee`
-                                : revPairLoading
-                                  ? 'Loading rates…'
-                                  : 'Bitcoin send swap'}
-                            </span>
-                            <button
-                              type="button"
-                              className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
-                              disabled={revPairLoading}
-                              onClick={() => void loadReversePair()}
-                              aria-label="Refresh swap rates"
-                              title="Refresh rates"
-                            >
-                              <RefreshCw
-                                size={12}
-                                className={revPairLoading ? 'ag-wallet-spin' : undefined}
-                              />
-                            </button>
-                          </div>
+                          <button
+                            type="button"
+                            className={`ag-wallet-btc-mode-btn${btcSendSource === 'boltz' ? ' active' : ''}`}
+                            aria-pressed={btcSendSource === 'boltz'}
+                            onClick={() => handleSelectBtcSendSource('boltz')}
+                          >
+                            Swap Ecash → BTC (Boltz)
+                          </button>
+                        </div>
 
-                          {revPairError && (
-                            <div className="ag-wallet-banner warn">
-                              <AlertCircle size={15} />
-                              <div>
-                                <div>{revPairError}</div>
+                        {btcSendSource === 'core' ? (
+                          <>
+                            <div className="ag-wallet-rate-line">
+                              <span className="truncate tabular">
+                                {wallet.btcBalanceUnconfirmedSats > 0
+                                  ? `On-chain: ${wallet.btcBalanceConfirmedSats.toLocaleString()} conf · +${wallet.btcBalanceUnconfirmedSats.toLocaleString()} pend`
+                                  : `On-chain balance: ${wallet.btcBalanceTotalSats.toLocaleString()} sats`}
+                              </span>
+                              <button
+                                type="button"
+                                className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
+                                disabled={wallet.btcRefreshing}
+                                onClick={() => void wallet.refreshOnchainBtcBalance()}
+                                aria-label="Refresh on-chain Bitcoin balance"
+                                title="Refresh balance"
+                              >
+                                <RefreshCw
+                                  size={12}
+                                  className={wallet.btcRefreshing ? 'ag-wallet-spin' : undefined}
+                                />
+                              </button>
+                            </div>
+
+                            {wallet.btcError && (
+                              <div className="ag-wallet-zap-error" role="status">
+                                <AlertCircle size={13} />
+                                <span>{wallet.btcError}</span>
+                              </div>
+                            )}
+
+                            {nativeBtcSentResult && (
+                              <div className="ag-wallet-tx-confirm" role="status">
+                                <div className="ag-wallet-tx-confirm-head">
+                                  <span className="ag-wallet-tx-confirm-head-left">
+                                    <Check size={14} />
+                                    <span className="tabular">
+                                      Sent {nativeBtcSentResult.sentSats.toLocaleString()} sats
+                                    </span>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
+                                    onClick={() => setNativeBtcSentResult(null)}
+                                    aria-label="Dismiss transaction confirmation"
+                                  >
+                                    <X size={12} />
+                                  </button>
+                                </div>
+                                <span className="ag-wallet-meta tabular">
+                                  Fee: {nativeBtcSentResult.feeSats.toLocaleString()} sats · TXID:{' '}
+                                  <span className="mono">
+                                    {nativeBtcSentResult.txid.slice(0, 10)}…
+                                    {nativeBtcSentResult.txid.slice(-6)}
+                                  </span>
+                                </span>
+                                <a
+                                  href={getMempoolTxUrl(nativeBtcSentResult.txid)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="ag-wallet-tx-confirm-link"
+                                >
+                                  <span>
+                                    mempool.space/tx/{nativeBtcSentResult.txid.slice(0, 12)}…
+                                  </span>
+                                  <ExternalLink size={11} />
+                                </a>
+                              </div>
+                            )}
+
+                            {wallet.btcBalanceTotalSats === 0 && !nativeBtcSentResult && (
+                              <span className="ag-wallet-meta">
+                                No on-chain BTC yet.{' '}
                                 <button
                                   type="button"
                                   className="ag-wbtn ag-wbtn-link"
-                                  style={{ paddingLeft: 0, marginTop: '0.2rem' }}
-                                  onClick={() => {
-                                    setShowAdvancedBoltz(true)
-                                    switchTab('mints')
-                                  }}
+                                  style={{ display: 'inline', padding: 0 }}
+                                  onClick={() => jumpToReceive('onchain')}
                                 >
-                                  Swap server settings
+                                  View your Bitcoin address
+                                </button>
+                                {' or use Swap Ecash → BTC.'}
+                              </span>
+                            )}
+
+                            <div className="ag-wallet-field">
+                              <div className="ag-wallet-label-row">
+                                <label
+                                  className="ag-wallet-label"
+                                  htmlFor="ag-native-btc-send-addr"
+                                >
+                                  Bitcoin Address
+                                </label>
+                                <button
+                                  type="button"
+                                  className="ag-wbtn ag-wbtn-link"
+                                  onClick={() => void handlePasteInto(setNativeBtcSendAddress)}
+                                >
+                                  Paste
                                 </button>
                               </div>
+                              <input
+                                id="ag-native-btc-send-addr"
+                                type="text"
+                                className="ag-wallet-input mono"
+                                value={nativeBtcSendAddress}
+                                onChange={(e) => setNativeBtcSendAddress(e.target.value)}
+                                placeholder="bc1q… / bc1p… / 1… / 3…"
+                              />
                             </div>
-                          )}
 
-                          <div className="ag-wallet-field">
-                            <label className="ag-wallet-label" htmlFor="ag-btc-send-addr">
-                              Bitcoin Address
-                            </label>
-                            <input
-                              id="ag-btc-send-addr"
-                              type="text"
-                              className="ag-wallet-input mono"
-                              value={btcSendAddress}
-                              onChange={(e) => setBtcSendAddress(e.target.value)}
-                              placeholder="bc1q… / bc1p…"
-                            />
-                          </div>
+                            <div className="ag-wallet-field">
+                              <div className="ag-wallet-label-row">
+                                <label
+                                  className="ag-wallet-label"
+                                  htmlFor="ag-native-btc-send-amt"
+                                >
+                                  Amount (sats)
+                                </label>
+                                <button
+                                  type="button"
+                                  className="ag-wbtn ag-wbtn-link tabular"
+                                  disabled={maxNativeSendSats < BITCOIN_DUST_LIMIT_SATS}
+                                  onClick={() => setNativeBtcSendAmount(String(maxNativeSendSats))}
+                                >
+                                  Max ({maxNativeSendSats.toLocaleString()})
+                                </button>
+                              </div>
+                              <input
+                                id="ag-native-btc-send-amt"
+                                type="number"
+                                inputMode="numeric"
+                                min={BITCOIN_DUST_LIMIT_SATS}
+                                step={1}
+                                className="ag-wallet-input tabular"
+                                value={nativeBtcSendAmount}
+                                onChange={(e) => setNativeBtcSendAmount(e.target.value)}
+                                placeholder={`Min ${BITCOIN_DUST_LIMIT_SATS.toLocaleString()} sats`}
+                              />
+                              <span className="ag-wallet-meta tabular">
+                                Available: {wallet.btcBalanceTotalSats.toLocaleString()} sats · Est.
+                                fee ~{estNativeMaxFee.toLocaleString()} sats (
+                                {selectedNativeFeeRateSatVb} sat/vB)
+                              </span>
+                            </div>
 
-                          <div className="ag-wallet-field">
-                            <label className="ag-wallet-label" htmlFor="ag-btc-send-amt">
-                              Amount (sats)
-                            </label>
-                            <input
-                              id="ag-btc-send-amt"
-                              type="number"
-                              inputMode="numeric"
-                              min={revPair?.minSats ?? 25000}
-                              step={1000}
-                              className="ag-wallet-input tabular"
-                              value={btcSendAmount}
-                              onChange={(e) => setBtcSendAmount(e.target.value)}
-                              placeholder="50000"
-                            />
-                          </div>
-
-                          {revEstimate && (
-                            <div className="ag-wallet-tonal">
-                              <div className="ag-wallet-kv-list">
-                                <div className="ag-wallet-kv">
-                                  <span className="ag-wallet-kv-label">Est. output</span>
-                                  <span className="ag-wallet-kv-val tabular">
-                                    ~{revEstimate.estOnchainSats.toLocaleString()} sats
-                                  </span>
-                                </div>
-                                <div className="ag-wallet-kv">
-                                  <span className="ag-wallet-kv-label">Total fee</span>
-                                  <span className="ag-wallet-kv-val tabular">
-                                    {revEstimate.totalFee.toLocaleString()} sats
-                                  </span>
-                                </div>
+                            <div className="ag-wallet-field">
+                              <div className="ag-wallet-label-row">
+                                <span className="ag-wallet-label">Fee Priority</span>
+                                <button
+                                  type="button"
+                                  className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
+                                  disabled={btcFeeRatesLoading}
+                                  onClick={() => void loadBtcFeeRates()}
+                                  aria-label="Refresh Bitcoin fee rates"
+                                  title="Refresh fee rates"
+                                >
+                                  <RefreshCw
+                                    size={11}
+                                    className={btcFeeRatesLoading ? 'ag-wallet-spin' : undefined}
+                                  />
+                                  <span>{btcFeeRatesLoading ? 'Updating…' : 'Rates'}</span>
+                                </button>
+                              </div>
+                              <div
+                                className="ag-wallet-fee-grid"
+                                role="group"
+                                aria-label="Bitcoin fee priority"
+                              >
+                                {(
+                                  [
+                                    {
+                                      id: 'economy',
+                                      label: 'Economy',
+                                      rate: effectiveBtcFeeRates.economyFee,
+                                    },
+                                    {
+                                      id: 'standard',
+                                      label: 'Standard',
+                                      rate: effectiveBtcFeeRates.halfHourFee,
+                                    },
+                                    {
+                                      id: 'priority',
+                                      label: 'Priority',
+                                      rate: effectiveBtcFeeRates.fastestFee,
+                                    },
+                                  ] as const
+                                ).map((opt) => (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    className={`ag-wallet-fee-btn${nativeBtcFeePriority === opt.id ? ' active' : ''}`}
+                                    aria-pressed={nativeBtcFeePriority === opt.id}
+                                    onClick={() => setNativeBtcFeePriority(opt.id)}
+                                  >
+                                    <span className="ag-wallet-fee-name">{opt.label}</span>
+                                    <span className="ag-wallet-fee-rate">
+                                      {opt.rate} sat/vB
+                                    </span>
+                                  </button>
+                                ))}
                               </div>
                             </div>
-                          )}
 
-                          <button
-                            type="button"
-                            className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
-                            disabled={
-                              creatingRevSwap ||
-                              revPairLoading ||
-                              !isValidBitcoinAddress(btcSendAddress) ||
-                              wallet.activeMintBalanceSats <= 0
-                            }
-                            onClick={() => void handleCreateReverseSwap()}
-                          >
-                            {creatingRevSwap ? (
-                              <Loader2 size={15} className="ag-wallet-spin" />
-                            ) : (
-                              <Bitcoin size={15} />
+                            <button
+                              type="button"
+                              className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
+                              disabled={!canSendNativeBtc}
+                              onClick={() => void handleSendNativeBtc()}
+                            >
+                              {sendingNativeBtc ? (
+                                <Loader2 size={15} className="ag-wallet-spin" />
+                              ) : (
+                                <Bitcoin size={15} />
+                              )}
+                              <span>{sendingNativeBtc ? 'Sending…' : 'Send Bitcoin'}</span>
+                            </button>
+                          </>
+                        ) : activeRevSwap ? (
+                          <>
+                            {renderSwapBlock(activeRevSwap)}
+                            <button
+                              type="button"
+                              className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm ag-wbtn-full"
+                              onClick={() => setActiveRevSwapId(null)}
+                            >
+                              New Bitcoin Swap
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <div className="ag-wallet-rate-line">
+                              <span className="truncate tabular">
+                                {revPair
+                                  ? `${revPair.minSats.toLocaleString()}–${revPair.maxSats.toLocaleString()} sats · ${revPair.feePercent}% + ${(revPair.lockupMinerFeeSats + revPair.claimMinerFeeSats).toLocaleString()} sat fee`
+                                  : revPairLoading
+                                    ? 'Loading rates…'
+                                    : 'Swap Ecash → BTC (Boltz)'}
+                              </span>
+                              <button
+                                type="button"
+                                className="ag-wbtn ag-wbtn-ghost ag-wbtn-sm"
+                                disabled={revPairLoading}
+                                onClick={() => void loadReversePair()}
+                                aria-label="Refresh swap rates"
+                                title="Refresh rates"
+                              >
+                                <RefreshCw
+                                  size={12}
+                                  className={revPairLoading ? 'ag-wallet-spin' : undefined}
+                                />
+                              </button>
+                            </div>
+
+                            {revPairError && (
+                              <div className="ag-wallet-banner warn">
+                                <AlertCircle size={15} />
+                                <div>
+                                  <div>{revPairError}</div>
+                                  <button
+                                    type="button"
+                                    className="ag-wbtn ag-wbtn-link"
+                                    style={{ paddingLeft: 0, marginTop: '0.2rem' }}
+                                    onClick={() => {
+                                      setShowAdvancedBoltz(true)
+                                      switchTab('mints')
+                                    }}
+                                  >
+                                    Swap server settings
+                                  </button>
+                                </div>
+                              </div>
                             )}
-                            <span>{creatingRevSwap ? 'Sending…' : 'Send Bitcoin'}</span>
-                          </button>
-                        </>
-                      )}
-                    </section>
-                  )}
+
+                            <div className="ag-wallet-field">
+                              <label className="ag-wallet-label" htmlFor="ag-btc-send-addr">
+                                Bitcoin Address
+                              </label>
+                              <input
+                                id="ag-btc-send-addr"
+                                type="text"
+                                className="ag-wallet-input mono"
+                                value={btcSendAddress}
+                                onChange={(e) => setBtcSendAddress(e.target.value)}
+                                placeholder="bc1q… / bc1p…"
+                              />
+                            </div>
+
+                            <div className="ag-wallet-field">
+                              <label className="ag-wallet-label" htmlFor="ag-btc-send-amt">
+                                Amount (sats)
+                              </label>
+                              <input
+                                id="ag-btc-send-amt"
+                                type="number"
+                                inputMode="numeric"
+                                min={revPair?.minSats ?? 25000}
+                                step={1000}
+                                className="ag-wallet-input tabular"
+                                value={btcSendAmount}
+                                onChange={(e) => setBtcSendAmount(e.target.value)}
+                                placeholder="50000"
+                              />
+                            </div>
+
+                            {revEstimate && (
+                              <div className="ag-wallet-tonal">
+                                <div className="ag-wallet-kv-list">
+                                  <div className="ag-wallet-kv">
+                                    <span className="ag-wallet-kv-label">Est. output</span>
+                                    <span className="ag-wallet-kv-val tabular">
+                                      ~{revEstimate.estOnchainSats.toLocaleString()} sats
+                                    </span>
+                                  </div>
+                                  <div className="ag-wallet-kv">
+                                    <span className="ag-wallet-kv-label">Total fee</span>
+                                    <span className="ag-wallet-kv-val tabular">
+                                      {revEstimate.totalFee.toLocaleString()} sats
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            <button
+                              type="button"
+                              className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
+                              disabled={
+                                creatingRevSwap ||
+                                revPairLoading ||
+                                !isValidBitcoinAddress(btcSendAddress) ||
+                                wallet.activeMintBalanceSats <= 0
+                              }
+                              onClick={() => void handleCreateReverseSwap()}
+                            >
+                              {creatingRevSwap ? (
+                                <Loader2 size={15} className="ag-wallet-spin" />
+                              ) : (
+                                <Bitcoin size={15} />
+                              )}
+                              <span>{creatingRevSwap ? 'Sending…' : 'Swap & Send Bitcoin'}</span>
+                            </button>
+                          </>
+                        )}
+                      </section>
+                    )
+                  })()}
                 </>
               )}
 
@@ -3248,7 +3861,10 @@ function WalletModalInner({
                     )}
 
                     <span className="ag-wallet-meta">
-                      Stored locally on this device. Export a backup before clearing data.
+                      Your 12-word recovery phrase backs up both Cashu Ecash (NUT-13) and Core
+                      Bitcoin (BIP-84{' '}
+                      <span className="mono">{wallet.btcDerivationPath}</span>). Stored locally on
+                      this device — export a backup before clearing data.
                     </span>
 
                     <div className="ag-wallet-btn-row">
@@ -3452,6 +4068,16 @@ function WalletModalInner({
                   <span className="ag-wallet-rail-balance-total tabular">
                     Total {wallet.totalBalanceSats.toLocaleString()} sats
                   </span>
+                )}
+                {wallet.btcBalanceTotalSats > 0 && (
+                  <button
+                    type="button"
+                    className="ag-wallet-onchain-pill tabular"
+                    onClick={() => jumpToReceive('onchain')}
+                  >
+                    <Bitcoin size={11} />
+                    <span>BTC {wallet.btcBalanceTotalSats.toLocaleString()} sats</span>
+                  </button>
                 )}
               </div>
 

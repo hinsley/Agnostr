@@ -147,7 +147,7 @@ export function extractGeohashTag(tags: string[][]): string | null {
 }
 
 /**
- * Extracts a validated Nymchat/Bitchat `kind: 23333` topic channel slug from the `d` tag.
+ * Extracts a validated ephemeral `kind: 23333` topic channel slug from the `d` tag.
  */
 export function extractTopicChannelTag(tags: string[][]): string | null {
   const raw = getTagValue(tags, 'd')
