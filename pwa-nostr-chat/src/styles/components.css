@@ -2815,8 +2815,11 @@ img.ag-avatar-agnostr,
   top: calc(100% + 6px);
   right: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 2px;
+  width: max-content;
+  max-width: min(234px, calc(100vw - 24px));
   padding: 4px;
   border-radius: var(--radius-md);
   background-color: var(--bg-elevated);
@@ -2830,16 +2833,37 @@ img.ag-avatar-agnostr,
   width: 30px;
   height: 30px;
   border-radius: 6px;
+  border: 1px solid transparent;
   font-size: 15px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: transform var(--dur-fast) ease, background-color var(--dur-fast) ease;
+  transition:
+    transform var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
 }
 
 .ag-emoji-opt:hover {
   background-color: var(--bg-hover);
-  transform: scale(1.16);
+  transform: scale(1.14);
+}
+
+.ag-emoji-opt.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-emoji-expand-btn {
+  color: var(--text-muted);
+  border-color: var(--border-subtle);
+}
+
+.ag-emoji-expand-btn:hover {
+  color: var(--accent);
+  border-color: var(--border-accent);
+  background-color: var(--accent-soft);
 }
 
 /* Reaction Pills below Message */
@@ -2873,6 +2897,422 @@ img.ag-avatar-agnostr,
   background-color: var(--accent-soft);
   border-color: var(--border-accent);
   color: var(--accent);
+}
+
+.ag-reaction-add-pill {
+  padding: 0 6px;
+  color: var(--text-muted);
+  border-style: dashed;
+}
+
+.ag-reaction-add-pill:hover {
+  color: var(--accent);
+  border-style: solid;
+  border-color: var(--border-accent);
+  background-color: var(--accent-soft);
+}
+
+/* Expanded Detailed Emoji Reaction & Pin Picker Popover */
+.ag-rpicker {
+  position: fixed;
+  z-index: calc(var(--z-popover) + 40);
+  width: min(332px, calc(100vw - 16px));
+  max-height: calc(var(--ag-vvh, 100dvh) - 16px);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg), 0 0 0 1px var(--border-subtle);
+  color: var(--text-primary);
+  overflow: hidden;
+  opacity: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ag-rpicker.is-ready {
+  opacity: 1;
+  animation: ag-scale-in 110ms var(--ease-out);
+}
+
+.ag-rpicker-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-rpicker-search-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.ag-rpicker-search-icon {
+  position: absolute;
+  left: 8px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.ag-rpicker-search {
+  width: 100%;
+  height: 30px;
+  padding: 0 26px 0 26px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+}
+
+.ag-rpicker-search::placeholder {
+  color: var(--text-muted);
+}
+
+.ag-rpicker-search:focus {
+  border-color: var(--border-accent);
+  box-shadow: var(--accent-glow);
+}
+
+.ag-rpicker-search-clear {
+  position: absolute;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+
+.ag-rpicker-search-clear:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-rpicker-pin-btn {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-rpicker-pin-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-rpicker-pin-btn.is-active {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+.ag-rpicker-pinned {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 8px;
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-rpicker-pinned-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ag-rpicker-pinned-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.ag-rpicker-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+
+.ag-rpicker-reset-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-rpicker-pinned-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.ag-rpicker-pin-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.ag-rpicker-pin-emoji {
+  width: 30px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-elevated);
+  font-size: 15px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    transform var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-rpicker-pin-emoji:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.ag-rpicker-pin-emoji.is-reacted {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-rpicker-pin-unpin {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.85;
+  transition:
+    opacity var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-rpicker-pin-chip:hover .ag-rpicker-pin-unpin,
+.ag-rpicker.is-pin-mode .ag-rpicker-pin-unpin {
+  opacity: 1;
+}
+
+.ag-rpicker-pin-unpin:hover {
+  background-color: var(--status-danger-soft);
+  border-color: var(--status-danger);
+  color: var(--status-danger);
+}
+
+.ag-rpicker-pinned-empty {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding: 2px 0;
+}
+
+.ag-rpicker-limit-notice {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--status-warn, var(--accent));
+  padding: 3px 6px;
+  border-radius: var(--radius-xs);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+}
+
+.ag-rpicker-cats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-rpicker-cat-btn {
+  flex: 1 1 0;
+  height: 28px;
+  border-radius: var(--radius-xs);
+  font-size: 14px;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+
+.ag-rpicker-cat-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-rpicker-cat-btn.active {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ag-rpicker-grid-wrap {
+  max-height: 224px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 6px;
+}
+
+.ag-rpicker-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.ag-rpicker-cell {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  min-height: 34px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background-color: transparent;
+  font-size: 18px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-rpicker-cell:hover,
+.ag-rpicker-cell:focus-visible {
+  background-color: var(--bg-hover);
+  transform: scale(1.12);
+  outline: none;
+}
+
+.ag-rpicker-cell.is-reacted {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-rpicker.is-pin-mode .ag-rpicker-cell.is-pinned {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-rpicker-cell-glyph {
+  display: inline-block;
+  line-height: 1;
+}
+
+.ag-rpicker-pin-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  pointer-events: none;
+}
+
+.ag-rpicker-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.ag-rpicker-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 10px;
+  background-color: var(--bg-surface);
+  border-top: 1px solid var(--border-subtle);
+  font-size: 11.5px;
+}
+
+.ag-rpicker-footer-emoji {
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.ag-rpicker-footer-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.ag-rpicker-footer-hint {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+@media (max-width: 867px) {
+  .ag-rpicker-search {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 420px) {
+  .ag-rpicker-grid {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+
+  .ag-rpicker-cell {
+    min-height: 38px;
+    font-size: 19px;
+  }
+
+  .ag-rpicker-footer-hint {
+    white-space: normal;
+    text-align: right;
+  }
 }
 
 .ag-reaction-count {

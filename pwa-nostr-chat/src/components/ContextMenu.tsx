@@ -14,6 +14,7 @@ import {
   Copy,
   ExternalLink,
   Link2,
+  Plus,
   Scissors,
   TextSelect,
 } from 'lucide-react'
@@ -40,6 +41,7 @@ export interface ContextMenuReaction {
 export interface ContextMenuSpec {
   header?: string
   reactions?: ContextMenuReaction[]
+  onExpandReactions?: (anchorRect: DOMRect) => void
   items: ContextMenuItem[]
 }
 
@@ -348,7 +350,9 @@ export function ContextMenuProvider({
       handledEventsRef.current.add(nativeEvent)
 
       const hasContent =
-        spec.items.length > 0 || (spec.reactions && spec.reactions.length > 0)
+        spec.items.length > 0 ||
+        (spec.reactions && spec.reactions.length > 0) ||
+        Boolean(spec.onExpandReactions)
       if (!hasContent) {
         setMenuState(null)
         setFocusedIndex(-1)
@@ -698,9 +702,10 @@ export function ContextMenuProvider({
               <div className="ag-ctx-header">{menuState.spec.header}</div>
             )}
 
-            {menuState.spec.reactions && menuState.spec.reactions.length > 0 && (
+            {((menuState.spec.reactions && menuState.spec.reactions.length > 0) ||
+              menuState.spec.onExpandReactions) && (
               <div className="ag-ctx-reactions" role="group" aria-label="Quick reactions">
-                {menuState.spec.reactions.map((reaction) => (
+                {menuState.spec.reactions?.map((reaction) => (
                   <button
                     key={reaction.emoji}
                     type="button"
@@ -715,6 +720,22 @@ export function ContextMenuProvider({
                     {reaction.emoji}
                   </button>
                 ))}
+                {menuState.spec.onExpandReactions && (
+                  <button
+                    type="button"
+                    className="ag-ctx-react-btn ag-ctx-react-more"
+                    title="More reactions & pin emojis"
+                    aria-label="More emoji reactions"
+                    onClick={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect()
+                      const onExpand = menuState.spec.onExpandReactions
+                      closeContextMenu()
+                      onExpand?.(rect)
+                    }}
+                  >
+                    <Plus size={15} strokeWidth={2.2} />
+                  </button>
+                )}
               </div>
             )}
 

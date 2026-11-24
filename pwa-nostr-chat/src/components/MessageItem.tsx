@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
@@ -17,10 +17,12 @@ import {
   Maximize2,
   MessageCircle,
   Phone,
+  Plus,
   RefreshCw,
   ShieldCheck,
   ShieldOff,
   Smile,
+  SmilePlus,
   Trash2,
   User,
   Video,
@@ -35,10 +37,12 @@ import type {
 } from '../types/transcription'
 import type { CashuTokenPreview, ZapTarget } from '../types/wallet'
 import { decodeCashuTokenPreview, extractCashuTokensFromText } from '../lib/cashuWallet'
+import { usePinnedReactions } from '../lib/reactionEmojis'
 import { pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
 import { AvatarImg } from './AvatarImg'
 import { useContextMenu, type ContextMenuItem, type ContextMenuReaction } from './ContextMenu'
+import { ReactionPickerPopover } from './ReactionPickerPopover'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
 import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
 
@@ -74,8 +78,6 @@ function extractMediaCaption(
   }
   return text.replace(/\n{3,}/g, '\n\n').trim()
 }
-
-const QUICK_EMOJIS = ['👍', '❤️', '🔥', '😂', '👀', '⚡']
 
 function formatClock(unixSec: number): string {
   try {
@@ -220,8 +222,11 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     underlyingCollapsed = false,
     isOriginalColumn = false,
   }) => {
+    const pinnedReactions = usePinnedReactions()
     const [pickerOpen, setPickerOpen] = useState(false)
+    const [expandedPickerAnchor, setExpandedPickerAnchor] = useState<DOMRect | null>(null)
     const [copied, setCopied] = useState(false)
+    const quickPickerWrapRef = useRef<HTMLDivElement | null>(null)
     const [hoveredReaction, setHoveredReaction] = useState<{
       emoji: string
       left: number
@@ -229,6 +234,36 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       placement: 'above' | 'below'
     } | null>(null)
     const { openContextMenu } = useContextMenu()
+
+    const myActiveEmojis = useMemo(
+      () => message.reactions.filter((r) => r.reactedByMe).map((r) => r.emoji),
+      [message.reactions]
+    )
+
+    useEffect(() => {
+      if (!pickerOpen) return
+      const onPointerDown = (e: PointerEvent) => {
+        if (
+          quickPickerWrapRef.current &&
+          e.target instanceof Node &&
+          quickPickerWrapRef.current.contains(e.target)
+        ) {
+          return
+        }
+        setPickerOpen(false)
+      }
+      const onKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          setPickerOpen(false)
+        }
+      }
+      document.addEventListener('pointerdown', onPointerDown, true)
+      window.addEventListener('keydown', onKeyDown)
+      return () => {
+        document.removeEventListener('pointerdown', onPointerDown, true)
+        window.removeEventListener('keydown', onKeyDown)
+      }
+    }, [pickerOpen])
 
     const hideReactionTooltip = useCallback(() => {
       setHoveredReaction(null)
@@ -450,7 +485,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       message.isEmote ? 'is-emote' : '',
       isMentioned ? 'is-mentioned' : '',
       isSearchActive ? 'is-search-active' : '',
-      actionsRevealed || pickerOpen ? 'actions-open' : '',
+      actionsRevealed || pickerOpen || Boolean(expandedPickerAnchor) ? 'actions-open' : '',
       compactTranslatorRow ? 'is-translator-row' : '',
     ]
       .filter(Boolean)
@@ -723,16 +758,25 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
       const reactions: ContextMenuReaction[] | undefined =
         !isDmMode && onReact
-          ? ['👍', '🔥', '❤️', '😂', '👀', '⚡'].map((emoji) => ({
+          ? pinnedReactions.map((emoji) => ({
               emoji,
               active: message.reactions.some((r) => r.emoji === emoji && r.reactedByMe),
               onSelect: () => onReact(message, emoji),
             }))
           : undefined
 
+      const onExpandReactions =
+        !isDmMode && onReact
+          ? (anchorRect: DOMRect) => {
+              setPickerOpen(false)
+              setExpandedPickerAnchor(anchorRect)
+            }
+          : undefined
+
       openContextMenu(e, {
         header: handle.full,
         reactions,
+        onExpandReactions,
         items,
       })
     }
@@ -1053,6 +1097,22 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                     <span className="ag-reaction-count tabular">{rx.count}</span>
                   </button>
                 ))}
+              {!isDmMode && onReact && message.reactions.length > 0 && (
+                <button
+                  type="button"
+                  className="ag-reaction-pill ag-reaction-add-pill"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    hideReactionTooltip()
+                    setPickerOpen(false)
+                    setExpandedPickerAnchor(e.currentTarget.getBoundingClientRect())
+                  }}
+                  title="Add reaction"
+                  aria-label="Add reaction"
+                >
+                  <SmilePlus size={13} />
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1099,37 +1159,64 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
         {/* Sleek Top-Right Floating Quick-Action Bar (Desktop Hover / Mobile Tap-to-Reveal) */}
         <div
-          className={`ag-msg-actions ${pickerOpen ? 'picker-open' : ''}`}
+          className={`ag-msg-actions ${pickerOpen || expandedPickerAnchor ? 'picker-open' : ''}`}
           role="toolbar"
           aria-label="Message actions"
         >
           {!isDmMode && onReact && (
-            <div style={{ position: 'relative' }}>
+            <div ref={quickPickerWrapRef} style={{ position: 'relative' }}>
               <button
                 type="button"
                 className="ag-msg-act-btn"
-                onClick={() => setPickerOpen((v) => !v)}
+                onClick={(e) => {
+                  if (pinnedReactions.length === 0) {
+                    setPickerOpen(false)
+                    setExpandedPickerAnchor(e.currentTarget.getBoundingClientRect())
+                    return
+                  }
+                  setPickerOpen((v) => !v)
+                }}
                 title="React"
                 aria-label="Add reaction"
+                aria-expanded={pickerOpen || Boolean(expandedPickerAnchor)}
               >
                 <Smile size={15} />
               </button>
               {pickerOpen && (
-                <div className="ag-emoji-popover" role="menu">
-                  {QUICK_EMOJIS.map((emoji) => (
-                    <button
-                      key={emoji}
-                      type="button"
-                      className="ag-emoji-opt"
-                      onClick={() => {
-                        onReact(message, emoji)
-                        setPickerOpen(false)
-                        onToggleActions(null)
-                      }}
-                    >
-                      {emoji}
-                    </button>
-                  ))}
+                <div className="ag-emoji-popover" role="menu" aria-label="Quick reactions">
+                  {pinnedReactions.map((emoji) => {
+                    const reacted = myActiveEmojis.includes(emoji)
+                    return (
+                      <button
+                        key={emoji}
+                        type="button"
+                        className={`ag-emoji-opt ${reacted ? 'active' : ''}`}
+                        aria-label={`React with ${emoji}`}
+                        aria-pressed={reacted}
+                        onClick={() => {
+                          onReact(message, emoji)
+                          setPickerOpen(false)
+                          onToggleActions(null)
+                        }}
+                      >
+                        {emoji}
+                      </button>
+                    )
+                  })}
+                  <button
+                    type="button"
+                    className="ag-emoji-opt ag-emoji-expand-btn"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const rect = e.currentTarget.getBoundingClientRect()
+                      setPickerOpen(false)
+                      setExpandedPickerAnchor(rect)
+                    }}
+                    title="More reactions & pin emojis"
+                    aria-label="More emoji reactions"
+                  >
+                    <Plus size={14} strokeWidth={2.3} />
+                  </button>
                 </div>
               )}
             </div>
@@ -1179,6 +1266,22 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             </button>
           )}
         </div>
+
+        {/* Expanded Detailed Emoji Reaction & Pin Picker (Portaled, Unclipped) */}
+        {expandedPickerAnchor && !isDmMode && onReact && (
+          <ReactionPickerPopover
+            anchorRect={expandedPickerAnchor}
+            activeEmojis={myActiveEmojis}
+            onSelect={(emoji) => {
+              onReact(message, emoji)
+              setExpandedPickerAnchor(null)
+              onToggleActions(null)
+            }}
+            onClose={() => {
+              setExpandedPickerAnchor(null)
+            }}
+          />
+        )}
       </article>
     )
   }
