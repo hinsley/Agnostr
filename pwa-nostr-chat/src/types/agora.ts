@@ -227,6 +227,7 @@ export interface AgoraEngine {
   // Thread viewer
   thread: AgoraThreadState | null
   openThread: (noteId: string) => void
+  openThreadById: (noteId: string, relayHints?: readonly string[]) => Promise<void>
   closeThread: () => void
 
   // Profile viewer

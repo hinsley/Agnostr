@@ -32,8 +32,14 @@ import {
   parseBitchatChannelHash,
 } from './lib/bitchatChannel'
 import {
+  clearLocationAgoraHash,
   clearLocationDmHash,
+  extractPendingAgoraFromLocation,
   extractPendingDmFromLocation,
+  parseAgoraShareUrl,
+  parseShareTarget,
+  type ParsedAgoraNoteShareTarget,
+  type ParsedAgoraProfileShareTarget,
   type ParsedShareTarget,
 } from './lib/shareLinks'
 import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
@@ -43,7 +49,10 @@ import { bitchatAudio, type SoundCue } from './utils/sound'
 import { shortPubkey } from './utils/identicon'
 import AppRail, { type ActiveWorkspace } from './components/AppRail'
 import { AvatarImg } from './components/AvatarImg'
-import { UntrustedLinkModal } from './components/UntrustedLinkModal'
+import {
+  registerInternalAgoraLinkHandler,
+  UntrustedLinkModal,
+} from './components/UntrustedLinkModal'
 import SuiteLauncher from './components/SuiteLauncher'
 import ConversationList, { type ListTab } from './components/ConversationList'
 import UserListPane from './components/UserListPane'
@@ -100,17 +109,37 @@ const ZERO_ARG_COMMANDS = new Set([
   '/strict',
 ])
 
+interface PwaLaunchParams {
+  readonly targetURL?: string
+}
+
+interface PwaLaunchQueue {
+  setConsumer: (consumer: (launchParams: PwaLaunchParams) => void) => void
+}
+
 function isAgoraLocationHash(hash: string): boolean {
   const raw = (hash || '').replace(/^#/, '').trim().toLowerCase()
-  return raw === 'agora' || raw.startsWith('agora/') || raw.startsWith('agora?')
+  return (
+    raw === 'agora' ||
+    raw.startsWith('agora/') ||
+    raw.startsWith('agora?') ||
+    raw.startsWith('agora=') ||
+    raw.startsWith('post=')
+  )
 }
 
 export function App() {
   useMobileViewport()
+  const [initialPendingAgora, setInitialPendingAgora] = useState<
+    ParsedAgoraNoteShareTarget | ParsedAgoraProfileShareTarget | null
+  >(() => extractPendingAgoraFromLocation())
   const engine = useAgnostrEngine()
 
   const [workspace, setWorkspace] = useState<ActiveWorkspace>(() =>
-    typeof window !== 'undefined' && isAgoraLocationHash(window.location.hash) ? 'agora' : 'chat'
+    typeof window !== 'undefined' &&
+    (isAgoraLocationHash(window.location.hash) || Boolean(initialPendingAgora))
+      ? 'agora'
+      : 'chat'
   )
   const [listTab, setListTab] = useState<ListTab>('bitchat')
   const [suiteLauncherOpen, setSuiteLauncherOpen] = useState(false)
@@ -1555,9 +1584,42 @@ export function App() {
     [isServer, activeServer, activeChannel, isDm, isServerE2ee, engine]
   )
 
+  const openAgoraShareTarget = useCallback(
+    (target: ParsedAgoraNoteShareTarget | ParsedAgoraProfileShareTarget) => {
+      handleSelectAgora()
+      setCmdkOpen(false)
+      setQrScannerOpen(false)
+      setQrShareTarget(null)
+      setLightboxImage(null)
+      engine.agora.activate()
+      if (target.kind === 'agora-note') {
+        engine.agora.closeProfile()
+        void engine.agora.openThreadById(target.noteId, target.relays)
+      } else {
+        engine.agora.closeThread()
+        engine.agora.openProfile(target.pubkey)
+      }
+      bitchatAudio.play('tune')
+    },
+    [engine.agora, handleSelectAgora]
+  )
+
+  // Register internal Agora link handler so trusted clicks & approved UntrustedLinkModal links
+  // open directly inside the installed PWA instead of spawning an external browser tab.
+  useEffect(() => {
+    registerInternalAgoraLinkHandler(openAgoraShareTarget)
+    return () => {
+      registerInternalAgoraLinkHandler(null)
+    }
+  }, [openAgoraShareTarget])
+
   const handleResolvedShareTarget = useCallback(
     (target: ParsedShareTarget) => {
       setQrScannerOpen(false)
+      if (target.kind === 'agora-note' || target.kind === 'agora-profile') {
+        openAgoraShareTarget(target)
+        return
+      }
       if (target.kind === 'cashu') {
         handleOpenWallet({
           tab: 'receive',
@@ -1645,8 +1707,50 @@ export function App() {
         }
       })
     },
-    [workspace, engine, handleJoinedServer, handleOpenWallet]
+    [workspace, engine, handleJoinedServer, handleOpenWallet, openAgoraShareTarget]
   )
+
+  // Consume cold-launch `#agora=...` / `?agora=...` / `#post=...` deep links captured on mount
+  useEffect(() => {
+    if (!initialPendingAgora) return
+    const target = initialPendingAgora
+    setInitialPendingAgora(null)
+    clearLocationAgoraHash()
+    openAgoraShareTarget(target)
+  }, [initialPendingAgora, openAgoraShareTarget])
+
+  // Listen on hashchange for `#agora=...` / `#post=...` deep links
+  useEffect(() => {
+    const consumeLocationAgora = () => {
+      const pending = extractPendingAgoraFromLocation()
+      if (!pending) return
+      clearLocationAgoraHash()
+      openAgoraShareTarget(pending)
+    }
+    window.addEventListener('hashchange', consumeLocationAgora)
+    return () => window.removeEventListener('hashchange', consumeLocationAgora)
+  }, [openAgoraShareTarget])
+
+  // Handle OS link launches inside installed PWAs via Web App Launch Handler API
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const launchQueue = (window as Window & { launchQueue?: PwaLaunchQueue }).launchQueue
+    if (!launchQueue || typeof launchQueue.setConsumer !== 'function') return
+    launchQueue.setConsumer((launchParams) => {
+      const targetUrl = launchParams?.targetURL
+      if (!targetUrl) return
+      const agoraTarget = parseAgoraShareUrl(targetUrl)
+      if (agoraTarget) {
+        clearLocationAgoraHash()
+        openAgoraShareTarget(agoraTarget)
+        return
+      }
+      const shareTarget = parseShareTarget(targetUrl)
+      if (shareTarget) {
+        handleResolvedShareTarget(shareTarget)
+      }
+    })
+  }, [openAgoraShareTarget, handleResolvedShareTarget])
 
   // Listen on mount + hashchange for `#dm=npub1...(&name=...)` deep links
   useEffect(() => {
@@ -2590,6 +2694,7 @@ export function App() {
             onOpenAgoraProfile={(pubkey) => {
               setInspectedPeer(null)
               handleSelectWorkspace('agora')
+              engine.agora.closeThread()
               engine.agora.openProfile(pubkey)
             }}
           />

@@ -19,7 +19,7 @@ const EXCLUDED_SWIPE_SELECTOR = [
   '[contenteditable=""]',
   '[role="slider"]',
   '.ag-voice-waveform',
-  '.leaflet-container',
+  '.ag-globe-canvas-wrap',
   '[data-no-swipe="true"]',
 ].join(', ')
 

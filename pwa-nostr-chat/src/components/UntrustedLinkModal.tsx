@@ -2,6 +2,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertTriangle, Check, Copy, ExternalLink, X } from 'lucide-react'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
+import {
+  parseAgoraShareUrl,
+  type ParsedAgoraNoteShareTarget,
+  type ParsedAgoraProfileShareTarget,
+} from '../lib/shareLinks.ts'
 
 export interface UntrustedLinkRequest {
   url: string
@@ -10,8 +15,27 @@ export interface UntrustedLinkRequest {
 }
 
 type UntrustedLinkListener = (req: UntrustedLinkRequest) => void
+type InternalAgoraLinkTarget = ParsedAgoraNoteShareTarget | ParsedAgoraProfileShareTarget
+type InternalAgoraLinkHandler = (target: InternalAgoraLinkTarget) => void
 
 const listeners = new Set<UntrustedLinkListener>()
+let internalAgoraLinkHandler: InternalAgoraLinkHandler | null = null
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function registerInternalAgoraLinkHandler(
+  handler: InternalAgoraLinkHandler | null
+): void {
+  internalAgoraLinkHandler = handler
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function tryOpenInternalAgoraLink(rawUrl: string): boolean {
+  if (!internalAgoraLinkHandler) return false
+  const target = parseAgoraShareUrl(rawUrl)
+  if (!target) return false
+  internalAgoraLinkHandler(target)
+  return true
+}
 
 function sanitizeExternalHttpUrl(raw: string): { safeUrl: string; hostname: string } | null {
   const trimmed = raw.trim()
@@ -44,7 +68,9 @@ export function requestUntrustedLinkOpen(req: UntrustedLinkRequest): void {
         `Open external link${senderNote}?\n\nDomain: ${checked.hostname}\n${checked.safeUrl}`
       )
       if (ok) {
-        window.open(checked.safeUrl, '_blank', 'noopener,noreferrer')
+        if (!tryOpenInternalAgoraLink(checked.safeUrl)) {
+          window.open(checked.safeUrl, '_blank', 'noopener,noreferrer')
+        }
       }
     }
     return
@@ -128,6 +154,9 @@ export const UntrustedLinkModal: React.FC = () => {
     if (!parsed) return
     const targetUrl = parsed.safeUrl
     close()
+    if (tryOpenInternalAgoraLink(targetUrl)) {
+      return
+    }
     window.open(targetUrl, '_blank', 'noopener,noreferrer')
   }, [parsed, close])
 

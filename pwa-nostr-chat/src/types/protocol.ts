@@ -289,6 +289,13 @@ export interface RelayTelemetry {
   supportsDm: boolean
 }
 
+export interface PulseBubbleMessage {
+  id: string
+  sender: string
+  preview: string
+  tsMs: number
+}
+
 export interface PulseRoom {
   geohash: string
   center: GeoCoords
@@ -301,6 +308,7 @@ export interface PulseRoom {
   lastPreview: string
   lastSender: string
   lastSenderPubkey?: string
+  recentMessages?: PulseBubbleMessage[]
   messagesPerMin: number
   nearestCity: string | null
 }

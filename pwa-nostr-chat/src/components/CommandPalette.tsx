@@ -62,6 +62,7 @@ import { formatHandle } from '../utils/identicon'
 import type { QrShareTarget } from './QrShareModal'
 import type { ServerHubTab } from './ServerHubModal'
 import type { SettingsTab } from './SettingsModal'
+import { tryOpenInternalAgoraLink } from './UntrustedLinkModal'
 
 const GEOHASH_REGEX = /^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$/i
 
@@ -155,48 +156,69 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     const cleanHash = q.replace(/^#/, '')
     const list: PaletteEntry[] = []
 
-    // Direct jump whenever query is a DM link / npub / community invite / Cashu token / Lightning invoice
+    // Direct jump whenever query is an Agora share link / nevent / DM link / npub / community invite / Cashu / Lightning
     const parsedShare = query.trim().length >= 8 ? parseShareTarget(query.trim()) : null
-    if (parsedShare && onResolvedShareTarget) {
+    if (
+      parsedShare &&
+      (onResolvedShareTarget ||
+        parsedShare.kind === 'agora-note' ||
+        parsedShare.kind === 'agora-profile')
+    ) {
       list.push({
         id: `direct-share-${parsedShare.kind}`,
         group:
-          parsedShare.kind === 'dm'
-            ? 'Direct Message'
-            : parsedShare.kind === 'cashu'
-              ? 'Cashu Ecash'
-              : parsedShare.kind === 'lightning'
-                ? 'Lightning'
-                : 'Community Invite',
+          parsedShare.kind === 'agora-note' || parsedShare.kind === 'agora-profile'
+            ? 'Agora'
+            : parsedShare.kind === 'dm'
+              ? 'Direct Message'
+              : parsedShare.kind === 'cashu'
+                ? 'Cashu Ecash'
+                : parsedShare.kind === 'lightning'
+                  ? 'Lightning'
+                  : 'Community Invite',
         title:
-          parsedShare.kind === 'dm'
-            ? `Start DM with ${parsedShare.nickname || `${parsedShare.npub.slice(0, 14)}…`}`
-            : parsedShare.kind === 'cashu'
-              ? 'Claim Cashu Ecash Token'
-              : parsedShare.kind === 'lightning'
-                ? parsedShare.lightningKind === 'lud16'
-                  ? `Pay Lightning Address (${parsedShare.payload})`
-                  : 'Pay Lightning Invoice'
-                : 'Join Community from Invite',
+          parsedShare.kind === 'agora-note'
+            ? 'Open Agora Post'
+            : parsedShare.kind === 'agora-profile'
+              ? 'Open Agora Profile'
+              : parsedShare.kind === 'dm'
+                ? `Start DM with ${parsedShare.nickname || `${parsedShare.npub.slice(0, 14)}…`}`
+                : parsedShare.kind === 'cashu'
+                  ? 'Claim Cashu Ecash Token'
+                  : parsedShare.kind === 'lightning'
+                    ? parsedShare.lightningKind === 'lud16'
+                      ? `Pay Lightning Address (${parsedShare.payload})`
+                      : 'Pay Lightning Invoice'
+                    : 'Join Community from Invite',
         subtitle:
-          parsedShare.kind === 'dm'
-            ? parsedShare.npub
-            : parsedShare.kind === 'cashu'
-              ? 'Open Agwallet to verify & claim this ecash token'
-              : parsedShare.kind === 'lightning'
-                ? 'Open Agwallet to melt & pay via Lightning'
-                : 'Open & join this community invite immediately',
-        keywords: query.trim().toLowerCase(),
+          parsedShare.kind === 'agora-note'
+            ? `${parsedShare.nevent.slice(0, 18)}… · Open post & replies in Agora`
+            : parsedShare.kind === 'agora-profile'
+              ? `${parsedShare.npub.slice(0, 18)}… · View profile in Agora`
+              : parsedShare.kind === 'dm'
+                ? parsedShare.npub
+                : parsedShare.kind === 'cashu'
+                  ? 'Open Agwallet to verify & claim this ecash token'
+                  : parsedShare.kind === 'lightning'
+                    ? 'Open Agwallet to melt & pay via Lightning'
+                    : 'Open & join this community invite immediately',
+        keywords: `${query.trim().toLowerCase()} agora post profile`,
         badge:
-          parsedShare.kind === 'dm'
-            ? 'DM'
-            : parsedShare.kind === 'cashu'
-              ? 'CASHU'
-              : parsedShare.kind === 'lightning'
-                ? 'LN'
-                : 'INVITE',
+          parsedShare.kind === 'agora-note'
+            ? 'POST'
+            : parsedShare.kind === 'agora-profile'
+              ? 'PROFILE'
+              : parsedShare.kind === 'dm'
+                ? 'DM'
+                : parsedShare.kind === 'cashu'
+                  ? 'CASHU'
+                  : parsedShare.kind === 'lightning'
+                    ? 'LN'
+                    : 'INVITE',
         icon:
-          parsedShare.kind === 'dm' ? (
+          parsedShare.kind === 'agora-note' || parsedShare.kind === 'agora-profile' ? (
+            <Landmark size={15} style={{ color: 'var(--accent)' }} />
+          ) : parsedShare.kind === 'dm' ? (
             <MessageCircle size={15} style={{ color: 'var(--dm-accent)' }} />
           ) : parsedShare.kind === 'cashu' || parsedShare.kind === 'lightning' ? (
             <Zap size={15} style={{ color: 'var(--status-warn)' }} />
@@ -205,7 +227,29 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           ),
         run: () => {
           onClose()
-          onResolvedShareTarget(parsedShare)
+          if (parsedShare.kind === 'agora-note') {
+            if (!tryOpenInternalAgoraLink(query.trim())) {
+              if (onResolvedShareTarget) {
+                onResolvedShareTarget(parsedShare)
+              } else {
+                onOpenAgora?.()
+                void engine.agora.openThreadById(parsedShare.noteId, parsedShare.relays)
+              }
+            }
+            return
+          }
+          if (parsedShare.kind === 'agora-profile') {
+            if (!tryOpenInternalAgoraLink(query.trim())) {
+              if (onResolvedShareTarget) {
+                onResolvedShareTarget(parsedShare)
+              } else {
+                onOpenAgora?.()
+                engine.agora.openProfile(parsedShare.pubkey)
+              }
+            }
+            return
+          }
+          onResolvedShareTarget?.(parsedShare)
         },
       })
     }

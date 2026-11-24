@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  Check,
   Crosshair,
   Globe,
   Grid3x3,
@@ -8,21 +9,16 @@ import {
   MapPin,
   MessageSquare,
   Minus,
-  Navigation,
   Plus,
   Search,
-  ShieldAlert,
   Waves,
   X,
-  ZoomIn,
-  ZoomOut,
 } from 'lucide-react'
 import type { AgnostrEngine, PulseRoom } from '../types/protocol.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import {
   buildGeohashCell,
   encodeGeohash,
-  formatCellDimensions,
   formatCoords,
   getZoomForPrecision,
   isValidGeohash,
@@ -44,8 +40,6 @@ export interface ExpandedRadarModalProps {
   /** When true on mobile, renders anchored inside .ag-shell-body above the always-present bottom navbar. */
   inShell?: boolean
 }
-
-const PRECISION_OPTIONS: readonly PrecisionSelection[] = ['auto', 1, 2, 3, 4, 5, 6, 7, 8]
 
 function formatPulseAge(tsMs: number): string {
   const diffSec = Math.max(0, Math.floor((Date.now() - tsMs) / 1000))
@@ -90,7 +84,6 @@ export function ExpandedRadarModal({
 
   const [selectedGeohash, setSelectedGeohash] = useState<string>(safeActiveGeo)
   const [precisionMode, setPrecisionMode] = useState<PrecisionSelection>('auto')
-  const [effectivePrecision, setEffectivePrecision] = useState<number>(safeActiveGeo.length)
   const [showSubZones, setShowSubZones] = useState(false)
   const [showBubbles, setShowBubbles] = useState(true)
   const [pulseDrawerOpen, setPulseDrawerOpen] = useState(false)
@@ -101,6 +94,7 @@ export function ExpandedRadarModal({
   useEffect(() => {
     if (!open) return
     setSelectedGeohash(safeActiveGeo)
+    setPrecisionMode('auto')
     setPulseDrawerOpen(false)
     setSearchError(null)
   }, [open, safeActiveGeo])
@@ -133,16 +127,6 @@ export function ExpandedRadarModal({
     [inspectedHash, localFullGeohash],
   )
 
-  const inspectedDimensions = useMemo(
-    () => formatCellDimensions(inspectedCell.bounds),
-    [inspectedCell.bounds],
-  )
-
-  const isInspectedLocal = useMemo(() => {
-    const localAtP = location.localGeohashes[inspectedCell.precision]
-    return Boolean(localAtP && localAtP === inspectedCell.geohash)
-  }, [location.localGeohashes, inspectedCell.precision, inspectedCell.geohash])
-
   const matchingPulse: PulseRoom | null = useMemo(() => {
     const exact = geoPulseRooms.find((r) => r.geohash === inspectedCell.geohash)
     if (exact) return exact
@@ -158,13 +142,6 @@ export function ExpandedRadarModal({
   const matchingPulseSnippet = useMemo(
     () => (matchingPulse?.lastPreview ? formatInspectSnippet(matchingPulse.lastPreview) : ''),
     [matchingPulse],
-  )
-
-  const handleViewportInfoChange = useCallback(
-    (info: { zoom: number; effectivePrecision: number }) => {
-      setEffectivePrecision(info.effectivePrecision)
-    },
-    [],
   )
 
   const handleSelectZone = useCallback(
@@ -198,34 +175,23 @@ export function ExpandedRadarModal({
     }
     setSearchError(null)
     setSelectedGeohash(resolved)
+    setPrecisionMode('auto')
     setSearchDraft('')
     onPlaySound?.('click')
     mapRef.current?.flyToGeohash(resolved, { animate: true })
   }
 
-  const handlePrecisionPick = (opt: PrecisionSelection) => {
-    setPrecisionMode(opt)
-    onPlaySound?.('click')
-    if (opt !== 'auto') {
-      const nextHash = encodeGeohash(
-        inspectedCell.center.lat,
-        inspectedCell.center.lon,
-        opt,
-      )
-      setSelectedGeohash(nextHash)
-      mapRef.current?.flyToGeohash(nextHash, {
-        animate: true,
-        zoom: getZoomForPrecision(opt),
-      })
-    }
-  }
-
   const handleZoomOutPrecision = () => {
     if (inspectedCell.precision <= 1) return
     const parent = inspectedCell.geohash.slice(0, -1)
+    const nextP = parent.length as PrecisionSelection
+    setPrecisionMode(nextP)
     setSelectedGeohash(parent)
     onPlaySound?.('click')
-    mapRef.current?.flyToGeohash(parent, { animate: true })
+    mapRef.current?.flyToGeohash(parent, {
+      animate: true,
+      zoom: getZoomForPrecision(parent.length),
+    })
   }
 
   const handleSubdivideZoomIn = () => {
@@ -236,7 +202,7 @@ export function ExpandedRadarModal({
       localChild && localChild.startsWith(inspectedCell.geohash)
         ? localChild
         : encodeGeohash(inspectedCell.center.lat, inspectedCell.center.lon, nextP)
-    setShowSubZones(true)
+    setPrecisionMode(nextP as PrecisionSelection)
     setSelectedGeohash(target)
     onPlaySound?.('click')
     mapRef.current?.flyToGeohash(target, {
@@ -245,17 +211,12 @@ export function ExpandedRadarModal({
     })
   }
 
-  const handleCenterActive = () => {
-    setSelectedGeohash(safeActiveGeo)
-    onPlaySound?.('click')
-    mapRef.current?.flyToGeohash(safeActiveGeo, { animate: true })
-  }
-
   const handleLocateMe = async () => {
     onPlaySound?.('click')
     const gh = await engine.locateMe()
     if (gh) {
       setSelectedGeohash(gh)
+      setPrecisionMode('auto')
       onPlaySound?.('tune')
       mapRef.current?.flyToGeohash(gh, { animate: true })
     }
@@ -270,6 +231,7 @@ export function ExpandedRadarModal({
 
   const handleFlyToPulseRoom = (room: PulseRoom) => {
     setSelectedGeohash(room.geohash)
+    setPrecisionMode('auto')
     setPulseDrawerOpen(false)
     onPlaySound?.('click')
     mapRef.current?.flyToGeohash(room.geohash, { animate: true })
@@ -288,10 +250,10 @@ export function ExpandedRadarModal({
         className="ag-radar-modal"
         role="dialog"
         aria-modal="true"
-        aria-label="Expanded Geohash Radar Map"
+        aria-label="Expanded Geohash Globe Map"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Full-bleed Leaflet Tactical Geohash Map */}
+        {/* Full-bleed 3D Earth Geohash Globe */}
         <TacticalGeohashMap
           ref={mapRef}
           mode="expanded"
@@ -307,10 +269,9 @@ export function ExpandedRadarModal({
           isTeleported={engine.isTeleported}
           onSelectGeohash={handleSelectZone}
           onTuneGeohash={handleTuneAndClose}
-          onViewportInfoChange={handleViewportInfoChange}
         />
 
-        {/* Top Floating Tactical Bar */}
+        {/* Single Sleek Floating Top Row */}
         <div className="ag-radar-top-bar">
           <div className="ag-radar-top-row">
             <form className="ag-radar-search-form" onSubmit={handleSearchSubmit}>
@@ -318,13 +279,13 @@ export function ExpandedRadarModal({
               <input
                 type="text"
                 className="ag-radar-search-input mono"
-                placeholder="#geohash, city, or lat, lon…"
+                placeholder="#geohash or city…"
                 value={searchDraft}
                 onChange={(e) => {
                   setSearchDraft(e.target.value)
                   if (searchError) setSearchError(null)
                 }}
-                aria-label="Search geohash, city, or coordinates on radar"
+                aria-label="Search geohash or city on globe"
               />
               {searchDraft && (
                 <button
@@ -370,8 +331,8 @@ export function ExpandedRadarModal({
               type="button"
               className="ag-radar-close-btn"
               onClick={onClose}
-              title="Close Expanded Radar (Esc)"
-              aria-label="Close expanded radar"
+              title="Close Map (Esc)"
+              aria-label="Close expanded map"
             >
               <X size={18} />
             </button>
@@ -382,32 +343,6 @@ export function ExpandedRadarModal({
               {searchError}
             </div>
           )}
-
-          {/* Precision Selector Strip */}
-          <div className="ag-radar-prec-bar" role="group" aria-label="Geohash grid precision">
-            <span className="ag-radar-prec-label mono">GRID</span>
-            <div className="ag-radar-prec-pills">
-              {PRECISION_OPTIONS.map((opt) => {
-                const active = precisionMode === opt
-                return (
-                  <button
-                    key={String(opt)}
-                    type="button"
-                    className={`ag-radar-prec-pill mono ${active ? 'active' : ''}`}
-                    onClick={() => handlePrecisionPick(opt)}
-                    aria-pressed={active}
-                    title={
-                      opt === 'auto'
-                        ? `Auto precision by zoom (currently P${effectivePrecision})`
-                        : `Lock grid to ${opt}-character geohashes`
-                    }
-                  >
-                    {opt === 'auto' ? `Auto · P${effectivePrecision}` : `P${opt}`}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
         </div>
 
         {/* Live Global Pulse Quick-Fly Popover */}
@@ -461,32 +396,31 @@ export function ExpandedRadarModal({
           </div>
         )}
 
-        {/* Right Floating Touch Stack (Fat-Finger 44×44px Buttons) */}
-        <div className="ag-radar-touch-stack" role="toolbar" aria-label="Map controls">
+        {/* Right Floating Controls (3 Core Actions + Desktop-Only +/- Zoom) */}
+        <div className="ag-radar-touch-stack" role="toolbar" aria-label="Globe controls">
           <button
             type="button"
-            className="ag-radar-fab"
-            onClick={() => {
-              onPlaySound?.('click')
-              mapRef.current?.zoomIn()
-            }}
-            title="Zoom in"
-            aria-label="Zoom in"
+            className={`ag-radar-fab ${location.status === 'ready' ? 'gps-ready' : ''}`}
+            onClick={() => void handleLocateMe()}
+            disabled={location.status === 'locating'}
+            title="Locate Me"
+            aria-label="Locate Me"
           >
-            <Plus size={18} />
+            {location.status === 'locating' ? (
+              <Loader2 size={17} className="ag-spin" />
+            ) : (
+              <Crosshair size={17} />
+            )}
           </button>
 
           <button
             type="button"
             className="ag-radar-fab"
-            onClick={() => {
-              onPlaySound?.('click')
-              mapRef.current?.zoomOut()
-            }}
-            title="Zoom out"
-            aria-label="Zoom out"
+            onClick={handleWorldView}
+            title="World View"
+            aria-label="World View"
           >
-            <Minus size={18} />
+            <Globe size={17} />
           </button>
 
           <button
@@ -497,135 +431,119 @@ export function ExpandedRadarModal({
               setShowSubZones((v) => !v)
             }}
             aria-pressed={showSubZones}
-            title="Toggle 32× Base32 sub-zone grid inside selected cell"
-            aria-label="Toggle 32x sub-zones overlay"
+            title="Sub-Zones"
+            aria-label="Toggle 32x sub-zones"
           >
             <Grid3x3 size={17} />
           </button>
 
-          <button
-            type="button"
-            className="ag-radar-fab"
-            onClick={handleCenterActive}
-            title={`Center on active channel #${activeGeohash}`}
-            aria-label="Center on active geohash"
-          >
-            <Crosshair size={17} />
-          </button>
-
-          <button
-            type="button"
-            className={`ag-radar-fab ${location.status === 'ready' ? 'gps-ready' : ''}`}
-            onClick={() => void handleLocateMe()}
-            disabled={location.status === 'locating'}
-            title="GPS Locate Me"
-            aria-label="Locate me via GPS"
-          >
-            {location.status === 'locating' ? (
-              <Loader2 size={17} className="ag-spin" />
-            ) : (
-              <Navigation size={17} />
-            )}
-          </button>
-
-          <button
-            type="button"
-            className="ag-radar-fab"
-            onClick={handleWorldView}
-            title="World View"
-            aria-label="Zoom out to world view"
-          >
-            <Globe size={17} />
-          </button>
+          <div className="ag-radar-zoom-pair ag-radar-desktop-only">
+            <button
+              type="button"
+              className="ag-radar-fab ag-radar-fab-compact"
+              onClick={() => {
+                onPlaySound?.('click')
+                mapRef.current?.zoomIn()
+              }}
+              title="Zoom in"
+              aria-label="Zoom in"
+            >
+              <Plus size={16} />
+            </button>
+            <button
+              type="button"
+              className="ag-radar-fab ag-radar-fab-compact"
+              onClick={() => {
+                onPlaySound?.('click')
+                mapRef.current?.zoomOut()
+              }}
+              title="Zoom out"
+              aria-label="Zoom out"
+            >
+              <Minus size={16} />
+            </button>
+          </div>
         </div>
 
-        {/* Bottom Thumb-Friendly Inspect & Tune Card */}
+        {/* Ultra-Clean Compact Bottom Selected-Cell Pill */}
         <div className="ag-radar-bottom-card">
-          <div className="ag-radar-inspect-head">
+          <div className="ag-radar-bottom-info">
             <div className="ag-radar-inspect-title">
-              <MapPin size={15} className="ag-radar-hud-accent" />
+              <MapPin size={14} className="ag-radar-hud-accent" aria-hidden="true" />
               <span className="ag-radar-inspect-hash mono">#{inspectedCell.geohash}</span>
               <span className="ag-radar-inspect-city truncate">
                 {inspectedCell.nearestCity ?? 'Open Coordinates'}
               </span>
-            </div>
-
-            <div className="ag-radar-inspect-badges">
-              {isAlreadyActive && <span className="ag-badge ag-badge-accent">TUNED</span>}
-              <span className={`ag-badge ${isInspectedLocal ? 'ag-badge-ok' : 'ag-badge-warn'}`}>
-                {isInspectedLocal ? 'LOCAL' : 'TELEPORT'}
-              </span>
               {matchingPulse && (
-                <span className="ag-badge ag-badge-ok">
-                  <Waves size={9} />
-                  <span>
-                    {matchingPulse.peerCount}{' '}
-                    {matchingPulse.peerCount === 1 ? 'peer' : 'peers'}
-                  </span>
+                <span
+                  className="ag-radar-live-chip mono"
+                  title={`${matchingPulse.peerCount} active ${matchingPulse.peerCount === 1 ? 'peer' : 'peers'}`}
+                >
+                  <span className="ag-led ag-led-ok" />
+                  <span>{matchingPulse.peerCount}</span>
                 </span>
               )}
             </div>
+
+            {matchingPulseSnippet && (
+              <div className="ag-radar-inspect-snippet">
+                <span className="ag-radar-inspect-snippet-sender">
+                  {matchingPulse?.lastSender?.trim().replace(/^@+/, '') || 'anon'}:
+                </span>
+                <span className="ag-radar-inspect-snippet-text truncate">
+                  {matchingPulseSnippet}
+                </span>
+              </div>
+            )}
           </div>
 
-          <div className="ag-radar-inspect-meta mono">
-            <span>
-              P{inspectedCell.precision} · {inspectedCell.label}
-            </span>
-            <span>·</span>
-            <span>{inspectedDimensions}</span>
-            <span>·</span>
-            <span>{formatCoords(inspectedCell.center)}</span>
-          </div>
-
-          {matchingPulseSnippet && (
-            <div className="ag-radar-inspect-snippet">
-              <MessageSquare size={12} className="ag-radar-hud-accent" aria-hidden="true" />
-              <span className="ag-radar-inspect-snippet-sender">
-                {matchingPulse?.lastSender?.trim().replace(/^@+/, '') || 'anon'}:
+          <div className="ag-radar-bottom-actions">
+            <div
+              className="ag-radar-prec-stepper"
+              role="group"
+              aria-label="Geohash precision"
+            >
+              <button
+                type="button"
+                className="ag-radar-prec-step-btn"
+                onClick={handleZoomOutPrecision}
+                disabled={inspectedCell.precision <= 1}
+                title="Broader precision (P−1)"
+                aria-label="Decrease geohash precision"
+              >
+                <Minus size={13} />
+              </button>
+              <span className="ag-radar-prec-step-val mono" title={`Precision P${inspectedCell.precision}`}>
+                P{inspectedCell.precision}
               </span>
-              <span className="ag-radar-inspect-snippet-text truncate">{matchingPulseSnippet}</span>
+              <button
+                type="button"
+                className="ag-radar-prec-step-btn"
+                onClick={handleSubdivideZoomIn}
+                disabled={inspectedCell.precision >= 8}
+                title="Finer precision (P+1)"
+                aria-label="Increase geohash precision"
+              >
+                <Plus size={13} />
+              </button>
             </div>
-          )}
-
-          {!inspectedCell.allowsPresence && (
-            <div className="ag-radar-inspect-privacy">
-              <ShieldAlert size={12} />
-              <span>Precision ≥6 mutes presence beacons for location privacy.</span>
-            </div>
-          )}
-
-          <div className="ag-radar-inspect-actions">
-            <button
-              type="button"
-              className="ag-btn ag-btn-secondary"
-              onClick={handleZoomOutPrecision}
-              disabled={inspectedCell.precision <= 1}
-              title="Zoom out to parent geohash"
-            >
-              <ZoomOut size={14} />
-              <span>Parent (p−1)</span>
-            </button>
-
-            <button
-              type="button"
-              className="ag-btn ag-btn-secondary"
-              onClick={handleSubdivideZoomIn}
-              disabled={inspectedCell.precision >= 8}
-              title="Show 32× sub-zones and zoom in"
-            >
-              <ZoomIn size={14} />
-              <span>Subdivide (p+1)</span>
-            </button>
 
             <button
               type="button"
               className="ag-btn ag-btn-primary ag-radar-tune-cta"
               onClick={() => handleTuneAndClose(inspectedCell.geohash)}
             >
-              <Waves size={14} />
-              <span>
-                {isAlreadyActive ? `Stay in #${inspectedCell.geohash}` : `Tune #${inspectedCell.geohash}`}
-              </span>
+              {isAlreadyActive ? (
+                <>
+                  <Check size={14} />
+                  <span>Active</span>
+                </>
+              ) : (
+                <>
+                  <Waves size={14} />
+                  <span>Tune In</span>
+                </>
+              )}
             </button>
           </div>
         </div>

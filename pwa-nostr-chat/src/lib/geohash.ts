@@ -450,7 +450,7 @@ export function getChildGeohashes(rawGeohash: string): GeohashGridCell[] {
 /**
  * Enumerates every geohash cell of the given precision overlapping `bounds`.
  * Safely clamps latitude to Web Mercator `[-85, 85]`, handles antimeridian /
- * Leaflet wrapped-world longitudes, deduplicates via Set, and caps at `maxCells`
+ * wrapped-world longitudes, deduplicates via Set, and caps at `maxCells`
  * centered around the viewport so it never hangs at mismatched zoom/precision.
  */
 export function getGeohashCellsInBounds(
@@ -482,7 +482,7 @@ export function getGeohashCellsInBounds(
   if (lonSpan >= 359.999 || lonSpan <= -359.999) {
     lonRanges.push([-180, 180])
   } else if (bounds.lonMin <= bounds.lonMax) {
-    // Handle Leaflet longitudes outside [-180, 180] (wrapped world copies)
+    // Handle longitudes outside [-180, 180] (wrapped-world spans)
     const startW = wrapLongitude(bounds.lonMin)
     const endW = wrapLongitude(bounds.lonMax)
     if (startW <= endW) {
@@ -570,7 +570,7 @@ export function getGeohashCellsInBounds(
 }
 
 /**
- * Smooth Leaflet zoom -> recommended geohash precision mapping so visible
+ * Smooth map zoom -> recommended geohash precision mapping so visible
  * cells remain legible and comfortably tappable on both desktop and mobile.
  */
 export function getRecommendedPrecisionForZoom(zoom: number): number {
@@ -586,7 +586,7 @@ export function getRecommendedPrecisionForZoom(zoom: number): number {
 }
 
 /**
- * Appropriate Leaflet zoom level to frame a geohash cell of the given precision.
+ * Appropriate map zoom level to frame a geohash cell of the given precision.
  */
 export function getZoomForPrecision(precision: number): number {
   const p = Math.max(1, Math.min(8, Math.floor(precision)))

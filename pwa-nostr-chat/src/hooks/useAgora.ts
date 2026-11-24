@@ -2221,13 +2221,19 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     [signMasterEvent]
   )
 
-  // Thread Viewer (`openThread`, `closeThread`)
-  const openThread = useCallback(
-    (noteId: string) => {
+  // Thread Viewer (`openThread`, `openThreadById`, `closeThread`)
+  const openThreadById = useCallback(
+    async (noteId: string, relayHints?: readonly string[]): Promise<void> => {
       if (!isHex64(noteId)) return
       const id = noteId.toLowerCase()
       const gen = ++threadGenRef.current
-      const cached = notesRef.current[id] ?? null
+      setActive(true)
+      profileViewGenRef.current += 1
+      setProfileView(null)
+
+      const rawCached = notesRef.current[id] ?? null
+      const cached =
+        rawCached && !blockedSetRef.current.has(rawCached.pubkey) ? rawCached : null
       const initialRootId = cached?.rootId ?? id
 
       setThread({
@@ -2239,73 +2245,95 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         loading: true,
       })
 
-      void (async () => {
-        const relays = socialRelaysRef.current
-        let focused = cached
-
-        if (!focused) {
-          const { promise } = queryOneShot('thread-focus', relays, [{ ids: [id] }], {
-            timeoutMs: 3800,
-            targetEose: Math.min(2, relays.length),
-            onEvent: (ev) => {
-              const parsed = parseAgoraNote(ev)
-              if (parsed && parsed.id === id) {
-                focused = parsed
-              }
-            },
-          })
-          await promise
-          if (threadGenRef.current !== gen) return
-          if (focused) {
-            ingestNotesBatch([focused])
-          }
+      const relaySet = new Set<string>()
+      if (relayHints) {
+        for (const raw of relayHints) {
+          const clean = normalizeRelayUrl(raw)
+          if (clean) relaySet.add(clean)
         }
+      }
+      for (const r of socialRelaysRef.current) relaySet.add(r)
+      for (const r of AGORA_SOCIAL_RELAYS) relaySet.add(r)
+      for (const r of AGORA_PROFILE_RELAYS) relaySet.add(r)
+      const relays = Array.from(relaySet).slice(0, 12)
 
-        const rootId = focused?.rootId ?? id
-        const fetchIds = new Set<string>([rootId])
-        if (focused?.replyToId) fetchIds.add(focused.replyToId)
-        for (const existingId of Array.from(fetchIds)) {
-          if (notesRef.current[existingId]) fetchIds.delete(existingId)
-        }
+      let focused = cached
 
-        const replyTargets = Array.from(new Set([rootId, id]))
-        const threadFilters: Filter[] = [
-          { kinds: [KIND_AGORA_NOTE], '#e': replyTargets, limit: 140 },
-        ]
-        if (fetchIds.size > 0) {
-          threadFilters.push({ ids: Array.from(fetchIds) })
-        }
-
-        const foundMap = new Map<string, AgoraNote>()
-        if (focused) foundMap.set(focused.id, focused)
-        for (const existing of Object.values(notesRef.current)) {
-          if (
-            existing.id === rootId ||
-            existing.id === focused?.replyToId ||
-            existing.replyToId === id ||
-            existing.rootId === rootId
-          ) {
-            foundMap.set(existing.id, existing)
-          }
-        }
-
-        const { promise } = queryOneShot('thread-tree', relays, threadFilters, {
+      if (!focused) {
+        const { promise } = queryOneShot('thread-focus', relays, [{ ids: [id] }], {
           timeoutMs: 4200,
           targetEose: Math.min(2, relays.length),
           onEvent: (ev) => {
+            if (!verifyEventCached(ev)) return
             const parsed = parseAgoraNote(ev)
-            if (!parsed) return
-            if (blockedSetRef.current.has(parsed.pubkey)) return
-            foundMap.set(parsed.id, parsed)
+            if (parsed && parsed.id === id && !blockedSetRef.current.has(parsed.pubkey)) {
+              focused = parsed
+            }
           },
         })
         await promise
         if (threadGenRef.current !== gen) return
+        if (focused) {
+          ingestNotesBatch([focused])
+          warmDependenciesForNotes([focused])
+          setThread((prev) =>
+            prev && prev.focusedNoteId === id
+              ? { ...prev, rootNoteId: focused?.rootId ?? id, focusedNote: focused }
+              : prev
+          )
+        }
+      }
 
-        const allFound = Array.from(foundMap.values())
-        ingestNotesBatch(allFound)
+      const rootId = focused?.rootId ?? id
+      const fetchIds = new Set<string>([rootId])
+      if (focused?.replyToId) fetchIds.add(focused.replyToId)
+      for (const existingId of Array.from(fetchIds)) {
+        if (notesRef.current[existingId]) fetchIds.delete(existingId)
+      }
 
-        // Fetch any intermediate missing ancestor links (up to 1 extra hop)
+      const replyTargets = Array.from(new Set([rootId, id]))
+      const threadFilters: Filter[] = [
+        { kinds: [KIND_AGORA_NOTE], '#e': replyTargets, limit: 140 },
+      ]
+      if (fetchIds.size > 0) {
+        threadFilters.push({ ids: Array.from(fetchIds) })
+      }
+
+      const foundMap = new Map<string, AgoraNote>()
+      if (focused && !blockedSetRef.current.has(focused.pubkey)) {
+        foundMap.set(focused.id, focused)
+      }
+      for (const existing of Object.values(notesRef.current)) {
+        if (blockedSetRef.current.has(existing.pubkey)) continue
+        if (
+          existing.id === rootId ||
+          existing.id === focused?.replyToId ||
+          existing.replyToId === id ||
+          existing.rootId === rootId
+        ) {
+          foundMap.set(existing.id, existing)
+        }
+      }
+
+      const { promise } = queryOneShot('thread-tree', relays, threadFilters, {
+        timeoutMs: 4200,
+        targetEose: Math.min(2, relays.length),
+        onEvent: (ev) => {
+          if (!verifyEventCached(ev)) return
+          const parsed = parseAgoraNote(ev)
+          if (!parsed) return
+          if (blockedSetRef.current.has(parsed.pubkey)) return
+          foundMap.set(parsed.id, parsed)
+        },
+      })
+      await promise
+      if (threadGenRef.current !== gen) return
+
+      const allFound = Array.from(foundMap.values())
+      ingestNotesBatch(allFound)
+
+      // Fetch any intermediate missing ancestor links (up to 2 extra hops)
+      for (let hop = 0; hop < 2; hop += 1) {
         const extraMissing = new Set<string>()
         let probe = focused
         const walkGuard = new Set<string>()
@@ -2318,73 +2346,80 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
           }
           probe = parent
         }
-        if (extraMissing.size > 0) {
-          const { promise: ancPromise } = queryOneShot(
-            'thread-anc',
-            relays,
-            [{ ids: Array.from(extraMissing) }],
-            {
-              timeoutMs: 2800,
-              targetEose: 1,
-              onEvent: (ev) => {
-                const parsed = parseAgoraNote(ev)
-                if (parsed && !blockedSetRef.current.has(parsed.pubkey)) {
-                  foundMap.set(parsed.id, parsed)
-                }
-              },
-            }
-          )
-          await ancPromise
-          if (threadGenRef.current !== gen) return
-          ingestNotesBatch(Array.from(foundMap.values()))
-        }
-
-        // Assemble ordered ancestor chain (root -> ... -> direct parent)
-        const ancestors: AgoraNote[] = []
-        const seenAnc = new Set<string>([id])
-        let cursor = focused?.replyToId
-        while (cursor && !seenAnc.has(cursor) && ancestors.length < 16) {
-          seenAnc.add(cursor)
-          const parent = foundMap.get(cursor) ?? notesRef.current[cursor]
-          if (!parent) break
-          if (!blockedSetRef.current.has(parent.pubkey)) {
-            ancestors.unshift(parent)
+        if (extraMissing.size === 0) break
+        const { promise: ancPromise } = queryOneShot(
+          'thread-anc',
+          relays,
+          [{ ids: Array.from(extraMissing) }],
+          {
+            timeoutMs: 2800,
+            targetEose: 1,
+            onEvent: (ev) => {
+              if (!verifyEventCached(ev)) return
+              const parsed = parseAgoraNote(ev)
+              if (parsed && !blockedSetRef.current.has(parsed.pubkey)) {
+                foundMap.set(parsed.id, parsed)
+              }
+            },
           }
-          cursor = parent.replyToId
+        )
+        await ancPromise
+        if (threadGenRef.current !== gen) return
+        ingestNotesBatch(Array.from(foundMap.values()))
+      }
+
+      // Assemble ordered ancestor chain (root -> ... -> direct parent)
+      const ancestors: AgoraNote[] = []
+      const seenAnc = new Set<string>([id])
+      let cursor = focused?.replyToId
+      while (cursor && !seenAnc.has(cursor) && ancestors.length < 16) {
+        seenAnc.add(cursor)
+        const parent = foundMap.get(cursor) ?? notesRef.current[cursor]
+        if (!parent) break
+        if (!blockedSetRef.current.has(parent.pubkey)) {
+          ancestors.unshift(parent)
         }
-        if (
-          rootId !== id &&
-          !seenAnc.has(rootId) &&
-          (foundMap.has(rootId) || notesRef.current[rootId])
-        ) {
-          const rootNote = foundMap.get(rootId) ?? notesRef.current[rootId]
-          if (rootNote && !blockedSetRef.current.has(rootNote.pubkey)) {
-            ancestors.unshift(rootNote)
-            seenAnc.add(rootId)
-          }
+        cursor = parent.replyToId
+      }
+      if (
+        rootId !== id &&
+        !seenAnc.has(rootId) &&
+        (foundMap.has(rootId) || notesRef.current[rootId])
+      ) {
+        const rootNote = foundMap.get(rootId) ?? notesRef.current[rootId]
+        if (rootNote && !blockedSetRef.current.has(rootNote.pubkey)) {
+          ancestors.unshift(rootNote)
+          seenAnc.add(rootId)
         }
+      }
 
-        const replies = Array.from(foundMap.values())
-          .filter((n) => {
-            if (n.id === id || seenAnc.has(n.id)) return false
-            if (blockedSetRef.current.has(n.pubkey)) return false
-            return n.replyToId === id || (rootId === id && n.rootId === id)
-          })
-          .sort((a, b) => a.createdAt - b.createdAt)
-
-        warmDependenciesForNotes([...ancestors, ...(focused ? [focused] : []), ...replies])
-
-        setThread({
-          rootNoteId: rootId,
-          focusedNoteId: id,
-          ancestors,
-          focusedNote: focused,
-          replies,
-          loading: false,
+      const replies = Array.from(foundMap.values())
+        .filter((n) => {
+          if (n.id === id || seenAnc.has(n.id)) return false
+          if (blockedSetRef.current.has(n.pubkey)) return false
+          return n.replyToId === id || (rootId === id && n.rootId === id)
         })
-      })()
+        .sort((a, b) => a.createdAt - b.createdAt)
+
+      warmDependenciesForNotes([...ancestors, ...(focused ? [focused] : []), ...replies])
+
+      setThread({
+        rootNoteId: rootId,
+        focusedNoteId: id,
+        ancestors,
+        focusedNote: focused && !blockedSetRef.current.has(focused.pubkey) ? focused : null,
+        replies,
+        loading: false,
+      })
     },
     [ingestNotesBatch, queryOneShot, warmDependenciesForNotes]
+  )
+
+  const openThread = useCallback(
+    (noteId: string) => {
+      void openThreadById(noteId)
+    },
+    [openThreadById]
   )
 
   const closeThread = useCallback(() => {
@@ -2398,6 +2433,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       if (!isHex64(pubkey)) return
       const pk = pubkey.toLowerCase()
       const gen = ++profileViewGenRef.current
+      setActive(true)
 
       // Seed immediately from cached notes for instant paint
       const cachedAuthorNotes = Object.values(notesRef.current)
@@ -2614,7 +2650,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
           return
         }
         if (target.kind === 'note') {
-          openThread(target.eventId)
+          void openThreadById(target.eventId, target.relays)
           return
         }
         if (target.kind === 'profile') {
@@ -2742,6 +2778,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       ingestProfilesBatch,
       openProfile,
       openThread,
+      openThreadById,
       queryOneShot,
       selectHashtag,
       warmDependenciesForNotes,
@@ -2988,6 +3025,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
 
       thread: visibleThread,
       openThread,
+      openThreadById,
       closeThread,
 
       profileView: visibleProfileView,
@@ -3054,6 +3092,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       markNotificationsRead,
       visibleThread,
       openThread,
+      openThreadById,
       closeThread,
       visibleProfileView,
       openProfile,

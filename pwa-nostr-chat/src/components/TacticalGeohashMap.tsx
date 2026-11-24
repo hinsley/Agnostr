@@ -1,6 +1,5 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import L from 'leaflet'
-import 'leaflet/dist/leaflet.css'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import * as THREE from 'three'
 import type { GeoCoords, PulseRoom, ThemeId } from '../types/protocol.ts'
 import {
   decodeBounds,
@@ -12,8 +11,14 @@ import {
   getRecommendedPrecisionForZoom,
   getZoomForPrecision,
   isValidGeohash,
+  wrapLongitude,
 } from '../lib/geohash.ts'
 import { isTopicChannel } from '../lib/bitchatChannel.ts'
+import {
+  computeSublunarPoint,
+  computeSubsolarPoint,
+  latLonToUnitVec3,
+} from '../lib/astronomy.ts'
 
 export type PrecisionSelection = 'auto' | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
 
@@ -44,55 +49,68 @@ export interface TacticalGeohashMapProps {
   className?: string
 }
 
+const DEG2RAD = Math.PI / 180
+const RAD2DEG = 180 / Math.PI
+const MAX_MERCATOR_LAT = 85.05112878
+
+const MIN_VIRTUAL_ZOOM = 1
+const MAX_VIRTUAL_ZOOM = 15.5
+const MAX_ALTITUDE = 3.6 // distance = 4.6 at zoom 1
+const ALTITUDE_DECAY = 0.52325 // distance ~ 1.004 at zoom 14, ~ 1.0018 at zoom 15.5
+const CAMERA_FOV_DEG = 42
+
+const EARTH_RADIUS = 1.0
+const PATCH_RADIUS = 1.00014
+const OVERLAY_FILL_RADIUS = 1.00045
+const OVERLAY_LINE_RADIUS = 1.00075
+const FOCUS_LINE_RADIUS = 1.00105
+
 const ESRI_DARK_BASE_URL =
   'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'
 const ESRI_DARK_REF_URL =
   'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}'
 const ESRI_TOPO_URL =
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}'
-const TILE_ATTRIBUTION = '&copy; Esri &middot; &copy; OpenStreetMap contributors'
 
-const WORLD_MAX_BOUNDS: L.LatLngBoundsExpression = [
-  [-85, -180],
-  [85, 180],
-]
-
-const VIEWPORT_DEBOUNCE_MS = 140
+const MAX_CACHED_PATCH_TILES = 64
+const MAX_VISIBLE_PATCH_TILES = 12
+const MAX_BUBBLES_PER_GEOHASH = 4
+const BUBBLE_DEMOTE_LIFETIME_MS = 5_000
+const BUBBLE_FADE_DURATION_MS = 380
 const RECENT_BUBBLE_WINDOW_MS = 120_000
+const VIEWPORT_DEBOUNCE_MS = 130
+const SUN_REFRESH_INTERVAL_MS = 30_000
 
 interface MapCanvasPalette {
   accent: string
   accentSecondary: string
-  borderStrong: string
-  gridOpacity: number
-  gridHoverOpacity: number
-  gridHoverFillOpacity: number
   isLight: boolean
+  spaceBg: string
 }
 
 const THEME_FALLBACKS: Record<
   ThemeId,
-  { accent: string; accentSecondary: string; borderStrong: string }
+  { accent: string; accentSecondary: string; spaceBg: string }
 > = {
   phosphor: {
     accent: '#3B82F6',
     accentSecondary: '#38BDF8',
-    borderStrong: 'rgba(255, 255, 255, 0.19)',
+    spaceBg: '#04070E',
   },
   indigo: {
     accent: '#6366F1',
     accentSecondary: '#38BDF8',
-    borderStrong: 'rgba(255, 255, 255, 0.2)',
+    spaceBg: '#050712',
   },
   amber: {
     accent: '#F59E0B',
     accentSecondary: '#FB7185',
-    borderStrong: 'rgba(255, 245, 235, 0.2)',
+    spaceBg: '#090605',
   },
   daylight: {
     accent: '#2563EB',
     accentSecondary: '#0284C7',
-    borderStrong: 'rgba(15, 23, 42, 0.22)',
+    spaceBg: '#0B1324',
   },
 }
 
@@ -108,35 +126,91 @@ function readCanvasPalette(el: HTMLElement | null, theme: ThemeId): MapCanvasPal
   const accent = styles?.getPropertyValue('--accent').trim() || fb.accent
   const accentSecondary =
     styles?.getPropertyValue('--accent-secondary').trim() || fb.accentSecondary
-  const borderStrong = styles?.getPropertyValue('--border-strong').trim() || fb.borderStrong
-  const isLight = theme === 'daylight'
-
   return {
     accent,
     accentSecondary,
-    borderStrong,
-    gridOpacity: isLight ? 0.28 : 0.24,
-    gridHoverOpacity: isLight ? 0.64 : 0.62,
-    gridHoverFillOpacity: isLight ? 0.08 : 0.07,
-    isLight,
+    isLight: theme === 'daylight',
+    spaceBg: fb.spaceBg,
   }
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value))
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v))
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+function wrapDeltaLon(deltaDeg: number): number {
+  let d = ((deltaDeg + 180) % 360 + 360) % 360 - 180
+  if (d === -180 && deltaDeg > 0) d = 180
+  return d
+}
+
+function zoomToDistance(zoom: number): number {
+  const z = clamp(zoom, MIN_VIRTUAL_ZOOM, MAX_VIRTUAL_ZOOM)
+  return EARTH_RADIUS + MAX_ALTITUDE * Math.exp(-ALTITUDE_DECAY * (z - 1))
+}
+
+function latLonToVec3(latDeg: number, lonDeg: number, radius = EARTH_RADIUS): THREE.Vector3 {
+  const [x, y, z] = latLonToUnitVec3(latDeg, lonDeg)
+  return new THREE.Vector3(x * radius, y * radius, z * radius)
+}
+
+function unitVec3ToLatLon(v: THREE.Vector3): { lat: number; lon: number } {
+  const len = v.length() || 1
+  const nx = v.x / len
+  const ny = clamp(v.y / len, -1, 1)
+  const nz = v.z / len
+  const lat = Math.asin(ny) * RAD2DEG
+  const lon = Math.atan2(-nz, nx) * RAD2DEG
+  return { lat, lon }
+}
+
+function latToMercYNorm(latDeg: number): number {
+  const clamped = clamp(latDeg, -MAX_MERCATOR_LAT, MAX_MERCATOR_LAT)
+  const rad = clamped * DEG2RAD
+  return (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2
+}
+
+function mercYNormToLat(yNorm: number): number {
+  return Math.atan(Math.sinh(Math.PI * (1 - 2 * yNorm))) * RAD2DEG
+}
+
+function lonToMercXNorm(lonDeg: number): number {
+  return (wrapLongitude(lonDeg) + 180) / 360
+}
+
+function tileUrl(template: string, z: number, x: number, y: number): string {
+  return template
+    .replace('{z}', String(z))
+    .replace('{x}', String(x))
+    .replace('{y}', String(y))
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
 }
 
 /**
- * Formats a raw message preview for compact map speech bubbles.
- * Collapses whitespace, shortens Cashu tokens & URLs, and caps length cleanly at ~52 chars.
+ * Computes exact visible central angular half-span (radians) on the unit sphere
+ * from camera distance `d` and vertical FOV half-angle `halfFovRad`.
+ */
+function computeVisibleHalfAngleRad(distance: number, halfFovRad: number): number {
+  const sinAlpha = Math.sin(halfFovRad)
+  const k = distance * sinAlpha
+  if (k < 0.999) {
+    return Math.max(0.0005, Math.asin(k) - halfFovRad)
+  }
+  return Math.acos(clamp(1 / Math.max(1.0001, distance), -1, 1))
+}
+
+/**
+ * Formats a raw message preview for compact globe speech bubbles.
  */
 function formatBubbleSnippet(preview: string): string {
   if (!preview) return ''
@@ -157,29 +231,694 @@ function formatBubbleSender(sender: string): string {
   return `${cleaned.slice(0, 10).trimEnd()}…`
 }
 
-function getBoundsTuple(geohash: string): L.LatLngBoundsExpression {
-  const b = decodeBounds(geohash)
-  return [
-    [Math.max(-85, b.latMin), b.lonMin],
-    [Math.min(85, b.latMax), b.lonMax],
+// ---------------------------------------------------------------------------
+// GLSL Shaders: Earth Day/Night + Twilight + Atmosphere + Moon + Starfield
+// ---------------------------------------------------------------------------
+
+const EARTH_VERTEX_SHADER = `
+  varying vec2 vUv;
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vUv = uv;
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vWorldPos = worldPos.xyz;
+    vWorldNormal = normalize(mat3(modelMatrix) * normal);
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+  }
+`
+
+const EARTH_FRAGMENT_SHADER = `
+  uniform sampler2D uMap;
+  uniform vec3 uSunDir;
+  uniform float uIsLight;
+  uniform float uOpacity;
+
+  varying vec2 vUv;
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vec3 texel = texture2D(uMap, vUv).rgb;
+    vec3 N = normalize(vWorldNormal);
+    vec3 L = normalize(uSunDir);
+    vec3 V = normalize(cameraPosition - vWorldPos);
+
+    float ndotl = dot(N, L);
+    float dayFactor = smoothstep(-0.14, 0.18, ndotl);
+    float twilight = exp(-pow((ndotl - 0.01) / 0.13, 2.0));
+
+    // Keep the night hemisphere softly illuminated in deep navy-slate so map labels & geohashes stay effortlessly legible
+    float nightAmbient = uIsLight > 0.5 ? 0.50 : 0.36;
+    vec3 nightTint = uIsLight > 0.5 ? vec3(0.76, 0.84, 0.98) : vec3(0.72, 0.84, 1.0);
+    vec3 nightColor = texel * nightAmbient * nightTint;
+
+    // Crisp sunlit hemisphere with slight warm sun balance
+    vec3 dayTint = uIsLight > 0.5 ? vec3(1.03, 1.02, 0.99) : vec3(1.16, 1.15, 1.12);
+    vec3 dayColor = texel * dayTint;
+
+    vec3 color = mix(nightColor, dayColor, dayFactor);
+
+    // Subtle warm golden-amber twilight scatter right along the day/night terminator
+    float twilightStrength = uIsLight > 0.5 ? 0.09 : 0.14;
+    color += vec3(0.96, 0.52, 0.22) * twilight * twilightStrength;
+
+    // Subtle specular glint on sunlit ocean surfaces (dark/blue-dominant pixels)
+    float luma = dot(texel, vec3(0.299, 0.587, 0.114));
+    float oceanMask = uIsLight > 0.5
+      ? smoothstep(0.02, 0.12, texel.b - texel.r * 0.85)
+      : smoothstep(0.26, 0.10, luma);
+    vec3 H = normalize(L + V);
+    float spec = pow(max(dot(N, H), 0.0), 30.0) * oceanMask * dayFactor;
+    color += vec3(0.92, 0.96, 1.0) * spec * 0.16;
+
+    // Gentle sunlit atmospheric limb scatter
+    float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.4);
+    float rimSun = 0.22 + 0.78 * smoothstep(-0.26, 0.35, ndotl);
+    color += vec3(0.32, 0.62, 1.0) * fresnel * rimSun * 0.28;
+
+    gl_FragColor = vec4(color, uOpacity);
+  }
+`
+
+const ATMOSPHERE_VERTEX_SHADER = `
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vWorldPos = worldPos.xyz;
+    vWorldNormal = normalize(mat3(modelMatrix) * normal);
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+  }
+`
+
+const ATMOSPHERE_FRAGMENT_SHADER = `
+  uniform vec3 uSunDir;
+
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(cameraPosition - vWorldPos);
+    vec3 L = normalize(uSunDir);
+
+    // BackSide shell: normal points outward, V points toward camera -> -dot(N, V) peaks softly around silhouette edge
+    float edge = clamp(0.68 - dot(-N, V), 0.0, 1.0);
+    float rim = pow(edge, 3.2);
+    float ndotl = dot(N, L);
+    float sunSide = 0.24 + 0.76 * smoothstep(-0.32, 0.42, ndotl);
+    float twilight = exp(-pow((ndotl + 0.04) / 0.22, 2.0));
+
+    vec3 haloColor = mix(vec3(0.28, 0.62, 1.0), vec3(0.98, 0.58, 0.28), twilight * 0.35);
+    float alpha = rim * sunSide * 0.62;
+    gl_FragColor = vec4(haloColor * alpha, alpha);
+  }
+`
+
+const MOON_VERTEX_SHADER = `
+  varying vec2 vUv;
+  varying vec3 vWorldNormal;
+
+  void main() {
+    vUv = uv;
+    vWorldNormal = normalize(mat3(modelMatrix) * normal);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`
+
+const MOON_FRAGMENT_SHADER = `
+  uniform sampler2D uMap;
+  uniform vec3 uSunDir;
+
+  varying vec2 vUv;
+  varying vec3 vWorldNormal;
+
+  void main() {
+    vec3 albedo = texture2D(uMap, vUv).rgb;
+    vec3 N = normalize(vWorldNormal);
+    vec3 L = normalize(uSunDir);
+    float ndotl = dot(N, L);
+    float lit = smoothstep(-0.08, 0.14, ndotl);
+    float shade = mix(0.08, 1.15, lit);
+    vec3 color = albedo * shade;
+    // Slight cool earthshine on the unlit lunar limb
+    color += vec3(0.04, 0.06, 0.10) * (1.0 - lit);
+    gl_FragColor = vec4(color, 1.0);
+  }
+`
+
+const STAR_VERTEX_SHADER = `
+  attribute float aSize;
+  attribute vec3 aColor;
+  varying vec3 vColor;
+
+  void main() {
+    vColor = aColor;
+    vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = aSize;
+    gl_Position = projectionMatrix * mvPos;
+  }
+`
+
+const STAR_FRAGMENT_SHADER = `
+  varying vec3 vColor;
+
+  void main() {
+    vec2 p = gl_PointCoord - vec2(0.5);
+    float d2 = dot(p, p);
+    if (d2 > 0.25) discard;
+    float alpha = exp(-d2 * 14.0);
+    gl_FragColor = vec4(vColor, alpha);
+  }
+`
+
+// ---------------------------------------------------------------------------
+// Procedural Textures & Starfield / Curved Patch / Overlay Geometry Builders
+// ---------------------------------------------------------------------------
+
+function paintProceduralBaseMap(canvas: HTMLCanvasElement, isLight: boolean): void {
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const w = canvas.width
+  const h = canvas.height
+
+  // Deep ocean vertical gradient (polar subtle tint -> equatorial ocean)
+  const grad = ctx.createLinearGradient(0, 0, 0, h)
+  if (isLight) {
+    grad.addColorStop(0, '#D9E4EC')
+    grad.addColorStop(0.08, '#9FC5DF')
+    grad.addColorStop(0.5, '#86B6D8')
+    grad.addColorStop(0.92, '#9FC5DF')
+    grad.addColorStop(1, '#DCE5ED')
+  } else {
+    grad.addColorStop(0, '#1B2535')
+    grad.addColorStop(0.08, '#141D2B')
+    grad.addColorStop(0.5, '#121B29')
+    grad.addColorStop(0.92, '#141D2B')
+    grad.addColorStop(1, '#1B2535')
+  }
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, w, h)
+
+  // Subtle equirectangular lat/lon graticule so the globe looks sharp on frame 1 even offline
+  ctx.strokeStyle = isLight ? 'rgba(30, 58, 95, 0.13)' : 'rgba(148, 178, 218, 0.12)'
+  ctx.lineWidth = 1
+  for (let lon = -150; lon <= 180; lon += 30) {
+    const x = ((lon + 180) / 360) * w
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, h)
+    ctx.stroke()
+  }
+  for (let lat = -60; lat <= 60; lat += 30) {
+    const y = ((90 - lat) / 180) * h
+    ctx.beginPath()
+    ctx.moveTo(0, y)
+    ctx.lineTo(w, y)
+    ctx.stroke()
+  }
+  // Slightly stronger equator line
+  ctx.strokeStyle = isLight ? 'rgba(30, 58, 95, 0.22)' : 'rgba(148, 178, 218, 0.2)'
+  ctx.beginPath()
+  ctx.moveTo(0, h / 2)
+  ctx.lineTo(w, h / 2)
+  ctx.stroke()
+}
+
+/**
+ * Composites a Web Mercator slippy tile `(z, tx, ty)` onto an equirectangular canvas
+ * using exact row-wise Web Mercator -> Equirectangular inverse projection.
+ */
+function compositeMercatorTileOntoEquirect(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  z: number,
+  tx: number,
+  ty: number,
+  canvasW: number,
+  canvasH: number,
+): void {
+  const n = 1 << z
+  const dstX = (tx / n) * canvasW
+  const dstW = canvasW / n + 0.5 // tiny overlap prevents sub-pixel seam lines
+
+  const latNorth = mercYNormToLat(ty / n)
+  const latSouth = mercYNormToLat((ty + 1) / n)
+  const pyTop = Math.max(0, Math.floor(((90 - latNorth) / 180) * canvasH))
+  const pyBot = Math.min(canvasH - 1, Math.ceil(((90 - latSouth) / 180) * canvasH))
+
+  const imgW = img.naturalWidth || img.width || 256
+  const imgH = img.naturalHeight || img.height || 256
+
+  for (let py = pyTop; py <= pyBot; py++) {
+    const lat0 = 90 - (py / canvasH) * 180
+    const lat1 = 90 - ((py + 1) / canvasH) * 180
+    if (lat0 < -MAX_MERCATOR_LAT || lat1 > MAX_MERCATOR_LAT) continue
+    const yNorm0 = latToMercYNorm(clamp(lat0, latSouth, latNorth))
+    const yNorm1 = latToMercYNorm(clamp(lat1, latSouth, latNorth))
+    const srcY0 = clamp((yNorm0 * n - ty) * imgH, 0, imgH - 0.5)
+    const srcY1 = clamp((yNorm1 * n - ty) * imgH, srcY0 + 0.5, imgH)
+    const srcH = Math.max(0.5, srcY1 - srcY0)
+    ctx.drawImage(img, 0, srcY0, imgW, srcH, dstX, py, dstW, 1.2)
+  }
+}
+
+function createSunCoronaTexture(): THREE.CanvasTexture {
+  const size = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    const cx = size / 2
+    const grad = ctx.createRadialGradient(cx, cx, 0, cx, cx, cx)
+    grad.addColorStop(0.0, 'rgba(255, 253, 240, 1.0)')
+    grad.addColorStop(0.16, 'rgba(255, 236, 178, 0.88)')
+    grad.addColorStop(0.38, 'rgba(255, 190, 96, 0.36)')
+    grad.addColorStop(0.68, 'rgba(255, 145, 58, 0.10)')
+    grad.addColorStop(1.0, 'rgba(255, 120, 40, 0.0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(0, 0, size, size)
+  }
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.needsUpdate = true
+  return tex
+}
+
+function createLunarSurfaceTexture(): THREE.CanvasTexture {
+  const w = 256
+  const h = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    const rand = mulberry32(4201969)
+    // Dusty highland base
+    ctx.fillStyle = '#B7B5B0'
+    ctx.fillRect(0, 0, w, h)
+
+    // Broad dark basaltic maria basins
+    for (let i = 0; i < 18; i++) {
+      const mx = rand() * w
+      const my = (0.18 + rand() * 0.64) * h
+      const mr = 10 + rand() * 26
+      const g = ctx.createRadialGradient(mx, my, mr * 0.15, mx, my, mr)
+      g.addColorStop(0, 'rgba(92, 92, 96, 0.52)')
+      g.addColorStop(0.7, 'rgba(110, 110, 114, 0.25)')
+      g.addColorStop(1, 'rgba(110, 110, 114, 0)')
+      ctx.fillStyle = g
+      ctx.beginPath()
+      ctx.arc(mx, my, mr, 0, Math.PI * 2)
+      ctx.fill()
+    }
+
+    // Fine impact craters (dark floor + subtle bright rim)
+    for (let i = 0; i < 160; i++) {
+      const cx = rand() * w
+      const cy = rand() * h
+      const r = 1.2 + Math.pow(rand(), 2.2) * 8.5
+      ctx.fillStyle = `rgba(74, 74, 78, ${0.14 + rand() * 0.22})`
+      ctx.beginPath()
+      ctx.arc(cx, cy, r, 0, Math.PI * 2)
+      ctx.fill()
+
+      ctx.strokeStyle = `rgba(222, 220, 214, ${0.16 + rand() * 0.18})`
+      ctx.lineWidth = 0.8
+      ctx.beginPath()
+      ctx.arc(cx - r * 0.12, cy - r * 0.12, r * 0.94, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.wrapS = THREE.RepeatWrapping
+  tex.wrapT = THREE.ClampToEdgeWrapping
+  tex.needsUpdate = true
+  return tex
+}
+
+function createStarfieldPoints(pixelRatio: number): {
+  points: THREE.Points
+  geometry: THREE.BufferGeometry
+  material: THREE.ShaderMaterial
+} {
+  const starCount = 2400
+  const planetGlints = 4
+  const total = starCount + planetGlints
+  const positions = new Float32Array(total * 3)
+  const colors = new Float32Array(total * 3)
+  const sizes = new Float32Array(total)
+
+  const rand = mulberry32(9021042)
+  // Milky Way galactic band tilted ~62 degrees from Earth's equator
+  const tilt = 62 * DEG2RAD
+  const cosTilt = Math.cos(tilt)
+  const sinTilt = Math.sin(tilt)
+
+  const spectralColors = [
+    new THREE.Color('#CFE4FF'), // O/B blue-white
+    new THREE.Color('#EEF4FF'), // A white-blue
+    new THREE.Color('#FFFFFF'), // F pure white
+    new THREE.Color('#FFF4DE'), // G warm solar cream
+    new THREE.Color('#FFD9A0'), // K warm gold
   ]
+
+  for (let i = 0; i < starCount; i++) {
+    const isBand = rand() < 0.44
+    let x: number
+    let y: number
+    let z: number
+
+    if (isBand) {
+      // Concentrated Gaussian band around tilted galactic plane
+      const az = rand() * Math.PI * 2
+      const u1 = Math.max(1e-6, rand())
+      const u2 = rand()
+      const gauss = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2)
+      const lat = clamp(gauss * 0.22, -Math.PI / 2 + 0.02, Math.PI / 2 - 0.02)
+      const gx = Math.cos(lat) * Math.cos(az)
+      const gy = Math.sin(lat)
+      const gz = Math.cos(lat) * Math.sin(az)
+      // Tilt around X axis
+      x = gx
+      y = gy * cosTilt - gz * sinTilt
+      z = gy * sinTilt + gz * cosTilt
+    } else {
+      // Uniform isotropic sphere
+      const u = rand() * 2 - 1
+      const az = rand() * Math.PI * 2
+      const s = Math.sqrt(Math.max(0, 1 - u * u))
+      x = s * Math.cos(az)
+      y = u
+      z = s * Math.sin(az)
+    }
+
+    const r = 42 + rand() * 5
+    positions[i * 3] = x * r
+    positions[i * 3 + 1] = y * r
+    positions[i * 3 + 2] = z * r
+
+    const specIdx = Math.min(
+      spectralColors.length - 1,
+      Math.floor(Math.pow(rand(), 0.85) * spectralColors.length),
+    )
+    const c = spectralColors[specIdx]
+    const brightness = 0.42 + Math.pow(rand(), 2.2) * 0.58
+    colors[i * 3] = c.r * brightness
+    colors[i * 3 + 1] = c.g * brightness
+    colors[i * 3 + 2] = c.b * brightness
+
+    const basePx = 1.2 + Math.pow(rand(), 3.6) * 2.9
+    sizes[i] = basePx * Math.min(2, pixelRatio)
+  }
+
+  // 4 subtle planetary glints on the ecliptic (Venus, Mars, Jupiter, Saturn)
+  const planets: Array<{ lat: number; lon: number; color: string; size: number }> = [
+    { lat: 14, lon: -42, color: '#FFF7DF', size: 4.8 },
+    { lat: -11, lon: 118, color: '#FFBA8C', size: 4.2 },
+    { lat: 19, lon: 48, color: '#FFE6B8', size: 4.6 },
+    { lat: -17, lon: -146, color: '#B7DEFF', size: 3.9 },
+  ]
+  for (let p = 0; p < planets.length; p++) {
+    const idx = starCount + p
+    const pl = planets[p]
+    const [px, py, pz] = latLonToUnitVec3(pl.lat, pl.lon)
+    positions[idx * 3] = px * 40
+    positions[idx * 3 + 1] = py * 40
+    positions[idx * 3 + 2] = pz * 40
+    const col = new THREE.Color(pl.color)
+    colors[idx * 3] = col.r
+    colors[idx * 3 + 1] = col.g
+    colors[idx * 3 + 2] = col.b
+    sizes[idx] = pl.size * Math.min(2, pixelRatio)
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setAttribute('aColor', new THREE.BufferAttribute(colors, 3))
+  geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1))
+
+  const material = new THREE.ShaderMaterial({
+    vertexShader: STAR_VERTEX_SHADER,
+    fragmentShader: STAR_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  })
+
+  const points = new THREE.Points(geometry, material)
+  points.frustumCulled = false
+  points.renderOrder = -10
+  return { points, geometry, material }
 }
 
-interface ScreenBox {
-  left: number
-  right: number
-  top: number
-  bottom: number
+/**
+ * Builds a curved spherical patch matching exact Web Mercator tile `(z, tx, ty)` coordinates.
+ */
+function createMercatorPatchGeometry(z: number, tx: number, ty: number): THREE.BufferGeometry {
+  const n = 1 << z
+  const seg = z <= 4 ? 10 : z <= 6 ? 6 : 4
+  const stride = seg + 1
+  const vertexCount = stride * stride
+  const positions = new Float32Array(vertexCount * 3)
+  const normals = new Float32Array(vertexCount * 3)
+  const uvs = new Float32Array(vertexCount * 2)
+
+  let vi = 0
+  let ui = 0
+  for (let iv = 0; iv <= seg; iv++) {
+    const v = iv / seg // v=0 south, v=1 north
+    const mercY = (ty + (1 - v)) / n
+    const lat = mercYNormToLat(mercY)
+    for (let iu = 0; iu <= seg; iu++) {
+      const u = iu / seg // u=0 west, u=1 east
+      const lon = ((tx + u) / n) * 360 - 180
+      const [nx, ny, nz] = latLonToUnitVec3(lat, lon)
+      positions[vi] = nx * PATCH_RADIUS
+      positions[vi + 1] = ny * PATCH_RADIUS
+      positions[vi + 2] = nz * PATCH_RADIUS
+      normals[vi] = nx
+      normals[vi + 1] = ny
+      normals[vi + 2] = nz
+      uvs[ui] = u
+      uvs[ui + 1] = v
+      vi += 3
+      ui += 2
+    }
+  }
+
+  const indices: number[] = []
+  for (let iv = 0; iv < seg; iv++) {
+    for (let iu = 0; iu < seg; iu++) {
+      const i00 = iv * stride + iu
+      const i10 = i00 + 1
+      const i01 = i00 + stride
+      const i11 = i01 + 1
+      // Outward-facing CCW winding: East x North = Outward Normal
+      indices.push(i00, i10, i11)
+      indices.push(i00, i11, i01)
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
+  geometry.setIndex(indices)
+  return geometry
 }
 
-function boxesOverlap(a: ScreenBox, b: ScreenBox, gap: number): boolean {
-  return (
-    a.left < b.right + gap &&
-    a.right + gap > b.left &&
-    a.top < b.bottom + gap &&
-    a.bottom + gap > b.top
-  )
+/**
+ * Appends curved border line segments for a lat/lon bounding box onto `out` float array.
+ */
+function pushCurvedRectSegments(
+  out: number[],
+  latMin: number,
+  latMax: number,
+  lonMin: number,
+  lonMax: number,
+  radius: number,
+): void {
+  const cLatMin = clamp(latMin, -85, 85)
+  const cLatMax = clamp(latMax, -85, 85)
+  const span = Math.max(Math.abs(cLatMax - cLatMin), Math.abs(lonMax - lonMin))
+  const steps = span > 25 ? 8 : span > 8 ? 4 : span > 2 ? 2 : 1
+
+  const pushArc = (la0: number, lo0: number, la1: number, lo1: number) => {
+    let prev = latLonToUnitVec3(la0, lo0)
+    for (let s = 1; s <= steps; s++) {
+      const t = s / steps
+      const curr = latLonToUnitVec3(la0 + (la1 - la0) * t, lo0 + (lo1 - lo0) * t)
+      out.push(
+        prev[0] * radius,
+        prev[1] * radius,
+        prev[2] * radius,
+        curr[0] * radius,
+        curr[1] * radius,
+        curr[2] * radius,
+      )
+      prev = curr
+    }
+  }
+
+  pushArc(cLatMin, lonMin, cLatMin, lonMax) // South edge
+  pushArc(cLatMin, lonMax, cLatMax, lonMax) // East edge
+  pushArc(cLatMax, lonMax, cLatMax, lonMin) // North edge
+  pushArc(cLatMax, lonMin, cLatMin, lonMin) // West edge
 }
+
+/**
+ * Builds a curved filled spherical mesh for one or more lat/lon boxes.
+ */
+function buildCurvedRectFillGeometry(
+  boxes: Array<{ latMin: number; latMax: number; lonMin: number; lonMax: number }>,
+  radius: number,
+): THREE.BufferGeometry {
+  const positions: number[] = []
+  const indices: number[] = []
+  let baseVertex = 0
+
+  for (const box of boxes) {
+    const latMin = clamp(box.latMin, -85, 85)
+    const latMax = clamp(box.latMax, -85, 85)
+    const span = Math.max(Math.abs(latMax - latMin), Math.abs(box.lonMax - box.lonMin))
+    const seg = span > 25 ? 6 : span > 8 ? 3 : 1
+    const stride = seg + 1
+
+    for (let iv = 0; iv <= seg; iv++) {
+      const lat = latMin + ((latMax - latMin) * iv) / seg
+      for (let iu = 0; iu <= seg; iu++) {
+        const lon = box.lonMin + ((box.lonMax - box.lonMin) * iu) / seg
+        const [x, y, z] = latLonToUnitVec3(lat, lon)
+        positions.push(x * radius, y * radius, z * radius)
+      }
+    }
+
+    for (let iv = 0; iv < seg; iv++) {
+      for (let iu = 0; iu < seg; iu++) {
+        const i00 = baseVertex + iv * stride + iu
+        const i10 = i00 + 1
+        const i01 = i00 + stride
+        const i11 = i01 + 1
+        indices.push(i00, i10, i11, i00, i11, i01)
+      }
+    }
+    baseVertex += stride * stride
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geometry.setIndex(indices)
+  return geometry
+}
+
+function buildCurvedTeleportArcGeometry(
+  from: GeoCoords,
+  to: GeoCoords,
+): THREE.BufferGeometry {
+  const a = latLonToVec3(from.lat, from.lon, 1).normalize()
+  const b = latLonToVec3(to.lat, to.lon, 1).normalize()
+  const dot = clamp(a.dot(b), -1, 1)
+  const omega = Math.acos(dot)
+  const steps = 40
+  const maxLift = clamp(omega * 0.09, 0.006, 0.22)
+  const positions = new Float32Array((steps + 1) * 3)
+
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps
+    let p: THREE.Vector3
+    if (omega < 1e-4) {
+      p = a.clone().lerp(b, t).normalize()
+    } else {
+      const sinOmega = Math.sin(omega)
+      const w0 = Math.sin((1 - t) * omega) / sinOmega
+      const w1 = Math.sin(t * omega) / sinOmega
+      p = a.clone().multiplyScalar(w0).addScaledVector(b, w1).normalize()
+    }
+    const r = FOCUS_LINE_RADIUS + Math.sin(t * Math.PI) * maxLift
+    positions[i * 3] = p.x * r
+    positions[i * 3 + 1] = p.y * r
+    positions[i * 3 + 2] = p.z * r
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  return geometry
+}
+
+function disposeObject3D(obj: THREE.Object3D | null): void {
+  if (!obj) return
+  obj.traverse((child) => {
+    const mesh = child as THREE.Mesh
+    if (mesh.geometry) {
+      mesh.geometry.dispose()
+    }
+    const mat = mesh.material
+    if (Array.isArray(mat)) {
+      for (const m of mat) m.dispose()
+    } else if (mat) {
+      mat.dispose()
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Per-Geohash Upward-Queued Speech Bubbles Types
+// ---------------------------------------------------------------------------
+
+interface QueuedGlobeBubble {
+  key: string
+  geohash: string
+  sender: string
+  snippet: string
+  tsMs: number
+  demotedAtMs: number | null
+  fadingOut: boolean
+  fadeStartedAtMs: number | null
+}
+
+interface GlobeBubbleStackRender {
+  geohash: string
+  center: GeoCoords
+  bubbles: QueuedGlobeBubble[]
+  latestTsMs: number
+  isFocused: boolean
+}
+
+interface PatchTileCacheEntry {
+  key: string
+  z: number
+  tx: number
+  ty: number
+  kind: 'dark' | 'light'
+  mesh: THREE.Mesh
+  geometry: THREE.BufferGeometry
+  material: THREE.ShaderMaterial
+  texture: THREE.CanvasTexture
+  canvas: HTMLCanvasElement
+  loaded: boolean
+  lastUsedMs: number
+}
+
+interface CameraState {
+  lat: number
+  lon: number
+  zoom: number
+  targetLat: number
+  targetLon: number
+  targetZoom: number
+  velLat: number
+  velLon: number
+  isFlying: boolean
+  dragging: boolean
+}
+
+// ---------------------------------------------------------------------------
+// Main 3D Three.js Earth Globe Component
+// ---------------------------------------------------------------------------
 
 export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalGeohashMapProps>(
   function TacticalGeohashMap(
@@ -202,28 +941,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     },
     ref,
   ) {
-    const containerRef = useRef<HTMLDivElement | null>(null)
-    const mapRef = useRef<L.Map | null>(null)
-    const canvasRendererRef = useRef<L.Canvas | null>(null)
-    const tileLayerRef = useRef<L.TileLayer | null>(null)
-    const refTileLayerRef = useRef<L.TileLayer | null>(null)
-    const gridLayerRef = useRef<L.LayerGroup | null>(null)
-    const pulseLayerRef = useRef<L.LayerGroup | null>(null)
-    const bubbleLayerRef = useRef<L.LayerGroup | null>(null)
-    const subZoneLayerRef = useRef<L.LayerGroup | null>(null)
-    const focusLayerRef = useRef<L.LayerGroup | null>(null)
-    const gpsLayerRef = useRef<L.LayerGroup | null>(null)
-    const cancelWheelZoomRef = useRef<() => void>(() => {})
-    const seenBubbleMsgRef = useRef<Map<string, string>>(new Map())
-    const hasSeededBubblesRef = useRef(false)
-    const bubbleMarkersRef = useRef<
-      Map<string, { marker: L.Marker; msgKey: string }>
-    >(new Map())
+    const hostRef = useRef<HTMLDivElement | null>(null)
+    const canvasWrapRef = useRef<HTMLDivElement | null>(null)
 
+    const [webglError, setWebglError] = useState(false)
     const [hoverHud, setHoverHud] = useState<{ geohash: string; coords: string } | null>(null)
     const [viewportTick, setViewportTick] = useState(0)
+    const [bubbleStacks, setBubbleStacks] = useState<GlobeBubbleStackRender[]>([])
 
-    // Keep latest callbacks & props in refs so Leaflet event listeners never go stale
     const safeActiveGeohash =
       activeGeohash && !isTopicChannel(activeGeohash) && isValidGeohash(activeGeohash)
         ? activeGeohash
@@ -233,13 +958,20 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         ? selectedGeohash
         : null
 
+    // Keep fresh callbacks & reactive props in refs for rAF & Three.js event listeners
     const onSelectRef = useRef(onSelectGeohash)
     const onTuneRef = useRef(onTuneGeohash)
     const onViewportInfoRef = useRef(onViewportInfoChange)
     const precisionModeRef = useRef(precisionMode)
     const modeRef = useRef(mode)
-    const prevActiveRef = useRef<string>(safeActiveGeohash)
-    const tileKindRef = useRef<'dark' | 'light'>(theme === 'daylight' ? 'light' : 'dark')
+    const themeRef = useRef(theme)
+    const prevActiveRef = useRef(safeActiveGeohash)
+    const activeGeohashRef = useRef(safeActiveGeohash)
+    const selectedGeohashRef = useRef(safeSelectedGeohash)
+    const showSubZonesRef = useRef(showSubZones)
+    const showPulseRef = useRef(showPulse)
+    const showBubblesRef = useRef(showBubbles)
+    const userCoordsRef = useRef(userCoords)
 
     useEffect(() => {
       onSelectRef.current = onSelectGeohash
@@ -247,174 +979,575 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       onViewportInfoRef.current = onViewportInfoChange
       precisionModeRef.current = precisionMode
       modeRef.current = mode
-    }, [onSelectGeohash, onTuneGeohash, onViewportInfoChange, precisionMode, mode])
+      themeRef.current = theme
+      activeGeohashRef.current = safeActiveGeohash
+      selectedGeohashRef.current = safeSelectedGeohash
+      showSubZonesRef.current = showSubZones
+      showPulseRef.current = showPulse
+      showBubblesRef.current = showBubbles
+      userCoordsRef.current = userCoords
+    }, [
+      onSelectGeohash,
+      onTuneGeohash,
+      onViewportInfoChange,
+      precisionMode,
+      mode,
+      theme,
+      safeActiveGeohash,
+      safeSelectedGeohash,
+      showSubZones,
+      showPulse,
+      showBubbles,
+      userCoords,
+    ])
 
-    const flyToCellInternal = (
-      map: L.Map,
-      geohash: string,
-      options?: { animate?: boolean; zoom?: number },
-    ) => {
-      cancelWheelZoomRef.current()
-      const center = decodeCenter(geohash)
-      const targetZoom =
-        options?.zoom ??
-        Math.max(
-          2,
-          Math.min(
-            19,
-            modeRef.current === 'compact'
-              ? Math.max(2, getZoomForPrecision(geohash.length) - 1)
-              : getZoomForPrecision(geohash.length),
-          ),
-        )
-      if (options?.animate === false) {
-        map.setView([center.lat, center.lon], targetZoom, { animate: false })
-      } else {
-        map.flyTo([center.lat, center.lon], targetZoom, {
-          duration: 0.55,
-          easeLinearity: 0.25,
+    // Scene & Three.js runtime refs (initialized once to active cell)
+    const initialCamCenter = decodeCenter(safeActiveGeohash)
+    const initialCamZoom = clamp(
+      mode === 'compact'
+        ? Math.max(2, getZoomForPrecision(safeActiveGeohash.length) - 1)
+        : Math.min(getZoomForPrecision(safeActiveGeohash.length), 5.2),
+      MIN_VIRTUAL_ZOOM,
+      MAX_VIRTUAL_ZOOM,
+    )
+    const cameraStateRef = useRef<CameraState>({
+      lat: initialCamCenter.lat,
+      lon: initialCamCenter.lon,
+      zoom: initialCamZoom,
+      targetLat: initialCamCenter.lat,
+      targetLon: initialCamCenter.lon,
+      targetZoom: initialCamZoom,
+      velLat: 0,
+      velLon: 0,
+      isFlying: false,
+      dragging: false,
+    })
+
+    const sceneRefs = useRef<{
+      scene: THREE.Scene
+      camera: THREE.PerspectiveCamera
+      renderer: THREE.WebGLRenderer
+      earthMesh: THREE.Mesh
+      earthMaterial: THREE.ShaderMaterial
+      baseCanvas: HTMLCanvasElement
+      baseTexture: THREE.CanvasTexture
+      sunDir: THREE.Vector3
+      sunGroup: THREE.Group
+      moonMesh: THREE.Mesh
+      moonMaterial: THREE.ShaderMaterial
+      atmosphereMaterial: THREE.ShaderMaterial
+      patchGroup: THREE.Group
+      patchCache: Map<string, PatchTileCacheEntry>
+      gridGroup: THREE.Group
+      subZoneGroup: THREE.Group
+      pulseGroup: THREE.Group
+      focusGroup: THREE.Group
+      hoverGroup: THREE.Group
+      gpsGroup: THREE.Group
+      tileKind: 'dark' | 'light'
+      baseLoadGen: number
+      hoveredGeohash: string | null
+      scheduleViewportEmit: () => void
+      reloadBaseTiles: (kind: 'dark' | 'light') => void
+      updatePatchTiles: () => void
+      updateHoverMesh: (gh: string | null) => void
+    } | null>(null)
+
+    // Projected DOM overlay refs (updated directly in rAF for zero-re-render 60fps positioning)
+    const bubbleStackElsRef = useRef<Map<string, HTMLDivElement>>(new Map())
+    const beaconElsRef = useRef<Map<string, HTMLButtonElement>>(new Map())
+    const activePillElRef = useRef<HTMLDivElement | null>(null)
+    const selectedPillElRef = useRef<HTMLDivElement | null>(null)
+    const gpsBeaconElRef = useRef<HTMLDivElement | null>(null)
+    const bubbleStacksRef = useRef<GlobeBubbleStackRender[]>([])
+    const visiblePulseRoomsRef = useRef<PulseRoom[]>([])
+
+    // Queue state for per-geohash upward-sliding speech bubbles
+    const bubbleQueuesRef = useRef<Map<string, QueuedGlobeBubble[]>>(new Map())
+    const evictedBubbleKeysRef = useRef<Map<string, Set<string>>>(new Map())
+    const seededRoomsRef = useRef<Set<string>>(new Set())
+
+    const validPulseRooms = useMemo(
+      () =>
+        showPulse
+          ? pulseRooms
+              .filter((r) => !isTopicChannel(r.geohash) && isValidGeohash(r.geohash))
+              .slice(0, mode === 'compact' ? 24 : 48)
+          : [],
+      [showPulse, pulseRooms, mode],
+    )
+
+    useEffect(() => {
+      visiblePulseRoomsRef.current = validPulseRooms
+    }, [validPulseRooms])
+
+    useEffect(() => {
+      bubbleStacksRef.current = bubbleStacks
+    }, [bubbleStacks])
+
+    const subZoneParent = useMemo(() => {
+      if (!showSubZones) return null
+      const candidate = safeSelectedGeohash || safeActiveGeohash
+      return candidate && candidate.length < 8 ? candidate : null
+    }, [showSubZones, safeSelectedGeohash, safeActiveGeohash])
+
+    const buildRenderStacks = useCallback(
+      (rooms: PulseRoom[]): GlobeBubbleStackRender[] => {
+        const roomByGh = new Map<string, PulseRoom>()
+        for (const r of rooms) roomByGh.set(r.geohash, r)
+
+        const out: GlobeBubbleStackRender[] = []
+        const queues = bubbleQueuesRef.current
+        for (const [gh, list] of queues.entries()) {
+          if (list.length === 0) continue
+          const room = roomByGh.get(gh)
+          if (!room) continue
+          if (subZoneParent === gh) continue
+          const latest = list[list.length - 1]
+          const isFocused = gh === safeActiveGeohash || gh === safeSelectedGeohash
+          out.push({
+            geohash: gh,
+            center: room.center,
+            bubbles: list.map((b) => ({ ...b })),
+            latestTsMs: latest.tsMs,
+            isFocused,
+          })
+        }
+
+        // Priority: selected -> active -> newest activity
+        out.sort((a, b) => {
+          const aSel = a.geohash === safeSelectedGeohash ? 1 : 0
+          const bSel = b.geohash === safeSelectedGeohash ? 1 : 0
+          if (aSel !== bSel) return bSel - aSel
+          const aAct = a.geohash === safeActiveGeohash ? 1 : 0
+          const bAct = b.geohash === safeActiveGeohash ? 1 : 0
+          if (aAct !== bAct) return bAct - aAct
+          return b.latestTsMs - a.latestTsMs
         })
+        return out
+      },
+      [safeActiveGeohash, safeSelectedGeohash, subZoneParent],
+    )
+
+    // Sync per-geohash speech bubble queues whenever pulseRooms / visibility changes
+    useEffect(() => {
+      const queues = bubbleQueuesRef.current
+      const evictedMap = evictedBubbleKeysRef.current
+      const seeded = seededRoomsRef.current
+
+      if (!showPulse || !showBubbles || validPulseRooms.length === 0) {
+        if (queues.size > 0) {
+          queues.clear()
+        }
+        setBubbleStacks([])
+        return
       }
-    }
+
+      const now = Date.now()
+      const liveSet = new Set(validPulseRooms.map((r) => r.geohash))
+
+      // Prune rooms no longer in pulseRooms
+      for (const gh of Array.from(queues.keys())) {
+        if (!liveSet.has(gh)) {
+          queues.delete(gh)
+          seeded.delete(gh)
+          evictedMap.delete(gh)
+        }
+      }
+
+      for (const room of validPulseRooms) {
+        const gh = room.geohash
+        const incoming: Array<{ key: string; sender: string; snippet: string; tsMs: number }> = []
+
+        if (room.recentMessages && room.recentMessages.length > 0) {
+          for (const msg of room.recentMessages) {
+            const snippet = formatBubbleSnippet(msg.preview)
+            if (!snippet) continue
+            const key = msg.id || `${msg.tsMs}:${snippet}`
+            incoming.push({
+              key,
+              sender: formatBubbleSender(msg.sender),
+              snippet,
+              tsMs: msg.tsMs,
+            })
+          }
+        } else {
+          const snippet = formatBubbleSnippet(room.lastPreview)
+          if (snippet) {
+            const tsMs = room.lastMessageAt ?? room.lastActivityAt
+            const key = room.lastMessageId || `${tsMs}:${snippet}`
+            incoming.push({
+              key,
+              sender: formatBubbleSender(room.lastSender),
+              snippet,
+              tsMs,
+            })
+          }
+        }
+
+        if (incoming.length === 0) continue
+
+        // Ensure strict oldest -> newest ordering
+        incoming.sort((a, b) => a.tsMs - b.tsMs)
+        const cappedIncoming = incoming.slice(-MAX_BUBBLES_PER_GEOHASH)
+
+        let evicted = evictedMap.get(gh)
+        if (!evicted) {
+          evicted = new Set<string>()
+          evictedMap.set(gh, evicted)
+        }
+
+        let queue = queues.get(gh)
+        if (!seeded.has(gh) || !queue) {
+          seeded.add(gh)
+          queue = []
+          const latest = cappedIncoming[cappedIncoming.length - 1]
+          const freshBurst = now - latest.tsMs < BUBBLE_DEMOTE_LIFETIME_MS
+          if (freshBurst && cappedIncoming.length > 1) {
+            for (let i = 0; i < cappedIncoming.length; i++) {
+              const item = cappedIncoming[i]
+              const isLast = i === cappedIncoming.length - 1
+              queue.push({
+                key: item.key,
+                geohash: gh,
+                sender: item.sender,
+                snippet: item.snippet,
+                tsMs: item.tsMs,
+                demotedAtMs: isLast ? null : now,
+                fadingOut: false,
+                fadeStartedAtMs: null,
+              })
+            }
+          } else {
+            for (let i = 0; i < cappedIncoming.length - 1; i++) {
+              evicted.add(cappedIncoming[i].key)
+            }
+            queue.push({
+              key: latest.key,
+              geohash: gh,
+              sender: latest.sender,
+              snippet: latest.snippet,
+              tsMs: latest.tsMs,
+              demotedAtMs: null,
+              fadingOut: false,
+              fadeStartedAtMs: null,
+            })
+          }
+          queues.set(gh, queue)
+          continue
+        }
+
+        const existingKeys = new Set(queue.map((b) => b.key))
+        const newlyArrived = cappedIncoming.filter(
+          (item) => !existingKeys.has(item.key) && !evicted.has(item.key),
+        )
+
+        if (newlyArrived.length > 0) {
+          // Demote all previously-latest bubbles now that newer message(s) arrived
+          for (const existing of queue) {
+            if (existing.demotedAtMs === null) {
+              existing.demotedAtMs = now
+            }
+          }
+          for (let i = 0; i < newlyArrived.length; i++) {
+            const item = newlyArrived[i]
+            const isNewest = i === newlyArrived.length - 1
+            queue.push({
+              key: item.key,
+              geohash: gh,
+              sender: item.sender,
+              snippet: item.snippet,
+              tsMs: item.tsMs,
+              demotedAtMs: isNewest ? null : now,
+              fadingOut: false,
+              fadeStartedAtMs: null,
+            })
+          }
+          // Enforce strict max 4 bubbles per geohash queue
+          while (queue.length > MAX_BUBBLES_PER_GEOHASH) {
+            const dropped = queue.shift()
+            if (dropped) evicted.add(dropped.key)
+          }
+          // Cap evicted key history per room
+          if (evicted.size > 64) {
+            const keep = Array.from(evicted).slice(-32)
+            evictedMap.set(gh, new Set(keep))
+          }
+        }
+      }
+
+      setBubbleStacks(buildRenderStacks(validPulseRooms))
+    }, [showPulse, showBubbles, validPulseRooms, buildRenderStacks])
+
+    // 5s post-demotion fadeout & eviction ticker (runs only when demoted bubbles exist)
+    const hasDemotedBubbles = useMemo(
+      () => bubbleStacks.some((s) => s.bubbles.some((b) => b.demotedAtMs !== null)),
+      [bubbleStacks],
+    )
+
+    useEffect(() => {
+      if (!hasDemotedBubbles) return
+      const timer = window.setInterval(() => {
+        const now = Date.now()
+        const queues = bubbleQueuesRef.current
+        const evictedMap = evictedBubbleKeysRef.current
+        let mutated = false
+
+        for (const [gh, queue] of queues.entries()) {
+          let evicted = evictedMap.get(gh)
+          if (!evicted) {
+            evicted = new Set<string>()
+            evictedMap.set(gh, evicted)
+          }
+          for (let i = queue.length - 1; i >= 0; i--) {
+            const b = queue[i]
+            if (b.demotedAtMs === null) continue
+            if (!b.fadingOut && now - b.demotedAtMs >= BUBBLE_DEMOTE_LIFETIME_MS) {
+              b.fadingOut = true
+              b.fadeStartedAtMs = now
+              mutated = true
+            } else if (
+              b.fadingOut &&
+              b.fadeStartedAtMs !== null &&
+              now - b.fadeStartedAtMs >= BUBBLE_FADE_DURATION_MS
+            ) {
+              evicted.add(b.key)
+              queue.splice(i, 1)
+              mutated = true
+            }
+          }
+        }
+
+        if (mutated) {
+          setBubbleStacks(buildRenderStacks(visiblePulseRoomsRef.current))
+        }
+      }, 220)
+
+      return () => window.clearInterval(timer)
+    }, [hasDemotedBubbles, buildRenderStacks])
+
+    const startFlyTo = useCallback(
+      (lat: number, lon: number, zoom: number, animate = true) => {
+        const cam = cameraStateRef.current
+        const clampedLat = clamp(lat, -82, 82)
+        const clampedZoom = clamp(zoom, MIN_VIRTUAL_ZOOM, MAX_VIRTUAL_ZOOM)
+        const dLon = wrapDeltaLon(lon - cam.lon)
+        const nextLon = cam.lon + dLon
+
+        cam.velLat = 0
+        cam.velLon = 0
+
+        if (!animate) {
+          cam.lat = clampedLat
+          cam.lon = nextLon
+          cam.zoom = clampedZoom
+          cam.targetLat = clampedLat
+          cam.targetLon = nextLon
+          cam.targetZoom = clampedZoom
+          cam.isFlying = false
+          sceneRefs.current?.scheduleViewportEmit()
+        } else {
+          cam.targetLat = clampedLat
+          cam.targetLon = nextLon
+          cam.targetZoom = clampedZoom
+          cam.isFlying = true
+        }
+      },
+      [],
+    )
+
+    const flyToCellInternal = useCallback(
+      (geohash: string, options?: { animate?: boolean; zoom?: number }) => {
+        if (!geohash || isTopicChannel(geohash) || !isValidGeohash(geohash)) return
+        const center = decodeCenter(geohash)
+        const rawZoom =
+          options?.zoom ??
+          (modeRef.current === 'compact'
+            ? Math.max(2, getZoomForPrecision(geohash.length) - 1)
+            : Math.min(MAX_VIRTUAL_ZOOM, getZoomForPrecision(geohash.length)))
+        startFlyTo(center.lat, center.lon, rawZoom, options?.animate !== false)
+      },
+      [startFlyTo],
+    )
 
     useImperativeHandle(
       ref,
       () => ({
         zoomIn() {
-          cancelWheelZoomRef.current()
-          mapRef.current?.zoomIn(0.75)
+          const cam = cameraStateRef.current
+          cam.targetZoom = clamp(cam.targetZoom + 1.15, MIN_VIRTUAL_ZOOM, MAX_VIRTUAL_ZOOM)
+          cam.isFlying = true
+          cam.targetLat = cam.lat
+          cam.targetLon = cam.lon
         },
         zoomOut() {
-          cancelWheelZoomRef.current()
-          mapRef.current?.zoomOut(0.75)
+          const cam = cameraStateRef.current
+          cam.targetZoom = clamp(cam.targetZoom - 1.15, MIN_VIRTUAL_ZOOM, MAX_VIRTUAL_ZOOM)
+          cam.isFlying = true
+          cam.targetLat = cam.lat
+          cam.targetLon = cam.lon
         },
         flyToGeohash(geohash: string, options?: { animate?: boolean; zoom?: number }) {
-          const map = mapRef.current
-          if (!map || !geohash || isTopicChannel(geohash) || !isValidGeohash(geohash)) return
-          flyToCellInternal(map, geohash, options)
+          flyToCellInternal(geohash, options)
         },
-        flyToCoords(lat: number, lon: number, zoom = 11) {
-          cancelWheelZoomRef.current()
-          const map = mapRef.current
-          if (!map) return
-          map.flyTo([lat, lon], Math.max(2, Math.min(19, zoom)), {
-            duration: 0.65,
-            easeLinearity: 0.25,
-          })
+        flyToCoords(lat: number, lon: number, zoom = 10.5) {
+          startFlyTo(lat, lon, zoom, true)
         },
         fitWorld() {
-          cancelWheelZoomRef.current()
-          const map = mapRef.current
-          if (!map) return
-          map.flyTo([18, 0], 2, { duration: 0.6 })
+          const cam = cameraStateRef.current
+          startFlyTo(18, wrapLongitude(cam.lon), 2.0, true)
         },
         getZoom() {
-          return mapRef.current?.getZoom() ?? 4
+          return cameraStateRef.current.zoom
         },
       }),
-      [],
+      [flyToCellInternal, startFlyTo],
     )
 
-    // 1. Mount / unmount Leaflet map instance with smooth rAF wheel/pinch controller
+    // -----------------------------------------------------------------------
+    // 1. Mount Three.js 3D Earth Globe, Solar System Skybox, Controls & rAF
+    // -----------------------------------------------------------------------
     useEffect(() => {
-      const el = containerRef.current
-      if (!el) return
+      const wrap = canvasWrapRef.current
+      if (!wrap) return
 
-      const initialCenter = decodeCenter(safeActiveGeohash)
-      const initialZoom =
-        mode === 'compact'
-          ? Math.max(2, getZoomForPrecision(safeActiveGeohash.length) - 1)
-          : getZoomForPrecision(safeActiveGeohash.length)
-
-      const map = L.map(el, {
-        center: [initialCenter.lat, initialCenter.lon],
-        zoom: initialZoom,
-        minZoom: 2,
-        maxZoom: 19,
-        scrollWheelZoom: false,
-        zoomSnap: 0,
-        zoomDelta: 0.75,
-        zoomAnimation: true,
-        inertia: true,
-        touchZoom: true,
-        tapHold: false,
-        bounceAtZoomLimits: false,
-        zoomControl: false,
-        attributionControl: true,
-        doubleClickZoom: false,
-        maxBounds: WORLD_MAX_BOUNDS,
-        maxBoundsViscosity: 0.85,
-        preferCanvas: true,
-      })
-
-      map.attributionControl.setPrefix(false)
-
-      const canvasRenderer = L.canvas({ padding: 0.5 })
-      canvasRendererRef.current = canvasRenderer
-
-      const isLight = tileKindRef.current === 'light'
-      const tileLayer = L.tileLayer(isLight ? ESRI_TOPO_URL : ESRI_DARK_BASE_URL, {
-        maxNativeZoom: isLight ? 17 : 16,
-        maxZoom: 19,
-        updateWhenZooming: false,
-        updateWhenIdle: true,
-        keepBuffer: 4,
-        attribution: TILE_ATTRIBUTION,
-      }).addTo(map)
-
-      const refTileLayer = isLight
-        ? null
-        : L.tileLayer(ESRI_DARK_REF_URL, {
-            maxNativeZoom: 16,
-            maxZoom: 19,
-            opacity: 0.95,
-            updateWhenZooming: false,
-            updateWhenIdle: true,
-            keepBuffer: 4,
-            attribution: '',
-          }).addTo(map)
-
-      const gridLayer = L.layerGroup().addTo(map)
-      const pulseLayer = L.layerGroup().addTo(map)
-      const bubbleLayer = L.layerGroup().addTo(map)
-      const subZoneLayer = L.layerGroup().addTo(map)
-      const focusLayer = L.layerGroup().addTo(map)
-      const gpsLayer = L.layerGroup().addTo(map)
-      const bubbleMarkers = bubbleMarkersRef.current
-
-      mapRef.current = map
-      tileLayerRef.current = tileLayer
-      refTileLayerRef.current = refTileLayer
-      gridLayerRef.current = gridLayer
-      pulseLayerRef.current = pulseLayer
-      bubbleLayerRef.current = bubbleLayer
-      subZoneLayerRef.current = subZoneLayer
-      focusLayerRef.current = focusLayer
-      gpsLayerRef.current = gpsLayer
-
-      // Smooth rAF-interpolated wheel & trackpad-pinch zoom state
-      const wheelState: {
-        rafId: number | null
-        active: boolean
-        targetZoom: number
-        anchorLatLng: L.LatLng | null
-        lastClientX: number
-        lastClientY: number
-        lastFrameMs: number
-      } = {
-        rafId: null,
-        active: false,
-        targetZoom: initialZoom,
-        anchorLatLng: null,
-        lastClientX: 0,
-        lastClientY: 0,
-        lastFrameMs: 0,
+      let renderer: THREE.WebGLRenderer
+      try {
+        renderer = new THREE.WebGLRenderer({
+          antialias: true,
+          alpha: false,
+          powerPreference: 'high-performance',
+        })
+      } catch {
+        setWebglError(true)
+        return
       }
 
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      renderer.setPixelRatio(dpr)
+      const initW = Math.max(1, wrap.clientWidth)
+      const initH = Math.max(1, wrap.clientHeight)
+      renderer.setSize(initW, initH, false)
+      renderer.domElement.style.width = '100%'
+      renderer.domElement.style.height = '100%'
+      renderer.domElement.style.display = 'block'
+      wrap.appendChild(renderer.domElement)
+
+      const palette = readCanvasPalette(hostRef.current, themeRef.current)
+      const scene = new THREE.Scene()
+      scene.background = new THREE.Color(palette.spaceBg)
+
+      const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, initW / initH, 0.01, 140)
+      camera.up.set(0, 1, 0)
+
+      // Live Astronomical Positions (Sun & Moon)
+      const sunDir = new THREE.Vector3(1, 0.25, 0.2).normalize()
+      const initSun = computeSubsolarPoint(new Date())
+      sunDir.set(...latLonToUnitVec3(initSun.lat, initSun.lon)).normalize()
+
+      // 1A. Procedural GPU Starfield Skybox (~2,400 stars + Milky Way band + 4 planetary glints)
+      const starfield = createStarfieldPoints(dpr)
+      scene.add(starfield.points)
+
+      // 1B. Real-Time Sun (photosphere + additive radial corona sprite)
+      const sunGroup = new THREE.Group()
+      const sunCoreGeo = new THREE.SphereGeometry(0.42, 24, 16)
+      const sunCoreMat = new THREE.MeshBasicMaterial({ color: '#FFF7E0' })
+      const sunCoreMesh = new THREE.Mesh(sunCoreGeo, sunCoreMat)
+      sunGroup.add(sunCoreMesh)
+
+      const sunCoronaTex = createSunCoronaTexture()
+      const sunCoronaMat = new THREE.SpriteMaterial({
+        map: sunCoronaTex,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+      const sunCoronaSprite = new THREE.Sprite(sunCoronaMat)
+      sunCoronaSprite.scale.set(4.1, 4.1, 1)
+      sunGroup.add(sunCoronaSprite)
+      sunGroup.position.copy(sunDir).multiplyScalar(18)
+      scene.add(sunGroup)
+
+      // 1C. Real-Time Moon (cratered procedural canvas + same uSunDir phase shader!)
+      const moonTex = createLunarSurfaceTexture()
+      const moonGeo = new THREE.SphereGeometry(0.145, 32, 24)
+      const moonMaterial = new THREE.ShaderMaterial({
+        vertexShader: MOON_VERTEX_SHADER,
+        fragmentShader: MOON_FRAGMENT_SHADER,
+        uniforms: {
+          uMap: { value: moonTex },
+          uSunDir: { value: sunDir.clone() },
+        },
+      })
+      const moonMesh = new THREE.Mesh(moonGeo, moonMaterial)
+      const initMoon = computeSublunarPoint(new Date())
+      moonMesh.position.set(...latLonToUnitVec3(initMoon.lat, initMoon.lon)).multiplyScalar(4.2)
+      scene.add(moonMesh)
+
+      // 1D. Earth Base Equirectangular Texture (procedural frame-1 ocean + progressive z=2 Esri tiles)
+      const baseCanvas = document.createElement('canvas')
+      baseCanvas.width = 1024
+      baseCanvas.height = 512
+      const initialTileKind: 'dark' | 'light' = themeRef.current === 'daylight' ? 'light' : 'dark'
+      paintProceduralBaseMap(baseCanvas, initialTileKind === 'light')
+
+      const baseTexture = new THREE.CanvasTexture(baseCanvas)
+      baseTexture.colorSpace = THREE.SRGBColorSpace
+      baseTexture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy())
+      baseTexture.needsUpdate = true
+
+      const earthGeo = new THREE.SphereGeometry(EARTH_RADIUS, 72, 48)
+      const earthMaterial = new THREE.ShaderMaterial({
+        vertexShader: EARTH_VERTEX_SHADER,
+        fragmentShader: EARTH_FRAGMENT_SHADER,
+        uniforms: {
+          uMap: { value: baseTexture },
+          uSunDir: { value: sunDir.clone() },
+          uIsLight: { value: initialTileKind === 'light' ? 1.0 : 0.0 },
+          uOpacity: { value: 1.0 },
+        },
+      })
+      const earthMesh = new THREE.Mesh(earthGeo, earthMaterial)
+      earthMesh.renderOrder = 1
+      scene.add(earthMesh)
+
+      // 1E. Thin Additive Outer Atmosphere Shell (BackSide Fresnel glow)
+      const atmosphereGeo = new THREE.SphereGeometry(1.032, 48, 32)
+      const atmosphereMaterial = new THREE.ShaderMaterial({
+        vertexShader: ATMOSPHERE_VERTEX_SHADER,
+        fragmentShader: ATMOSPHERE_FRAGMENT_SHADER,
+        uniforms: {
+          uSunDir: { value: sunDir.clone() },
+        },
+        side: THREE.BackSide,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+      const atmosphereMesh = new THREE.Mesh(atmosphereGeo, atmosphereMaterial)
+      atmosphereMesh.renderOrder = 3
+      scene.add(atmosphereMesh)
+
+      // 1F. Layered Scene Groups
+      const patchGroup = new THREE.Group()
+      const gridGroup = new THREE.Group()
+      const subZoneGroup = new THREE.Group()
+      const pulseGroup = new THREE.Group()
+      const focusGroup = new THREE.Group()
+      const hoverGroup = new THREE.Group()
+      const gpsGroup = new THREE.Group()
+      scene.add(patchGroup, gridGroup, subZoneGroup, pulseGroup, focusGroup, hoverGroup, gpsGroup)
+
+      const patchCache = new Map<string, PatchTileCacheEntry>()
+      let baseLoadGen = 0
+      let isDisposed = false
       let viewportDebounceTimer: number | null = null
+      let lastPatchKeySig = ''
 
       const emitViewport = () => {
-        const z = map.getZoom()
+        if (isDisposed) return
+        const z = cameraStateRef.current.zoom
         const p =
           precisionModeRef.current === 'auto'
             ? getRecommendedPrecisionForZoom(z)
@@ -423,72 +1556,611 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         setViewportTick((t) => t + 1)
       }
 
-      const cancelViewportEmit = () => {
+      const scheduleViewportEmit = () => {
         if (viewportDebounceTimer !== null) {
           window.clearTimeout(viewportDebounceTimer)
-          viewportDebounceTimer = null
         }
-      }
-
-      const scheduleViewportEmit = () => {
-        cancelViewportEmit()
         viewportDebounceTimer = window.setTimeout(() => {
           viewportDebounceTimer = null
-          if (wheelState.active) return
           emitViewport()
         }, VIEWPORT_DEBOUNCE_MS)
       }
 
-      const cancelWheelZoom = () => {
-        if (wheelState.rafId !== null) {
-          window.cancelAnimationFrame(wheelState.rafId)
-          wheelState.rafId = null
-        }
-        wheelState.active = false
-        wheelState.anchorLatLng = null
-      }
-      cancelWheelZoomRef.current = cancelWheelZoom
+      // Progressive z=2 (4x4) Esri Base World Tile Loader onto Equirectangular Canvas
+      const reloadBaseTiles = (kind: 'dark' | 'light') => {
+        baseLoadGen += 1
+        const gen = baseLoadGen
+        const isLight = kind === 'light'
+        paintProceduralBaseMap(baseCanvas, isLight)
+        baseTexture.needsUpdate = true
+        earthMaterial.uniforms.uIsLight.value = isLight ? 1.0 : 0.0
 
-      const stepWheelZoom = (nowMs: number) => {
-        wheelState.rafId = null
-        if (!wheelState.active || !wheelState.anchorLatLng) return
-
-        const currentZoom = map.getZoom()
-        const diff = wheelState.targetZoom - currentZoom
-
-        if (Math.abs(diff) < 0.004) {
-          const finalZoom = wheelState.targetZoom
-          const anchor = wheelState.anchorLatLng
-          if (finalZoom !== currentZoom) {
-            map.setZoomAround(anchor, finalZoom, { animate: false })
+        // Evict opposite-theme patch tiles
+        for (const [k, entry] of patchCache.entries()) {
+          if (entry.kind !== kind) {
+            patchGroup.remove(entry.mesh)
+            entry.geometry.dispose()
+            entry.material.dispose()
+            entry.texture.dispose()
+            patchCache.delete(k)
           }
-          wheelState.active = false
-          wheelState.anchorLatLng = null
+        }
+        lastPatchKeySig = ''
+
+        const ctx = baseCanvas.getContext('2d')
+        if (!ctx) return
+
+        const baseTemplate = isLight ? ESRI_TOPO_URL : ESRI_DARK_BASE_URL
+        const z = 2
+        const n = 1 << z
+        const baseLoaded: boolean[][] = Array.from({ length: n }, () => Array(n).fill(false))
+        const refImages: (HTMLImageElement | null)[][] = Array.from({ length: n }, () =>
+          Array(n).fill(null),
+        )
+
+        for (let ty = 0; ty < n; ty++) {
+          for (let tx = 0; tx < n; tx++) {
+            const img = new Image()
+            img.crossOrigin = 'anonymous'
+            img.onload = () => {
+              if (isDisposed || gen !== baseLoadGen) return
+              compositeMercatorTileOntoEquirect(ctx, img, z, tx, ty, baseCanvas.width, baseCanvas.height)
+              baseLoaded[ty][tx] = true
+              const pendingRef = refImages[ty][tx]
+              if (pendingRef) {
+                compositeMercatorTileOntoEquirect(
+                  ctx,
+                  pendingRef,
+                  z,
+                  tx,
+                  ty,
+                  baseCanvas.width,
+                  baseCanvas.height,
+                )
+              }
+              baseTexture.needsUpdate = true
+            }
+            img.src = tileUrl(baseTemplate, z, tx, ty)
+
+            if (!isLight) {
+              const refImg = new Image()
+              refImg.crossOrigin = 'anonymous'
+              refImg.onload = () => {
+                if (isDisposed || gen !== baseLoadGen) return
+                refImages[ty][tx] = refImg
+                if (baseLoaded[ty][tx]) {
+                  compositeMercatorTileOntoEquirect(
+                    ctx,
+                    refImg,
+                    z,
+                    tx,
+                    ty,
+                    baseCanvas.width,
+                    baseCanvas.height,
+                  )
+                  baseTexture.needsUpdate = true
+                }
+              }
+              refImg.src = tileUrl(ESRI_DARK_REF_URL, z, tx, ty)
+            }
+          }
+        }
+      }
+
+      // Dynamic High-Resolution Curved Spherical Patch Tiles (z = 3..12)
+      const updatePatchTiles = () => {
+        if (isDisposed) return
+        const cam = cameraStateRef.current
+        const dist = zoomToDistance(cam.zoom)
+        const currentKind: 'dark' | 'light' = themeRef.current === 'daylight' ? 'light' : 'dark'
+
+        if (dist >= 2.2) {
+          for (const entry of patchCache.values()) {
+            entry.mesh.visible = false
+          }
+          lastPatchKeySig = 'orbital'
+          return
+        }
+
+        const halfFovRad = (CAMERA_FOV_DEG * DEG2RAD) / 2
+        const halfAngRad = computeVisibleHalfAngleRad(dist, halfFovRad)
+        const latSpanDeg = Math.max(0.01, 2 * halfAngRad * RAD2DEG)
+        const cosLat = Math.max(0.2, Math.cos(cam.lat * DEG2RAD))
+        const tileZ = clamp(
+          Math.round(Math.log2((360 * cosLat) / Math.max(0.008, latSpanDeg * 0.72))),
+          3,
+          12,
+        )
+
+        const n = 1 << tileZ
+        const centerTx = Math.floor(lonToMercXNorm(cam.lon) * n)
+        const centerTy = clamp(Math.floor(latToMercYNorm(cam.lat) * n), 0, n - 1)
+        const aspect = camera.aspect || 1
+        const radiusX = aspect > 1.25 ? 2 : 1
+        const radiusY = 1
+
+        const desired: Array<{ tx: number; ty: number; dist2: number }> = []
+        for (let dy = -radiusY; dy <= radiusY; dy++) {
+          const ty = centerTy + dy
+          if (ty < 0 || ty >= n) continue
+          for (let dx = -radiusX; dx <= radiusX; dx++) {
+            const tx = ((centerTx + dx) % n + n) % n
+            desired.push({ tx, ty, dist2: dx * dx + dy * dy })
+          }
+        }
+        desired.sort((a, b) => a.dist2 - b.dist2)
+        const chosen = desired.slice(0, MAX_VISIBLE_PATCH_TILES)
+        const sig = `${currentKind}:${tileZ}:${chosen.map((c) => `${c.tx},${c.ty}`).join('|')}`
+        if (sig === lastPatchKeySig) return
+        lastPatchKeySig = sig
+
+        const nowMs = Date.now()
+        const activeKeys = new Set<string>()
+        const isLight = currentKind === 'light'
+        const baseTemplate = isLight ? ESRI_TOPO_URL : ESRI_DARK_BASE_URL
+
+        for (const { tx, ty } of chosen) {
+          const key = `${currentKind}:${tileZ}:${tx}:${ty}`
+          activeKeys.add(key)
+
+          let entry = patchCache.get(key)
+          if (!entry) {
+            const tileCanvas = document.createElement('canvas')
+            tileCanvas.width = 256
+            tileCanvas.height = 256
+            const texture = new THREE.CanvasTexture(tileCanvas)
+            texture.colorSpace = THREE.SRGBColorSpace
+            texture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy())
+
+            const geometry = createMercatorPatchGeometry(tileZ, tx, ty)
+            const material = new THREE.ShaderMaterial({
+              vertexShader: EARTH_VERTEX_SHADER,
+              fragmentShader: EARTH_FRAGMENT_SHADER,
+              uniforms: {
+                uMap: { value: texture },
+                uSunDir: { value: sunDir.clone() },
+                uIsLight: { value: isLight ? 1.0 : 0.0 },
+                uOpacity: { value: 1.0 },
+              },
+              polygonOffset: true,
+              polygonOffsetFactor: -1,
+              polygonOffsetUnits: -1,
+            })
+
+            const mesh = new THREE.Mesh(geometry, material)
+            mesh.visible = false
+            mesh.renderOrder = 2
+            patchGroup.add(mesh)
+
+            entry = {
+              key,
+              z: tileZ,
+              tx,
+              ty,
+              kind: currentKind,
+              mesh,
+              geometry,
+              material,
+              texture,
+              canvas: tileCanvas,
+              loaded: false,
+              lastUsedMs: nowMs,
+            }
+            patchCache.set(key, entry)
+
+            const localEntry = entry
+            let baseDone = false
+            let pendingRef: HTMLImageElement | null = null
+
+            const img = new Image()
+            img.crossOrigin = 'anonymous'
+            img.onload = () => {
+              if (isDisposed || !patchCache.has(key)) return
+              const ctx = localEntry.canvas.getContext('2d')
+              if (!ctx) return
+              ctx.clearRect(0, 0, 256, 256)
+              ctx.drawImage(img, 0, 0, 256, 256)
+              baseDone = true
+              if (pendingRef) {
+                ctx.drawImage(pendingRef, 0, 0, 256, 256)
+              }
+              localEntry.texture.needsUpdate = true
+              localEntry.loaded = true
+              if (lastPatchKeySig.includes(`${tx},${ty}`) && lastPatchKeySig.startsWith(`${currentKind}:${tileZ}:`)) {
+                localEntry.mesh.visible = true
+              }
+            }
+            img.src = tileUrl(baseTemplate, tileZ, tx, ty)
+
+            if (!isLight) {
+              const refImg = new Image()
+              refImg.crossOrigin = 'anonymous'
+              refImg.onload = () => {
+                if (isDisposed || !patchCache.has(key)) return
+                pendingRef = refImg
+                if (baseDone) {
+                  const ctx = localEntry.canvas.getContext('2d')
+                  if (ctx) {
+                    ctx.drawImage(refImg, 0, 0, 256, 256)
+                    localEntry.texture.needsUpdate = true
+                  }
+                }
+              }
+              refImg.src = tileUrl(ESRI_DARK_REF_URL, tileZ, tx, ty)
+            }
+          }
+
+          entry.lastUsedMs = nowMs
+          entry.mesh.visible = entry.loaded
+        }
+
+        // Hide inactive patch tiles and evict oldest LRU entries beyond MAX_CACHED_PATCH_TILES
+        for (const [k, entry] of patchCache.entries()) {
+          if (!activeKeys.has(k)) {
+            entry.mesh.visible = false
+          }
+        }
+        if (patchCache.size > MAX_CACHED_PATCH_TILES) {
+          const evictable = Array.from(patchCache.values())
+            .filter((e) => !activeKeys.has(e.key))
+            .sort((a, b) => a.lastUsedMs - b.lastUsedMs)
+          let toDrop = patchCache.size - MAX_CACHED_PATCH_TILES
+          for (const victim of evictable) {
+            if (toDrop <= 0) break
+            patchGroup.remove(victim.mesh)
+            victim.geometry.dispose()
+            victim.material.dispose()
+            victim.texture.dispose()
+            patchCache.delete(victim.key)
+            toDrop -= 1
+          }
+        }
+      }
+
+      // Hover cell curved highlight on Earth
+      const updateHoverMesh = (gh: string | null) => {
+        while (hoverGroup.children.length > 0) {
+          const ch = hoverGroup.children[0]
+          hoverGroup.remove(ch)
+          disposeObject3D(ch)
+        }
+        if (!gh || gh === activeGeohashRef.current || gh === selectedGeohashRef.current) return
+        const b = decodeBounds(gh)
+        const pal = readCanvasPalette(hostRef.current, themeRef.current)
+        const color = new THREE.Color(pal.accent)
+
+        const fillGeo = buildCurvedRectFillGeometry([b], OVERLAY_FILL_RADIUS)
+        const fillMat = new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: pal.isLight ? 0.14 : 0.12,
+          depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2,
+        })
+        const fillMesh = new THREE.Mesh(fillGeo, fillMat)
+        fillMesh.renderOrder = 4
+        hoverGroup.add(fillMesh)
+
+        const segs: number[] = []
+        pushCurvedRectSegments(segs, b.latMin, b.latMax, b.lonMin, b.lonMax, FOCUS_LINE_RADIUS)
+        const lineGeo = new THREE.BufferGeometry()
+        lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
+        const lineMat = new THREE.LineBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.72,
+          depthWrite: false,
+        })
+        const line = new THREE.LineSegments(lineGeo, lineMat)
+        line.renderOrder = 6
+        hoverGroup.add(line)
+      }
+
+      sceneRefs.current = {
+        scene,
+        camera,
+        renderer,
+        earthMesh,
+        earthMaterial,
+        baseCanvas,
+        baseTexture,
+        sunDir,
+        sunGroup,
+        moonMesh,
+        moonMaterial,
+        atmosphereMaterial,
+        patchGroup,
+        patchCache,
+        gridGroup,
+        subZoneGroup,
+        pulseGroup,
+        focusGroup,
+        hoverGroup,
+        gpsGroup,
+        tileKind: initialTileKind,
+        baseLoadGen,
+        hoveredGeohash: null,
+        scheduleViewportEmit,
+        reloadBaseTiles,
+        updatePatchTiles,
+        updateHoverMesh,
+      }
+
+      reloadBaseTiles(initialTileKind)
+
+      // Refresh Sun & Moon live astronomical coordinates every 30s
+      const syncCelestialBodies = () => {
+        const now = new Date()
+        const sun = computeSubsolarPoint(now)
+        const moon = computeSublunarPoint(now)
+        sunDir.set(...latLonToUnitVec3(sun.lat, sun.lon)).normalize()
+        sunGroup.position.copy(sunDir).multiplyScalar(18)
+        earthMaterial.uniforms.uSunDir.value.copy(sunDir)
+        atmosphereMaterial.uniforms.uSunDir.value.copy(sunDir)
+        moonMaterial.uniforms.uSunDir.value.copy(sunDir)
+        moonMesh.position.set(...latLonToUnitVec3(moon.lat, moon.lon)).multiplyScalar(4.2)
+        for (const entry of patchCache.values()) {
+          entry.material.uniforms.uSunDir.value.copy(sunDir)
+        }
+      }
+      const sunTimer = window.setInterval(syncCelestialBodies, SUN_REFRESH_INTERVAL_MS)
+
+      // ---------------------------------------------------------------------
+      // Pointer, Touch Pinch-Zoom, Wheel Zoom & Raycast Interaction Controller
+      // ---------------------------------------------------------------------
+      const canvas = renderer.domElement
+      const raycaster = new THREE.Raycaster()
+      const ndcPointer = new THREE.Vector2()
+      const activePointers = new Map<number, { x: number; y: number }>()
+
+      let dragPrimaryId: number | null = null
+      let dragStartX = 0
+      let dragStartY = 0
+      let dragLastX = 0
+      let dragLastY = 0
+      let dragMovedPx = 0
+      let dragDownMs = 0
+      let lastPinchDist = 0
+      let lastPinchMidX = 0
+      let lastPinchMidY = 0
+      let lastTapMs = 0
+      let lastTapX = 0
+      let lastTapY = 0
+
+      const isTouchOnly =
+        typeof window !== 'undefined' &&
+        Boolean(window.matchMedia?.('(hover: none)').matches)
+
+      const raycastEarthLatLon = (clientX: number, clientY: number): { lat: number; lon: number } | null => {
+        const rect = canvas.getBoundingClientRect()
+        if (rect.width <= 0 || rect.height <= 0) return null
+        ndcPointer.x = ((clientX - rect.left) / rect.width) * 2 - 1
+        ndcPointer.y = -((clientY - rect.top) / rect.height) * 2 + 1
+        raycaster.setFromCamera(ndcPointer, camera)
+        const hits = raycaster.intersectObject(earthMesh, false)
+        if (hits.length === 0) return null
+        return unitVec3ToLatLon(hits[0].point)
+      }
+
+      const degPerPixel = (): number => {
+        const cam = cameraStateRef.current
+        const dist = zoomToDistance(cam.zoom)
+        const halfFovRad = (CAMERA_FOV_DEG * DEG2RAD) / 2
+        const halfAngRad = computeVisibleHalfAngleRad(dist, halfFovRad)
+        const h = Math.max(180, canvas.clientHeight)
+        return ((2 * halfAngRad * RAD2DEG) / h) * 1.05
+      }
+
+      const onPointerDown = (e: PointerEvent) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return
+        canvas.setPointerCapture(e.pointerId)
+        activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+
+        const cam = cameraStateRef.current
+        cam.isFlying = false
+        cam.velLat = 0
+        cam.velLon = 0
+        cam.targetLat = cam.lat
+        cam.targetLon = cam.lon
+        cam.targetZoom = cam.zoom
+
+        if (activePointers.size === 1) {
+          cam.dragging = true
+          wrap.classList.add('is-dragging')
+          dragPrimaryId = e.pointerId
+          dragStartX = e.clientX
+          dragStartY = e.clientY
+          dragLastX = e.clientX
+          dragLastY = e.clientY
+          dragMovedPx = 0
+          dragDownMs = performance.now()
+        } else if (activePointers.size === 2) {
+          cam.dragging = true
+          wrap.classList.add('is-dragging')
+          dragPrimaryId = null
+          dragMovedPx = 999 // cancel single-tap click
+          const pts = Array.from(activePointers.values())
+          lastPinchDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y)
+          lastPinchMidX = (pts[0].x + pts[1].x) / 2
+          lastPinchMidY = (pts[0].y + pts[1].y) / 2
+        }
+      }
+
+      const onPointerMove = (e: PointerEvent) => {
+        const cam = cameraStateRef.current
+        if (activePointers.has(e.pointerId)) {
+          activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+        }
+
+        if (activePointers.size >= 2) {
+          const pts = Array.from(activePointers.values())
+          const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y)
+          const midX = (pts[0].x + pts[1].x) / 2
+          const midY = (pts[0].y + pts[1].y) / 2
+
+          if (lastPinchDist > 8 && dist > 8) {
+            const scaleRatio = dist / lastPinchDist
+            const zoomDelta = Math.log(scaleRatio) / ALTITUDE_DECAY
+            cam.zoom = clamp(cam.zoom + zoomDelta, MIN_VIRTUAL_ZOOM, MAX_VIRTUAL_ZOOM)
+            cam.targetZoom = cam.zoom
+          }
+
+          const dpp = degPerPixel()
+          const dx = midX - lastPinchMidX
+          const dy = midY - lastPinchMidY
+          const cosLat = Math.max(0.24, Math.cos(cam.lat * DEG2RAD))
+          cam.lat = clamp(cam.lat + dy * dpp, -82, 82)
+          cam.lon -= (dx * dpp) / cosLat
+          cam.targetLat = cam.lat
+          cam.targetLon = cam.lon
+
+          lastPinchDist = dist
+          lastPinchMidX = midX
+          lastPinchMidY = midY
           scheduleViewportEmit()
           return
         }
 
-        const dt = clamp(nowMs - wheelState.lastFrameMs, 4, 64)
-        wheelState.lastFrameMs = nowMs
-        const alpha = 1 - Math.exp(-dt / 55)
-        const nextZoom = clamp(
-          currentZoom + diff * alpha,
-          map.getMinZoom(),
-          map.getMaxZoom(),
-        )
+        if (cam.dragging && e.pointerId === dragPrimaryId) {
+          const dx = e.clientX - dragLastX
+          const dy = e.clientY - dragLastY
+          dragLastX = e.clientX
+          dragLastY = e.clientY
+          dragMovedPx += Math.hypot(dx, dy)
 
-        if (nextZoom !== currentZoom) {
-          map.setZoomAround(wheelState.anchorLatLng, nextZoom, { animate: false })
+          const dpp = degPerPixel()
+          const cosLat = Math.max(0.24, Math.cos(cam.lat * DEG2RAD))
+          const dLat = dy * dpp
+          const dLon = -(dx * dpp) / cosLat
+
+          cam.lat = clamp(cam.lat + dLat, -82, 82)
+          cam.lon += dLon
+          cam.targetLat = cam.lat
+          cam.targetLon = cam.lon
+          // Track velocity for smooth release inertia
+          cam.velLat = cam.velLat * 0.45 + dLat * 36 * 0.55
+          cam.velLon = cam.velLon * 0.45 + dLon * 36 * 0.55
+          scheduleViewportEmit()
+          return
         }
 
-        wheelState.rafId = window.requestAnimationFrame(stepWheelZoom)
+        // Desktop hover readout + curved hover cell highlight
+        if (!isTouchOnly && e.pointerType === 'mouse' && activePointers.size === 0) {
+          const hit = raycastEarthLatLon(e.clientX, e.clientY)
+          if (!hit) {
+            if (sceneRefs.current && sceneRefs.current.hoveredGeohash !== null) {
+              sceneRefs.current.hoveredGeohash = null
+              updateHoverMesh(null)
+              setHoverHud(null)
+            }
+            return
+          }
+          const p =
+            precisionModeRef.current === 'auto'
+              ? getRecommendedPrecisionForZoom(cam.zoom)
+              : precisionModeRef.current
+          const gh = encodeGeohash(hit.lat, hit.lon, p)
+          if (sceneRefs.current && sceneRefs.current.hoveredGeohash !== gh) {
+            sceneRefs.current.hoveredGeohash = gh
+            updateHoverMesh(gh)
+          }
+          setHoverHud({
+            geohash: gh,
+            coords: formatCoords(hit),
+          })
+        }
       }
 
-      const handleWheel = (e: WheelEvent) => {
+      const finishPointer = (e: PointerEvent) => {
+        activePointers.delete(e.pointerId)
+        try {
+          if (canvas.hasPointerCapture(e.pointerId)) {
+            canvas.releasePointerCapture(e.pointerId)
+          }
+        } catch {
+          // ignore already-released capture
+        }
+
+        const cam = cameraStateRef.current
+        if (activePointers.size === 1) {
+          const [remId, pt] = Array.from(activePointers.entries())[0]
+          dragPrimaryId = remId
+          dragLastX = pt.x
+          dragLastY = pt.y
+          lastPinchDist = 0
+          return
+        }
+
+        if (activePointers.size === 0) {
+          const wasClick =
+            e.pointerId === dragPrimaryId &&
+            dragMovedPx < 6 &&
+            performance.now() - dragDownMs < 380 &&
+            Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) < 8
+
+          cam.dragging = false
+          wrap.classList.remove('is-dragging')
+          dragPrimaryId = null
+          lastPinchDist = 0
+
+          if (wasClick) {
+            cam.velLat = 0
+            cam.velLon = 0
+            const hit = raycastEarthLatLon(e.clientX, e.clientY)
+            if (hit) {
+              const p =
+                precisionModeRef.current === 'auto'
+                  ? getRecommendedPrecisionForZoom(cam.zoom)
+                  : precisionModeRef.current
+              const gh = encodeGeohash(hit.lat, hit.lon, p)
+              const nowMs = performance.now()
+              const isTouchDoubleTap =
+                e.pointerType !== 'mouse' &&
+                nowMs - lastTapMs < 320 &&
+                Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY) < 22
+
+              if (isTouchDoubleTap && modeRef.current === 'expanded' && onTuneRef.current) {
+                lastTapMs = 0
+                onTuneRef.current(gh)
+              } else {
+                lastTapMs = nowMs
+                lastTapX = e.clientX
+                lastTapY = e.clientY
+                onSelectRef.current(gh)
+              }
+            }
+          } else {
+            scheduleViewportEmit()
+          }
+        }
+      }
+
+      const onDoubleClick = (e: MouseEvent) => {
+        if (modeRef.current !== 'expanded' || !onTuneRef.current) return
+        const hit = raycastEarthLatLon(e.clientX, e.clientY)
+        if (!hit) return
+        const cam = cameraStateRef.current
+        const p =
+          precisionModeRef.current === 'auto'
+            ? getRecommendedPrecisionForZoom(cam.zoom)
+            : precisionModeRef.current
+        const gh = encodeGeohash(hit.lat, hit.lon, p)
+        onTuneRef.current(gh)
+      }
+
+      const onPointerLeave = () => {
+        if (sceneRefs.current && sceneRefs.current.hoveredGeohash !== null) {
+          sceneRefs.current.hoveredGeohash = null
+          updateHoverMesh(null)
+        }
+        setHoverHud(null)
+      }
+
+      const onWheel = (e: WheelEvent) => {
         e.preventDefault()
         e.stopPropagation()
-
-        cancelViewportEmit()
 
         let delta = e.deltaY
         if (e.deltaMode === 1) delta *= 18
@@ -497,942 +2169,974 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
         let zoomStep: number
         if (e.ctrlKey) {
-          // Trackpad pinch-to-zoom
-          zoomStep = clamp(-delta * 0.011, -0.45, 0.45)
+          zoomStep = clamp(-delta * 0.012, -0.55, 0.55)
         } else if (e.deltaMode === 0 && Math.abs(delta) < 48) {
-          // Smooth high-precision trackpad scroll
-          zoomStep = clamp(-delta * 0.0042, -0.35, 0.35)
+          zoomStep = clamp(-delta * 0.0052, -0.4, 0.4)
         } else {
-          // Discrete mouse wheel notch
-          zoomStep =
-            -Math.sign(delta) * Math.min(0.65, Math.max(0.28, Math.abs(delta) * 0.0045))
+          zoomStep = -Math.sign(delta) * Math.min(0.85, Math.max(0.32, Math.abs(delta) * 0.0052))
         }
 
-        const minZ = map.getMinZoom()
-        const maxZ = map.getMaxZoom()
-        const currentZ = map.getZoom()
-
-        if (!wheelState.active) {
-          map.stop()
-        }
-
-        const rect = el.getBoundingClientRect()
-        const point = L.point(e.clientX - rect.left, e.clientY - rect.top)
-        const movedPx = Math.hypot(
-          e.clientX - wheelState.lastClientX,
-          e.clientY - wheelState.lastClientY,
+        const cam = cameraStateRef.current
+        cam.targetZoom = clamp(
+          (cam.isFlying ? cam.targetZoom : cam.zoom) + zoomStep,
+          MIN_VIRTUAL_ZOOM,
+          MAX_VIRTUAL_ZOOM,
         )
-
-        if (!wheelState.active || !wheelState.anchorLatLng || movedPx > 3) {
-          wheelState.anchorLatLng = map.containerPointToLatLng(point)
-          wheelState.lastClientX = e.clientX
-          wheelState.lastClientY = e.clientY
-        }
-
-        const baseZoom = wheelState.active ? wheelState.targetZoom : currentZ
-        const nextTarget = clamp(baseZoom + zoomStep, minZ, maxZ)
-
-        if (Math.abs(nextTarget - currentZ) < 0.0005 && !wheelState.active) {
-          return
-        }
-
-        wheelState.targetZoom = nextTarget
-        wheelState.active = true
-
-        if (wheelState.rafId === null) {
-          wheelState.lastFrameMs = performance.now()
-          wheelState.rafId = window.requestAnimationFrame(stepWheelZoom)
-        }
+        cam.targetLat = cam.lat
+        cam.targetLon = cam.lon
+        cam.isFlying = true
+        scheduleViewportEmit()
       }
 
-      const handleTouchStart = (e: TouchEvent) => {
-        if (e.touches.length >= 2) {
-          cancelWheelZoom()
-          cancelViewportEmit()
-        }
-      }
-
-      const preventSafariGesture = (e: Event) => {
+      const preventGesture = (e: Event) => {
         e.preventDefault()
       }
 
-      el.addEventListener('wheel', handleWheel, { passive: false })
-      el.addEventListener('touchstart', handleTouchStart, { passive: true })
-      el.addEventListener('gesturestart', preventSafariGesture, { passive: false })
-      el.addEventListener('gesturechange', preventSafariGesture, { passive: false })
-
-      const handleMapClick = (e: L.LeafletMouseEvent) => {
-        const z = map.getZoom()
-        const p =
-          precisionModeRef.current === 'auto'
-            ? getRecommendedPrecisionForZoom(z)
-            : precisionModeRef.current
-        const gh = encodeGeohash(e.latlng.lat, e.latlng.lng, p)
-        onSelectRef.current(gh)
+      const onContextLost = (e: Event) => {
+        e.preventDefault()
+        setWebglError(true)
       }
 
-      const handleMapDblClick = (e: L.LeafletMouseEvent) => {
-        if (modeRef.current !== 'expanded' || !onTuneRef.current) return
-        const z = map.getZoom()
-        const p =
-          precisionModeRef.current === 'auto'
-            ? getRecommendedPrecisionForZoom(z)
-            : precisionModeRef.current
-        const gh = encodeGeohash(e.latlng.lat, e.latlng.lng, p)
-        onTuneRef.current(gh)
-      }
+      canvas.addEventListener('pointerdown', onPointerDown)
+      canvas.addEventListener('pointermove', onPointerMove)
+      canvas.addEventListener('pointerup', finishPointer)
+      canvas.addEventListener('pointercancel', finishPointer)
+      canvas.addEventListener('pointerleave', onPointerLeave)
+      canvas.addEventListener('dblclick', onDoubleClick)
+      canvas.addEventListener('wheel', onWheel, { passive: false })
+      canvas.addEventListener('gesturestart', preventGesture, { passive: false })
+      canvas.addEventListener('gesturechange', preventGesture, { passive: false })
+      canvas.addEventListener('webglcontextlost', onContextLost, false)
 
-      const isTouchDevice =
-        typeof window !== 'undefined' &&
-        window.matchMedia &&
-        window.matchMedia('(hover: none)').matches
-
-      const handleMouseMove = (e: L.LeafletMouseEvent) => {
-        if (isTouchDevice) return
-        const z = map.getZoom()
-        const p =
-          precisionModeRef.current === 'auto'
-            ? getRecommendedPrecisionForZoom(z)
-            : precisionModeRef.current
-        const gh = encodeGeohash(e.latlng.lat, e.latlng.lng, p)
-        setHoverHud({
-          geohash: gh,
-          coords: formatCoords({ lat: e.latlng.lat, lon: e.latlng.lng }),
-        })
-      }
-
-      const handleMouseOut = () => {
-        setHoverHud(null)
-      }
-
-      const handleDragStart = () => {
-        cancelWheelZoom()
-        cancelViewportEmit()
-      }
-
-      const handleMoveOrZoomStart = () => {
-        cancelViewportEmit()
-      }
-
-      const handleMoveOrZoomEnd = () => {
-        if (wheelState.active) return
-        scheduleViewportEmit()
-      }
-
-      map.on('dragstart', handleDragStart)
-      map.on('movestart zoomstart move zoom', handleMoveOrZoomStart)
-      map.on('moveend zoomend', handleMoveOrZoomEnd)
-      map.on('click', handleMapClick)
-      map.on('dblclick', handleMapDblClick)
-      map.on('mousemove', handleMouseMove)
-      map.on('mouseout', handleMouseOut)
-
-      // Guard ResizeObserver so invalidateSize only fires on actual dimension changes
-      let lastObservedW = el.clientWidth
-      let lastObservedH = el.clientHeight
+      // ResizeObserver
+      let lastW = initW
+      let lastH = initH
       const ro = new ResizeObserver(() => {
-        const nextW = el.clientWidth
-        const nextH = el.clientHeight
-        if (nextW === lastObservedW && nextH === lastObservedH) return
-        lastObservedW = nextW
-        lastObservedH = nextH
-        map.invalidateSize({ animate: false })
+        const nextW = Math.max(1, wrap.clientWidth)
+        const nextH = Math.max(1, wrap.clientHeight)
+        if (nextW === lastW && nextH === lastH) return
+        lastW = nextW
+        lastH = nextH
+        camera.aspect = nextW / nextH
+        camera.updateProjectionMatrix()
+        renderer.setSize(nextW, nextH, false)
         scheduleViewportEmit()
       })
-      ro.observe(el)
+      ro.observe(wrap)
 
-      const settleTimer = window.setTimeout(() => {
-        lastObservedW = el.clientWidth
-        lastObservedH = el.clientHeight
-        map.invalidateSize({ animate: false })
-        emitViewport()
-      }, 180)
+      // ---------------------------------------------------------------------
+      // Main 60fps rAF Loop: Damped Camera + Patch LOD + 3D->2D DOM Projection
+      // ---------------------------------------------------------------------
+      const tmpVec = new THREE.Vector3()
+      const camDir = new THREE.Vector3()
+      let lastFrameMs = performance.now()
+      let lastPatchCheckMs = 0
+      let rafId = 0
 
+      const projectPointToScreen = (
+        lat: number,
+        lon: number,
+        viewW: number,
+        viewH: number,
+      ): { x: number; y: number; visible: boolean } => {
+        const [ux, uy, uz] = latLonToUnitVec3(lat, lon)
+        // True 3D horizon occlusion: hide points on or near the back hemisphere of Earth
+        const facing = ux * camDir.x + uy * camDir.y + uz * camDir.z
+        if (facing < 0.14) {
+          return { x: 0, y: 0, visible: false }
+        }
+        tmpVec.set(ux * FOCUS_LINE_RADIUS, uy * FOCUS_LINE_RADIUS, uz * FOCUS_LINE_RADIUS)
+        tmpVec.project(camera)
+        if (tmpVec.z > 1 || tmpVec.z < -1) {
+          return { x: 0, y: 0, visible: false }
+        }
+        const x = (tmpVec.x * 0.5 + 0.5) * viewW
+        const y = (-tmpVec.y * 0.5 + 0.5) * viewH
+        if (x < -140 || x > viewW + 140 || y < -140 || y > viewH + 140) {
+          return { x, y, visible: false }
+        }
+        return { x, y, visible: true }
+      }
+
+      const hideEl = (el: HTMLElement) => {
+        if (el.dataset.vis !== '0') {
+          el.dataset.vis = '0'
+          el.style.visibility = 'hidden'
+          el.style.opacity = '0'
+          el.style.pointerEvents = 'none'
+        }
+      }
+
+      const showElAt = (
+        el: HTMLElement,
+        x: number,
+        y: number,
+        anchor: 'center' | 'bottom-center' = 'center',
+      ) => {
+        if (el.dataset.vis !== '1') {
+          el.dataset.vis = '1'
+          el.style.visibility = 'visible'
+          el.style.opacity = '1'
+          el.style.pointerEvents = ''
+        }
+        el.style.transform =
+          anchor === 'bottom-center'
+            ? `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`
+            : `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -50%)`
+      }
+
+      const tick = (nowMs: number) => {
+        if (isDisposed) return
+        rafId = window.requestAnimationFrame(tick)
+
+        const dt = clamp((nowMs - lastFrameMs) / 1000, 0.004, 0.064)
+        lastFrameMs = nowMs
+
+        const cam = cameraStateRef.current
+        let cameraMoved = false
+
+        if (cam.isFlying) {
+          const alpha = 1 - Math.exp(-dt * 8.5)
+          const dLat = cam.targetLat - cam.lat
+          const dLon = cam.targetLon - cam.lon
+          const dZoom = cam.targetZoom - cam.zoom
+
+          if (Math.abs(dLat) < 0.002 && Math.abs(dLon) < 0.002 && Math.abs(dZoom) < 0.003) {
+            cam.lat = cam.targetLat
+            cam.lon = cam.targetLon
+            cam.zoom = cam.targetZoom
+            cam.isFlying = false
+            scheduleViewportEmit()
+          } else {
+            cam.lat += dLat * alpha
+            cam.lon += dLon * alpha
+            cam.zoom += dZoom * alpha
+          }
+          cameraMoved = true
+        } else if (!cam.dragging && (Math.abs(cam.velLat) > 0.02 || Math.abs(cam.velLon) > 0.02)) {
+          cam.lat = clamp(cam.lat + cam.velLat * dt, -82, 82)
+          cam.lon += cam.velLon * dt
+          const decay = Math.exp(-dt * 7.5)
+          cam.velLat *= decay
+          cam.velLon *= decay
+          if (Math.abs(cam.velLat) <= 0.02 && Math.abs(cam.velLon) <= 0.02) {
+            cam.velLat = 0
+            cam.velLon = 0
+            scheduleViewportEmit()
+          }
+          cameraMoved = true
+        }
+
+        // Update Three.js perspective camera position & dynamic near plane (zero z-fighting at P8!)
+        const dist = zoomToDistance(cam.zoom)
+        const nextNear = clamp((dist - EARTH_RADIUS) * 0.16, 0.0003, 0.08)
+        if (Math.abs(camera.near - nextNear) > 0.0001) {
+          camera.near = nextNear
+          camera.updateProjectionMatrix()
+        }
+        const [cx, cy, cz] = latLonToUnitVec3(cam.lat, cam.lon)
+        camera.position.set(cx * dist, cy * dist, cz * dist)
+        camera.lookAt(0, 0, 0)
+        camDir.set(cx, cy, cz).normalize()
+
+        // Throttled regional high-res patch tile check
+        if (nowMs - lastPatchCheckMs > 160 || cameraMoved) {
+          if (nowMs - lastPatchCheckMs > 160) {
+            lastPatchCheckMs = nowMs
+            updatePatchTiles()
+          }
+        }
+
+        renderer.render(scene, camera)
+
+        // Project 3D anchors -> 2D screen coordinates for DOM overlays
+        const viewW = lastW
+        const viewH = lastH
+        const isCompact = modeRef.current === 'compact'
+        const isNarrow = viewW < 640
+
+        // 1. Active & Selected Geohash Pill Badges
+        const subParent = showSubZonesRef.current
+          ? selectedGeohashRef.current || activeGeohashRef.current
+          : null
+        const activeSubParent = subParent && subParent.length < 8 ? subParent : null
+
+        const activeEl = activePillElRef.current
+        if (activeEl) {
+          const gh = activeGeohashRef.current
+          if (gh && activeSubParent !== gh) {
+            const c = decodeCenter(gh)
+            const p = projectPointToScreen(c.lat, c.lon, viewW, viewH)
+            if (p.visible) showElAt(activeEl, p.x, p.y)
+            else hideEl(activeEl)
+          } else {
+            hideEl(activeEl)
+          }
+        }
+
+        const selEl = selectedPillElRef.current
+        if (selEl) {
+          const gh = selectedGeohashRef.current
+          if (gh && gh !== activeGeohashRef.current && activeSubParent !== gh) {
+            const c = decodeCenter(gh)
+            const p = projectPointToScreen(c.lat, c.lon, viewW, viewH)
+            if (p.visible) showElAt(selEl, p.x, p.y)
+            else hideEl(selEl)
+          } else {
+            hideEl(selEl)
+          }
+        }
+
+        // 2. User GPS Beacon
+        const gpsEl = gpsBeaconElRef.current
+        if (gpsEl) {
+          const coords = userCoordsRef.current
+          if (coords) {
+            const p = projectPointToScreen(coords.lat, coords.lon, viewW, viewH)
+            if (p.visible) showElAt(gpsEl, p.x, p.y)
+            else hideEl(gpsEl)
+          } else {
+            hideEl(gpsEl)
+          }
+        }
+
+        // 3. Upward-Queued Speech Bubble Stacks (with lightweight screen-space de-cluttering)
+        const placedBubbleBoxes: Array<{ l: number; r: number; t: number; b: number }> = []
+        const visibleBubbleGhs = new Set<string>()
+        const maxStacks = isCompact ? 3 : isNarrow ? 5 : 10
+        const stackW = isNarrow ? 142 : 162
+        const marginTop = !isCompact && viewH >= 440 ? (isNarrow ? 76 : 68) : 12
+        const marginBottom = !isCompact && viewH >= 440 ? (isNarrow ? 104 : 96) : 12
+        const marginRight = !isCompact ? (isNarrow ? 56 : 64) : 10
+
+        const stacks = bubbleStacksRef.current
+        for (const stack of stacks) {
+          const el = bubbleStackElsRef.current.get(stack.geohash)
+          if (!el) continue
+          if (!showPulseRef.current || !showBubblesRef.current || visibleBubbleGhs.size >= maxStacks) {
+            hideEl(el)
+            continue
+          }
+          const p = projectPointToScreen(stack.center.lat, stack.center.lon, viewW, viewH)
+          if (!p.visible) {
+            hideEl(el)
+            continue
+          }
+
+          const approxH = Math.min(200, stack.bubbles.length * 46)
+          const tailOffset = stack.isFocused ? 22 : 14
+          const box = {
+            l: p.x - stackW / 2,
+            r: p.x + stackW / 2,
+            t: p.y - tailOffset - approxH,
+            b: p.y - tailOffset,
+          }
+
+          const inSafeBounds =
+            box.l >= 8 &&
+            box.r <= viewW - marginRight &&
+            box.b >= marginTop + 26 &&
+            box.b <= viewH - marginBottom
+
+          const overlaps = placedBubbleBoxes.some(
+            (o) => box.l < o.r + 6 && box.r + 6 > o.l && box.t < o.b + 6 && box.b + 6 > o.t,
+          )
+
+          if (!inSafeBounds || overlaps) {
+            hideEl(el)
+            continue
+          }
+
+          placedBubbleBoxes.push(box)
+          visibleBubbleGhs.add(stack.geohash)
+          showElAt(el, p.x, p.y - tailOffset, 'bottom-center')
+        }
+
+        // 4. Live Pulse Sonar Beacons
+        const rooms = visiblePulseRoomsRef.current
+        for (const room of rooms) {
+          const el = beaconElsRef.current.get(room.geohash)
+          if (!el) continue
+          if (!showPulseRef.current || activeSubParent === room.geohash) {
+            hideEl(el)
+            continue
+          }
+          const p = projectPointToScreen(room.center.lat, room.center.lon, viewW, viewH)
+          if (!p.visible) {
+            hideEl(el)
+            continue
+          }
+          showElAt(el, p.x, p.y)
+        }
+      }
+
+      rafId = window.requestAnimationFrame(tick)
       emitViewport()
+      updatePatchTiles()
 
       return () => {
-        window.clearTimeout(settleTimer)
-        cancelViewportEmit()
-        cancelWheelZoom()
-        cancelWheelZoomRef.current = () => {}
-        el.removeEventListener('wheel', handleWheel)
-        el.removeEventListener('touchstart', handleTouchStart)
-        el.removeEventListener('gesturestart', preventSafariGesture)
-        el.removeEventListener('gesturechange', preventSafariGesture)
+        isDisposed = true
+        window.cancelAnimationFrame(rafId)
+        window.clearInterval(sunTimer)
+        if (viewportDebounceTimer !== null) {
+          window.clearTimeout(viewportDebounceTimer)
+        }
         ro.disconnect()
-        map.off()
-        map.remove()
-        mapRef.current = null
-        canvasRendererRef.current = null
-        tileLayerRef.current = null
-        refTileLayerRef.current = null
-        gridLayerRef.current = null
-        pulseLayerRef.current = null
-        bubbleLayerRef.current = null
-        bubbleMarkers.clear()
-        subZoneLayerRef.current = null
-        focusLayerRef.current = null
-        gpsLayerRef.current = null
+        canvas.removeEventListener('pointerdown', onPointerDown)
+        canvas.removeEventListener('pointermove', onPointerMove)
+        canvas.removeEventListener('pointerup', finishPointer)
+        canvas.removeEventListener('pointercancel', finishPointer)
+        canvas.removeEventListener('pointerleave', onPointerLeave)
+        canvas.removeEventListener('dblclick', onDoubleClick)
+        canvas.removeEventListener('wheel', onWheel)
+        canvas.removeEventListener('gesturestart', preventGesture)
+        canvas.removeEventListener('gesturechange', preventGesture)
+        canvas.removeEventListener('webglcontextlost', onContextLost)
+
+        // Clean GPU memory disposal
+        starfield.geometry.dispose()
+        starfield.material.dispose()
+        sunCoreGeo.dispose()
+        sunCoreMat.dispose()
+        sunCoronaTex.dispose()
+        sunCoronaMat.dispose()
+        moonGeo.dispose()
+        moonTex.dispose()
+        moonMaterial.dispose()
+        earthGeo.dispose()
+        earthMaterial.dispose()
+        baseTexture.dispose()
+        atmosphereGeo.dispose()
+        atmosphereMaterial.dispose()
+
+        for (const entry of patchCache.values()) {
+          entry.geometry.dispose()
+          entry.material.dispose()
+          entry.texture.dispose()
+        }
+        patchCache.clear()
+        disposeObject3D(gridGroup)
+        disposeObject3D(subZoneGroup)
+        disposeObject3D(pulseGroup)
+        disposeObject3D(focusGroup)
+        disposeObject3D(hoverGroup)
+        disposeObject3D(gpsGroup)
+
+        renderer.dispose()
+        if (canvas.parentElement === wrap) {
+          wrap.removeChild(canvas)
+        }
+        sceneRefs.current = null
       }
       // Intentionally mount once per component instance
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
-    // 2. Swap basemap tiles cleanly when theme switches between dark <-> daylight
+    // -----------------------------------------------------------------------
+    // 2. React to Theme Switches (Space Backdrop + Dark/Topo Earth Basemap)
+    // -----------------------------------------------------------------------
     useEffect(() => {
+      const sr = sceneRefs.current
+      if (!sr) return
+      const palette = readCanvasPalette(hostRef.current, theme)
+      sr.scene.background = new THREE.Color(palette.spaceBg)
+
       const nextKind: 'dark' | 'light' = theme === 'daylight' ? 'light' : 'dark'
-      if (tileKindRef.current === nextKind) return
-      tileKindRef.current = nextKind
-
-      const map = mapRef.current
-      if (!map) return
-
-      cancelWheelZoomRef.current()
-      map.stop()
-
-      if (tileLayerRef.current) {
-        tileLayerRef.current.remove()
-        tileLayerRef.current = null
-      }
-      if (refTileLayerRef.current) {
-        refTileLayerRef.current.remove()
-        refTileLayerRef.current = null
-      }
-
-      const isLight = nextKind === 'light'
-      tileLayerRef.current = L.tileLayer(isLight ? ESRI_TOPO_URL : ESRI_DARK_BASE_URL, {
-        maxNativeZoom: isLight ? 17 : 16,
-        maxZoom: 19,
-        updateWhenZooming: false,
-        updateWhenIdle: true,
-        keepBuffer: 4,
-        attribution: TILE_ATTRIBUTION,
-      }).addTo(map)
-
-      if (!isLight) {
-        refTileLayerRef.current = L.tileLayer(ESRI_DARK_REF_URL, {
-          maxNativeZoom: 16,
-          maxZoom: 19,
-          opacity: 0.95,
-          updateWhenZooming: false,
-          updateWhenIdle: true,
-          keepBuffer: 4,
-          attribution: '',
-        }).addTo(map)
+      if (sr.tileKind !== nextKind) {
+        sr.tileKind = nextKind
+        sr.reloadBaseTiles(nextKind)
+        sr.updatePatchTiles()
       }
     }, [theme])
 
-    // 3. Smoothly re-frame map whenever activeGeohash changes externally
+    // -----------------------------------------------------------------------
+    // 3. Smoothly Fly Globe Whenever activeGeohash Changes Externally
+    // -----------------------------------------------------------------------
     useEffect(() => {
       if (prevActiveRef.current === safeActiveGeohash) return
       prevActiveRef.current = safeActiveGeohash
-      const map = mapRef.current
-      if (!map) return
-      flyToCellInternal(map, safeActiveGeohash, { animate: true })
-    }, [safeActiveGeohash])
+      flyToCellInternal(safeActiveGeohash, { animate: true })
+    }, [safeActiveGeohash, flyToCellInternal])
 
-    // 4. Emit updated effective precision when precisionMode changes
+    // -----------------------------------------------------------------------
+    // 4. Emit Effective Precision Whenever precisionMode Changes
+    // -----------------------------------------------------------------------
     useEffect(() => {
-      const map = mapRef.current
-      if (!map) return
-      const z = map.getZoom()
+      const z = cameraStateRef.current.zoom
       const p = precisionMode === 'auto' ? getRecommendedPrecisionForZoom(z) : precisionMode
       onViewportInfoRef.current?.({ zoom: z, effectivePrecision: p })
     }, [precisionMode])
 
-    // 5. Render Live Geohash Zone Grid Overlay (Canvas-accelerated)
+    // -----------------------------------------------------------------------
+    // 5. Render Curved Geohash Grid Lines on the Sphere Surface
+    // -----------------------------------------------------------------------
     useEffect(() => {
-      const map = mapRef.current
-      const layer = gridLayerRef.current
-      const renderer = canvasRendererRef.current
-      if (!map || !layer || !renderer) return
+      const sr = sceneRefs.current
+      if (!sr) return
+      const group = sr.gridGroup
+      while (group.children.length > 0) {
+        const ch = group.children[0]
+        group.remove(ch)
+        disposeObject3D(ch)
+      }
 
-      layer.clearLayers()
-
-      const palette = readCanvasPalette(containerRef.current, theme)
-      const isTouchDevice =
-        typeof window !== 'undefined' &&
-        window.matchMedia &&
-        window.matchMedia('(hover: none)').matches
-
-      const z = map.getZoom()
+      const cam = cameraStateRef.current
+      const dist = zoomToDistance(cam.zoom)
       const effectivePrecision =
-        precisionMode === 'auto' ? getRecommendedPrecisionForZoom(z) : precisionMode
+        precisionMode === 'auto' ? getRecommendedPrecisionForZoom(cam.zoom) : precisionMode
 
-      const b = map.getBounds()
-      const cells = getGeohashCellsInBounds(
-        {
-          latMin: b.getSouth(),
-          latMax: b.getNorth(),
-          lonMin: b.getWest(),
-          lonMax: b.getEast(),
-        },
-        effectivePrecision,
-        mode === 'compact' ? 96 : 180,
-      )
+      const halfFovRad = (CAMERA_FOV_DEG * DEG2RAD) / 2
+      const halfAngRad = computeVisibleHalfAngleRad(dist, halfFovRad)
+      const halfLatDeg = Math.min(84, halfAngRad * RAD2DEG * 1.15)
+      const aspect = sr.camera.aspect || 1
+      const cosLat = Math.max(0.22, Math.cos(cam.lat * DEG2RAD))
+      const halfLonDeg = Math.min(180, (halfLatDeg * aspect) / cosLat)
+
+      const bounds =
+        halfLonDeg >= 175
+          ? {
+              latMin: Math.max(-85, cam.lat - halfLatDeg),
+              latMax: Math.min(85, cam.lat + halfLatDeg),
+              lonMin: -180,
+              lonMax: 180,
+            }
+          : {
+              latMin: Math.max(-85, cam.lat - halfLatDeg),
+              latMax: Math.min(85, cam.lat + halfLatDeg),
+              lonMin: cam.lon - halfLonDeg,
+              lonMax: cam.lon + halfLonDeg,
+            }
+
+      const cells = getGeohashCellsInBounds(bounds, effectivePrecision, mode === 'compact' ? 84 : 164)
+      if (cells.length === 0) return
 
       const focusSet = new Set<string>([safeActiveGeohash])
       if (safeSelectedGeohash) focusSet.add(safeSelectedGeohash)
 
-      // Skip plain center cell labels whenever a visible Global Pulse badge occupies the exact geohash
-      const pulseOccupiedSet = new Set<string>()
-      if (showPulse && pulseRooms.length > 0) {
-        const visiblePulse = pulseRooms
-          .filter((r) => !isTopicChannel(r.geohash) && isValidGeohash(r.geohash))
-          .slice(0, mode === 'compact' ? 24 : 44)
-        for (const room of visiblePulse) {
-          pulseOccupiedSet.add(room.geohash)
-        }
-      }
-
+      const segs: number[] = []
       for (const cell of cells) {
-        const isFocus = focusSet.has(cell.geohash)
-        const latMin = Math.max(-85, cell.bounds.latMin)
-        const latMax = Math.min(85, cell.bounds.latMax)
-        const rect = L.rectangle(
-          [
-            [latMin, cell.bounds.lonMin],
-            [latMax, cell.bounds.lonMax],
-          ],
-          {
-            renderer,
-            color: palette.accent,
-            opacity: isFocus ? 0 : palette.gridOpacity,
-            fillColor: palette.accent,
-            fillOpacity: 0,
-            weight: 0.75,
-            interactive: true,
-          },
+        if (focusSet.has(cell.geohash)) continue
+        pushCurvedRectSegments(
+          segs,
+          cell.bounds.latMin,
+          cell.bounds.latMax,
+          cell.bounds.lonMin,
+          cell.bounds.lonMax,
+          OVERLAY_LINE_RADIUS,
         )
-
-        if (!isTouchDevice && !isFocus) {
-          rect.on('mouseover', () => {
-            rect.setStyle({
-              opacity: palette.gridHoverOpacity,
-              fillOpacity: palette.gridHoverFillOpacity,
-            })
-          })
-          rect.on('mouseout', () => {
-            rect.setStyle({
-              opacity: palette.gridOpacity,
-              fillOpacity: 0,
-            })
-          })
-        }
-
-        rect.on('click', (ev: L.LeafletMouseEvent) => {
-          L.DomEvent.stopPropagation(ev)
-          onSelectRef.current(cell.geohash)
-        })
-
-        if (mode === 'expanded') {
-          rect.on('dblclick', (ev: L.LeafletMouseEvent) => {
-            L.DomEvent.stopPropagation(ev)
-            onTuneRef.current?.(cell.geohash)
-          })
-        }
-
-        rect.addTo(layer)
-
-        // Centered #geohash label only if pixel footprint comfortably fits and isn't covered by focus or Pulse
-        if (!isFocus && !pulseOccupiedSet.has(cell.geohash)) {
-          const nw = map.latLngToContainerPoint([latMax, cell.bounds.lonMin])
-          const se = map.latLngToContainerPoint([latMin, cell.bounds.lonMax])
-          const pxW = Math.abs(se.x - nw.x)
-          const pxH = Math.abs(se.y - nw.y)
-          const neededW = Math.max(40, (cell.geohash.length + 1) * 7.2 + 12)
-          if (pxW >= neededW && pxH >= 22) {
-            const labelMarker = L.marker([cell.center.lat, cell.center.lon], {
-              interactive: false,
-              keyboard: false,
-              icon: L.divIcon({
-                className: 'ag-gh-label-host',
-                html: `<span class="ag-gh-label mono">#${escapeHtml(cell.geohash)}</span>`,
-                iconSize: [0, 0],
-              }),
-            })
-            labelMarker.addTo(layer)
-          }
-        }
       }
-    }, [
-      viewportTick,
-      precisionMode,
-      safeActiveGeohash,
-      safeSelectedGeohash,
-      showPulse,
-      pulseRooms,
-      mode,
-      theme,
-    ])
+      if (segs.length === 0) return
 
-    // 6. Render Sub-Zone 32× Drill-Down Overlay (Canvas-accelerated)
+      const pal = readCanvasPalette(hostRef.current, theme)
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
+      const mat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(pal.accent),
+        transparent: true,
+        opacity: pal.isLight ? 0.34 : 0.28,
+        depthWrite: false,
+      })
+      const lines = new THREE.LineSegments(geo, mat)
+      lines.renderOrder = 4
+      group.add(lines)
+    }, [viewportTick, precisionMode, safeActiveGeohash, safeSelectedGeohash, mode, theme])
+
+    // -----------------------------------------------------------------------
+    // 6. Render Optional 32× Child Sub-Zones Curved on the Sphere
+    // -----------------------------------------------------------------------
     useEffect(() => {
-      const map = mapRef.current
-      const layer = subZoneLayerRef.current
-      const renderer = canvasRendererRef.current
-      if (!map || !layer || !renderer) return
-
-      layer.clearLayers()
-      if (!showSubZones) return
-
-      const parentHash = safeSelectedGeohash || safeActiveGeohash
-      if (!parentHash || parentHash.length >= 8) return
-
-      const palette = readCanvasPalette(containerRef.current, theme)
-      const isTouchDevice =
-        typeof window !== 'undefined' &&
-        window.matchMedia &&
-        window.matchMedia('(hover: none)').matches
-
-      const children = getChildGeohashes(parentHash)
-      for (const child of children) {
-        const latMin = Math.max(-85, child.bounds.latMin)
-        const latMax = Math.min(85, child.bounds.latMax)
-        const isChildActive = child.geohash === safeActiveGeohash
-        const isChildSelected = child.geohash === safeSelectedGeohash
-        const baseFillOpacity = isChildSelected ? 0.11 : isChildActive ? 0.08 : 0.025
-
-        const rect = L.rectangle(
-          [
-            [latMin, child.bounds.lonMin],
-            [latMax, child.bounds.lonMax],
-          ],
-          {
-            renderer,
-            color: palette.accentSecondary,
-            opacity: 0.5,
-            fillColor: palette.accentSecondary,
-            fillOpacity: baseFillOpacity,
-            weight: 0.9,
-            dashArray: '3 3',
-            interactive: true,
-          },
-        )
-
-        if (!isTouchDevice) {
-          rect.on('mouseover', () => {
-            rect.setStyle({ opacity: 0.84, fillOpacity: Math.max(0.11, baseFillOpacity + 0.06) })
-          })
-          rect.on('mouseout', () => {
-            rect.setStyle({ opacity: 0.5, fillOpacity: baseFillOpacity })
-          })
-        }
-
-        rect.on('click', (ev: L.LeafletMouseEvent) => {
-          L.DomEvent.stopPropagation(ev)
-          onSelectRef.current(child.geohash)
-        })
-
-        if (mode === 'expanded') {
-          rect.on('dblclick', (ev: L.LeafletMouseEvent) => {
-            L.DomEvent.stopPropagation(ev)
-            onTuneRef.current?.(child.geohash)
-          })
-        }
-
-        rect.addTo(layer)
-
-        const nw = map.latLngToContainerPoint([latMax, child.bounds.lonMin])
-        const se = map.latLngToContainerPoint([latMin, child.bounds.lonMax])
-        const pxW = Math.abs(se.x - nw.x)
-        const pxH = Math.abs(se.y - nw.y)
-        const fullNeededW = (child.geohash.length + 1) * 6.8 + 8
-
-        let text: string | null = null
-        if (pxW >= fullNeededW && pxH >= 18) {
-          text = `#${child.geohash}`
-        } else if (pxW >= 16 && pxH >= 14) {
-          text = child.geohash.slice(-1)
-        }
-
-        if (text) {
-          L.marker([child.center.lat, child.center.lon], {
-            interactive: false,
-            keyboard: false,
-            icon: L.divIcon({
-              className: 'ag-gh-label-host',
-              html: `<span class="ag-gh-sub-label mono">${escapeHtml(text)}</span>`,
-              iconSize: [0, 0],
-            }),
-          }).addTo(layer)
-        }
+      const sr = sceneRefs.current
+      if (!sr) return
+      const group = sr.subZoneGroup
+      while (group.children.length > 0) {
+        const ch = group.children[0]
+        group.remove(ch)
+        disposeObject3D(ch)
       }
-    }, [viewportTick, showSubZones, safeActiveGeohash, safeSelectedGeohash, mode, theme])
+      if (!subZoneParent) return
 
-    // 7. Render Live Global Pulse Zones, Sonar Beacons & Compact Live Speech Bubbles
-    useEffect(() => {
-      const map = mapRef.current
-      const layer = pulseLayerRef.current
-      const bubbleLayer = bubbleLayerRef.current
-      const renderer = canvasRendererRef.current
-      if (!map || !layer || !bubbleLayer || !renderer) return
+      const children = getChildGeohashes(subZoneParent)
+      if (children.length === 0) return
 
-      layer.clearLayers()
-      if (!showPulse || pulseRooms.length === 0) {
-        bubbleLayer.clearLayers()
-        bubbleMarkersRef.current.clear()
-        return
-      }
+      const pal = readCanvasPalette(hostRef.current, theme)
+      const color = new THREE.Color(pal.accentSecondary)
 
-      const palette = readCanvasPalette(containerRef.current, theme)
-      const isTouchDevice =
-        typeof window !== 'undefined' &&
-        window.matchMedia &&
-        window.matchMedia('(hover: none)').matches
-
-      const validRooms = pulseRooms.filter(
-        (r) => !isTopicChannel(r.geohash) && isValidGeohash(r.geohash),
+      const fillGeo = buildCurvedRectFillGeometry(
+        children.map((c) => c.bounds),
+        OVERLAY_FILL_RADIUS,
       )
-      const visible = validRooms.slice(0, mode === 'compact' ? 24 : 44)
-      const z = map.getZoom()
-      const subZoneCandidate = showSubZones ? safeSelectedGeohash || safeActiveGeohash : null
-      const subZoneParent =
-        subZoneCandidate && subZoneCandidate.length < 8 ? subZoneCandidate : null
+      const fillMat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.06,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      })
+      const fillMesh = new THREE.Mesh(fillGeo, fillMat)
+      fillMesh.renderOrder = 4
+      group.add(fillMesh)
 
-      // Track freshly-arrived message IDs so only newly arrived messages play pop-in animation
-      const freshGeohashes = new Set<string>()
-      const seenMap = seenBubbleMsgRef.current
-      if (!hasSeededBubblesRef.current) {
-        for (const r of validRooms) {
-          const snip = formatBubbleSnippet(r.lastPreview)
-          if (!snip) continue
-          const msgKey = r.lastMessageId || `${r.lastMessageAt ?? r.lastActivityAt}:${snip}`
-          seenMap.set(r.geohash, msgKey)
-        }
-        hasSeededBubblesRef.current = true
-      } else {
-        for (const r of validRooms) {
-          const snip = formatBubbleSnippet(r.lastPreview)
-          if (!snip) continue
-          const msgKey = r.lastMessageId || `${r.lastMessageAt ?? r.lastActivityAt}:${snip}`
-          if (seenMap.get(r.geohash) !== msgKey) {
-            seenMap.set(r.geohash, msgKey)
-            freshGeohashes.add(r.geohash)
-          }
-        }
-        if (seenMap.size > 200) {
-          const liveSet = new Set(validRooms.map((r) => r.geohash))
-          for (const key of seenMap.keys()) {
-            if (!liveSet.has(key)) seenMap.delete(key)
-          }
-        }
-      }
-
-      // Compute screen-space collision-avoided compact speech bubbles
-      const placedBubbles: Array<{ room: PulseRoom; snippet: string; isFocused: boolean }> = []
-      const bubblePlacedSet = new Set<string>()
-
-      if (showBubbles) {
-        const mapSize = map.getSize()
-        const isNarrow = mapSize.x < 640
-        const bubbleW = isNarrow ? 132 : 154
-        const bubbleH = isNarrow ? 42 : 46
-        const bubbleGap = 6
-        const maxBubbles = mode === 'compact' ? 3 : isNarrow ? 6 : 12
-
-        const isTallExpanded = mode === 'expanded' && mapSize.y >= 460
-        const minX = mode === 'expanded' ? 10 : 6
-        const maxX = mode === 'expanded' ? mapSize.x - (isNarrow ? 58 : 66) : mapSize.x - 6
-        const minY = isTallExpanded ? (isNarrow ? 104 : 96) : 6
-        const maxY = isTallExpanded ? mapSize.y - (isNarrow ? 154 : 140) : mapSize.y - 6
-
-        const focusBlocks: Array<{ geohash: string; box: ScreenBox }> = []
-        const placedBoxes: ScreenBox[] = []
-
-        const addFocusBadgeBlock = (gh: string | null) => {
-          if (!gh || subZoneParent === gh) return
-          const center = decodeCenter(gh)
-          const pt = map.latLngToContainerPoint([center.lat, center.lon])
-          const badgeW = Math.max(66, (gh.length + 1) * 7.5 + 18)
-          const badgeH = 26
-          focusBlocks.push({
-            geohash: gh,
-            box: {
-              left: pt.x - badgeW / 2,
-              right: pt.x + badgeW / 2,
-              top: pt.y - badgeH / 2,
-              bottom: pt.y + badgeH / 2,
-            },
-          })
-        }
-        addFocusBadgeBlock(safeActiveGeohash)
-        if (safeSelectedGeohash && safeSelectedGeohash !== safeActiveGeohash) {
-          addFocusBadgeBlock(safeSelectedGeohash)
-        }
-
-        const paddedBounds = map.getBounds().pad(0.08)
-        const bubbleCandidates = validRooms
-          .filter((room) => {
-            if (subZoneParent === room.geohash) return false
-            if (!paddedBounds.contains([room.center.lat, room.center.lon])) return false
-            return formatBubbleSnippet(room.lastPreview).length > 0
-          })
-          .sort((a, b) => {
-            // Keep an explicitly selected bubble pinned first so single-clicking it never evicts it
-            const aSel = a.geohash === safeSelectedGeohash ? 1 : 0
-            const bSel = b.geohash === safeSelectedGeohash ? 1 : 0
-            if (aSel !== bSel) return bSel - aSel
-            return (b.lastMessageAt ?? b.lastActivityAt) - (a.lastMessageAt ?? a.lastActivityAt)
-          })
-
-        for (const room of bubbleCandidates) {
-          if (placedBubbles.length >= maxBubbles) break
-          const snippet = formatBubbleSnippet(room.lastPreview)
-          if (!snippet) continue
-
-          const isFocused =
-            room.geohash === safeActiveGeohash || room.geohash === safeSelectedGeohash
-          // Lift focused room's bubble slightly above its focus pill so both stay crisp & clickable
-          const tailOffset = isFocused ? 20 : 12
-          const effectiveMinY = isFocused ? Math.max(6, minY - 8) : minY
-
-          const pt = map.latLngToContainerPoint([room.center.lat, room.center.lon])
-          const box: ScreenBox = {
-            left: pt.x - bubbleW / 2,
-            right: pt.x + bubbleW / 2,
-            top: pt.y - tailOffset - bubbleH,
-            bottom: pt.y - tailOffset,
-          }
-
-          if (box.left < minX || box.right > maxX || box.top < effectiveMinY || box.bottom > maxY) {
-            continue
-          }
-
-          if (placedBoxes.some((other) => boxesOverlap(box, other, bubbleGap))) {
-            continue
-          }
-
-          // Never let a room's own focus pill collide out that room's speech bubble
-          if (
-            focusBlocks.some(
-              (fb) => fb.geohash !== room.geohash && boxesOverlap(box, fb.box, bubbleGap),
-            )
-          ) {
-            continue
-          }
-
-          placedBoxes.push(box)
-          placedBubbles.push({ room, snippet, isFocused })
-          bubblePlacedSet.add(room.geohash)
-        }
-      }
-
-      // 1. Render pulse zone polygons + sonar beacons (ensure every placed bubble has its beacon underneath)
-      const visibleSet = new Set(visible.map((r) => r.geohash))
-      const beaconRooms = [...visible]
-      for (const { room } of placedBubbles) {
-        if (!visibleSet.has(room.geohash)) {
-          beaconRooms.push(room)
-          visibleSet.add(room.geohash)
-        }
-      }
-
-      for (const room of beaconRooms) {
-        const b = decodeBounds(room.geohash)
-        const latMin = Math.max(-85, b.latMin)
-        const latMax = Math.min(85, b.latMax)
-        const isCurrent = room.geohash === safeActiveGeohash
-        const isFocused = isCurrent || room.geohash === safeSelectedGeohash
-        const baseOpacity = isCurrent ? 0.56 : 0.45
-        const baseFillOpacity = isCurrent ? 0.1 : 0.07
-
-        // Highlight the live geohash zone polygon itself on Canvas
-        const poly = L.rectangle(
-          [
-            [latMin, b.lonMin],
-            [latMax, b.lonMax],
-          ],
-          {
-            renderer,
-            color: palette.accent,
-            opacity: baseOpacity,
-            fillColor: palette.accent,
-            fillOpacity: baseFillOpacity,
-            weight: 1.15,
-            interactive: true,
-          },
+      const segs: number[] = []
+      for (const child of children) {
+        pushCurvedRectSegments(
+          segs,
+          child.bounds.latMin,
+          child.bounds.latMax,
+          child.bounds.lonMin,
+          child.bounds.lonMax,
+          OVERLAY_LINE_RADIUS,
         )
-        if (!isTouchDevice) {
-          poly.on('mouseover', () => {
-            poly.setStyle({ opacity: 0.74, fillOpacity: 0.13 })
-          })
-          poly.on('mouseout', () => {
-            poly.setStyle({ opacity: baseOpacity, fillOpacity: baseFillOpacity })
-          })
-        }
-        poly.on('click', (ev: L.LeafletMouseEvent) => {
-          L.DomEvent.stopPropagation(ev)
-          onSelectRef.current(room.geohash)
-        })
-        if (mode === 'expanded') {
-          poly.on('dblclick', (ev: L.LeafletMouseEvent) => {
-            L.DomEvent.stopPropagation(ev)
-            onTuneRef.current?.(room.geohash)
-          })
-        }
-        poly.addTo(layer)
-
-        // Skip center sonar beacon when 32x sub-zones are expanded inside this exact cell
-        if (subZoneParent === room.geohash) continue
-
-        // Clickable sonar beacon at cell center (suppress side pill when cell has focus badge or speech bubble)
-        const hasBubble = bubblePlacedSet.has(room.geohash)
-        const showPill =
-          !isFocused && !hasBubble && mode === 'expanded' && (z >= 4 || room.peerCount >= 2)
-        const countTag = room.peerCount > 0 ? `${room.peerCount}p` : `${room.messageCount}m`
-        const html = showPill
-          ? `<div class="ag-gh-pulse-beacon with-pill"><span class="ag-gh-pulse-ring"></span><span class="ag-gh-pulse-core"></span><span class="ag-gh-pulse-pill mono">#${escapeHtml(room.geohash)} <b>${escapeHtml(countTag)}</b></span></div>`
-          : `<div class="ag-gh-pulse-beacon"><span class="ag-gh-pulse-ring"></span><span class="ag-gh-pulse-core"></span></div>`
-
-        const beacon = L.marker([room.center.lat, room.center.lon], {
-          interactive: true,
-          keyboard: true,
-          title: `#${room.geohash}${room.nearestCity ? ` · ${room.nearestCity}` : ''} (${room.peerCount} ${room.peerCount === 1 ? 'peer' : 'peers'})`,
-          icon: L.divIcon({
-            className: 'ag-gh-beacon-host',
-            html,
-            iconSize: [18, 18],
-            iconAnchor: [9, 9],
-          }),
-        })
-
-        beacon.on('click', (ev: L.LeafletMouseEvent) => {
-          L.DomEvent.stopPropagation(ev)
-          onSelectRef.current(room.geohash)
-        })
-        if (mode === 'expanded') {
-          beacon.on('dblclick', (ev: L.LeafletMouseEvent) => {
-            L.DomEvent.stopPropagation(ev)
-            onTuneRef.current?.(room.geohash)
-          })
-        }
-
-        beacon.addTo(layer)
       }
+      const lineGeo = new THREE.BufferGeometry()
+      lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
+      const lineMat = new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.6,
+        depthWrite: false,
+      })
+      const lines = new THREE.LineSegments(lineGeo, lineMat)
+      lines.renderOrder = 5
+      group.add(lines)
+    }, [subZoneParent, theme])
 
-      // 2. Reconcile compact live worldwide speech bubbles in-place so click #1 never detaches DOM before dblclick
-      const existingMarkers = bubbleMarkersRef.current
-      for (const [gh, entry] of existingMarkers.entries()) {
-        if (!bubblePlacedSet.has(gh)) {
-          bubbleLayer.removeLayer(entry.marker)
-          existingMarkers.delete(gh)
-        }
-      }
-
-      const nowMs = Date.now()
-      for (const { room, snippet, isFocused } of placedBubbles) {
-        const msgTs = room.lastMessageAt ?? room.lastActivityAt
-        const isRecent = nowMs - msgTs < RECENT_BUBBLE_WINDOW_MS
-        const isFresh = freshGeohashes.has(room.geohash)
-        const sender = formatBubbleSender(room.lastSender)
-        const msgKey = room.lastMessageId || `${msgTs}:${snippet}`
-        const zIndexOffset = isFocused ? 420 : isRecent ? 240 : 210
-
-        const buildBubbleIcon = (playFreshAnim: boolean) =>
-          L.divIcon({
-            className: 'ag-gh-bubble-host',
-            html:
-              `<div class="ag-gh-bubble${playFreshAnim ? ' is-fresh' : ''}${isRecent ? ' is-recent' : ''}${isFocused ? ' is-focused' : ''}">` +
-              `<div class="ag-gh-bubble-head">` +
-              `<span class="ag-gh-bubble-dot${isRecent ? ' is-live' : ''}"></span>` +
-              `<span class="ag-gh-bubble-sender">${escapeHtml(sender)}</span>` +
-              `<span class="ag-gh-bubble-tag mono">#${escapeHtml(room.geohash)}</span>` +
-              `</div>` +
-              `<div class="ag-gh-bubble-body">${escapeHtml(snippet)}</div>` +
-              `</div>`,
-            iconSize: [0, 0],
-            iconAnchor: [0, 0],
-          })
-
-        const existing = existingMarkers.get(room.geohash)
-        if (existing) {
-          const curLatLng = existing.marker.getLatLng()
-          if (curLatLng.lat !== room.center.lat || curLatLng.lng !== room.center.lon) {
-            existing.marker.setLatLng([room.center.lat, room.center.lon])
-          }
-          existing.marker.setZIndexOffset(zIndexOffset)
-
-          if (existing.msgKey !== msgKey) {
-            existing.marker.setIcon(buildBubbleIcon(isFresh))
-            existing.msgKey = msgKey
-          } else {
-            const el = existing.marker.getElement()
-            const bubbleEl = el?.querySelector('.ag-gh-bubble')
-            if (bubbleEl) {
-              bubbleEl.classList.remove('is-fresh')
-              bubbleEl.classList.toggle('is-focused', isFocused)
-              bubbleEl.classList.toggle('is-recent', isRecent)
-              const dotEl = bubbleEl.querySelector('.ag-gh-bubble-dot')
-              dotEl?.classList.toggle('is-live', isRecent)
-            }
-          }
-          continue
-        }
-
-        const gh = room.geohash
-        const bubbleMarker = L.marker([room.center.lat, room.center.lon], {
-          interactive: true,
-          keyboard: true,
-          riseOnHover: true,
-          zIndexOffset,
-          title: `#${gh} — ${sender}: ${snippet}`,
-          icon: buildBubbleIcon(isFresh),
-        })
-
-        bubbleMarker.on('click', (ev: L.LeafletMouseEvent) => {
-          L.DomEvent.stopPropagation(ev)
-          onSelectRef.current(gh)
-        })
-        bubbleMarker.on('dblclick', (ev: L.LeafletMouseEvent) => {
-          L.DomEvent.stopPropagation(ev)
-          onTuneRef.current?.(gh)
-        })
-
-        bubbleMarker.addTo(bubbleLayer)
-        existingMarkers.set(gh, { marker: bubbleMarker, msgKey })
-      }
-    }, [
-      viewportTick,
-      showPulse,
-      showBubbles,
-      showSubZones,
-      pulseRooms,
-      safeActiveGeohash,
-      safeSelectedGeohash,
-      mode,
-      theme,
-    ])
-
-    // 8. Render Active Tuned Zone & Selected / Inspected Zone (Canvas-accelerated)
+    // -----------------------------------------------------------------------
+    // 7. Render Live Global Pulse Zone Highlights on the Sphere Surface
+    // -----------------------------------------------------------------------
     useEffect(() => {
-      const map = mapRef.current
-      const layer = focusLayerRef.current
-      const renderer = canvasRendererRef.current
-      if (!map || !layer || !renderer) return
+      const sr = sceneRefs.current
+      if (!sr) return
+      const group = sr.pulseGroup
+      while (group.children.length > 0) {
+        const ch = group.children[0]
+        group.remove(ch)
+        disposeObject3D(ch)
+      }
+      if (!showPulse || validPulseRooms.length === 0) return
 
-      layer.clearLayers()
+      const pal = readCanvasPalette(hostRef.current, theme)
+      const color = new THREE.Color(pal.accent)
+      const boxes = validPulseRooms.map((r) => decodeBounds(r.geohash))
 
-      const palette = readCanvasPalette(containerRef.current, theme)
+      const fillGeo = buildCurvedRectFillGeometry(boxes, OVERLAY_FILL_RADIUS)
+      const fillMat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.11,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      })
+      const fillMesh = new THREE.Mesh(fillGeo, fillMat)
+      fillMesh.renderOrder = 4
+      group.add(fillMesh)
 
-      // When 32x sub-zones are overlaid on a cell, hide its centered parent pill so center Base32 children stay clear
-      const subZoneCandidate = showSubZones ? safeSelectedGeohash || safeActiveGeohash : null
-      const subZoneParent =
-        subZoneCandidate && subZoneCandidate.length < 8 ? subZoneCandidate : null
+      const segs: number[] = []
+      for (const b of boxes) {
+        pushCurvedRectSegments(segs, b.latMin, b.latMax, b.lonMin, b.lonMax, OVERLAY_LINE_RADIUS)
+      }
+      const lineGeo = new THREE.BufferGeometry()
+      lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
+      const lineMat = new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.56,
+        depthWrite: false,
+      })
+      const lines = new THREE.LineSegments(lineGeo, lineMat)
+      lines.renderOrder = 5
+      group.add(lines)
+    }, [showPulse, validPulseRooms, theme])
 
-      // Active tuned geohash rectangle + badge
+    // -----------------------------------------------------------------------
+    // 8. Render Active Tuned & Selected Geohash Curved Polygon Fill & Borders
+    // -----------------------------------------------------------------------
+    useEffect(() => {
+      const sr = sceneRefs.current
+      if (!sr) return
+      const group = sr.focusGroup
+      while (group.children.length > 0) {
+        const ch = group.children[0]
+        group.remove(ch)
+        disposeObject3D(ch)
+      }
+
+      const pal = readCanvasPalette(hostRef.current, theme)
+
+      const addFocusCell = (gh: string, hexColor: string, fillOpacity: number) => {
+        const b = decodeBounds(gh)
+        const col = new THREE.Color(hexColor)
+
+        const fillGeo = buildCurvedRectFillGeometry([b], OVERLAY_FILL_RADIUS)
+        const fillMat = new THREE.MeshBasicMaterial({
+          color: col,
+          transparent: true,
+          opacity: fillOpacity,
+          depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: -3,
+          polygonOffsetUnits: -3,
+        })
+        const fillMesh = new THREE.Mesh(fillGeo, fillMat)
+        fillMesh.renderOrder = 5
+        group.add(fillMesh)
+
+        const segs: number[] = []
+        pushCurvedRectSegments(segs, b.latMin, b.latMax, b.lonMin, b.lonMax, FOCUS_LINE_RADIUS)
+        const lineGeo = new THREE.BufferGeometry()
+        lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
+        const lineMat = new THREE.LineBasicMaterial({
+          color: col,
+          transparent: true,
+          opacity: 0.94,
+          depthWrite: false,
+        })
+        const lines = new THREE.LineSegments(lineGeo, lineMat)
+        lines.renderOrder = 7
+        group.add(lines)
+      }
+
       if (safeActiveGeohash) {
-        const activeCenter = decodeCenter(safeActiveGeohash)
-        const activeRect = L.rectangle(getBoundsTuple(safeActiveGeohash), {
-          renderer,
-          color: palette.accent,
-          opacity: 0.88,
-          fillColor: palette.accent,
-          fillOpacity: 0.1,
-          weight: 2,
-          interactive: false,
-        })
-        activeRect.addTo(layer)
-
-        if (subZoneParent !== safeActiveGeohash) {
-          L.marker([activeCenter.lat, activeCenter.lon], {
-            interactive: false,
-            keyboard: false,
-            zIndexOffset: 300,
-            icon: L.divIcon({
-              className: 'ag-gh-label-host',
-              html: `<span class="ag-gh-active-label mono">#${escapeHtml(safeActiveGeohash)}</span>`,
-              iconSize: [0, 0],
-            }),
-          }).addTo(layer)
-        }
+        addFocusCell(safeActiveGeohash, pal.accent, 0.16)
       }
-
-      // Selected / Inspected geohash rectangle + badge (distinct from active tuned cell)
       if (safeSelectedGeohash && safeSelectedGeohash !== safeActiveGeohash) {
-        const selCenter = decodeCenter(safeSelectedGeohash)
-        const selRect = L.rectangle(getBoundsTuple(safeSelectedGeohash), {
-          renderer,
-          color: palette.accentSecondary,
-          opacity: 0.88,
-          fillColor: palette.accentSecondary,
-          fillOpacity: 0.1,
-          weight: 2,
-          dashArray: '6 4',
-          interactive: false,
-        })
-        selRect.addTo(layer)
-
-        if (subZoneParent !== safeSelectedGeohash) {
-          L.marker([selCenter.lat, selCenter.lon], {
-            interactive: false,
-            keyboard: false,
-            zIndexOffset: 400,
-            icon: L.divIcon({
-              className: 'ag-gh-label-host',
-              html: `<span class="ag-gh-selected-label mono">#${escapeHtml(safeSelectedGeohash)}</span>`,
-              iconSize: [0, 0],
-            }),
-          }).addTo(layer)
-        }
+        addFocusCell(safeSelectedGeohash, pal.accentSecondary, 0.15)
       }
-    }, [safeActiveGeohash, safeSelectedGeohash, showSubZones, viewportTick, theme])
+    }, [safeActiveGeohash, safeSelectedGeohash, theme])
 
-    // 9. Render Physical GPS Beacon + Teleport Vector Polyline (Canvas-accelerated)
+    // -----------------------------------------------------------------------
+    // 9. Render Orbital Great-Circle Teleport Vector Arc When Teleported
+    // -----------------------------------------------------------------------
     useEffect(() => {
-      const layer = gpsLayerRef.current
-      const renderer = canvasRendererRef.current
-      if (!layer || !renderer) return
-
-      layer.clearLayers()
-      if (!userCoords) return
-
-      const palette = readCanvasPalette(containerRef.current, theme)
-
-      if (isTeleported && safeActiveGeohash) {
-        const activeCenter = decodeCenter(safeActiveGeohash)
-        L.polyline(
-          [
-            [userCoords.lat, userCoords.lon],
-            [activeCenter.lat, activeCenter.lon],
-          ],
-          {
-            renderer,
-            color: palette.accentSecondary,
-            opacity: 0.82,
-            weight: 1.6,
-            dashArray: '5 5',
-            interactive: false,
-          },
-        ).addTo(layer)
+      const sr = sceneRefs.current
+      if (!sr) return
+      const group = sr.gpsGroup
+      while (group.children.length > 0) {
+        const ch = group.children[0]
+        group.remove(ch)
+        disposeObject3D(ch)
       }
+      if (!userCoords || !isTeleported || !safeActiveGeohash) return
 
-      L.marker([userCoords.lat, userCoords.lon], {
-        interactive: false,
-        keyboard: false,
-        zIndexOffset: 500,
-        icon: L.divIcon({
-          className: 'ag-gh-beacon-host',
-          html: '<div class="ag-gh-gps-beacon"><span class="ag-gh-gps-halo"></span><span class="ag-gh-gps-dot"></span></div>',
-          iconSize: [18, 18],
-          iconAnchor: [9, 9],
-        }),
-      }).addTo(layer)
+      const activeCenter = decodeCenter(safeActiveGeohash)
+      const pal = readCanvasPalette(hostRef.current, theme)
+      const arcGeo = buildCurvedTeleportArcGeometry(userCoords, activeCenter)
+      const arcMat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(pal.accentSecondary),
+        transparent: true,
+        opacity: 0.85,
+        depthWrite: false,
+      })
+      const line = new THREE.Line(arcGeo, arcMat)
+      line.renderOrder = 7
+      group.add(line)
     }, [userCoords, isTeleported, safeActiveGeohash, theme])
+
+    // Sync bubble & beacon ref callbacks cleanly
+    const setBubbleStackEl = useCallback((gh: string, node: HTMLDivElement | null) => {
+      if (node) bubbleStackElsRef.current.set(gh, node)
+      else bubbleStackElsRef.current.delete(gh)
+    }, [])
+
+    const setBeaconEl = useCallback((gh: string, node: HTMLButtonElement | null) => {
+      if (node) beaconElsRef.current.set(gh, node)
+      else beaconElsRef.current.delete(gh)
+    }, [])
+
+    const nowMsForRecent = Date.now()
+    const placedBubbleGeohashSet = useMemo(
+      () => new Set(bubbleStacks.map((s) => s.geohash)),
+      [bubbleStacks],
+    )
 
     return (
       <div
+        ref={hostRef}
         className={`ag-radar-map-host ag-radar-map-${mode} ${className}`}
         data-map-theme={theme}
       >
+        {/* Three.js WebGL 3D Earth Globe Canvas Container */}
         <div
-          ref={containerRef}
-          className="ag-radar-leaflet-canvas"
-          aria-label={`Interactive zoomable geohash map centered on #${safeActiveGeohash}`}
+          ref={canvasWrapRef}
+          className="ag-globe-canvas-wrap"
+          aria-label={`Interactive 3D geohash globe centered on #${safeActiveGeohash}`}
         />
 
-        {/* Desktop hover coordinate & live geohash readout */}
-        {hoverHud && (
+        {/* Graceful Fallback if WebGL Cannot Initialize */}
+        {webglError && (
+          <div className="ag-globe-fallback" role="status">
+            <div className="ag-globe-fallback-card">
+              <div className="ag-globe-fallback-title">3D Globe Unavailable</div>
+              <p className="ag-globe-fallback-sub">
+                WebGL hardware graphics could not initialize on this device. Active cell:{' '}
+                <span className="mono">#{safeActiveGeohash}</span>.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Projected 3D -> 2D Interactive Overlay Layer (Horizon-Occluded in rAF) */}
+        {!webglError && (
+          <div className="ag-globe-bubble-layer" aria-hidden={false}>
+            {/* Live Pulse Surface Sonar Beacons */}
+            {showPulse &&
+              validPulseRooms.map((room) => {
+                const isFocused =
+                  room.geohash === safeActiveGeohash || room.geohash === safeSelectedGeohash
+                const hasBubble = showBubbles && placedBubbleGeohashSet.has(room.geohash)
+                const showPill = !isFocused && !hasBubble && mode === 'expanded' && room.peerCount >= 2
+                const countTag = room.peerCount > 0 ? `${room.peerCount}p` : `${room.messageCount}m`
+                return (
+                  <button
+                    key={room.geohash}
+                    ref={(node) => setBeaconEl(room.geohash, node)}
+                    type="button"
+                    style={{
+                      position: 'absolute',
+                      left: 0,
+                      top: 0,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      padding: 0,
+                      border: 'none',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      pointerEvents: 'auto',
+                      zIndex: 6,
+                      visibility: 'hidden',
+                      opacity: 0,
+                    }}
+                    title={`#${room.geohash}${room.nearestCity ? ` · ${room.nearestCity}` : ''} (${room.peerCount} ${room.peerCount === 1 ? 'peer' : 'peers'})`}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onSelectRef.current(room.geohash)
+                    }}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation()
+                      if (modeRef.current === 'expanded') {
+                        onTuneRef.current?.(room.geohash)
+                      }
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: '999px',
+                        backgroundColor: 'var(--accent)',
+                        border: '2px solid var(--bg-canvas)',
+                        boxShadow: '0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 10px var(--accent)',
+                        flexShrink: 0,
+                      }}
+                    />
+                    {showPill && (
+                      <span
+                        className="mono"
+                        style={{
+                          padding: '1px 6px',
+                          borderRadius: '999px',
+                          backgroundColor: 'color-mix(in srgb, var(--bg-surface) 92%, transparent)',
+                          border: '1px solid color-mix(in srgb, var(--accent) 52%, transparent)',
+                          color: 'var(--text-primary)',
+                          fontSize: 10,
+                          fontWeight: 600,
+                          whiteSpace: 'nowrap',
+                          boxShadow: 'var(--shadow-sm)',
+                        }}
+                      >
+                        #{room.geohash}{' '}
+                        <b style={{ color: 'var(--accent)', fontWeight: 700 }}>{countTag}</b>
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+
+            {/* Active Tuned Geohash Pill */}
+            <div
+              ref={activePillElRef}
+              style={{
+                position: 'absolute',
+                left: 0,
+                top: 0,
+                pointerEvents: 'none',
+                zIndex: 8,
+                visibility: 'hidden',
+                opacity: 0,
+              }}
+              aria-hidden="true"
+            >
+              <span
+                className="mono"
+                style={{
+                  display: 'inline-block',
+                  padding: '2px 7px',
+                  borderRadius: '999px',
+                  backgroundColor: 'var(--accent)',
+                  color: 'var(--text-inverse)',
+                  border: '1px solid color-mix(in srgb, var(--text-inverse) 28%, transparent)',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  letterSpacing: '0.03em',
+                  whiteSpace: 'nowrap',
+                  boxShadow: 'var(--shadow-sm)',
+                }}
+              >
+                #{safeActiveGeohash}
+              </span>
+            </div>
+
+            {/* Selected / Inspected Geohash Pill */}
+            {safeSelectedGeohash && safeSelectedGeohash !== safeActiveGeohash && (
+              <div
+                ref={selectedPillElRef}
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: 0,
+                  pointerEvents: 'none',
+                  zIndex: 9,
+                  visibility: 'hidden',
+                  opacity: 0,
+                }}
+                aria-hidden="true"
+              >
+                <span
+                  className="mono"
+                  style={{
+                    display: 'inline-block',
+                    padding: '2px 7px',
+                    borderRadius: '999px',
+                    backgroundColor: 'var(--accent-secondary)',
+                    color: '#06131c',
+                    border: '1px solid rgba(255, 255, 255, 0.35)',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    letterSpacing: '0.03em',
+                    whiteSpace: 'nowrap',
+                    boxShadow: 'var(--shadow-sm)',
+                  }}
+                >
+                  #{safeSelectedGeohash}
+                </span>
+              </div>
+            )}
+
+            {/* Physical User GPS Beacon */}
+            {userCoords && (
+              <div
+                ref={gpsBeaconElRef}
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: 0,
+                  pointerEvents: 'none',
+                  zIndex: 10,
+                  visibility: 'hidden',
+                  opacity: 0,
+                }}
+                aria-hidden="true"
+              >
+                <span
+                  style={{
+                    display: 'block',
+                    width: 11,
+                    height: 11,
+                    borderRadius: '999px',
+                    backgroundColor: 'var(--status-ok, #22c55e)',
+                    border: '2px solid #ffffff',
+                    boxShadow: '0 0 0 4px rgba(34, 197, 94, 0.32), 0 0 10px rgba(34, 197, 94, 0.72)',
+                  }}
+                />
+              </div>
+            )}
+
+            {/* Upward-Queued Speech Bubbles (Max 4 Per Geohash, Bottom = Latest, 5s Post-Demotion Fadeout) */}
+            {showPulse &&
+              showBubbles &&
+              bubbleStacks.map((stack) => (
+                <div
+                  key={stack.geohash}
+                  ref={(node) => setBubbleStackEl(stack.geohash, node)}
+                  className={`ag-globe-bubble-stack${stack.isFocused ? ' is-focused' : ''}`}
+                  style={{ visibility: 'hidden', opacity: 0 }}
+                >
+                  {stack.bubbles.map((bubble, idx) => {
+                    const isLatest = idx === stack.bubbles.length - 1
+                    const isDemoted = bubble.demotedAtMs !== null
+                    const isRecent = nowMsForRecent - bubble.tsMs < RECENT_BUBBLE_WINDOW_MS
+                    return (
+                      <div
+                        key={bubble.key}
+                        role="button"
+                        tabIndex={0}
+                        className={`ag-globe-bubble${isLatest ? ' is-latest' : ' is-older'}${isDemoted ? ' is-demoted' : ''}${bubble.fadingOut ? ' is-fading' : ''}${isRecent ? ' is-recent' : ''}${stack.isFocused ? ' is-focused' : ''}`}
+                        title={`#${stack.geohash} — ${bubble.sender}: ${bubble.snippet}`}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onSelectRef.current(stack.geohash)
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation()
+                          onTuneRef.current?.(stack.geohash)
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            onSelectRef.current(stack.geohash)
+                          }
+                        }}
+                      >
+                        <div className="ag-globe-bubble-head">
+                          <span
+                            className={`ag-globe-bubble-dot${isRecent && isLatest ? ' is-live' : ''}`}
+                          />
+                          <span className="ag-globe-bubble-sender">{bubble.sender}</span>
+                          {isLatest && (
+                            <span className="ag-globe-bubble-tag mono">#{stack.geohash}</span>
+                          )}
+                        </div>
+                        <div className="ag-globe-bubble-body">{bubble.snippet}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ))}
+          </div>
+        )}
+
+        {/* Compact Unobtrusive Map Tile Attribution */}
+        {!webglError && (
+          <div
+            className="mono"
+            style={{
+              position: 'absolute',
+              right: 8,
+              bottom: 3,
+              zIndex: 5,
+              padding: '1px 5px',
+              borderRadius: '4px',
+              backgroundColor: 'color-mix(in srgb, var(--bg-surface) 70%, transparent)',
+              color: 'var(--text-muted)',
+              fontSize: 9,
+              lineHeight: 1.3,
+              opacity: 0.72,
+              pointerEvents: 'none',
+            }}
+            aria-hidden="true"
+          >
+            © Esri · OSM
+          </div>
+        )}
+
+        {/* Desktop Hover Coordinate & Live Geohash Readout */}
+        {hoverHud && !webglError && (
           <div className="ag-radar-hover-hud mono" aria-hidden="true">
             <span className="ag-radar-hud-accent">#{hoverHud.geohash}</span>
             <span className="ag-radar-hud-sep">·</span>

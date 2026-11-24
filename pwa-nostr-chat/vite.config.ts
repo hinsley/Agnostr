@@ -33,8 +33,8 @@ export default defineConfig({
           if (id.includes('/node_modules/qrcode/')) {
             return 'qrcode'
           }
-          if (id.includes('/node_modules/leaflet/')) {
-            return 'leaflet'
+          if (id.includes('/node_modules/three/')) {
+            return 'globe'
           }
           if (id.includes('/node_modules/@scure/base/')) {
             return 'nostr-core'
@@ -105,6 +105,16 @@ export default defineConfig({
         scope: '/',
         display: 'standalone',
         display_override: ['window-controls-overlay', 'standalone'],
+        handle_links: 'preferred',
+        launch_handler: {
+          client_mode: ['focus-existing', 'auto'],
+        },
+        protocol_handlers: [
+          {
+            protocol: 'web+nostr',
+            url: '/#agora=%s',
+          },
+        ],
         orientation: 'any',
         background_color: '#0B0C0F',
         theme_color: '#0B0C0F',

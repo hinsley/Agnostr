@@ -89,6 +89,7 @@ import {
   isVoiceRecordingSupported,
   revokeVoicePreviewUrl,
 } from '../lib/voiceRecorder.ts'
+import { parseAgoraShareUrl } from '../lib/shareLinks.ts'
 import { RichMessageContent } from '../utils/markdown.tsx'
 import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
@@ -96,7 +97,10 @@ import { AvatarImg } from './AvatarImg.tsx'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 import { ImageAttachmentCard } from './ImageAttachmentCard.tsx'
 import type { LightboxImagePayload } from './ImageLightboxModal.tsx'
-import { requestUntrustedLinkOpen } from './UntrustedLinkModal.tsx'
+import {
+  requestUntrustedLinkOpen,
+  tryOpenInternalAgoraLink,
+} from './UntrustedLinkModal.tsx'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer.tsx'
 import '../styles/amail.css'
 
@@ -3283,13 +3287,13 @@ export function AmailView({
                       !engine.settings.allowUntrustedLinks
 
                     const handleBodyLinkEvent = (e: ReactMouseEvent<HTMLDivElement>, isAux = false) => {
-                      if (!warnUntrustedLinks) return
                       if (isAux && e.button !== 1) return
                       const anchor = (e.target as HTMLElement | null)?.closest(
                         'a[href]',
                       ) as HTMLAnchorElement | null
                       const href = anchor?.getAttribute('href') ?? ''
-                      if (anchor && /^https?:\/\//i.test(href)) {
+                      if (!anchor || !/^https?:\/\//i.test(href)) return
+                      if (warnUntrustedLinks) {
                         e.preventDefault()
                         e.stopPropagation()
                         requestUntrustedLinkOpen({
@@ -3297,6 +3301,11 @@ export function AmailView({
                           senderHandle: item.fromName,
                           senderPubkey: item.fromPubkey,
                         })
+                        return
+                      }
+                      if (!isAux && parseAgoraShareUrl(href) && tryOpenInternalAgoraLink(href)) {
+                        e.preventDefault()
+                        e.stopPropagation()
                       }
                     }
 

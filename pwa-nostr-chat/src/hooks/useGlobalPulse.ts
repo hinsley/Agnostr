@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Event as NostrEvent } from 'nostr-tools'
-import type { PulseRoom } from '../types/protocol.ts'
+import type { PulseBubbleMessage, PulseRoom } from '../types/protocol.ts'
 import {
   extractGeohashTag,
   extractTopicChannelTag,
@@ -402,6 +402,18 @@ export function useGlobalPulse(
         room.messages.reduce((max, m) => (m.tsMs > max ? m.tsMs : max), 0)
       )
 
+      const recentMessages: PulseBubbleMessage[] = visibleMessages
+        .filter((m) => m.preview.trim().length > 0)
+        .slice()
+        .sort(comparePulseMessages)
+        .slice(-4)
+        .map((m) => ({
+          id: m.id,
+          sender: m.sender,
+          preview: m.preview,
+          tsMs: m.tsMs,
+        }))
+
       next.push({
         geohash: room.geohash,
         center: room.center,
@@ -416,6 +428,7 @@ export function useGlobalPulse(
         lastSenderPubkey: latestMsg?.pubkey,
         messagesPerMin: recentMin,
         nearestCity: room.nearestCity,
+        recentMessages,
       })
     }
 

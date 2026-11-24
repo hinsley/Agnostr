@@ -1,18 +1,18 @@
 /* ==========================================================================
-   Agnostr Interactive Zoomable Leaflet Tactical Geohash Radar
-   Supports compact docked mini-map + full-screen ExpandedRadarModal
+   Agnostr Interactive 3D Globe Geohash Map
+   Supports full-screen ExpandedRadarModal + compact container mode
    Theme-adaptive across phosphor | amber | indigo | daylight
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
-   Leaflet Host & Theme-Matched Tactical Basemap Tinting
+   Globe Host, WebGL Canvas Container & Fallback Card
    -------------------------------------------------------------------------- */
 .ag-radar-map-host {
   position: relative;
   width: 100%;
   height: 100%;
   isolation: isolate;
-  background-color: var(--bg-canvas);
+  background-color: #030712;
   overflow: hidden;
   touch-action: none;
   overscroll-behavior: contain;
@@ -27,314 +27,130 @@
   height: 100%;
 }
 
-.ag-radar-leaflet-canvas {
+.ag-globe-canvas-wrap {
+  position: relative;
   width: 100%;
   height: 100%;
-  background-color: var(--bg-canvas) !important;
-  font-family: var(--font-sans) !important;
+  overflow: hidden;
+  background-color: #030712;
   touch-action: none;
   overscroll-behavior: contain;
+  user-select: none;
+  cursor: grab;
 }
 
-/* Compositor-friendly basemap: avoid expensive per-frame CSS filter shaders on tile pane */
-.ag-radar-map-host .leaflet-tile-pane {
-  filter: none;
+.ag-globe-canvas-wrap.is-dragging {
+  cursor: grabbing;
 }
 
-.ag-radar-map-host .leaflet-map-pane {
-  will-change: transform;
+.ag-globe-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
-/* Compact unobtrusive Leaflet attribution */
-.ag-radar-map-host .leaflet-control-attribution {
-  background: color-mix(in srgb, var(--bg-surface) 74%, transparent) !important;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  color: var(--text-muted) !important;
-  font-family: var(--font-mono);
-  font-size: 9px !important;
-  line-height: 1.3;
-  padding: 1px 6px !important;
-  border-radius: var(--radius-xs) 0 0 0;
+.ag-globe-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 1.5rem;
+  text-align: center;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
 }
 
-.ag-radar-map-host .leaflet-control-attribution a {
-  color: var(--text-secondary) !important;
+.ag-globe-fallback-card {
+  max-width: 340px;
+  padding: 1rem 1.15rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
 }
 
-/* Keep attribution unobtrusively tucked in bottom-right corner on Expanded mode */
-.ag-radar-map-expanded .leaflet-bottom.leaflet-right {
-  bottom: 2px;
-  right: 4px;
-  opacity: 0.72;
+.ag-globe-fallback-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-globe-fallback-sub {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--text-muted);
 }
 
 /* --------------------------------------------------------------------------
-   Geohash Grid Rectangles, Sub-Zones, Pulse Zones & Focus Highlights
-   Ultra-transparent fills + crisp hairline strokes so Esri basemap stays legible
+   Projected 3D Globe Upward-Queued Speech Bubbles (Max 4 / 5s Fadeout)
+   Anchored bottom-center over each projected geohash point on the Earth
    -------------------------------------------------------------------------- */
-.ag-gh-rect {
-  stroke: color-mix(in srgb, var(--accent) 44%, var(--border-strong));
-  stroke-opacity: 0.22;
-  fill: var(--accent);
-  fill-opacity: 0;
-  transition: fill-opacity 120ms ease, stroke-opacity 120ms ease;
-}
-
-.ag-gh-rect:hover {
-  stroke-opacity: 0.62;
-  fill-opacity: 0.06;
-}
-
-.ag-gh-rect-under-focus {
-  stroke-opacity: 0;
-  fill-opacity: 0;
-}
-
-[data-theme='daylight'] .ag-gh-rect {
-  stroke: rgba(37, 99, 235, 0.42);
-  stroke-opacity: 0.26;
-  fill: rgba(37, 99, 235, 0.06);
-  fill-opacity: 0;
-}
-
-[data-theme='daylight'] .ag-gh-rect:hover {
-  stroke-opacity: 0.62;
-  fill-opacity: 0.07;
-}
-
-/* Sub-Zone 32× Base32 Drill-Down Cells */
-.ag-gh-sub-rect {
-  stroke: var(--accent-secondary);
-  stroke-opacity: 0.48;
-  fill: var(--accent-secondary);
-  fill-opacity: 0.025;
-  transition: fill-opacity 110ms ease, stroke-opacity 110ms ease;
-}
-
-.ag-gh-sub-rect:hover {
-  fill-opacity: 0.09;
-  stroke-opacity: 0.82;
-}
-
-.ag-gh-sub-rect.selected {
-  fill-opacity: 0.11;
-}
-
-/* Live Global Pulse Zones */
-.ag-gh-pulse-rect {
-  stroke: var(--accent);
-  stroke-opacity: 0.45;
-  fill: var(--accent);
-  fill-opacity: 0.07;
-}
-
-.ag-gh-pulse-rect:hover {
-  fill-opacity: 0.12;
-  stroke-opacity: 0.72;
-}
-
-.ag-gh-pulse-rect.active {
-  fill-opacity: 0.1;
-}
-
-/* Active Tuned Geohash Cell */
-.ag-gh-active-rect {
-  stroke: var(--accent);
-  stroke-opacity: 0.85;
-  fill: var(--accent);
-  fill-opacity: 0.1;
-}
-
-/* Selected / Inspected Geohash Cell (distinct from active tuned cell) */
-.ag-gh-selected-rect {
-  stroke: var(--accent-secondary);
-  stroke-opacity: 0.85;
-  fill: var(--accent-secondary);
-  fill-opacity: 0.1;
-}
-
-/* Teleport Dashed Vector Line */
-.ag-gh-teleport-line {
-  stroke: var(--accent-secondary);
-  stroke-opacity: 0.8;
-}
-
-/* Centered Geohash Zone Labels (Subtle & Unobtrusive when Unselected) */
-.ag-gh-label-host {
-  background: transparent !important;
-  border: none !important;
+.ag-globe-bubble-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
   pointer-events: none;
+  overflow: hidden;
 }
 
-.ag-gh-label {
+.ag-globe-bubble-stack {
   position: absolute;
   left: 0;
   top: 0;
-  transform: translate(-50%, -50%);
-  padding: 0 3px;
-  border-radius: 3px;
-  font-size: 9px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  opacity: 0.56;
-  color: var(--text-secondary);
-  background-color: color-mix(in srgb, var(--bg-canvas) 38%, transparent);
-  white-space: nowrap;
-  pointer-events: none;
-}
-
-[data-theme='daylight'] .ag-gh-label {
-  color: rgba(15, 23, 42, 0.72);
-  background-color: rgba(255, 255, 255, 0.52);
-  opacity: 0.66;
-}
-
-.ag-gh-sub-label {
-  position: absolute;
-  left: 0;
-  top: 0;
-  transform: translate(-50%, -50%);
-  padding: 0 3px;
-  border-radius: 3px;
-  font-size: 9px;
-  font-weight: 600;
-  opacity: 0.76;
-  color: var(--accent-secondary);
-  background-color: color-mix(in srgb, var(--bg-canvas) 52%, transparent);
-  white-space: nowrap;
-  pointer-events: none;
-}
-
-[data-theme='daylight'] .ag-gh-sub-label {
-  color: #0369a1;
-  background-color: rgba(255, 255, 255, 0.66);
-}
-
-.ag-gh-active-label,
-.ag-gh-selected-label {
-  position: absolute;
-  left: 0;
-  top: 0;
-  transform: translate(-50%, -50%);
-  padding: 2px 7px;
-  border-radius: var(--radius-full);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  white-space: nowrap;
-  box-shadow: var(--shadow-sm);
-  pointer-events: none;
-}
-
-.ag-gh-active-label {
-  background-color: var(--accent);
-  color: var(--text-inverse);
-  border: 1px solid color-mix(in srgb, var(--text-inverse) 25%, transparent);
-}
-
-.ag-gh-selected-label {
-  background-color: var(--accent-secondary);
-  color: #06131c;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-}
-
-/* Global Pulse Sonar Beacons & GPS Beacon */
-.ag-gh-beacon-host {
-  background: transparent !important;
-  border: none !important;
-}
-
-.ag-gh-pulse-beacon {
-  position: relative;
-  width: 18px;
-  height: 18px;
   display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
   align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
-
-.ag-gh-pulse-ring {
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  border-radius: var(--radius-full);
-  border: 1.5px solid var(--accent);
-  animation: ag-radar-ping 2.4s var(--ease-out) infinite;
-}
-
-.ag-gh-pulse-core {
-  width: 7px;
-  height: 7px;
-  border-radius: var(--radius-full);
-  background-color: var(--accent);
-  border: 1.5px solid var(--bg-canvas);
-  box-shadow: 0 0 8px var(--accent);
-}
-
-.ag-gh-pulse-pill {
-  position: absolute;
-  left: 16px;
-  top: 50%;
-  transform: translateY(-50%);
-  padding: 1px 6px;
-  border-radius: var(--radius-full);
-  background-color: color-mix(in srgb, var(--bg-surface) 92%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 52%, transparent);
-  color: var(--text-primary);
-  font-size: 10px;
-  font-weight: 600;
-  white-space: nowrap;
-  box-shadow: var(--shadow-sm);
+  gap: 4px;
+  transform-origin: center bottom;
   pointer-events: none;
+  will-change: transform;
+  z-index: 7;
 }
 
-.ag-gh-pulse-pill b {
-  color: var(--accent);
-  font-weight: 700;
+.ag-globe-bubble-stack:hover {
+  z-index: 20;
 }
 
-/* Small Live Worldwide Speech Bubbles Anchored Above Sonar Beacons */
-.ag-gh-bubble-host {
-  background: transparent !important;
-  border: none !important;
-  pointer-events: none;
-  overflow: visible !important;
-}
-
-.ag-gh-bubble-host:hover {
-  z-index: 650 !important;
-}
-
-.ag-gh-bubble {
-  position: absolute;
-  left: 0;
-  top: 0;
-  transform: translate(-50%, calc(-100% - 12px));
+.ag-globe-bubble {
+  position: relative;
   width: max-content;
-  min-width: 84px;
-  max-width: 152px;
-  padding: 4px 7px;
-  border-radius: 9px;
+  min-width: 88px;
+  max-width: 168px;
+  padding: 4.5px 8px;
+  border-radius: 10px;
   background-color: color-mix(in srgb, var(--bg-surface) 92%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border-default));
   box-shadow: var(--shadow-md);
   color: var(--text-primary);
   pointer-events: auto;
   cursor: pointer;
   user-select: none;
+  text-align: left;
+  transform-origin: center bottom;
+  animation: ag-globe-bubble-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
   transition:
-    transform 140ms var(--ease-out),
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 360ms ease,
     border-color var(--dur-fast) ease,
     background-color var(--dur-fast) ease,
     box-shadow var(--dur-fast) ease;
 }
 
-.ag-gh-bubble::before,
-.ag-gh-bubble::after {
+/* Downward anchor caret on the newest (bottom) bubble */
+.ag-globe-bubble:last-child::before,
+.ag-globe-bubble:last-child::after {
   content: '';
   position: absolute;
   left: 50%;
@@ -345,59 +161,57 @@
   pointer-events: none;
 }
 
-.ag-gh-bubble::before {
+.ag-globe-bubble:last-child::before {
   bottom: -6px;
   border-width: 6px 5.5px 0 5.5px;
   border-color: color-mix(in srgb, var(--accent) 34%, var(--border-default)) transparent
     transparent transparent;
 }
 
-.ag-gh-bubble::after {
+.ag-globe-bubble:last-child::after {
   bottom: -5px;
   border-width: 5px 4.5px 0 4.5px;
   border-color: color-mix(in srgb, var(--bg-surface) 92%, transparent) transparent transparent
     transparent;
 }
 
-.ag-gh-bubble:hover {
+.ag-globe-bubble.is-demoted,
+.ag-globe-bubble:not(:last-child) {
+  opacity: 0.78;
+  transform: scale(0.97);
+}
+
+.ag-globe-bubble.is-focused {
+  border-color: var(--accent);
+}
+
+.ag-globe-bubble.is-focused:last-child::before {
+  border-top-color: var(--accent);
+}
+
+.ag-globe-bubble:hover {
+  opacity: 1;
+  transform: translateY(-2px) scale(1);
   border-color: var(--accent);
   background-color: var(--bg-elevated);
   box-shadow: var(--shadow-lg), 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 
-.ag-gh-bubble:hover::before {
+.ag-globe-bubble:hover:last-child::before {
   border-top-color: var(--accent);
 }
 
-.ag-gh-bubble:hover::after {
+.ag-globe-bubble:hover:last-child::after {
   border-top-color: var(--bg-elevated);
 }
 
-.ag-gh-bubble.is-recent {
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--border-default));
+.ag-globe-bubble.is-fading {
+  opacity: 0 !important;
+  transform: translateY(-8px) scale(0.94) !important;
+  pointer-events: none;
 }
 
-.ag-gh-bubble.is-recent::before {
-  border-top-color: color-mix(in srgb, var(--accent) 48%, var(--border-default));
-}
-
-.ag-gh-bubble.is-focused {
-  transform: translate(-50%, calc(-100% - 20px));
-  border-color: var(--accent);
-}
-
-.ag-gh-bubble.is-focused::before {
-  border-top-color: var(--accent);
-}
-
-.ag-gh-bubble.is-fresh {
-  animation: ag-bubble-pop 220ms var(--ease-spring) both;
-}
-
-.ag-gh-bubble.is-focused.is-fresh {
-  animation: ag-bubble-pop-focused 220ms var(--ease-spring) both;
-}
-
+.ag-globe-bubble-head,
 .ag-gh-bubble-head {
   display: flex;
   align-items: center;
@@ -408,6 +222,7 @@
   margin-bottom: 1.5px;
 }
 
+.ag-globe-bubble-dot,
 .ag-gh-bubble-dot {
   width: 5px;
   height: 5px;
@@ -416,12 +231,14 @@
   flex-shrink: 0;
 }
 
+.ag-globe-bubble-dot.is-live,
 .ag-gh-bubble-dot.is-live {
   background-color: var(--accent);
   box-shadow: 0 0 6px var(--accent);
   animation: ag-bubble-dot-pulse 2s ease-in-out infinite;
 }
 
+.ag-globe-bubble-sender,
 .ag-gh-bubble-sender {
   font-weight: 700;
   color: var(--text-primary);
@@ -431,16 +248,18 @@
   white-space: nowrap;
 }
 
+.ag-globe-bubble-tag,
 .ag-gh-bubble-tag {
   margin-left: auto;
   font-size: 9px;
   font-weight: 600;
   color: var(--accent);
-  opacity: 0.88;
+  opacity: 0.9;
   white-space: nowrap;
   flex-shrink: 0;
 }
 
+.ag-globe-bubble-body,
 .ag-gh-bubble-body {
   font-size: 10.5px;
   line-height: 1.26;
@@ -453,58 +272,47 @@
   word-break: break-word;
 }
 
-[data-theme='daylight'] .ag-gh-bubble,
-.ag-radar-map-host[data-map-theme='daylight'] .ag-gh-bubble {
+[data-theme='daylight'] .ag-globe-bubble,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-bubble {
   background-color: rgba(255, 255, 255, 0.95);
   border-color: color-mix(in srgb, var(--accent) 42%, rgba(15, 23, 42, 0.16));
-  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.14);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.16);
 }
 
-[data-theme='daylight'] .ag-gh-bubble::before,
-.ag-radar-map-host[data-map-theme='daylight'] .ag-gh-bubble::before {
+[data-theme='daylight'] .ag-globe-bubble:last-child::before,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-bubble:last-child::before {
   border-top-color: color-mix(in srgb, var(--accent) 42%, rgba(15, 23, 42, 0.16));
 }
 
-[data-theme='daylight'] .ag-gh-bubble::after,
-.ag-radar-map-host[data-map-theme='daylight'] .ag-gh-bubble::after {
+[data-theme='daylight'] .ag-globe-bubble:last-child::after,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-bubble:last-child::after {
   border-top-color: rgba(255, 255, 255, 0.95);
 }
 
-[data-theme='daylight'] .ag-gh-bubble:hover,
-.ag-radar-map-host[data-map-theme='daylight'] .ag-gh-bubble:hover {
+[data-theme='daylight'] .ag-globe-bubble:hover,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-bubble:hover {
   background-color: #ffffff;
   border-color: var(--accent);
 }
 
-[data-theme='daylight'] .ag-gh-bubble:hover::after,
-.ag-radar-map-host[data-map-theme='daylight'] .ag-gh-bubble:hover::after {
+[data-theme='daylight'] .ag-globe-bubble:hover:last-child::after,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-bubble:hover:last-child::after {
   border-top-color: #ffffff;
 }
 
-[data-theme='daylight'] .ag-gh-bubble-body,
-.ag-radar-map-host[data-map-theme='daylight'] .ag-gh-bubble-body {
+[data-theme='daylight'] .ag-globe-bubble-body,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-bubble-body {
   color: #334155;
 }
 
-@keyframes ag-bubble-pop {
+@keyframes ag-globe-bubble-in {
   0% {
     opacity: 0;
-    transform: translate(-50%, calc(-100% - 6px)) scale(0.9);
+    transform: translateY(8px) scale(0.93);
   }
   100% {
     opacity: 1;
-    transform: translate(-50%, calc(-100% - 12px)) scale(1);
-  }
-}
-
-@keyframes ag-bubble-pop-focused {
-  0% {
-    opacity: 0;
-    transform: translate(-50%, calc(-100% - 14px)) scale(0.9);
-  }
-  100% {
-    opacity: 1;
-    transform: translate(-50%, calc(-100% - 20px)) scale(1);
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -521,53 +329,28 @@
 }
 
 @media (max-width: 639px) {
-  .ag-gh-bubble {
-    max-width: 128px;
-    padding: 3.5px 6px;
+  .ag-globe-bubble {
+    min-width: 78px;
+    max-width: 136px;
+    padding: 3.5px 6.5px;
   }
 
+  .ag-globe-bubble-body,
   .ag-gh-bubble-body {
     font-size: 10px;
   }
 }
 
-.ag-gh-gps-beacon {
-  position: relative;
-  width: 18px;
-  height: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.ag-gh-gps-halo {
-  position: absolute;
-  width: 16px;
-  height: 16px;
-  border-radius: var(--radius-full);
-  background-color: var(--accent-secondary-soft);
-  border: 1.5px solid var(--accent-secondary);
-  animation: ag-radar-ping 2.8s var(--ease-out) infinite;
-}
-
-.ag-gh-gps-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--radius-full);
-  background-color: var(--accent-secondary);
-  border: 2px solid var(--bg-canvas);
-}
-
-/* Desktop Hover Readout HUD inside Map */
+/* Desktop Hover Readout HUD inside Globe */
 .ag-radar-hover-hud {
   position: absolute;
-  left: 8px;
-  bottom: 8px;
-  z-index: 5;
+  left: 14px;
+  bottom: 84px;
+  z-index: 8;
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  padding: 0.22rem 0.5rem;
+  padding: 0.24rem 0.54rem;
   border-radius: var(--radius-sm);
   background-color: color-mix(in srgb, var(--bg-surface) 88%, transparent);
   backdrop-filter: blur(8px);
@@ -579,102 +362,14 @@
   box-shadow: var(--shadow-sm);
 }
 
-.ag-radar-map-expanded .ag-radar-hover-hud {
-  left: 14px;
-  bottom: 148px;
+.ag-radar-hud-accent {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 /* --------------------------------------------------------------------------
-   Compact Mini-Map Container (GeoRadarPanel)
-   -------------------------------------------------------------------------- */
-.ag-radar-meta-pills {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.32rem;
-  flex-shrink: 0;
-}
-
-.ag-radar-expand-head-btn {
-  gap: 0.28rem;
-}
-
-.ag-radar-compact-frame {
-  position: relative;
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  border: 1px solid var(--border-default);
-  background-color: var(--bg-canvas);
-}
-
-.ag-radar-compact-controls {
-  position: absolute;
-  top: 7px;
-  right: 7px;
-  z-index: 6;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.ag-radar-mini-btn {
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-sm);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-primary);
-  background-color: color-mix(in srgb, var(--bg-surface) 88%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid var(--border-default);
-  box-shadow: var(--shadow-sm);
-  transition:
-    background-color var(--dur-fast) ease,
-    border-color var(--dur-fast) ease,
-    color var(--dur-fast) ease;
-}
-
-.ag-radar-mini-btn:hover {
-  border-color: var(--border-accent);
-  color: var(--accent);
-  background-color: var(--bg-elevated);
-}
-
-.ag-radar-mini-btn-accent {
-  color: var(--accent);
-  border-color: var(--border-accent);
-}
-
-.ag-radar-compact-tune-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.4rem;
-  padding: 0.35rem 0.45rem;
-  background-color: var(--bg-surface);
-  border-top: 1px solid var(--border-accent);
-}
-
-.ag-radar-compact-sel-meta {
-  display: flex;
-  align-items: center;
-  gap: 0.26rem;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.ag-radar-compact-sel-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.24rem;
-  flex-shrink: 0;
-}
-
-/* --------------------------------------------------------------------------
-   Expanded Full-Screen Tactical Radar Modal
-   Desktop: 95vw × 92dvh crisp frame | Mobile (<768px): true 100vw × 100dvh
+   Expanded Full-Screen 3D Globe Modal
+   Desktop: 95vw × 92dvh crisp frame | Mobile (<868px): true 100vw × 100dvh
    -------------------------------------------------------------------------- */
 .ag-radar-modal-backdrop {
   position: fixed;
@@ -697,12 +392,12 @@
   border-radius: var(--radius-xl);
   overflow: hidden;
   border: 1px solid var(--border-default);
-  background-color: var(--bg-canvas);
+  background-color: #030712;
   box-shadow: var(--shadow-lg);
   animation: ag-scale-in var(--dur-med) var(--ease-spring);
 }
 
-/* Top Floating Tactical Bar */
+/* Single Sleek Floating Top Row */
 .ag-radar-top-bar {
   position: absolute;
   top: 12px;
@@ -711,7 +406,7 @@
   z-index: 16;
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
+  gap: 0.4rem;
   pointer-events: none;
 }
 
@@ -720,22 +415,25 @@
   align-items: center;
   gap: 0.45rem;
   pointer-events: auto;
+  min-width: 0;
 }
 
 .ag-radar-search-form {
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
-  max-width: 390px;
+  max-width: 340px;
   display: flex;
   align-items: center;
-  background-color: color-mix(in srgb, var(--bg-surface) 92%, transparent);
+  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-full);
   box-shadow: var(--shadow-md);
-  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+  transition:
+    border-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
 }
 
 .ag-radar-search-form:focus-within {
@@ -752,8 +450,8 @@
 
 .ag-radar-search-input {
   width: 100%;
-  height: 40px;
-  padding: 0 2.6rem 0 2.2rem;
+  height: 38px;
+  padding: 0 2.5rem 0 2.15rem;
   border: none;
   background: transparent;
   color: var(--text-primary);
@@ -770,10 +468,10 @@
 
 .ag-radar-search-go {
   position: absolute;
-  right: 6px;
+  right: 5px;
   height: 28px;
   padding: 0 0.52rem;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
   background-color: var(--accent);
   color: var(--text-inverse);
   font-size: 10.5px;
@@ -782,7 +480,7 @@
 
 .ag-radar-search-err {
   align-self: flex-start;
-  padding: 0.25rem 0.55rem;
+  padding: 0.25rem 0.58rem;
   border-radius: var(--radius-sm);
   background-color: color-mix(in srgb, var(--bg-surface) 94%, transparent);
   border: 1px solid var(--status-danger);
@@ -792,13 +490,13 @@
 }
 
 .ag-radar-top-pill {
-  height: 40px;
+  height: 38px;
   padding: 0 0.72rem;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  background-color: color-mix(in srgb, var(--bg-surface) 88%, transparent);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--border-default);
@@ -823,14 +521,14 @@
 
 .ag-radar-close-btn {
   margin-left: auto;
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-md);
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-full);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  background-color: color-mix(in srgb, var(--bg-surface) 88%, transparent);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--border-default);
@@ -848,79 +546,13 @@
   background-color: var(--bg-elevated);
 }
 
-/* Precision Selector Strip */
-.ag-radar-prec-bar {
-  align-self: flex-start;
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.25rem 0.35rem 0.25rem 0.55rem;
-  border-radius: var(--radius-md);
-  background-color: color-mix(in srgb, var(--bg-surface) 88%, transparent);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--border-default);
-  box-shadow: var(--shadow-sm);
-  pointer-events: auto;
-}
-
-.ag-radar-prec-label {
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.ag-radar-prec-pills {
-  display: flex;
-  align-items: center;
-  gap: 0.2rem;
-  overflow-x: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.ag-radar-prec-pills::-webkit-scrollbar {
-  display: none;
-}
-
-.ag-radar-prec-pill {
-  height: 26px;
-  padding: 0 0.5rem;
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background-color: transparent;
-  border: 1px solid transparent;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition:
-    color var(--dur-fast) ease,
-    background-color var(--dur-fast) ease,
-    border-color var(--dur-fast) ease;
-}
-
-.ag-radar-prec-pill:hover {
-  color: var(--text-primary);
-  background-color: var(--bg-hover);
-}
-
-.ag-radar-prec-pill.active {
-  color: var(--accent);
-  background-color: var(--accent-soft);
-  border-color: var(--border-accent);
-}
-
 /* Live Global Pulse Quick-Fly Popover */
 .ag-radar-pulse-popover {
   position: absolute;
-  top: 100px;
+  top: 60px;
   left: 12px;
   width: min(310px, calc(100% - 76px));
-  max-height: 46dvh;
+  max-height: 48dvh;
   z-index: 17;
   display: flex;
   flex-direction: column;
@@ -962,7 +594,9 @@
   background-color: var(--bg-input);
   border: 1px solid var(--border-subtle);
   text-align: left;
-  transition: border-color var(--dur-fast) ease, background-color var(--dur-fast) ease;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
 }
 
 .ag-radar-pulse-item:hover,
@@ -989,7 +623,7 @@
   flex-shrink: 0;
 }
 
-/* Right Floating Touch Stack (Fat-Finger 44×44px Buttons) */
+/* Right Floating Controls (3 Core Buttons + Desktop-Only +/- Zoom) */
 .ag-radar-touch-stack {
   position: absolute;
   right: 12px;
@@ -998,18 +632,19 @@
   z-index: 11;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 8px;
 }
 
 .ag-radar-fab {
-  width: 44px;
-  height: 44px;
+  width: 42px;
+  height: 42px;
   border-radius: var(--radius-md);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--text-primary);
-  background-color: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  background-color: color-mix(in srgb, var(--bg-surface) 88%, transparent);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--border-default);
@@ -1043,43 +678,56 @@
   border-color: color-mix(in srgb, var(--accent-secondary) 52%, transparent);
 }
 
-/* Bottom Thumb-Friendly Inspect & Tune Card */
+.ag-radar-zoom-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.ag-radar-fab-compact {
+  width: 36px;
+  height: 36px;
+}
+
+/* Compact Floating Bottom Selected-Cell Pill */
 .ag-radar-bottom-card {
   position: absolute;
   left: 50%;
   bottom: 14px;
   transform: translateX(-50%);
-  width: min(600px, calc(100% - 24px));
+  width: min(560px, calc(100% - 24px));
   z-index: 13;
   display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-  padding: 0.78rem 0.9rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.72rem;
+  padding: 0.56rem 0.72rem;
   border-radius: var(--radius-lg);
-  background-color: color-mix(in srgb, var(--bg-surface) 93%, transparent);
+  background-color: color-mix(in srgb, var(--bg-surface) 92%, transparent);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--border-default);
   box-shadow: var(--shadow-lg);
 }
 
-.ag-radar-inspect-head {
+.ag-radar-bottom-info {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 0.22rem;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .ag-radar-inspect-title {
   display: flex;
   align-items: center;
-  gap: 0.42rem;
+  gap: 0.38rem;
   min-width: 0;
 }
 
 .ag-radar-inspect-hash {
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
   font-weight: 700;
   color: var(--accent);
   flex-shrink: 0;
@@ -1089,47 +737,37 @@
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-primary);
+  min-width: 0;
 }
 
-.ag-radar-inspect-badges {
-  display: flex;
+.ag-radar-live-chip {
+  display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 0.28rem;
-}
-
-.ag-radar-inspect-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 11px;
-  color: var(--text-secondary);
+  gap: 0.24rem;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 700;
+  flex-shrink: 0;
 }
 
 .ag-radar-inspect-snippet {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.28rem;
   min-width: 0;
-  padding: 0.28rem 0.5rem;
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-subtle);
-  font-size: 11.5px;
+  font-size: 11px;
   line-height: 1.3;
-  color: var(--text-secondary);
-}
-
-.ag-radar-inspect-snippet svg {
-  flex-shrink: 0;
+  color: var(--text-muted);
 }
 
 .ag-radar-inspect-snippet-sender {
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   flex-shrink: 0;
-  max-width: 14ch;
+  max-width: 12ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1140,27 +778,61 @@
   flex: 1 1 auto;
 }
 
-.ag-radar-inspect-privacy {
+.ag-radar-bottom-actions {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  font-size: 11px;
-  color: var(--status-warn);
-}
-
-.ag-radar-inspect-actions {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
   gap: 0.45rem;
-  padding-top: 0.15rem;
+  flex-shrink: 0;
 }
 
-.ag-radar-inspect-actions .ag-btn {
-  height: 38px;
+.ag-radar-prec-stepper {
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-radar-prec-step-btn {
+  width: 28px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  background-color: transparent;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-radar-prec-step-btn:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  color: var(--accent);
+}
+
+.ag-radar-prec-step-btn:disabled {
+  opacity: 0.36;
+  cursor: not-allowed;
+}
+
+.ag-radar-prec-step-val {
+  min-width: 28px;
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  user-select: none;
 }
 
 .ag-radar-tune-cta {
+  height: 36px;
+  padding: 0 0.85rem;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 /* --------------------------------------------------------------------------
@@ -1168,6 +840,10 @@
    Visual-viewport anchored (--ag-vvt / --ag-vvh) + safe-area insets + 16px zoom guard
    -------------------------------------------------------------------------- */
 @media (max-width: 867px) {
+  .ag-radar-desktop-only {
+    display: none !important;
+  }
+
   .ag-radar-modal-backdrop {
     padding: 0;
     top: var(--ag-vvt, 0px);
@@ -1223,8 +899,7 @@
 
   html[data-keyboard-open='true'] .ag-radar-bottom-card {
     bottom: 8px;
-    padding: 0.56rem 0.68rem;
-    gap: 0.32rem;
+    padding: 0.48rem 0.64rem;
   }
 }
 
@@ -1237,73 +912,63 @@
 
   .ag-radar-search-input {
     font-size: 16px;
-    height: 42px;
+    height: 40px;
   }
 
   .ag-radar-top-pill,
   .ag-radar-close-btn {
-    height: 42px;
+    height: 40px;
   }
 
   .ag-radar-close-btn {
-    width: 42px;
-  }
-
-  .ag-radar-prec-bar {
-    width: 100%;
-    gap: 0.25rem;
-    padding: 0.2rem 0.28rem 0.2rem 0.42rem;
-  }
-
-  .ag-radar-prec-pills {
-    flex: 1 1 auto;
-    justify-content: space-between;
-    gap: 0.14rem;
-  }
-
-  .ag-radar-prec-pill {
-    height: 26px;
-    padding: 0 0.34rem;
-    font-size: 10px;
+    width: 40px;
   }
 
   .ag-radar-touch-stack {
     right: 10px;
-    top: calc(106px + env(safe-area-inset-top, 0px));
+    top: calc(64px + env(safe-area-inset-top, 0px));
     bottom: auto;
     transform: none;
-    gap: 5px;
+    gap: 6px;
   }
 
   .ag-radar-fab {
-    width: 44px;
-    height: 44px;
+    width: 42px;
+    height: 42px;
   }
 
   .ag-radar-pulse-popover {
-    top: calc(104px + env(safe-area-inset-top, 0px));
+    top: calc(58px + env(safe-area-inset-top, 0px));
     left: 10px;
     width: calc(100% - 20px);
-    max-height: calc(var(--ag-vvh, 100dvh) * 0.4);
+    max-height: calc(var(--ag-vvh, 100dvh) * 0.42);
   }
 
   .ag-radar-bottom-card {
     bottom: calc(10px + env(safe-area-inset-bottom, 0px));
     width: calc(100% - 20px);
-    padding: 0.72rem 0.78rem;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+    padding: 0.62rem 0.72rem;
   }
 
   .ag-radar-modal-backdrop.in-shell .ag-radar-bottom-card {
     bottom: 10px;
   }
 
-  .ag-radar-inspect-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .ag-radar-bottom-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .ag-radar-tune-cta {
-    grid-column: 1 / -1;
-    height: 42px !important;
+    flex: 1 1 auto;
+    height: 38px;
+  }
+
+  .ag-radar-prec-stepper {
+    height: 38px;
   }
 
   .ag-radar-hover-hud {
@@ -1317,60 +982,32 @@
   }
 
   .ag-radar-bubbles-pill {
-    min-width: 42px;
+    min-width: 40px;
     padding: 0 0.55rem;
     justify-content: center;
   }
 }
 
-/* Short Mobile Viewports (e.g. 390×500 split-screen, landscape, iPhone SE / compact visual viewport)
-   Reflow 6-FAB vertical tower into compact 2×3 grid cleanly between top bar and bottom card */
-@media (max-width: 867px) and (max-height: 680px) {
+/* Short Mobile Viewports (landscape / compact split-screen) */
+@media (max-width: 867px) and (max-height: 540px) {
   .ag-radar-touch-stack,
   .ag-radar-modal-backdrop.in-shell .ag-radar-touch-stack {
-    display: grid;
-    grid-template-columns: repeat(2, 38px);
-    gap: 5px;
-    top: calc(104px + env(safe-area-inset-top, 0px));
-    bottom: auto;
-    right: 10px;
-    transform: none;
+    gap: 4px;
+    top: calc(58px + env(safe-area-inset-top, 0px));
   }
 
   .ag-radar-fab {
-    width: 38px;
-    height: 38px;
+    width: 36px;
+    height: 36px;
   }
 
   .ag-radar-bottom-card {
     bottom: calc(8px + env(safe-area-inset-bottom, 0px));
-    padding: 0.58rem 0.72rem;
-    gap: 0.32rem;
+    padding: 0.48rem 0.64rem;
+    gap: 0.36rem;
   }
 
   .ag-radar-modal-backdrop.in-shell .ag-radar-bottom-card {
     bottom: 8px;
-  }
-
-  .ag-radar-inspect-actions .ag-btn {
-    height: 34px;
-  }
-
-  .ag-radar-tune-cta {
-    height: 38px !important;
-  }
-}
-
-@media (max-width: 867px) and (max-height: 430px) {
-  .ag-radar-touch-stack,
-  .ag-radar-modal-backdrop.in-shell .ag-radar-touch-stack {
-    grid-template-columns: repeat(3, 34px);
-    gap: 4px;
-    top: calc(100px + env(safe-area-inset-top, 0px));
-  }
-
-  .ag-radar-fab {
-    width: 34px;
-    height: 34px;
   }
 }

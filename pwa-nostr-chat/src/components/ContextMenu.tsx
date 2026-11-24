@@ -73,7 +73,7 @@ const LONG_PRESS_MOVE_TOLERANCE_PX = 10
 const LONG_PRESS_CLICK_SUPPRESS_MS = 700
 const LONG_PRESS_NATIVE_CTX_GUARD_MS = 380
 const LONG_PRESS_SKIP_SELECTOR =
-  'input, textarea, select, [contenteditable="true"], [contenteditable=""], [data-drag-handle="true"], [data-no-long-press="true"], .leaflet-container'
+  'input, textarea, select, [contenteditable="true"], [contenteditable=""], [data-drag-handle="true"], [data-no-long-press="true"], .ag-globe-canvas-wrap'
 
 const ContextMenuContext = createContext<ContextMenuApi | null>(null)
 

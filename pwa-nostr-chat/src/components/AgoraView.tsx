@@ -67,12 +67,20 @@ import {
 } from '../lib/agoraProtocol.ts'
 import { encodeNpubSafe } from '../lib/identity.ts'
 import { isNonTranslatableText } from '../lib/languageDetect.ts'
+import {
+  buildAgoraNoteShareUrl,
+  buildAgoraProfileShareUrl,
+  parseAgoraShareUrl,
+} from '../lib/shareLinks.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { identiconDataUrl, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { AvatarImg } from './AvatarImg.tsx'
 import type { LightboxImagePayload } from './ImageLightboxModal.tsx'
-import { requestUntrustedLinkOpen } from './UntrustedLinkModal.tsx'
+import {
+  requestUntrustedLinkOpen,
+  tryOpenInternalAgoraLink,
+} from './UntrustedLinkModal.tsx'
 import '../styles/agora.css'
 
 export interface AgoraViewProps {
@@ -755,6 +763,10 @@ const AgoraQuotedNoteCard: React.FC<{
                         senderHandle: authorName,
                         senderPubkey: note.pubkey,
                       })
+                      return
+                    }
+                    if (parseAgoraShareUrl(tok.url) && tryOpenInternalAgoraLink(tok.url)) {
+                      e.preventDefault()
                     }
                   }}
                   onAuxClick={(e) => {
@@ -1020,6 +1032,17 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   const mediaSlice = useMemo(() => note.media.slice(0, 4), [note.media])
   const needsCwGate = Boolean(note.contentWarning) && !revealedCw
 
+  const handleCopyShareLink = async () => {
+    const shareUrl = buildAgoraNoteShareUrl(note.id, note.pubkey, agora.socialRelays)
+    const ok = await copyTextSafe(shareUrl)
+    if (ok) {
+      onPlaySound?.('click')
+      engine.pushToast('success', 'Agora post link copied', shareUrl)
+    } else {
+      engine.pushToast('error', 'Clipboard copy failed')
+    }
+  }
+
   const handleCopyNevent = async () => {
     const nevent = encodeNoteEventId(note.id, note.pubkey, agora.socialRelays)
     const ok = await copyTextSafe(`nostr:${nevent}`)
@@ -1179,6 +1202,18 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                   role="menu"
                   onClick={(e) => e.stopPropagation()}
                 >
+                  <button
+                    type="button"
+                    className="ag-agora-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false)
+                      void handleCopyShareLink()
+                    }}
+                  >
+                    <Link2 size={14} />
+                    <span>Copy Link</span>
+                  </button>
                   <button
                     type="button"
                     className="ag-agora-menu-item"
@@ -1347,6 +1382,10 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                                 senderHandle: authorName,
                                 senderPubkey: note.pubkey,
                               })
+                              return
+                            }
+                            if (parseAgoraShareUrl(tok.url) && tryOpenInternalAgoraLink(tok.url)) {
+                              e.preventDefault()
                             }
                           }}
                           onAuxClick={(e) => {
@@ -1713,9 +1752,9 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
             <button
               type="button"
               className="ag-agora-act-btn"
-              onClick={() => void handleCopyNevent()}
-              aria-label="Share note link"
-              title="Copy nostr:nevent1 link"
+              onClick={() => void handleCopyShareLink()}
+              aria-label="Share link"
+              title="Copy shareable Agora link"
             >
               <Share2 size={14} />
             </button>
@@ -3031,6 +3070,35 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
             </div>
 
             <div className="ag-agora-header-actions">
+              {inThread && agora.thread && (
+                <button
+                  type="button"
+                  className="ag-agora-icon-btn"
+                  onClick={() => {
+                    const focusedId =
+                      agora.thread!.focusedNote?.id ?? agora.thread!.focusedNoteId
+                    const focusedAuthor = agora.thread!.focusedNote?.pubkey
+                    const shareUrl = buildAgoraNoteShareUrl(
+                      focusedId,
+                      focusedAuthor,
+                      agora.socialRelays,
+                    )
+                    void copyTextSafe(shareUrl).then((ok) => {
+                      if (ok) {
+                        onPlaySound?.('click')
+                        engine.pushToast('success', 'Agora post link copied', shareUrl)
+                      } else {
+                        engine.pushToast('error', 'Clipboard copy failed')
+                      }
+                    })
+                  }}
+                  aria-label="Copy thread link"
+                  title="Copy shareable link to this post"
+                >
+                  <Link2 size={16} />
+                </button>
+              )}
+
               <button
                 type="button"
                 className={`ag-agora-icon-btn ag-agora-translate-toggle-btn${translatorEnabled ? ' active' : ''}`}
@@ -3346,6 +3414,25 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                     )}
 
                     <div className="ag-agora-profile-actions">
+                      <button
+                        type="button"
+                        className="ag-agora-pill-btn"
+                        onClick={() => {
+                          const shareUrl = buildAgoraProfileShareUrl(agora.profileView!.pubkey)
+                          void copyTextSafe(shareUrl).then((ok) => {
+                            if (ok) {
+                              onPlaySound?.('click')
+                              engine.pushToast('success', 'Agora profile link copied', shareUrl)
+                            } else {
+                              engine.pushToast('error', 'Clipboard copy failed')
+                            }
+                          })
+                        }}
+                        title="Copy shareable Agora profile link"
+                      >
+                        <Link2 size={13} />
+                        <span>Copy Link</span>
+                      </button>
                       {isMyProfileOpen ? (
                         <button
                           type="button"
@@ -3473,6 +3560,13 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                                 senderHandle: profileTargetName,
                                 senderPubkey: profilePk,
                               })
+                              return
+                            }
+                            if (
+                              parseAgoraShareUrl(profileTargetWebsite) &&
+                              tryOpenInternalAgoraLink(profileTargetWebsite)
+                            ) {
+                              e.preventDefault()
                             }
                           }}
                           onAuxClick={(e) => {

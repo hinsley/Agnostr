@@ -38,12 +38,13 @@ import type { CashuTokenPreview, ZapReceiptSummary, ZapTarget } from '../types/w
 import { clientAvatarRingClass } from '../lib/bitchatProtocol'
 import { decodeCashuTokenPreview, extractCashuTokensFromText } from '../lib/cashuWallet'
 import { usePinnedReactions } from '../lib/reactionEmojis'
+import { parseAgoraShareUrl } from '../lib/shareLinks'
 import { pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
 import { AvatarImg } from './AvatarImg'
 import { useContextMenu, type ContextMenuItem, type ContextMenuReaction } from './ContextMenu'
 import { ReactionPickerPopover } from './ReactionPickerPopover'
-import { requestUntrustedLinkOpen } from './UntrustedLinkModal'
+import { requestUntrustedLinkOpen, tryOpenInternalAgoraLink } from './UntrustedLinkModal'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
 import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
 
@@ -639,6 +640,8 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                   senderHandle: handle.full,
                   senderPubkey: message.pubkey,
                 })
+              } else if (parseAgoraShareUrl(resolvedUrl) && tryOpenInternalAgoraLink(resolvedUrl)) {
+                // Opened directly inside Agora
               } else {
                 window.open(resolvedUrl, '_blank', 'noopener,noreferrer')
               }
@@ -902,25 +905,32 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
     const avatarRingClass = clientAvatarRingClass(message.clientName, message.isAgnostrClient)
 
-    const interceptUntrustedLinkClick = (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!warnUntrustedLinks) return
+    const interceptMessageLinkClick = (e: React.MouseEvent<HTMLDivElement>) => {
       const target = e.target as HTMLElement | null
       const anchor = target?.closest('a[href]') as HTMLAnchorElement | null
       if (!anchor || anchor.classList.contains('ag-md-link-internal')) return
       const rawHref = (anchor.getAttribute('href') || '').trim()
       if (!/^https?:\/\//i.test(rawHref)) return
-      e.preventDefault()
-      e.stopPropagation()
-      requestUntrustedLinkOpen({
-        url: anchor.href || rawHref,
-        senderHandle: handle.full,
-        senderPubkey: message.pubkey,
-      })
+      const resolvedUrl = anchor.href || rawHref
+      if (warnUntrustedLinks) {
+        e.preventDefault()
+        e.stopPropagation()
+        requestUntrustedLinkOpen({
+          url: resolvedUrl,
+          senderHandle: handle.full,
+          senderPubkey: message.pubkey,
+        })
+        return
+      }
+      if (parseAgoraShareUrl(resolvedUrl) && tryOpenInternalAgoraLink(resolvedUrl)) {
+        e.preventDefault()
+        e.stopPropagation()
+      }
     }
 
-    const interceptUntrustedLinkAuxClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const interceptMessageLinkAuxClick = (e: React.MouseEvent<HTMLDivElement>) => {
       if (!warnUntrustedLinks || e.button !== 1) return
-      interceptUntrustedLinkClick(e)
+      interceptMessageLinkClick(e)
     }
 
     return (
@@ -1044,8 +1054,8 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             translationStatus === 'error') && (
             <div
               ref={messageBodyRef}
-              onClickCapture={interceptUntrustedLinkClick}
-              onAuxClickCapture={interceptUntrustedLinkAuxClick}
+              onClickCapture={interceptMessageLinkClick}
+              onAuxClickCapture={interceptMessageLinkAuxClick}
             >
               {hideRawUntranslatedBody ? (
                 translationStatus === 'loading' ? (
