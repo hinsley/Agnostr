@@ -37,6 +37,7 @@ import { DEFAULT_RECORDING_QUALITY, isValidRecordingQuality } from './callRecord
 import type { GeoRelayEntry } from './geoRelays.ts'
 import { DEFAULT_GEOHASH, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe } from './identity.ts'
+import { isGlobalProfileVaultKey } from './profileVault.ts'
 import {
   formatBitchatChannelLabel,
   getTopicSlug,
@@ -96,7 +97,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   powEnabled: true,
   powTargetBits: 8,
   presenceEnabled: true,
-  perGeohashIdentity: false,
   showBridgeBadges: true,
   broadcastClientTag: true,
   strictWhitelistMode: false,
@@ -155,10 +155,6 @@ export function loadSettings(): AppSettings {
         : DEFAULT_SETTINGS.powTargetBits,
     presenceEnabled:
       typeof parsed.presenceEnabled === 'boolean' ? parsed.presenceEnabled : DEFAULT_SETTINGS.presenceEnabled,
-    perGeohashIdentity:
-      typeof parsed.perGeohashIdentity === 'boolean'
-        ? parsed.perGeohashIdentity
-        : DEFAULT_SETTINGS.perGeohashIdentity,
     showBridgeBadges:
       typeof parsed.showBridgeBadges === 'boolean' ? parsed.showBridgeBadges : DEFAULT_SETTINGS.showBridgeBadges,
     broadcastClientTag:
@@ -1564,7 +1560,11 @@ export function panicWipeStorage(): void {
     const toRemove: string[] = []
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i)
-      if (k && (k.startsWith('agnostr:') || k.startsWith('agnostr_') || k === 'ephemeral_sk')) {
+      if (
+        k &&
+        !isGlobalProfileVaultKey(k) &&
+        (k.startsWith('agnostr:') || k.startsWith('agnostr_') || k === 'ephemeral_sk')
+      ) {
         toRemove.push(k)
       }
     }

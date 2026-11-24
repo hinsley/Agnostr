@@ -6552,6 +6552,209 @@
   cursor: pointer;
 }
 
+/* Profiles Management Card (Settings -> Profile) */
+.ag-set-label-row:has(.ag-set-profiles-title-wrap) {
+  flex-wrap: wrap;
+  row-gap: 0.42rem;
+}
+
+.ag-set-profiles-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  min-width: 0;
+}
+
+.ag-set-profiles-head-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.36rem;
+}
+
+.ag-set-profiles-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.84rem 0.9rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.ag-set-profile-subform {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.7rem 0.75rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.ag-set-profile-subform .ag-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.ag-set-profile-subform-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.1rem;
+}
+
+.ag-set-profiles-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+  min-width: 0;
+}
+
+.ag-set-profile-item-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.48rem;
+  padding: 0.56rem 0.68rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+  min-width: 0;
+}
+
+.ag-set-profile-item-wrap.is-active {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--border-subtle));
+  background-color: color-mix(in srgb, var(--accent) 7%, var(--bg-surface));
+}
+
+.ag-set-profile-item {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.ag-set-profile-item-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  object-fit: cover;
+  flex-shrink: 0;
+  background-color: var(--bg-elevated);
+}
+
+.ag-set-profile-item-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-set-profile-item-name-row {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  min-width: 0;
+}
+
+.ag-set-profile-item-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  min-width: 0;
+}
+
+.ag-set-profile-item-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  flex-shrink: 0;
+}
+
+.ag-set-profile-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.64rem 0.72rem;
+  border-radius: var(--radius-sm);
+  background-color: color-mix(in srgb, var(--status-danger) 10%, var(--bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--status-danger) 32%, transparent);
+  min-width: 0;
+}
+
+.ag-set-profile-confirm-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.ag-set-profile-confirm-text svg {
+  flex-shrink: 0;
+  margin-top: 0.14rem;
+  color: var(--status-danger);
+}
+
+.ag-set-profile-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.ag-set-profile-confirm-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.34rem;
+  min-height: 28px;
+  padding: 0.28rem 0.68rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background-color: var(--status-danger);
+  color: #ffffff;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    filter var(--dur-fast) ease,
+    opacity var(--dur-fast) ease;
+}
+
+.ag-set-profile-confirm-danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.ag-set-profile-confirm-danger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 600px) {
+  .ag-set-profiles-card {
+    padding: 0.72rem 0.76rem;
+  }
+
+  .ag-set-profile-subform .ag-input {
+    font-size: 16px;
+  }
+
+  .ag-set-profile-item {
+    gap: 0.52rem;
+  }
+}
+
 /* Multi-Device Background Sync Card (Settings -> Profile) */
 .ag-set-sync-card {
   display: flex;

@@ -15,6 +15,32 @@ export type InspectorTab = 'radar' | 'peers' | 'notes' | 'relays' | 'identity'
 
 export type SignMode = 'auto' | 'local' | 'extension'
 
+export type IdentitySignMode = SignMode
+
+export interface ProfileAccountRecord {
+  id: string // lowercase 64-hex masterPubkey
+  pubkey: string // lowercase 64-hex masterPubkey
+  npub: string
+  nickname: string
+  picture?: string
+  signMode: IdentitySignMode
+  createdAt: number // unix ms
+  lastUsedAt: number // unix ms
+}
+
+export interface ProfileSwitcherEngine {
+  profiles: ProfileAccountRecord[]
+  activeProfileId: string
+  switching: boolean
+  switchProfile: (targetPubkey: string) => Promise<void>
+  createProfile: (opts?: { nickname?: string }) => Promise<ProfileAccountRecord | null>
+  importProfile: (
+    secretInput: string,
+    opts?: { nickname?: string }
+  ) => Promise<{ ok: boolean; error?: string; profile?: ProfileAccountRecord }>
+  deleteProfile: (targetPubkey: string) => Promise<boolean>
+}
+
 export type GeoPrecisionLevel =
   | 'continent'
   | 'region'
@@ -327,7 +353,6 @@ export interface IdentityState {
   activePubkey: string
   activeNpub: string
   activeDisplayHandle: string
-  perGeohashIdentity: boolean
   hasNip07: boolean
   hasNip07Nip44: boolean
   localSecretValid: boolean
@@ -350,7 +375,6 @@ export interface AppSettings {
   powEnabled: boolean
   powTargetBits: number
   presenceEnabled: boolean
-  perGeohashIdentity: boolean
   showBridgeBadges: boolean
   /** When true, appends NIP-89 ["client", "agnostr"] tag to Bitchat messages & presence */
   broadcastClientTag: boolean
@@ -520,7 +544,9 @@ export interface AgnostrEngine {
 
   // Identity & settings
   identity: IdentityState
-  /** Verified `kind: 0` HTTPS profile picture strictly keyed by exact pubkey (never aliases Bitchat geohash keys to masterPubkey) */
+  /** Isolated multi-profile switcher & local vault manager */
+  profiles: ProfileSwitcherEngine
+  /** Verified `kind: 0` HTTPS profile picture strictly keyed by exact pubkey */
   getProfilePicture: (pubkey: string) => string | undefined
   /** Batch-prefetch verified `kind: 0` profiles for 64-char hex pubkeys */
   ensureProfilePictures: (pubkeys: readonly string[]) => void

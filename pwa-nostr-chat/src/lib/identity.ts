@@ -1,5 +1,3 @@
-import { hmac } from '@noble/hashes/hmac'
-import { sha256 } from '@noble/hashes/sha256'
 import {
   finalizeEvent,
   generateSecretKey,
@@ -9,7 +7,6 @@ import {
   type VerifiedEvent,
 } from 'nostr-tools'
 import type { IdentityState, SignMode } from '../types/protocol.ts'
-import { normalizeGeohash } from './geohash.ts'
 
 export interface Nip07NostrProvider {
   getPublicKey: () => Promise<string>
@@ -25,8 +22,6 @@ declare global {
     nostr?: Nip07NostrProvider
   }
 }
-
-const utf8Encoder = new TextEncoder()
 
 export function bytesToHex(bytes: Uint8Array): string {
   let out = ''
@@ -143,32 +138,35 @@ export function detectNip07(): { hasNip07: boolean; hasNip07Nip44: boolean } {
   }
 }
 
-/**
- * Exact Bitchat per-geohash unlinkable key derivation (NostrIdentityBridge.swift):
- * HMAC-SHA256(key = deviceSeed, message = utf8(geohash) || uint32BE(iteration))
- */
-export function deriveGeohashSecretKey(deviceSeed: Uint8Array, geohash: string): Uint8Array {
-  const gh = normalizeGeohash(geohash)
-  const msg = utf8Encoder.encode(gh)
-
-  for (let iter = 0; iter < 10; iter++) {
-    const input = new Uint8Array(msg.length + 4)
-    input.set(msg, 0)
-    const view = new DataView(input.buffer)
-    view.setUint32(msg.length, iter, false) // big-endian
-    const candidate = hmac(sha256, deviceSeed, input)
-    try {
-      getPublicKey(candidate)
-      return candidate
-    } catch {
-      // Try next iteration if scalar is invalid
-    }
+export function generateFreshSeedKeypair(): {
+  deviceSeedHex: string
+  pubkey: string
+  npub: string
+} {
+  const sk = generateSecretKey()
+  const pubkey = getPublicKey(sk).toLowerCase()
+  return {
+    deviceSeedHex: bytesToHex(sk),
+    pubkey,
+    npub: encodeNpubSafe(pubkey),
   }
+}
 
-  const combined = new Uint8Array(deviceSeed.length + msg.length)
-  combined.set(deviceSeed, 0)
-  combined.set(msg, deviceSeed.length)
-  return sha256(combined)
+export function parseSecretKeyInput(
+  raw: string
+): { secretKeyHex: string; pubkey: string; npub: string } | null {
+  const bytes = parseSecretKey(raw)
+  if (!bytes || bytes.length !== 32) return null
+  try {
+    const pubkey = getPublicKey(bytes).toLowerCase()
+    return {
+      secretKeyHex: bytesToHex(bytes),
+      pubkey,
+      npub: encodeNpubSafe(pubkey),
+    }
+  } catch {
+    return null
+  }
 }
 
 export interface SigningKeyMaterial {
@@ -184,8 +182,6 @@ export class IdentityManager {
   private nip07Pubkey: string | null = null
   private signMode: SignMode = 'auto'
   private nickname: string
-  private perGeohashIdentity = false
-  private derivedCache = new Map<string, { sk: Uint8Array; pk: string }>()
   private wipeGeneration = 0
 
   constructor(opts: {
@@ -193,13 +189,11 @@ export class IdentityManager {
     signMode: SignMode
     localSecretRaw: string
     nickname: string
-    perGeohashIdentity: boolean
   }) {
     const parsedSeed = opts.deviceSeedHex ? hexToBytes(opts.deviceSeedHex) : null
     this.deviceSeed = parsedSeed && parsedSeed.length === 32 ? parsedSeed : generateSecretKey()
     this.signMode = opts.signMode
     this.nickname = opts.nickname.trim() || generateRandomNickname()
-    this.perGeohashIdentity = opts.perGeohashIdentity
     this.setLocalSecret(opts.localSecretRaw)
   }
 
@@ -226,10 +220,6 @@ export class IdentityManager {
 
   setSignMode(mode: SignMode): void {
     this.signMode = mode
-  }
-
-  setPerGeohashIdentity(enabled: boolean): void {
-    this.perGeohashIdentity = enabled
   }
 
   setNip07Pubkey(pk: string | null): void {
@@ -261,45 +251,30 @@ export class IdentityManager {
     return { mode: 'auto', pubkey: getPublicKey(this.deviceSeed), secretKey: this.deviceSeed }
   }
 
-  /**
-   * Always returns the deterministic HMAC-SHA256 derived identity for a geohash
-   * (independent of `perGeohashIdentity` / `signMode`), guaranteeing public Bitchat
-   * call signaling NEVER exposes the user's primary DM `npub`.
-   */
-  getDerivedGeohashKeyMaterial(geohash: string): SigningKeyMaterial {
-    const gh = normalizeGeohash(geohash)
-    const cached = this.derivedCache.get(gh)
-    if (cached) {
-      return { mode: 'auto', pubkey: cached.pk, secretKey: cached.sk }
-    }
-    const sk = deriveGeohashSecretKey(this.deviceSeed, gh)
-    const pk = getPublicKey(sk)
-    this.derivedCache.set(gh, { sk, pk })
-    return { mode: 'auto', pubkey: pk, secretKey: sk }
-  }
-
-  getKeyMaterialForGeohash(geohash?: string): SigningKeyMaterial {
-    if (this.signMode === 'auto' && this.perGeohashIdentity && geohash) {
-      return this.getDerivedGeohashKeyMaterial(geohash)
-    }
+  getDerivedGeohashKeyMaterial(_geohash?: string): SigningKeyMaterial {
+    void _geohash
     return this.getMasterKeyMaterial()
   }
 
-  getState(activeGeohash?: string): IdentityState {
+  getKeyMaterialForGeohash(_geohash?: string): SigningKeyMaterial {
+    void _geohash
+    return this.getMasterKeyMaterial()
+  }
+
+  getState(_activeGeohash?: string): IdentityState {
+    void _activeGeohash
     const { hasNip07, hasNip07Nip44 } = detectNip07()
     const master = this.getMasterKeyMaterial()
-    const active = this.getKeyMaterialForGeohash(activeGeohash)
-    const exportable = encodeNsecSafe(active.secretKey)
+    const exportable = encodeNsecSafe(master.secretKey)
 
     return {
       signMode: this.signMode,
       nickname: this.nickname,
       masterPubkey: master.pubkey,
       masterNpub: encodeNpubSafe(master.pubkey),
-      activePubkey: active.pubkey,
-      activeNpub: encodeNpubSafe(active.pubkey),
-      activeDisplayHandle: formatDisplayHandle(this.nickname, active.pubkey),
-      perGeohashIdentity: this.perGeohashIdentity,
+      activePubkey: master.pubkey,
+      activeNpub: encodeNpubSafe(master.pubkey),
+      activeDisplayHandle: formatDisplayHandle(this.nickname, master.pubkey),
       hasNip07,
       hasNip07Nip44,
       localSecretValid: this.localSecret !== null,
@@ -346,7 +321,6 @@ export class IdentityManager {
 
   rotateEphemeral(): string {
     this.deviceSeed = generateSecretKey()
-    this.derivedCache.clear()
     return bytesToHex(this.deviceSeed)
   }
 
@@ -357,7 +331,6 @@ export class IdentityManager {
     this.localSecretRaw = ''
     this.signMode = 'auto'
     this.nickname = generateRandomNickname()
-    this.derivedCache.clear()
     return {
       deviceSeedHex: bytesToHex(this.deviceSeed),
       nickname: this.nickname,

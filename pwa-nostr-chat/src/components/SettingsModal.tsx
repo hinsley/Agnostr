@@ -17,10 +17,10 @@ import {
   Download,
   Eye,
   EyeOff,
-  Fingerprint,
   Flame,
   Globe,
   Image as ImageIcon,
+  KeyRound,
   Languages,
   Link2,
   Loader2,
@@ -329,6 +329,16 @@ export function SettingsModal({
   const [rotateConfirmAck, setRotateConfirmAck] = useState(false)
   const rotateCancelBtnRef = useRef<HTMLButtonElement | null>(null)
 
+  // Multi-Profile Manager state
+  const [profileFormMode, setProfileFormMode] = useState<'none' | 'create' | 'import'>('none')
+  const [newProfileNickDraft, setNewProfileNickDraft] = useState('')
+  const [importKeyDraft, setImportKeyDraft] = useState('')
+  const [importNickDraft, setImportNickDraft] = useState('')
+  const [profileFormError, setProfileFormError] = useState<string | null>(null)
+  const [profileFormBusy, setProfileFormBusy] = useState(false)
+  const [confirmRemoveProfilePubkey, setConfirmRemoveProfilePubkey] = useState<string | null>(null)
+  const [removingProfilePubkey, setRemovingProfilePubkey] = useState<string | null>(null)
+
   const myProfilePicture = engine.getProfilePicture(identity.masterPubkey)
   const ensureProfilePictures = engine.ensureProfilePictures
 
@@ -347,6 +357,9 @@ export function SettingsModal({
   useEffect(() => {
     if (!open) return
     const pks = new Set<string>([identity.masterPubkey, identity.activePubkey])
+    for (const prof of engine.profiles.profiles) {
+      if (prof.pubkey) pks.add(prof.pubkey)
+    }
     if (activeTab === 'privacy') {
       for (const entry of trustedPubkeys) pks.add(entry.pubkey)
       for (const pk of blockedPubkeys) pks.add(pk)
@@ -357,10 +370,81 @@ export function SettingsModal({
     activeTab,
     identity.masterPubkey,
     identity.activePubkey,
+    engine.profiles.profiles,
     trustedPubkeys,
     blockedPubkeys,
     ensureProfilePictures,
   ])
+
+  const resetProfileForm = useCallback(() => {
+    setProfileFormMode('none')
+    setNewProfileNickDraft('')
+    setImportKeyDraft('')
+    setImportNickDraft('')
+    setProfileFormError(null)
+  }, [])
+
+  const handleCreateProfileSubmit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (profileFormBusy || engine.profiles.switching) return
+    setProfileFormBusy(true)
+    setProfileFormError(null)
+    try {
+      const created = await engine.profiles.createProfile({
+        nickname: newProfileNickDraft.trim() || undefined,
+      })
+      if (!created) {
+        setProfileFormError('Unable to create a new profile right now.')
+      } else {
+        onPlaySound?.('send')
+        resetProfileForm()
+      }
+    } catch (err) {
+      setProfileFormError(err instanceof Error ? err.message : 'Unable to create profile.')
+    } finally {
+      setProfileFormBusy(false)
+    }
+  }
+
+  const handleImportProfileSubmit = async (e: FormEvent) => {
+    e.preventDefault()
+    const rawKey = importKeyDraft.trim()
+    if (!rawKey || profileFormBusy || engine.profiles.switching) return
+    setProfileFormBusy(true)
+    setProfileFormError(null)
+    try {
+      const res = await engine.profiles.importProfile(rawKey, {
+        nickname: importNickDraft.trim() || undefined,
+      })
+      if (!res.ok) {
+        setProfileFormError(res.error || 'Enter a valid nsec1… or 64-character hex private key.')
+      } else {
+        onPlaySound?.('send')
+        resetProfileForm()
+      }
+    } catch (err) {
+      setProfileFormError(err instanceof Error ? err.message : 'Unable to import private key.')
+    } finally {
+      setProfileFormBusy(false)
+    }
+  }
+
+  const handleConfirmDeleteProfile = async (targetPubkey: string) => {
+    if (removingProfilePubkey || engine.profiles.switching) return
+    setRemovingProfilePubkey(targetPubkey)
+    try {
+      const deleted = await engine.profiles.deleteProfile(targetPubkey)
+      if (deleted) {
+        setConfirmRemoveProfilePubkey(null)
+        onPlaySound?.('click')
+        engine.pushToast('info', 'Profile removed from this device')
+      } else {
+        engine.pushToast('error', 'Unable to remove profile')
+      }
+    } finally {
+      setRemovingProfilePubkey(null)
+    }
+  }
 
   const handleProfilePictureSelect = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -572,6 +656,12 @@ export function SettingsModal({
       setRotateConfirmOpen(false)
       setRotateConfirmAck(false)
       setHeroAvatarMenuOpen(false)
+      setProfileFormMode('none')
+      setNewProfileNickDraft('')
+      setImportKeyDraft('')
+      setImportNickDraft('')
+      setProfileFormError(null)
+      setConfirmRemoveProfilePubkey(null)
     }
   }, [open])
 
@@ -1304,6 +1394,274 @@ export function SettingsModal({
         )}
       </form>
 
+      {/* Profiles Management */}
+      <div className="ag-set-group">
+        <div className="ag-set-label-row">
+          <div className="ag-set-profiles-title-wrap">
+            <span className="ag-set-label">Profiles</span>
+            <span className="ag-badge ag-badge-muted mono">
+              {engine.profiles.profiles.length}
+            </span>
+          </div>
+          <div className="ag-set-profiles-head-actions">
+            <button
+              type="button"
+              className={`ag-btn ag-btn-sm ${
+                profileFormMode === 'create' ? 'ag-btn-primary' : 'ag-btn-secondary'
+              }`}
+              disabled={engine.profiles.switching}
+              onClick={() => {
+                onPlaySound?.('click')
+                setConfirmRemoveProfilePubkey(null)
+                setProfileFormError(null)
+                setProfileFormMode((m) => (m === 'create' ? 'none' : 'create'))
+              }}
+            >
+              <Plus size={13} />
+              <span>New Profile</span>
+            </button>
+            <button
+              type="button"
+              className={`ag-btn ag-btn-sm ${
+                profileFormMode === 'import' ? 'ag-btn-primary' : 'ag-btn-secondary'
+              }`}
+              disabled={engine.profiles.switching}
+              onClick={() => {
+                onPlaySound?.('click')
+                setConfirmRemoveProfilePubkey(null)
+                setProfileFormError(null)
+                setProfileFormMode((m) => (m === 'import' ? 'none' : 'import'))
+              }}
+            >
+              <KeyRound size={13} />
+              <span>Import nsec</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="ag-set-profiles-card">
+          <p className="ag-set-helper">
+            Each profile uses its own Nostr keypair with completely separate chats, groups, Agmail,
+            wallet, and settings.
+          </p>
+
+          {profileFormMode === 'create' && (
+            <form
+              className="ag-set-profile-subform"
+              onSubmit={(e) => void handleCreateProfileSubmit(e)}
+            >
+              <input
+                type="text"
+                maxLength={24}
+                className="ag-input"
+                value={newProfileNickDraft}
+                onChange={(e) => {
+                  setNewProfileNickDraft(e.target.value)
+                  if (profileFormError) setProfileFormError(null)
+                }}
+                placeholder="Display name (optional)"
+                aria-label="New profile display name"
+              />
+              {profileFormError && (
+                <p className="ag-field-hint ag-field-hint-danger" role="alert">
+                  {profileFormError}
+                </p>
+              )}
+              <div className="ag-set-profile-subform-actions">
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-secondary ag-btn-sm"
+                  disabled={profileFormBusy}
+                  onClick={resetProfileForm}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="ag-btn ag-btn-primary ag-btn-sm"
+                  disabled={profileFormBusy || engine.profiles.switching}
+                >
+                  {profileFormBusy ? <Loader2 size={13} className="ag-spin" /> : <Plus size={13} />}
+                  <span>{profileFormBusy ? 'Creating…' : 'Create'}</span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          {profileFormMode === 'import' && (
+            <form
+              className="ag-set-profile-subform"
+              onSubmit={(e) => void handleImportProfileSubmit(e)}
+            >
+              <input
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                className="ag-input mono"
+                value={importKeyDraft}
+                onChange={(e) => {
+                  setImportKeyDraft(e.target.value)
+                  if (profileFormError) setProfileFormError(null)
+                }}
+                placeholder="nsec1… or 64-char hex private key"
+                aria-label="Private key to import"
+              />
+              <input
+                type="text"
+                maxLength={24}
+                className="ag-input"
+                value={importNickDraft}
+                onChange={(e) => setImportNickDraft(e.target.value)}
+                placeholder="Display name (optional)"
+                aria-label="Optional display name for imported profile"
+              />
+              {profileFormError && (
+                <p className="ag-field-hint ag-field-hint-danger" role="alert">
+                  {profileFormError}
+                </p>
+              )}
+              <div className="ag-set-profile-subform-actions">
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-secondary ag-btn-sm"
+                  disabled={profileFormBusy}
+                  onClick={resetProfileForm}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="ag-btn ag-btn-primary ag-btn-sm"
+                  disabled={!importKeyDraft.trim() || profileFormBusy || engine.profiles.switching}
+                >
+                  {profileFormBusy ? (
+                    <Loader2 size={13} className="ag-spin" />
+                  ) : (
+                    <KeyRound size={13} />
+                  )}
+                  <span>{profileFormBusy ? 'Importing…' : 'Import & Switch'}</span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          <div className="ag-set-profiles-list" role="list" aria-label="Saved profiles">
+            {engine.profiles.profiles.map((prof) => {
+              const isActive =
+                prof.id === engine.profiles.activeProfileId ||
+                prof.pubkey.toLowerCase() === identity.masterPubkey.toLowerCase()
+              const displayNick = isActive ? identity.nickname : prof.nickname
+              const avatarUrl = isActive
+                ? myProfilePicture
+                : (engine.getProfilePicture(prof.pubkey) ?? prof.picture)
+              const isConfirmingRemove =
+                !isActive && confirmRemoveProfilePubkey === prof.pubkey
+              const isRemovingThis = removingProfilePubkey === prof.pubkey
+
+              return (
+                <div
+                  key={prof.id}
+                  role="listitem"
+                  className={`ag-set-profile-item-wrap${isActive ? ' is-active' : ''}`}
+                >
+                  <div className="ag-set-profile-item">
+                    <AvatarImg
+                      pubkey={prof.pubkey}
+                      pictureUrl={avatarUrl}
+                      alt=""
+                      width={34}
+                      height={34}
+                      className="ag-set-profile-item-avatar"
+                    />
+                    <div className="ag-set-profile-item-copy">
+                      <div className="ag-set-profile-item-name-row">
+                        <span
+                          className="ag-set-profile-item-name truncate"
+                          style={{ color: pubkeyToColor(prof.pubkey) }}
+                        >
+                          {displayNick}
+                        </span>
+                        {isActive && <span className="ag-badge ag-badge-accent">Active</span>}
+                      </div>
+                      <span className="ag-set-row-sub mono truncate">
+                        {shortPubkey(prof.npub, 10, 6)}
+                      </span>
+                    </div>
+
+                    {!isActive && (
+                      <div className="ag-set-profile-item-actions">
+                        <button
+                          type="button"
+                          className="ag-btn ag-btn-secondary ag-btn-xs"
+                          disabled={engine.profiles.switching || removingProfilePubkey !== null}
+                          onClick={() => {
+                            onPlaySound?.('click')
+                            void engine.profiles.switchProfile(prof.pubkey)
+                          }}
+                        >
+                          Switch
+                        </button>
+                        <button
+                          type="button"
+                          className="ag-icon-btn-sm ag-icon-btn-danger"
+                          disabled={engine.profiles.switching || removingProfilePubkey !== null}
+                          onClick={() => {
+                            onPlaySound?.('click')
+                            setConfirmRemoveProfilePubkey((prev) =>
+                              prev === prof.pubkey ? null : prof.pubkey,
+                            )
+                          }}
+                          aria-label={`Remove profile ${displayNick}`}
+                          title="Remove profile"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {isConfirmingRemove && (
+                    <div className="ag-set-profile-confirm" role="alert">
+                      <p className="ag-set-profile-confirm-text">
+                        <AlertTriangle size={14} aria-hidden="true" />
+                        <span>
+                          Remove this profile and all its local chats, groups, Agmail, and wallet
+                          data from this device? Back up its private key first if you want to keep
+                          it.
+                        </span>
+                      </p>
+                      <div className="ag-set-profile-confirm-actions">
+                        <button
+                          type="button"
+                          className="ag-btn ag-btn-secondary ag-btn-xs"
+                          disabled={isRemovingThis}
+                          onClick={() => setConfirmRemoveProfilePubkey(null)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          className="ag-set-profile-confirm-danger"
+                          disabled={isRemovingThis}
+                          onClick={() => void handleConfirmDeleteProfile(prof.pubkey)}
+                        >
+                          {isRemovingThis ? (
+                            <Loader2 size={12} className="ag-spin" />
+                          ) : (
+                            <Trash2 size={12} />
+                          )}
+                          <span>{isRemovingThis ? 'Removing…' : 'Remove Profile'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+
       {/* Multi-Device Background Sync */}
       <div className="ag-set-group">
         <div className="ag-set-label-row">
@@ -1635,29 +1993,6 @@ export function SettingsModal({
           </form>
         )}
       </div>
-
-      {/* Per-Room Privacy Keys */}
-      <label className="ag-set-toggle-card">
-        <div className="ag-set-toggle-copy">
-          <span className="ag-set-toggle-title">
-            <Fingerprint size={16} />
-            <span>Per-Room Privacy Keys</span>
-          </span>
-          <span className="ag-set-toggle-desc">
-            Derive a separate unlinkable keypair for every geohash room.
-          </span>
-        </div>
-        <input
-          type="checkbox"
-          className="ag-switch"
-          checked={settings.perGeohashIdentity}
-          disabled={identity.signMode === 'extension'}
-          onChange={() => {
-            engine.updateSettings({ perGeohashIdentity: !settings.perGeohashIdentity })
-            onPlaySound?.('click')
-          }}
-        />
-      </label>
     </div>
   )
 

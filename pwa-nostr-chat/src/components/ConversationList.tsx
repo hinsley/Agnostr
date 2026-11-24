@@ -221,13 +221,26 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const [qpUploadingPhoto, setQpUploadingPhoto] = useState(false)
   const [qpPhotoError, setQpPhotoError] = useState<string | null>(null)
   const [qpCopiedNpub, setQpCopiedNpub] = useState(false)
-  const [qpPos, setQpPos] = useState<{ left: number; bottom: number; width: number } | null>(null)
+  const [qpProfileForm, setQpProfileForm] = useState<'none' | 'new' | 'import'>('none')
+  const [qpNewProfileName, setQpNewProfileName] = useState('')
+  const [qpImportSecret, setQpImportSecret] = useState('')
+  const [qpProfileError, setQpProfileError] = useState<string | null>(null)
+  const [qpProfileBusy, setQpProfileBusy] = useState(false)
+  const [qpConfirmDeleteId, setQpConfirmDeleteId] = useState<string | null>(null)
+  const [qpPos, setQpPos] = useState<{
+    left: number
+    bottom: number
+    width: number
+    maxHeight: number
+  } | null>(null)
   const footerRef = useRef<HTMLDivElement | null>(null)
   const profileTriggerRef = useRef<HTMLButtonElement | null>(null)
   const quickProfileRef = useRef<HTMLDivElement | null>(null)
   const qpAvatarWrapRef = useRef<HTMLDivElement | null>(null)
   const qpNameInputRef = useRef<HTMLInputElement | null>(null)
   const qpFileInputRef = useRef<HTMLInputElement | null>(null)
+  const qpNewProfileInputRef = useRef<HTMLInputElement | null>(null)
+  const qpImportInputRef = useRef<HTMLInputElement | null>(null)
   const qpCopyTimerRef = useRef<number | null>(null)
 
   const isQuickProfileVisible = quickProfileOpen && !collapsed
@@ -237,13 +250,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     const rect = footerRef.current?.getBoundingClientRect()
     const vw = window.innerWidth
     const vh = window.innerHeight
-    const width = Math.min(284, Math.max(220, vw - 16))
+    const width = Math.min(296, Math.max(220, vw - 16))
     if (!rect) {
-      return { left: 8, bottom: 68, width }
+      return { left: 8, bottom: 68, width, maxHeight: Math.max(220, vh - 80) }
     }
     const left = Math.max(8, Math.min(Math.round(rect.left + 8), vw - width - 8))
-    const bottom = Math.max(12, Math.min(Math.round(vh - rect.top + 8), vh - 120))
-    return { left, bottom, width }
+    const bottom = Math.max(12, Math.min(Math.round(vh - rect.top + 8), Math.max(12, vh - 120)))
+    const maxHeight = Math.max(220, Math.min(vh - bottom - 12, vh - 24))
+    return { left, bottom, width, maxHeight }
   }, [])
 
   const closeQuickProfile = useCallback(() => {
@@ -251,6 +265,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     setQpAvatarMenuOpen(false)
     setQpEditingName(false)
     setQpPhotoError(null)
+    setQpProfileForm('none')
+    setQpNewProfileName('')
+    setQpImportSecret('')
+    setQpProfileError(null)
+    setQpConfirmDeleteId(null)
   }, [])
 
   const handleToggleQuickProfile = useCallback(() => {
@@ -260,12 +279,22 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         setQpAvatarMenuOpen(false)
         setQpEditingName(false)
         setQpPhotoError(null)
+        setQpProfileForm('none')
+        setQpNewProfileName('')
+        setQpImportSecret('')
+        setQpProfileError(null)
+        setQpConfirmDeleteId(null)
         return false
       }
       setQpPos(computeQuickProfilePos())
       setQpAvatarMenuOpen(false)
       setQpPhotoError(null)
       setQpEditingName(false)
+      setQpProfileForm('none')
+      setQpNewProfileName('')
+      setQpImportSecret('')
+      setQpProfileError(null)
+      setQpConfirmDeleteId(null)
       return true
     })
   }, [computeQuickProfilePos, onPlaySound])
@@ -326,6 +355,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         setQpAvatarMenuOpen(false)
         return
       }
+      if (qpConfirmDeleteId) {
+        setQpConfirmDeleteId(null)
+        return
+      }
+      if (qpProfileForm !== 'none') {
+        setQpProfileForm('none')
+        setQpProfileError(null)
+        return
+      }
       if (qpEditingName) {
         setQpEditingName(false)
         return
@@ -346,10 +384,24 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   }, [
     isQuickProfileVisible,
     qpAvatarMenuOpen,
+    qpConfirmDeleteId,
+    qpProfileForm,
     qpEditingName,
     closeQuickProfile,
     computeQuickProfilePos,
   ])
+
+  useEffect(() => {
+    if (qpProfileForm === 'none') return
+    const raf = window.requestAnimationFrame(() => {
+      if (qpProfileForm === 'new') {
+        qpNewProfileInputRef.current?.focus()
+      } else if (qpProfileForm === 'import') {
+        qpImportInputRef.current?.focus()
+      }
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [qpProfileForm])
 
   useEffect(() => {
     if (!qpEditingName) return
@@ -450,6 +502,93 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         engine.pushToast('error', 'Could not copy npub')
       })
   }, [engine, onPlaySound])
+
+  const handleSwitchProfile = useCallback(
+    (targetPubkey: string) => {
+      if (engine.profiles.switching || qpProfileBusy) return
+      setQpProfileError(null)
+      setQpConfirmDeleteId(null)
+      onPlaySound?.('click')
+      void engine.profiles.switchProfile(targetPubkey)
+    },
+    [engine.profiles, qpProfileBusy, onPlaySound]
+  )
+
+  const handleCreateProfileSubmit = useCallback(
+    async (ev: FormEvent) => {
+      ev.preventDefault()
+      if (engine.profiles.switching || qpProfileBusy) return
+      setQpProfileBusy(true)
+      setQpProfileError(null)
+      try {
+        const nickname = qpNewProfileName.trim().slice(0, 24) || undefined
+        const created = await engine.profiles.createProfile(nickname ? { nickname } : undefined)
+        if (!created) {
+          setQpProfileError('Could not create profile.')
+          setQpProfileBusy(false)
+        } else {
+          onPlaySound?.('click')
+          setQpNewProfileName('')
+          setQpProfileForm('none')
+          setQpProfileBusy(false)
+        }
+      } catch (err) {
+        setQpProfileError(err instanceof Error ? err.message : 'Could not create profile.')
+        setQpProfileBusy(false)
+      }
+    },
+    [engine.profiles, qpProfileBusy, qpNewProfileName, onPlaySound]
+  )
+
+  const handleImportProfileSubmit = useCallback(
+    async (ev: FormEvent) => {
+      ev.preventDefault()
+      if (engine.profiles.switching || qpProfileBusy) return
+      const secret = qpImportSecret.trim()
+      if (!secret) {
+        setQpProfileError('Enter an nsec1… or 64-character hex private key.')
+        return
+      }
+      setQpProfileBusy(true)
+      setQpProfileError(null)
+      try {
+        const res = await engine.profiles.importProfile(secret)
+        if (!res.ok) {
+          setQpProfileError(res.error || 'Invalid private key.')
+          setQpProfileBusy(false)
+          return
+        }
+        onPlaySound?.('click')
+        setQpImportSecret('')
+        setQpProfileForm('none')
+        setQpProfileBusy(false)
+      } catch (err) {
+        setQpProfileError(err instanceof Error ? err.message : 'Could not import key.')
+        setQpProfileBusy(false)
+      }
+    },
+    [engine.profiles, qpProfileBusy, qpImportSecret, onPlaySound]
+  )
+
+  const handleConfirmDeleteProfile = useCallback(
+    async (targetPubkey: string) => {
+      if (engine.profiles.switching || qpProfileBusy) return
+      setQpProfileBusy(true)
+      setQpProfileError(null)
+      try {
+        const deleted = await engine.profiles.deleteProfile(targetPubkey)
+        if (deleted) {
+          onPlaySound?.('click')
+        }
+      } catch (err) {
+        setQpProfileError(err instanceof Error ? err.message : 'Could not remove profile.')
+      } finally {
+        setQpConfirmDeleteId(null)
+        setQpProfileBusy(false)
+      }
+    },
+    [engine.profiles, qpProfileBusy, onPlaySound]
+  )
 
   useEffect(() => {
     return () => {
@@ -2973,8 +3112,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 left: `${qpPos.left}px`,
                 bottom: `${qpPos.bottom}px`,
                 width: `${qpPos.width}px`,
+                maxHeight: `${qpPos.maxHeight}px`,
               }
-            : { left: '8px', bottom: '68px', width: '284px' }
+            : { left: '8px', bottom: '68px', width: '296px' }
+          const storedProfiles = engine.profiles.profiles
+          const activeProfileId = engine.profiles.activeProfileId
+          const isProfileActionBusy = engine.profiles.switching || qpProfileBusy
 
           return createPortal(
             <div
@@ -3182,6 +3325,259 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   </button>
                 </div>
               )}
+
+              {/* Compact Multi-Profile Switcher Section */}
+              <div className="ag-qp-divider" aria-hidden="true" />
+
+              <div className="ag-qp-profiles" aria-label="Profiles">
+                <div className="ag-qp-profiles-head">
+                  <div className="ag-qp-profiles-title-wrap">
+                    <span className="ag-qp-profiles-title">Profiles</span>
+                    <span className="ag-qp-profiles-count tabular">{storedProfiles.length}</span>
+                  </div>
+                  <div className="ag-qp-profiles-actions">
+                    <button
+                      type="button"
+                      className={`ag-qp-mini-btn ${qpProfileForm === 'new' ? 'active' : ''}`}
+                      disabled={isProfileActionBusy}
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setQpProfileError(null)
+                        setQpConfirmDeleteId(null)
+                        setQpImportSecret('')
+                        setQpProfileForm((prev) => (prev === 'new' ? 'none' : 'new'))
+                      }}
+                    >
+                      <Plus size={11} aria-hidden="true" />
+                      <span>New</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`ag-qp-mini-btn ${qpProfileForm === 'import' ? 'active' : ''}`}
+                      disabled={isProfileActionBusy}
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setQpProfileError(null)
+                        setQpConfirmDeleteId(null)
+                        setQpNewProfileName('')
+                        setQpProfileForm((prev) => (prev === 'import' ? 'none' : 'import'))
+                      }}
+                    >
+                      <span>Import</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Inline New Profile Mini-Form */}
+                {qpProfileForm === 'new' && (
+                  <form
+                    className="ag-qp-inline-form"
+                    onSubmit={(ev) => void handleCreateProfileSubmit(ev)}
+                  >
+                    <input
+                      ref={qpNewProfileInputRef}
+                      type="text"
+                      className="ag-qp-inline-input"
+                      maxLength={24}
+                      placeholder="Display name (optional)"
+                      aria-label="New profile display name"
+                      value={qpNewProfileName}
+                      disabled={isProfileActionBusy}
+                      onChange={(ev) => setQpNewProfileName(ev.target.value)}
+                    />
+                    {qpProfileError && (
+                      <div className="ag-qp-error" role="alert">
+                        {qpProfileError}
+                      </div>
+                    )}
+                    <div className="ag-qp-inline-form-actions">
+                      <button
+                        type="submit"
+                        className="ag-qp-inline-btn primary"
+                        disabled={isProfileActionBusy}
+                      >
+                        {isProfileActionBusy ? (
+                          <Loader2 size={12} className="ag-spin" aria-hidden="true" />
+                        ) : null}
+                        <span>Create</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-qp-inline-btn"
+                        disabled={isProfileActionBusy}
+                        onClick={() => {
+                          setQpProfileForm('none')
+                          setQpNewProfileName('')
+                          setQpProfileError(null)
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {/* Inline Import Key Mini-Form */}
+                {qpProfileForm === 'import' && (
+                  <form
+                    className="ag-qp-inline-form"
+                    onSubmit={(ev) => void handleImportProfileSubmit(ev)}
+                  >
+                    <input
+                      ref={qpImportInputRef}
+                      type="password"
+                      className="ag-qp-inline-input mono"
+                      placeholder="nsec1… or 64-hex private key"
+                      aria-label="Private key (nsec or 64-character hex)"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={qpImportSecret}
+                      disabled={isProfileActionBusy}
+                      onChange={(ev) => {
+                        setQpImportSecret(ev.target.value)
+                        if (qpProfileError) setQpProfileError(null)
+                      }}
+                    />
+                    {qpProfileError && (
+                      <div className="ag-qp-error" role="alert">
+                        {qpProfileError}
+                      </div>
+                    )}
+                    <div className="ag-qp-inline-form-actions">
+                      <button
+                        type="submit"
+                        className="ag-qp-inline-btn primary"
+                        disabled={isProfileActionBusy || !qpImportSecret.trim()}
+                      >
+                        {isProfileActionBusy ? (
+                          <Loader2 size={12} className="ag-spin" aria-hidden="true" />
+                        ) : null}
+                        <span>Import</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-qp-inline-btn"
+                        disabled={isProfileActionBusy}
+                        onClick={() => {
+                          setQpProfileForm('none')
+                          setQpImportSecret('')
+                          setQpProfileError(null)
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {qpProfileForm === 'none' && qpProfileError && (
+                  <div className="ag-qp-error" role="alert">
+                    {qpProfileError}
+                  </div>
+                )}
+
+                {/* Scrollable Stored Profiles List */}
+                <div className="ag-qp-profile-list" role="list" aria-label="Saved profiles">
+                  {storedProfiles.map((p) => {
+                    const isActive = p.id === activeProfileId
+                    const isConfirmingRemove = !isActive && qpConfirmDeleteId === p.id
+                    const profileLabel = isActive ? engine.identity.nickname : p.nickname
+                    const shortNpub =
+                      p.npub.length > 15
+                        ? `${p.npub.slice(0, 9)}…${p.npub.slice(-4)}`
+                        : p.npub
+                    return (
+                      <div
+                        key={p.id}
+                        role="listitem"
+                        className={`ag-qp-profile-row ${isActive ? 'is-active' : ''} ${
+                          isConfirmingRemove ? 'is-confirming' : ''
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          className="ag-qp-profile-select"
+                          disabled={isActive || isProfileActionBusy}
+                          aria-current={isActive ? 'true' : undefined}
+                          title={
+                            isActive
+                              ? `${profileLabel} (Active)`
+                              : `Switch to ${profileLabel}`
+                          }
+                          onClick={() => {
+                            if (!isActive) handleSwitchProfile(p.pubkey)
+                          }}
+                        >
+                          <AvatarImg
+                            pubkey={p.pubkey}
+                            pictureUrl={isActive ? myPictureUrl : p.picture}
+                            width={28}
+                            height={28}
+                            className="ag-qp-profile-avatar"
+                          />
+                          <div className="ag-qp-profile-meta">
+                            <span className="ag-qp-profile-name truncate">{profileLabel}</span>
+                            <span className="ag-qp-profile-sub mono truncate">
+                              #{p.pubkey.slice(-4)} · {shortNpub}
+                            </span>
+                          </div>
+                          {isActive && (
+                            <span
+                              className="ag-qp-profile-check"
+                              aria-label="Active profile"
+                              title="Active profile"
+                            >
+                              <Check size={14} aria-hidden="true" />
+                            </span>
+                          )}
+                        </button>
+
+                        {!isActive &&
+                          (isConfirmingRemove ? (
+                            <div
+                              className="ag-qp-profile-confirm"
+                              role="group"
+                              aria-label={`Confirm remove ${profileLabel}`}
+                            >
+                              <span className="ag-qp-profile-confirm-label">Remove?</span>
+                              <button
+                                type="button"
+                                className="ag-qp-confirm-btn danger"
+                                disabled={isProfileActionBusy}
+                                onClick={() => void handleConfirmDeleteProfile(p.pubkey)}
+                              >
+                                Yes
+                              </button>
+                              <button
+                                type="button"
+                                className="ag-qp-confirm-btn"
+                                disabled={isProfileActionBusy}
+                                onClick={() => setQpConfirmDeleteId(null)}
+                              >
+                                No
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="ag-qp-profile-remove-btn"
+                              disabled={isProfileActionBusy}
+                              onClick={() => {
+                                onPlaySound?.('click')
+                                setQpProfileError(null)
+                                setQpConfirmDeleteId(p.id)
+                              }}
+                              title={`Remove ${profileLabel}`}
+                              aria-label={`Remove ${profileLabel}`}
+                            >
+                              <Trash2 size={12} aria-hidden="true" />
+                            </button>
+                          ))}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
             </div>,
             document.body
           )

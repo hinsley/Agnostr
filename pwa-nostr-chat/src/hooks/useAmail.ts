@@ -35,6 +35,7 @@ import {
 } from '../lib/amailCrypto.ts'
 import { AmailMeshNode } from '../lib/amailMesh.ts'
 import { AmailStorage } from '../lib/amailStorage.ts'
+import { getProfileAmailDbName } from '../lib/profileVault.ts'
 import {
   cleanMimeType,
   computeSha256HexAsync,
@@ -259,7 +260,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
   const storageRef = useRef<AmailStorage | null>(null)
   if (!storageRef.current) {
-    storageRef.current = new AmailStorage()
+    storageRef.current = new AmailStorage(getProfileAmailDbName(options.masterPubkey))
   }
 
   const meshRef = useRef<AmailMeshNode | null>(null)

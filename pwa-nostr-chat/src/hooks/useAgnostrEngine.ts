@@ -13,6 +13,8 @@ import type {
   PendingTrustRequest,
   PinnedChannel,
   PreparedImage,
+  ProfileAccountRecord,
+  ProfileSwitcherEngine,
   BitchatChannelPreview,
   RecordedVoiceMemo,
   RelayTelemetry,
@@ -93,6 +95,15 @@ import {
   nextPresenceDelayMs,
   PresenceTracker,
 } from '../lib/presenceService.ts'
+import {
+  bootstrapActiveProfile,
+  createAndSwitchProfile,
+  deleteStoredProfile,
+  importAndSwitchProfile,
+  snapshotCurrentProfileToVault,
+  switchToProfile,
+  syncActiveProfileMetadata,
+} from '../lib/profileVault.ts'
 import {
   formatBitchatChannelHash,
   getTopicSlug,
@@ -303,13 +314,26 @@ export function useAgnostrEngine(): AgnostrEngine {
       signMode: loadSignMode(hasNip07),
       localSecretRaw: loadLocalSecret(),
       nickname: initialNick,
-      perGeohashIdentity: settings.perGeohashIdentity,
     })
     saveDeviceSeedHex(mgr.getDeviceSeedHex())
     saveNickname(mgr.getNickname())
     identityManagerRef.current = mgr
   }
   const identityManager = identityManagerRef.current
+
+  // Synchronously bootstrap multi-profile registry BEFORE Amail/sub-engines initialize
+  const initialProfilesRef = useRef<ProfileAccountRecord[] | null>(null)
+  if (!initialProfilesRef.current) {
+    initialProfilesRef.current = bootstrapActiveProfile(identityManager.getState())
+  }
+  const [storedProfiles, setStoredProfiles] = useState<ProfileAccountRecord[]>(
+    () => initialProfilesRef.current ?? []
+  )
+  const [profileSwitching, setProfileSwitching] = useState(false)
+  const profileSwitchingRef = useRef(false)
+  const lastSyncedMasterPubkeyRef = useRef<string>(
+    identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+  )
 
   const presenceTrackerRef = useRef<PresenceTracker | null>(null)
   if (!presenceTrackerRef.current) {
@@ -2456,7 +2480,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     onProfileNameSaved: handleAgoraProfileNameSaved,
   })
 
-  // Verified kind: 0 profile pictures (strictly exact pubkey lookup — NEVER aliases Bitchat geohash keys to masterPubkey)
+  // Verified kind: 0 profile pictures strictly keyed by exact pubkey
   const getProfilePicture = useCallback(
     (pubkey: string): string | undefined => {
       if (typeof pubkey !== 'string') return undefined
@@ -2474,6 +2498,180 @@ export function useAgnostrEngine(): AgnostrEngine {
       }
     },
     [agoraEngine.profilesByPubkey]
+  )
+
+  const myMasterPkLower = identity.masterPubkey.toLowerCase()
+  const hasLoadedOwnAgoraProfile = Boolean(agoraEngine.profilesByPubkey[myMasterPkLower])
+  const myVerifiedPicture = getProfilePicture(myMasterPkLower)
+
+  useEffect(() => {
+    if (!/^[0-9a-f]{64}$/.test(myMasterPkLower)) return
+    const prevPk = lastSyncedMasterPubkeyRef.current
+    const rotatedInPlace = Boolean(prevPk && prevPk !== myMasterPkLower)
+    lastSyncedMasterPubkeyRef.current = myMasterPkLower
+    const updated = syncActiveProfileMetadata({
+      pubkey: myMasterPkLower,
+      npub: identity.masterNpub,
+      nickname: identity.nickname,
+      ...(myVerifiedPicture
+        ? { picture: myVerifiedPicture }
+        : hasLoadedOwnAgoraProfile
+          ? { picture: null }
+          : {}),
+      signMode: identity.signMode,
+      ...(rotatedInPlace ? { prevPubkey: prevPk } : {}),
+    })
+    setStoredProfiles(updated)
+  }, [
+    myMasterPkLower,
+    identity.masterNpub,
+    identity.nickname,
+    identity.signMode,
+    myVerifiedPicture,
+    hasLoadedOwnAgoraProfile,
+  ])
+
+  const switchProfile = useCallback(
+    async (targetPubkey: string): Promise<void> => {
+      const tgt = targetPubkey.trim().toLowerCase()
+      const cur = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      if (!tgt || tgt === cur || profileSwitchingRef.current) return
+      profileSwitchingRef.current = true
+      setProfileSwitching(true)
+      try {
+        const ok = await switchToProfile(cur, tgt)
+        if (!ok) {
+          profileSwitchingRef.current = false
+          setProfileSwitching(false)
+          pushToast('error', 'Profile switch failed', 'Selected profile could not be loaded.')
+        }
+      } catch (err) {
+        profileSwitchingRef.current = false
+        setProfileSwitching(false)
+        pushToast(
+          'error',
+          'Profile switch failed',
+          err instanceof Error ? err.message : 'Unable to switch profiles.'
+        )
+      }
+    },
+    [identityManager, pushToast]
+  )
+
+  const createProfile = useCallback(
+    async (opts?: { nickname?: string }): Promise<ProfileAccountRecord | null> => {
+      if (profileSwitchingRef.current) return null
+      profileSwitchingRef.current = true
+      setProfileSwitching(true)
+      try {
+        const cur = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+        return await createAndSwitchProfile(cur, opts)
+      } catch (err) {
+        profileSwitchingRef.current = false
+        setProfileSwitching(false)
+        pushToast(
+          'error',
+          'Could not create profile',
+          err instanceof Error ? err.message : 'Unable to initialize new profile.'
+        )
+        return null
+      }
+    },
+    [identityManager, pushToast]
+  )
+
+  const importProfile = useCallback(
+    async (
+      secretInput: string,
+      opts?: { nickname?: string }
+    ): Promise<{ ok: boolean; error?: string; profile?: ProfileAccountRecord }> => {
+      if (profileSwitchingRef.current) {
+        return { ok: false, error: 'Profile switch already in progress.' }
+      }
+      profileSwitchingRef.current = true
+      setProfileSwitching(true)
+      try {
+        const cur = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+        const res = await importAndSwitchProfile(cur, secretInput, opts)
+        if (!res.ok || (res.profile && res.profile.id === cur)) {
+          profileSwitchingRef.current = false
+          setProfileSwitching(false)
+        }
+        return res
+      } catch (err) {
+        profileSwitchingRef.current = false
+        setProfileSwitching(false)
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : 'Unable to import private key.',
+        }
+      }
+    },
+    [identityManager]
+  )
+
+  const deleteProfile = useCallback(
+    async (targetPubkey: string): Promise<boolean> => {
+      if (profileSwitchingRef.current) return false
+      const cur = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const tgt = targetPubkey.trim().toLowerCase()
+      const deletingActive = tgt === cur
+      if (deletingActive) {
+        profileSwitchingRef.current = true
+        setProfileSwitching(true)
+      }
+      try {
+        const res = await deleteStoredProfile(cur, tgt)
+        if (!res.reloaded) {
+          setStoredProfiles(res.profiles)
+          if (deletingActive) {
+            profileSwitchingRef.current = false
+            setProfileSwitching(false)
+          }
+          if (res.deleted) {
+            pushToast(
+              'info',
+              'Profile removed',
+              'Removed profile and its local data from this device.'
+            )
+          }
+        }
+        return res.deleted
+      } catch (err) {
+        if (deletingActive) {
+          profileSwitchingRef.current = false
+          setProfileSwitching(false)
+        }
+        pushToast(
+          'error',
+          'Could not remove profile',
+          err instanceof Error ? err.message : 'Unable to delete stored profile.'
+        )
+        return false
+      }
+    },
+    [identityManager, pushToast]
+  )
+
+  const profilesEngine = useMemo<ProfileSwitcherEngine>(
+    () => ({
+      profiles: storedProfiles,
+      activeProfileId: myMasterPkLower,
+      switching: profileSwitching,
+      switchProfile,
+      createProfile,
+      importProfile,
+      deleteProfile,
+    }),
+    [
+      storedProfiles,
+      myMasterPkLower,
+      profileSwitching,
+      switchProfile,
+      createProfile,
+      importProfile,
+      deleteProfile,
+    ]
   )
 
   const ensureAgoraProfiles = agoraEngine.ensureProfiles
@@ -4901,25 +5099,30 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const rotateIdentity = useCallback(() => {
+    const prevPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
     const newSeedHex = identityManager.rotateEphemeral()
     saveDeviceSeedHex(newSeedHex)
+    const nextState = identityManager.getState()
+    const nextPk = nextState.masterPubkey.toLowerCase()
+    lastSyncedMasterPubkeyRef.current = nextPk
+    setStoredProfiles(
+      syncActiveProfileMetadata({
+        pubkey: nextPk,
+        npub: nextState.masterNpub,
+        nickname: nextState.nickname,
+        picture: null,
+        signMode: nextState.signMode,
+        prevPubkey: prevPk,
+      })
+    )
+    void snapshotCurrentProfileToVault(nextPk)
     setIdentityVersion((v) => v + 1)
     pushToast('success', 'Identity rotated', 'Fresh ephemeral keypair generated.')
   }, [identityManager, pushToast])
 
-  const updateSettings = useCallback(
-    (patch: Partial<AppSettings>) => {
-      setSettings((prev) => {
-        const next = { ...prev, ...patch }
-        if (typeof patch.perGeohashIdentity === 'boolean') {
-          identityManager.setPerGeohashIdentity(patch.perGeohashIdentity)
-          setIdentityVersion((v) => v + 1)
-        }
-        return next
-      })
-    },
-    [identityManager]
-  )
+  const updateSettings = useCallback((patch: Partial<AppSettings>) => {
+    setSettings((prev) => ({ ...prev, ...patch }))
+  }, [])
 
   const setTheme = useCallback(
     (theme: ThemeId) => {
@@ -4974,6 +5177,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const panicWipe = useCallback(() => {
+    const prevPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
     trustedSetRef.current = new Set()
     blockedSetRef.current = new Set()
     resetAllNotifications()
@@ -5015,6 +5219,20 @@ export function useAgnostrEngine(): AgnostrEngine {
     saveDeviceSeedHex(deviceSeedHex)
     saveNickname(nickname)
     saveSignMode('auto')
+    const freshState = identityManager.getState()
+    const freshPk = freshState.masterPubkey.toLowerCase()
+    lastSyncedMasterPubkeyRef.current = freshPk
+    setStoredProfiles(
+      syncActiveProfileMetadata({
+        pubkey: freshPk,
+        npub: freshState.masterNpub,
+        nickname: freshState.nickname,
+        picture: null,
+        signMode: 'auto',
+        prevPubkey: prevPk,
+      })
+    )
+    void snapshotCurrentProfileToVault(freshPk)
 
     setSettings(DEFAULT_SETTINGS)
     setPinnedChannels([])
@@ -5375,6 +5593,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     reconnectRelays,
 
     identity,
+    profiles: profilesEngine,
     getProfilePicture,
     ensureProfilePictures,
     updateMyProfilePicture,

@@ -123,8 +123,13 @@ function clampSettings(raw?: Partial<AmailRelaySettings> | null): AmailRelaySett
  * fallback to in-memory Maps if IndexedDB is unavailable.
  */
 export class AmailStorage {
+  private readonly dbName: string
   private dbPromise: Promise<IDBDatabase | null> | null = null
   private dbHandle: IDBDatabase | null = null
+
+  constructor(dbName: string = AMAIL_DB_NAME) {
+    this.dbName = dbName.trim() || AMAIL_DB_NAME
+  }
 
   // In-memory write-through mirror (guarantees fast sync queries & graceful fallback)
   private mailMap = new Map<string, AmailMessage>()
@@ -241,7 +246,7 @@ export class AmailStorage {
 
     this.dbPromise = new Promise<IDBDatabase | null>((resolve) => {
       try {
-        const req = indexedDB.open(AMAIL_DB_NAME, AMAIL_DB_VERSION)
+        const req = indexedDB.open(this.dbName, AMAIL_DB_VERSION)
         req.onupgradeneeded = () => {
           const db = req.result
           if (!db.objectStoreNames.contains(STORES.mail)) {
@@ -827,7 +832,7 @@ export class AmailStorage {
     if (typeof indexedDB !== 'undefined') {
       await new Promise<void>((resolve) => {
         try {
-          const req = indexedDB.deleteDatabase(AMAIL_DB_NAME)
+          const req = indexedDB.deleteDatabase(this.dbName)
           req.onsuccess = () => resolve()
           req.onerror = () => resolve()
           req.onblocked = () => resolve()
