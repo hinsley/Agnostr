@@ -975,6 +975,21 @@ function createMercatorPatchGeometry(
   return { geometry, anchor: new THREE.Vector3(anchorX, anchorY, anchorZ) }
 }
 
+/**
+ * Span-proportional sagitta clearance lift for curved geohash fills & lines:
+ * - Clears every central-sphere facet on wide P1–P3 cells (zero sawtooth clipping),
+ * - Tapers cleanly to 0.0 on P6–P9 so high-precision cells keep 0.000px radial parallax.
+ */
+function getSurfaceLiftForSpan(spanDeg: number): number {
+  if (spanDeg > 0.5) {
+    return clamp(spanDeg * 0.00004, 0.00012, 0.0014)
+  }
+  if (spanDeg > 0.02) {
+    return 0.00004
+  }
+  return 0
+}
+
 function pushCurvedRectSegments(
   out: number[],
   latMin: number,
@@ -984,33 +999,38 @@ function pushCurvedRectSegments(
   radius: number,
   anchor: readonly [number, number, number] = [0, 0, 0],
 ): void {
-  const cLatMin = clamp(latMin, -85, 85)
-  const cLatMax = clamp(latMax, -85, 85)
-  const span = Math.max(Math.abs(cLatMax - cLatMin), Math.abs(lonMax - lonMin))
-  const steps = span > 25 ? 20 : span > 8 ? 10 : span > 2 ? 4 : 1
+  const cLatMin = clamp(latMin, -89.5, 89.5)
+  const cLatMax = clamp(latMax, -89.5, 89.5)
+  const latSpan = Math.abs(cLatMax - cLatMin)
+  const lonSpan = Math.abs(lonMax - lonMin)
+  const span = Math.max(latSpan, lonSpan)
+  const latSteps = Math.max(2, Math.min(28, Math.ceil(latSpan / 1.8)))
+  const lonSteps = Math.max(2, Math.min(28, Math.ceil(lonSpan / 1.8)))
+  const lift = getSurfaceLiftForSpan(span)
+  const r = radius + lift + (span > 0.5 ? 0.00004 : 0)
   const [ax, ay, az] = anchor
 
-  const pushArc = (la0: number, lo0: number, la1: number, lo1: number) => {
+  const pushArc = (la0: number, lo0: number, la1: number, lo1: number, steps: number) => {
     let prev = latLonToUnitVec3(la0, lo0)
     for (let s = 1; s <= steps; s++) {
       const t = s / steps
       const curr = latLonToUnitVec3(la0 + (la1 - la0) * t, lo0 + (lo1 - lo0) * t)
       out.push(
-        prev[0] * radius - ax,
-        prev[1] * radius - ay,
-        prev[2] * radius - az,
-        curr[0] * radius - ax,
-        curr[1] * radius - ay,
-        curr[2] * radius - az,
+        prev[0] * r - ax,
+        prev[1] * r - ay,
+        prev[2] * r - az,
+        curr[0] * r - ax,
+        curr[1] * r - ay,
+        curr[2] * r - az,
       )
       prev = curr
     }
   }
 
-  pushArc(cLatMin, lonMin, cLatMin, lonMax)
-  pushArc(cLatMin, lonMax, cLatMax, lonMax)
-  pushArc(cLatMax, lonMax, cLatMax, lonMin)
-  pushArc(cLatMax, lonMin, cLatMin, lonMin)
+  pushArc(cLatMin, lonMin, cLatMin, lonMax, lonSteps)
+  pushArc(cLatMin, lonMax, cLatMax, lonMax, latSteps)
+  pushArc(cLatMax, lonMax, cLatMax, lonMin, lonSteps)
+  pushArc(cLatMax, lonMin, cLatMin, lonMin, latSteps)
 }
 
 function buildCurvedRectFillGeometry(
@@ -1024,23 +1044,27 @@ function buildCurvedRectFillGeometry(
   let baseVertex = 0
 
   for (const box of boxes) {
-    const latMin = clamp(box.latMin, -85, 85)
-    const latMax = clamp(box.latMax, -85, 85)
-    const span = Math.max(Math.abs(latMax - latMin), Math.abs(box.lonMax - box.lonMin))
-    const seg = span > 25 ? 10 : span > 8 ? 5 : 1
-    const stride = seg + 1
+    const latMin = clamp(box.latMin, -89.5, 89.5)
+    const latMax = clamp(box.latMax, -89.5, 89.5)
+    const latSpan = Math.abs(latMax - latMin)
+    const lonSpan = Math.abs(box.lonMax - box.lonMin)
+    const span = Math.max(latSpan, lonSpan)
+    const segLat = Math.max(2, Math.min(28, Math.ceil(latSpan / 1.8)))
+    const segLon = Math.max(2, Math.min(28, Math.ceil(lonSpan / 1.8)))
+    const stride = segLon + 1
+    const r = radius + getSurfaceLiftForSpan(span)
 
-    for (let iv = 0; iv <= seg; iv++) {
-      const lat = latMin + ((latMax - latMin) * iv) / seg
-      for (let iu = 0; iu <= seg; iu++) {
-        const lon = box.lonMin + ((box.lonMax - box.lonMin) * iu) / seg
+    for (let iv = 0; iv <= segLat; iv++) {
+      const lat = latMin + ((latMax - latMin) * iv) / segLat
+      for (let iu = 0; iu <= segLon; iu++) {
+        const lon = box.lonMin + ((box.lonMax - box.lonMin) * iu) / segLon
         const [x, y, z] = latLonToUnitVec3(lat, lon)
-        positions.push(x * radius - ax, y * radius - ay, z * radius - az)
+        positions.push(x * r - ax, y * r - ay, z * r - az)
       }
     }
 
-    for (let iv = 0; iv < seg; iv++) {
-      for (let iu = 0; iu < seg; iu++) {
+    for (let iv = 0; iv < segLat; iv++) {
+      for (let iu = 0; iu < segLon; iu++) {
         const i00 = baseVertex + iv * stride + iu
         const i10 = i00 + 1
         const i01 = i00 + stride
@@ -1048,7 +1072,7 @@ function buildCurvedRectFillGeometry(
         indices.push(i00, i10, i11, i00, i11, i01)
       }
     }
-    baseVertex += stride * stride
+    baseVertex += (segLat + 1) * stride
   }
 
   const geometry = new THREE.BufferGeometry()
@@ -2194,7 +2218,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       baseTexture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy())
       baseTexture.needsUpdate = true
 
-      const earthGeo = new THREE.SphereGeometry(EARTH_RADIUS, 72, 48)
+      const earthGeo = new THREE.SphereGeometry(EARTH_RADIUS, 96, 64)
       const earthMaterial = new THREE.ShaderMaterial({
         vertexShader: EARTH_VERTEX_SHADER,
         fragmentShader: EARTH_FRAGMENT_SHADER,
@@ -2511,10 +2535,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           color,
           transparent: true,
           opacity: pal.isLight ? 0.14 : 0.12,
+          side: THREE.FrontSide,
           depthWrite: false,
           polygonOffset: true,
-          polygonOffsetFactor: -2,
-          polygonOffsetUnits: -2,
+          polygonOffsetFactor: -4,
+          polygonOffsetUnits: -4,
         })
         const fillMesh = new THREE.Mesh(fillGeo, fillMat)
         fillMesh.position.set(anchor[0], anchor[1], anchor[2])
@@ -3368,15 +3393,16 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         setWebglError(true)
       }
 
+      const wheelTarget: HTMLElement = hostRef.current ?? canvas
       canvas.addEventListener('pointerdown', onPointerDown)
       canvas.addEventListener('pointermove', onPointerMove)
       canvas.addEventListener('pointerup', finishPointer)
       canvas.addEventListener('pointercancel', finishPointer)
       canvas.addEventListener('pointerleave', onPointerLeave)
       canvas.addEventListener('dblclick', onDoubleClick)
-      canvas.addEventListener('wheel', onWheel, { passive: false })
-      canvas.addEventListener('gesturestart', preventGesture, { passive: false })
-      canvas.addEventListener('gesturechange', preventGesture, { passive: false })
+      wheelTarget.addEventListener('wheel', onWheel, { passive: false })
+      wheelTarget.addEventListener('gesturestart', preventGesture, { passive: false })
+      wheelTarget.addEventListener('gesturechange', preventGesture, { passive: false })
       canvas.addEventListener('webglcontextlost', onContextLost, false)
 
       let lastW = initW
@@ -4034,9 +4060,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         canvas.removeEventListener('pointercancel', finishPointer)
         canvas.removeEventListener('pointerleave', onPointerLeave)
         canvas.removeEventListener('dblclick', onDoubleClick)
-        canvas.removeEventListener('wheel', onWheel)
-        canvas.removeEventListener('gesturestart', preventGesture)
-        canvas.removeEventListener('gesturechange', preventGesture)
+        wheelTarget.removeEventListener('wheel', onWheel)
+        wheelTarget.removeEventListener('gesturestart', preventGesture)
+        wheelTarget.removeEventListener('gesturechange', preventGesture)
         canvas.removeEventListener('webglcontextlost', onContextLost)
 
         starfield.geometry.dispose()
@@ -4261,10 +4287,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         color,
         transparent: true,
         opacity: 0.06,
+        side: THREE.FrontSide,
         depthWrite: false,
         polygonOffset: true,
-        polygonOffsetFactor: -2,
-        polygonOffsetUnits: -2,
+        polygonOffsetFactor: -4,
+        polygonOffsetUnits: -4,
       })
       const fillMesh = new THREE.Mesh(fillGeo, fillMat)
       fillMesh.position.set(anchor[0], anchor[1], anchor[2])
@@ -4324,10 +4351,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           color,
           transparent: true,
           opacity: 0.11,
+          side: THREE.FrontSide,
           depthWrite: false,
           polygonOffset: true,
-          polygonOffsetFactor: -2,
-          polygonOffsetUnits: -2,
+          polygonOffsetFactor: -4,
+          polygonOffsetUnits: -4,
         })
         const fillMesh = new THREE.Mesh(fillGeo, fillMat)
         fillMesh.position.set(anchor[0], anchor[1], anchor[2])
@@ -4377,10 +4405,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           color: col,
           transparent: true,
           opacity: fillOpacity,
+          side: THREE.FrontSide,
           depthWrite: false,
           polygonOffset: true,
-          polygonOffsetFactor: -3,
-          polygonOffsetUnits: -3,
+          polygonOffsetFactor: -4,
+          polygonOffsetUnits: -4,
         })
         const fillMesh = new THREE.Mesh(fillGeo, fillMat)
         fillMesh.position.set(anchor[0], anchor[1], anchor[2])
