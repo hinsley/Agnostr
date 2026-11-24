@@ -18,7 +18,7 @@ import {
 import type { AgnostrEngine } from '../types/protocol'
 import type { ZapTarget } from '../types/wallet'
 import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel'
-import { identiconDataUrl } from '../utils/identicon'
+import { AvatarImg } from './AvatarImg'
 
 function getServerMonogram(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean)
@@ -81,11 +81,14 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   const translatorEnabled = engine.translator.settings.enabled
   const translatorLang = engine.translator.settings.myLanguage
 
+  const { ensureProfilePictures } = engine
+
   useEffect(() => {
     if (!dmPeerPubkey) return
+    ensureProfilePictures([dmPeerPubkey])
     void engine.zaps.lookupPeerLightningAddress(dmPeerPubkey)
     void engine.zaps.lookupPeerNutzapInfo(dmPeerPubkey)
-  }, [dmPeerPubkey, engine.zaps])
+  }, [dmPeerPubkey, ensureProfilePictures, engine.zaps])
 
   const handleToggleTranslator = () => {
     engine.translator.updateSettings({ enabled: !translatorEnabled })
@@ -213,9 +216,12 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
           >
             {isDm && dmThread ? (
               <>
-                <img
-                  src={identiconDataUrl(dmThread.peerPubkey)}
+                <AvatarImg
+                  pubkey={dmThread.peerPubkey}
+                  pictureUrl={engine.getProfilePicture(dmThread.peerPubkey)}
                   alt=""
+                  width={36}
+                  height={36}
                   className="ag-header-avatar-img"
                 />
                 <div className="ag-header-text">

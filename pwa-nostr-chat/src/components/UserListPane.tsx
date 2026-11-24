@@ -18,7 +18,9 @@ import type { ZapTarget } from '../types/wallet.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { isAutoAnonNickname } from '../lib/deviceSync.ts'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
-import { formatHandle, identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
+import { AvatarImg } from './AvatarImg.tsx'
+import { formatHandle, pubkeyToColor } from '../utils/identicon.ts'
+import { formatCompactLastActive } from '../utils/relativeTime.ts'
 
 export interface UserListPaneProps {
   engine: AgnostrEngine
@@ -38,6 +40,7 @@ interface NormalizedUserItem {
   npub: string
   nickname: string
   displayHandle: string
+  lastSeenAt: number
   isSelf: boolean
   isOnline: boolean
   isAgnostrClient: boolean
@@ -94,7 +97,16 @@ export function UserListPane({
   const { openContextMenu } = useContextMenu()
   const [filterQuery, setFilterQuery] = useState('')
 
-  const { activeView, activeGeohash, activeDmThread, identity, servers, peers, peerNotes } = engine
+  const {
+    activeView,
+    activeGeohash,
+    activeDmThread,
+    identity,
+    servers,
+    peers,
+    peerNotes,
+    ensureProfilePictures,
+  } = engine
   const activeServer = servers.activeServer
 
   // Reset filter query cleanly whenever the active view / channel changes
@@ -116,6 +128,13 @@ export function UserListPane({
 
     if (activeView.type === 'server') {
       const visibleMembers = servers.members.filter((m) => !m.isBanned)
+      const serverLastSeenByPubkey = new Map<string, number>()
+      for (const msg of servers.messages) {
+        if (msg.isSystem || msg.isBlockedPlaceholder || !msg.pubkey) continue
+        const mpk = msg.pubkey.toLowerCase()
+        const prev = serverLastSeenByPubkey.get(mpk) ?? 0
+        if (msg.createdAt > prev) serverLastSeenByPubkey.set(mpk, msg.createdAt)
+      }
       const staff: NormalizedUserItem[] = []
       const regulars: NormalizedUserItem[] = []
 
@@ -129,6 +148,9 @@ export function UserListPane({
         const isOnline = m.isSelf ? true : Boolean(known?.isOnline)
         const isBlocked = !m.isSelf && engine.isPeerBlocked(pk)
         const isTrusted = !m.isSelf && engine.isExplicitlyTrusted(pk)
+        const memberLastSeenAt = m.isSelf
+          ? nowSec
+          : Math.max(known?.lastSeenAt ?? 0, serverLastSeenByPubkey.get(pk) ?? 0)
         const primaryRole = m.roles[0]?.trim() || ''
         const isStaff =
           m.isFounder ||
@@ -150,6 +172,7 @@ export function UserListPane({
               ...known,
               nickname: m.nickname || known.nickname,
               displayHandle: m.displayHandle || known.displayHandle,
+              lastSeenAt: memberLastSeenAt,
               isSelf: m.isSelf,
               isBlocked,
               isTrusted,
@@ -161,7 +184,7 @@ export function UserListPane({
               npub: m.npub,
               nickname: m.nickname,
               displayHandle: m.displayHandle,
-              lastSeenAt: nowSec,
+              lastSeenAt: memberLastSeenAt,
               isOnline,
               isSelf: m.isSelf,
               isTeleported: false,
@@ -179,6 +202,7 @@ export function UserListPane({
           npub: m.npub,
           nickname: m.nickname,
           displayHandle: m.displayHandle,
+          lastSeenAt: memberLastSeenAt,
           isSelf: m.isSelf,
           isOnline,
           isAgnostrClient: isAgnostr,
@@ -200,6 +224,7 @@ export function UserListPane({
         if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1
         const prio = comparePeerPriority(a, b)
         if (prio !== 0) return prio
+        if (b.lastSeenAt !== a.lastSeenAt) return b.lastSeenAt - a.lastSeenAt
         return a.nickname.localeCompare(b.nickname, undefined, { sensitivity: 'base' })
       }
 
@@ -222,12 +247,17 @@ export function UserListPane({
         const isBlocked = engine.isPeerBlocked(peerPk)
         const isTrusted = engine.isExplicitlyTrusted(peerPk)
         const isOnline = Boolean(knownPeer?.isOnline)
+        const peerLastSeenAt = Math.max(
+          knownPeer?.lastSeenAt ?? 0,
+          activeDmThread.lastMessageAt ?? 0,
+        )
 
         const peerInfo: PeerInfo = knownPeer
           ? {
               ...knownPeer,
               nickname: activeDmThread.peerNickname || knownPeer.nickname,
               displayHandle: activeDmThread.peerDisplayHandle || knownPeer.displayHandle,
+              lastSeenAt: peerLastSeenAt,
               isBlocked,
               isTrusted,
               isAgnostrClient: isAgnostr,
@@ -238,7 +268,7 @@ export function UserListPane({
               npub: activeDmThread.peerNpub,
               nickname: activeDmThread.peerNickname,
               displayHandle: activeDmThread.peerDisplayHandle,
-              lastSeenAt: activeDmThread.lastMessageAt || nowSec,
+              lastSeenAt: peerLastSeenAt,
               isOnline,
               isSelf: false,
               isTeleported: false,
@@ -256,6 +286,7 @@ export function UserListPane({
           npub: activeDmThread.peerNpub,
           nickname: activeDmThread.peerNickname,
           displayHandle: activeDmThread.peerDisplayHandle,
+          lastSeenAt: peerLastSeenAt,
           isSelf: false,
           isOnline,
           isAgnostrClient: isAgnostr,
@@ -302,6 +333,7 @@ export function UserListPane({
         npub: identity.masterNpub,
         nickname: identity.nickname,
         displayHandle: selfHandle.full,
+        lastSeenAt: nowSec,
         isSelf: true,
         isOnline: true,
         isAgnostrClient: selfIsAgnostr,
@@ -332,6 +364,7 @@ export function UserListPane({
         npub: p.npub,
         nickname: p.nickname,
         displayHandle: p.displayHandle,
+        lastSeenAt: p.lastSeenAt,
         isSelf: p.isSelf,
         isOnline: p.isOnline,
         isAgnostrClient: isAgnostr,
@@ -367,7 +400,22 @@ export function UserListPane({
     if (online.length > 0) out.push({ id: 'online', label: 'Online', items: online })
     if (offline.length > 0) out.push({ id: 'offline', label: 'Offline', items: offline })
     return out
-  }, [activeView.type, servers.members, activeDmThread, identity, peers, engine])
+  }, [activeView.type, servers.members, servers.messages, activeDmThread, identity, peers, engine])
+
+  const visiblePubkeys = useMemo(() => {
+    const pks: string[] = []
+    for (const group of rawGroups) {
+      for (const item of group.items) {
+        pks.push(item.pubkey)
+      }
+    }
+    return pks
+  }, [rawGroups])
+
+  useEffect(() => {
+    if (collapsed || visiblePubkeys.length === 0) return
+    ensureProfilePictures(visiblePubkeys)
+  }, [collapsed, visiblePubkeys, ensureProfilePictures])
 
   const totalCount = useMemo(
     () => rawGroups.reduce((sum, g) => sum + g.items.length, 0),
@@ -603,7 +651,11 @@ export function UserListPane({
                       ? 'Muted'
                       : item.isOnline
                         ? 'Online'
-                        : 'Recently active'
+                        : formatCompactLastActive(item.lastSeenAt)
+                  const sublineTitle =
+                    !savedNote && !item.isBlocked && !item.isOnline && item.lastSeenAt > 0
+                      ? `Last active ${new Date(item.lastSeenAt * 1000).toLocaleString()}`
+                      : undefined
 
                   return (
                     <div
@@ -627,8 +679,9 @@ export function UserListPane({
                       onContextMenu={(e) => handleRowContextMenu(e, item)}
                     >
                       <div className="ag-users-avatar-wrap">
-                        <img
-                          src={identiconDataUrl(item.pubkey)}
+                        <AvatarImg
+                          pubkey={item.pubkey}
+                          pictureUrl={engine.getProfilePicture(item.pubkey)}
                           alt=""
                           width={32}
                           height={32}
@@ -663,6 +716,7 @@ export function UserListPane({
                           className={`ag-users-sub truncate ${
                             savedNote ? 'note' : item.isBlocked ? 'muted-peer' : ''
                           }`}
+                          title={sublineTitle}
                         >
                           {subline}
                         </span>

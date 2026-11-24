@@ -1,9 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ArrowDown,
   ArrowUp,
   Ban,
+  Camera,
+  Check,
   ChevronDown,
   ChevronRight,
   Compass,
@@ -13,6 +16,7 @@ import {
   Globe,
   GripVertical,
   Hash,
+  Landmark,
   Link2,
   Loader2,
   Lock,
@@ -20,6 +24,7 @@ import {
   Mail,
   Map as MapIcon,
   MessageCircle,
+  Pencil,
   Phone,
   PhoneOff,
   Pin,
@@ -33,6 +38,7 @@ import {
   ShieldOff,
   Star,
   StickyNote,
+  Trash2,
   User,
   UserPlus,
   Users,
@@ -61,7 +67,8 @@ import {
   parseQuickTuneInput,
 } from '../lib/bitchatChannel'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
-import { formatHandle, identiconDataUrl, pubkeyToColor } from '../utils/identicon'
+import { formatHandle, pubkeyToColor } from '../utils/identicon'
+import { AvatarImg } from './AvatarImg'
 
 export type ListTab = 'bitchat' | 'dms' | 'servers'
 
@@ -116,6 +123,7 @@ export interface ConversationListProps {
   onOpenCommandPalette: () => void
   onExpandRadar: () => void
   onOpenSettings: (tab?: SettingsTab) => void
+  onOpenOwnAgoraProfile?: () => void
   amailOpen?: boolean
   onOpenAmail?: (section?: 'inbox' | 'compose' | 'contacts' | 'mesh') => void
   onOpenAmailCompose?: (pubkey: string, nickname?: string) => void
@@ -149,6 +157,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onOpenCommandPalette,
   onExpandRadar,
   onOpenSettings,
+  onOpenOwnAgoraProfile,
   onOpenAmailCompose,
   onOpenZap,
   onLocateMe,
@@ -204,6 +213,225 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const suppressNextServerClickRef = useRef(false)
   const suppressServerResetTimerRef = useRef<number | null>(null)
 
+  // Quick Profile Card Popover state (toggled from bottom user dock)
+  const [quickProfileOpen, setQuickProfileOpen] = useState(false)
+  const [qpEditingName, setQpEditingName] = useState(false)
+  const [qpNameDraft, setQpNameDraft] = useState('')
+  const [qpUploadingPhoto, setQpUploadingPhoto] = useState(false)
+  const [qpPhotoError, setQpPhotoError] = useState<string | null>(null)
+  const [qpCopiedNpub, setQpCopiedNpub] = useState(false)
+  const [qpPos, setQpPos] = useState<{ left: number; bottom: number; width: number } | null>(null)
+  const footerRef = useRef<HTMLDivElement | null>(null)
+  const profileTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const quickProfileRef = useRef<HTMLDivElement | null>(null)
+  const qpNameInputRef = useRef<HTMLInputElement | null>(null)
+  const qpFileInputRef = useRef<HTMLInputElement | null>(null)
+  const qpCopyTimerRef = useRef<number | null>(null)
+
+  const isQuickProfileVisible = quickProfileOpen && !collapsed
+
+  const computeQuickProfilePos = useCallback(() => {
+    if (typeof window === 'undefined') return null
+    const rect = footerRef.current?.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const width = Math.min(284, Math.max(220, vw - 16))
+    if (!rect) {
+      return { left: 8, bottom: 68, width }
+    }
+    const left = Math.max(8, Math.min(Math.round(rect.left + 8), vw - width - 8))
+    const bottom = Math.max(12, Math.min(Math.round(vh - rect.top + 8), vh - 120))
+    return { left, bottom, width }
+  }, [])
+
+  const closeQuickProfile = useCallback(() => {
+    setQuickProfileOpen(false)
+    setQpEditingName(false)
+    setQpPhotoError(null)
+  }, [])
+
+  const handleToggleQuickProfile = useCallback(() => {
+    onPlaySound?.('click')
+    setQuickProfileOpen((prev) => {
+      if (prev) {
+        setQpEditingName(false)
+        setQpPhotoError(null)
+        return false
+      }
+      setQpPos(computeQuickProfilePos())
+      setQpPhotoError(null)
+      setQpEditingName(false)
+      return true
+    })
+  }, [computeQuickProfilePos, onPlaySound])
+
+  // Prefetch verified kind: 0 profile pictures for self + visible DM threads, friends, and peers
+  const visibleProfilePubkeys = useMemo(() => {
+    const set = new Set<string>()
+    const addPk = (raw?: string | null) => {
+      if (!raw) return
+      const pk = raw.trim().toLowerCase()
+      if (/^[0-9a-f]{64}$/.test(pk)) set.add(pk)
+    }
+    addPk(engine.identity.masterPubkey)
+    for (const thread of engine.dmThreads) addPk(thread.peerPubkey)
+    for (const entry of engine.trustedPubkeys) addPk(entry.pubkey)
+    for (const peer of engine.peers) addPk(peer.pubkey)
+    if (engine.calls.activeCall) {
+      for (const participant of engine.calls.activeCall.participants) addPk(participant.pubkey)
+    }
+    for (const roster of Object.values(engine.calls.serverCallRosters)) {
+      for (const participant of roster) addPk(participant.pubkey)
+    }
+    return Array.from(set).sort()
+  }, [
+    engine.identity.masterPubkey,
+    engine.dmThreads,
+    engine.trustedPubkeys,
+    engine.peers,
+    engine.calls.activeCall,
+    engine.calls.serverCallRosters,
+  ])
+
+  const visibleProfilePubkeysKey = visibleProfilePubkeys.join(',')
+  const ensureProfilePictures = engine.ensureProfilePictures
+  useEffect(() => {
+    if (!visibleProfilePubkeysKey) return
+    ensureProfilePictures(visibleProfilePubkeysKey.split(','))
+  }, [visibleProfilePubkeysKey, ensureProfilePictures])
+
+  // Quick Profile Popover outside-click, Escape, and viewport reposition listeners
+  useEffect(() => {
+    if (!isQuickProfileVisible) return
+    const handlePointerDown = (ev: PointerEvent) => {
+      const target = ev.target as Node | null
+      if (!target) return
+      if (quickProfileRef.current?.contains(target)) return
+      if (profileTriggerRef.current?.contains(target)) return
+      closeQuickProfile()
+    }
+    const handleKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key !== 'Escape') return
+      ev.preventDefault()
+      ev.stopPropagation()
+      if (qpEditingName) {
+        setQpEditingName(false)
+        return
+      }
+      closeQuickProfile()
+    }
+    const handleViewportMove = () => {
+      setQpPos(computeQuickProfilePos())
+    }
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    window.addEventListener('keydown', handleKeyDown, true)
+    window.addEventListener('resize', handleViewportMove)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true)
+      window.removeEventListener('keydown', handleKeyDown, true)
+      window.removeEventListener('resize', handleViewportMove)
+    }
+  }, [isQuickProfileVisible, qpEditingName, closeQuickProfile, computeQuickProfilePos])
+
+  useEffect(() => {
+    if (!qpEditingName) return
+    const raf = window.requestAnimationFrame(() => {
+      const input = qpNameInputRef.current
+      if (input) {
+        input.focus()
+        input.select()
+      }
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [qpEditingName])
+
+  const handleQuickPhotoChange = useCallback(
+    async (ev: React.ChangeEvent<HTMLInputElement>) => {
+      const file = ev.target.files?.[0]
+      ev.target.value = ''
+      if (!file) return
+      if (!file.type.startsWith('image/')) {
+        setQpPhotoError('Please choose an image file.')
+        return
+      }
+      setQpUploadingPhoto(true)
+      setQpPhotoError(null)
+      try {
+        const res = await engine.updateMyProfilePicture(file)
+        if (!res.ok) {
+          setQpPhotoError(res.error || 'Could not update profile photo.')
+        } else {
+          onPlaySound?.('click')
+        }
+      } catch (err) {
+        setQpPhotoError(err instanceof Error ? err.message : 'Could not update profile photo.')
+      } finally {
+        setQpUploadingPhoto(false)
+      }
+    },
+    [engine, onPlaySound]
+  )
+
+  const handleQuickPhotoRemove = useCallback(async () => {
+    setQpUploadingPhoto(true)
+    setQpPhotoError(null)
+    try {
+      const res = await engine.updateMyProfilePicture(null)
+      if (!res.ok) {
+        setQpPhotoError(res.error || 'Could not remove profile photo.')
+      } else {
+        onPlaySound?.('click')
+      }
+    } catch (err) {
+      setQpPhotoError(err instanceof Error ? err.message : 'Could not remove profile photo.')
+    } finally {
+      setQpUploadingPhoto(false)
+    }
+  }, [engine, onPlaySound])
+
+  const handleStartQuickNameEdit = useCallback(() => {
+    setQpNameDraft(engine.identity.nickname)
+    setQpEditingName(true)
+  }, [engine.identity.nickname])
+
+  const handleSaveQuickName = useCallback(
+    (ev?: FormEvent) => {
+      ev?.preventDefault()
+      const trimmed = qpNameDraft.trim().slice(0, 32)
+      if (!trimmed) {
+        setQpEditingName(false)
+        return
+      }
+      if (trimmed !== engine.identity.nickname) {
+        engine.setNickname(trimmed)
+        onPlaySound?.('click')
+      }
+      setQpEditingName(false)
+    },
+    [qpNameDraft, engine, onPlaySound]
+  )
+
+  const handleCopyQuickNpub = useCallback(() => {
+    const npub = engine.identity.masterNpub
+    if (!npub) return
+    navigator.clipboard
+      ?.writeText(npub)
+      .then(() => {
+        onPlaySound?.('click')
+        setQpCopiedNpub(true)
+        if (qpCopyTimerRef.current !== null) {
+          window.clearTimeout(qpCopyTimerRef.current)
+        }
+        qpCopyTimerRef.current = window.setTimeout(() => {
+          setQpCopiedNpub(false)
+          qpCopyTimerRef.current = null
+        }, 1800)
+      })
+      .catch(() => {
+        engine.pushToast('error', 'Could not copy npub')
+      })
+  }, [engine, onPlaySound])
+
   useEffect(() => {
     return () => {
       if (
@@ -214,6 +442,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       }
       if (suppressServerResetTimerRef.current !== null) {
         window.clearTimeout(suppressServerResetTimerRef.current)
+      }
+      if (qpCopyTimerRef.current !== null) {
+        window.clearTimeout(qpCopyTimerRef.current)
       }
     }
   }, [])
@@ -1375,9 +1606,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   <div className="ag-srv-discord-voice-users" role="list" aria-label="In voice">
                     {voiceParticipants.map((p) => (
                       <div key={p.pubkey} className="ag-srv-discord-voice-user" role="listitem">
-                        <img
-                          src={identiconDataUrl(p.pubkey)}
-                          alt=""
+                        <AvatarImg
+                          pubkey={p.pubkey}
+                          pictureUrl={engine.getProfilePicture(p.pubkey)}
                           width={22}
                           height={22}
                           className="ag-srv-discord-voice-avatar"
@@ -2437,9 +2668,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                             onClick={() => onOpenDm(thread.peerPubkey, thread.peerNickname)}
                           >
                             <div className="ag-chat-row-avatar-img-wrap">
-                              <img
-                                src={identiconDataUrl(thread.peerPubkey)}
-                                alt=""
+                              <AvatarImg
+                                pubkey={thread.peerPubkey}
+                                pictureUrl={engine.getProfilePicture(thread.peerPubkey)}
+                                width={36}
+                                height={36}
                                 className="ag-chat-row-avatar-img"
                               />
                               {trusted && (
@@ -2578,9 +2811,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                             onClick={() => onOpenDm(entry.pubkey, nickname)}
                           >
                             <div className="ag-chat-row-avatar-img-wrap">
-                              <img
-                                src={identiconDataUrl(entry.pubkey)}
-                                alt=""
+                              <AvatarImg
+                                pubkey={entry.pubkey}
+                                pictureUrl={engine.getProfilePicture(entry.pubkey)}
+                                width={36}
+                                height={36}
                                 className="ag-chat-row-avatar-img"
                               />
                               <span className="ag-avatar-trust-badge" title="Trusted friend">
@@ -2642,18 +2877,23 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
       )}
 
-      {/* Bottom User Dock (Compact Discord-style Profile + Quiet Status + Settings) */}
-      <div className="ag-conv-footer">
+      {/* Bottom User Dock (Compact Discord-style Profile + Quiet Status; mobile-only Settings) */}
+      <div ref={footerRef} className="ag-conv-footer">
         <button
+          ref={profileTriggerRef}
           type="button"
-          className="ag-profile-bar-btn"
-          onClick={() => onOpenSettings('profile')}
-          title="Profile"
+          className={`ag-profile-bar-btn ${isQuickProfileVisible ? 'active' : ''}`}
+          onClick={handleToggleQuickProfile}
+          title="Quick profile"
+          aria-haspopup="dialog"
+          aria-expanded={isQuickProfileVisible}
         >
           <span className="ag-profile-avatar-wrap">
-            <img
-              src={identiconDataUrl(engine.identity.activePubkey)}
-              alt=""
+            <AvatarImg
+              pubkey={engine.identity.masterPubkey}
+              pictureUrl={engine.getProfilePicture(engine.identity.masterPubkey)}
+              width={30}
+              height={30}
               className="ag-profile-avatar"
             />
             <span
@@ -2669,7 +2909,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           </div>
         </button>
 
-        <div className="ag-conv-footer-actions">
+        <div className="ag-conv-footer-actions ag-mobile-only">
           {pwa && !pwa.isInstalled && pwa.canPromptInstall && onOpenInstall && (
             <button
               type="button"
@@ -2684,7 +2924,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
           <button
             type="button"
-            className="ag-circle-btn ag-dock-icon-btn"
+            className="ag-circle-btn ag-dock-icon-btn ag-mobile-only"
             onClick={() => {
               onPlaySound?.('click')
               onOpenSettings()
@@ -2696,6 +2936,224 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Sleek Discord-Inspired Quick Profile Card Popover */}
+      {isQuickProfileVisible &&
+        typeof document !== 'undefined' &&
+        (() => {
+          const masterPk = engine.identity.masterPubkey
+          const masterNpub = engine.identity.masterNpub
+          const myPictureUrl = engine.getProfilePicture(masterPk)
+          const truncatedNpub =
+            masterNpub.length > 22
+              ? `${masterNpub.slice(0, 12)}…${masterNpub.slice(-8)}`
+              : masterNpub
+          const relayCount = engine.connectedRelayCount
+          const posStyle: CSSProperties = qpPos
+            ? {
+                left: `${qpPos.left}px`,
+                bottom: `${qpPos.bottom}px`,
+                width: `${qpPos.width}px`,
+              }
+            : { left: '8px', bottom: '68px', width: '284px' }
+
+          return createPortal(
+            <div
+              ref={quickProfileRef}
+              className="ag-quick-profile-popover"
+              role="dialog"
+              aria-label="Quick profile"
+              style={posStyle}
+            >
+              <input
+                ref={qpFileInputRef}
+                type="file"
+                accept="image/*"
+                className="ag-qp-file-input"
+                tabIndex={-1}
+                aria-hidden="true"
+                onChange={(ev) => void handleQuickPhotoChange(ev)}
+              />
+
+              <div className="ag-qp-header">
+                <button
+                  type="button"
+                  className="ag-qp-avatar-btn"
+                  disabled={qpUploadingPhoto}
+                  onClick={() => qpFileInputRef.current?.click()}
+                  title="Change profile photo"
+                  aria-label="Change profile photo"
+                >
+                  <AvatarImg
+                    pubkey={masterPk}
+                    pictureUrl={myPictureUrl}
+                    width={52}
+                    height={52}
+                    className="ag-qp-avatar"
+                  />
+                  <span className="ag-qp-avatar-overlay" aria-hidden="true">
+                    {qpUploadingPhoto ? (
+                      <Loader2 size={15} className="ag-spin" />
+                    ) : (
+                      <Camera size={15} />
+                    )}
+                  </span>
+                  <span
+                    className={`ag-qp-status-ring ${relayCount > 0 ? 'online' : 'reconnecting'}`}
+                    aria-hidden="true"
+                  />
+                </button>
+
+                <div className="ag-qp-photo-actions">
+                  <button
+                    type="button"
+                    className="ag-qp-photo-btn"
+                    disabled={qpUploadingPhoto}
+                    onClick={() => qpFileInputRef.current?.click()}
+                  >
+                    {qpUploadingPhoto ? (
+                      <>
+                        <Loader2 size={12} className="ag-spin" aria-hidden="true" />
+                        <span>Uploading…</span>
+                      </>
+                    ) : (
+                      <>
+                        <Camera size={12} aria-hidden="true" />
+                        <span>Change Photo</span>
+                      </>
+                    )}
+                  </button>
+                  {myPictureUrl && (
+                    <button
+                      type="button"
+                      className="ag-qp-photo-remove"
+                      disabled={qpUploadingPhoto}
+                      onClick={() => void handleQuickPhotoRemove()}
+                      title="Remove profile photo"
+                      aria-label="Remove profile photo"
+                    >
+                      <Trash2 size={12} aria-hidden="true" />
+                      <span>Remove</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {qpPhotoError && (
+                <div className="ag-qp-error" role="alert">
+                  {qpPhotoError}
+                </div>
+              )}
+
+              {/* Inline Display Name Editor */}
+              <div className="ag-qp-name-block">
+                {qpEditingName ? (
+                  <form className="ag-qp-name-form" onSubmit={handleSaveQuickName}>
+                    <input
+                      ref={qpNameInputRef}
+                      type="text"
+                      className="ag-qp-name-input"
+                      value={qpNameDraft}
+                      maxLength={32}
+                      placeholder="Display name"
+                      aria-label="Display name"
+                      onChange={(ev) => setQpNameDraft(ev.target.value)}
+                    />
+                    <button
+                      type="submit"
+                      className="ag-qp-icon-btn primary"
+                      title="Save display name"
+                      aria-label="Save display name"
+                    >
+                      <Check size={14} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-qp-icon-btn"
+                      onClick={() => setQpEditingName(false)}
+                      title="Cancel"
+                      aria-label="Cancel editing display name"
+                    >
+                      <X size={14} aria-hidden="true" />
+                    </button>
+                  </form>
+                ) : (
+                  <div className="ag-qp-name-row">
+                    <span className="ag-qp-display-name truncate">
+                      {engine.identity.nickname}
+                    </span>
+                    <button
+                      type="button"
+                      className="ag-qp-icon-btn"
+                      onClick={handleStartQuickNameEdit}
+                      title="Edit display name"
+                      aria-label="Edit display name"
+                    >
+                      <Pencil size={13} aria-hidden="true" />
+                    </button>
+                  </div>
+                )}
+
+                <div className="ag-qp-status-line">
+                  <span
+                    className={`ag-qp-status-dot ${relayCount > 0 ? 'online' : 'reconnecting'}`}
+                    aria-hidden="true"
+                  />
+                  <span className="truncate">
+                    {relayCount > 0
+                      ? `Online · ${relayCount} ${relayCount === 1 ? 'relay' : 'relays'}`
+                      : 'Reconnecting…'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Identity npub + 1-click Copy */}
+              <div className="ag-qp-npub-row">
+                <code className="ag-qp-npub-code truncate" title={masterNpub}>
+                  {truncatedNpub}
+                </code>
+                <button
+                  type="button"
+                  className={`ag-qp-copy-btn ${qpCopiedNpub ? 'copied' : ''}`}
+                  onClick={handleCopyQuickNpub}
+                  title="Copy npub"
+                  aria-label="Copy npub"
+                >
+                  {qpCopiedNpub ? (
+                    <>
+                      <Check size={12} aria-hidden="true" />
+                      <span>Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={12} aria-hidden="true" />
+                      <span>Copy npub</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* View Agora Profile Shortcut (strictly NO Settings button inside popover) */}
+              {onOpenOwnAgoraProfile && (
+                <div className="ag-qp-footer">
+                  <button
+                    type="button"
+                    className="ag-qp-agora-btn"
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      closeQuickProfile()
+                      onOpenOwnAgoraProfile()
+                    }}
+                  >
+                    <Landmark size={14} aria-hidden="true" />
+                    <span>View Agora Profile</span>
+                  </button>
+                </div>
+              )}
+            </div>,
+            document.body
+          )
+        })()}
     </aside>
   )
 }

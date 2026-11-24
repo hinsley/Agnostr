@@ -86,9 +86,9 @@ import {
   loadServerChannelMessages,
   saveJoinedServers,
   saveServerChannelMessages,
+  scrubBlockedPubkeyFromServerStorage,
 } from '../lib/storage.ts'
 import {
-  buildEventDeleteTemplate,
   buildVirtualChatTemplate,
   buildVirtualManifestTemplate,
   buildVirtualReactionTemplate,
@@ -98,7 +98,6 @@ import {
   generateServerId,
   generateServerKeyB64,
   getVirtualChannelTag,
-  KIND_EVENT_DELETE,
   KIND_VIRTUAL_CHAT,
   KIND_VIRTUAL_MANIFEST,
   manifestDTag,
@@ -339,8 +338,66 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     ownPubkeysRef.current = ownPubkeys
   }, [ownPubkeys])
 
+  const prevBlockedSetRef = useRef<Set<string>>(blockedSet)
   useLayoutEffect(() => {
     blockedSetRef.current = blockedSet
+  }, [blockedSet])
+
+  useEffect(() => {
+    const prev = prevBlockedSetRef.current
+    prevBlockedSetRef.current = blockedSet
+
+    // Scrub newly-blocked pubkeys out of all persisted server buckets immediately
+    for (const pk of blockedSet) {
+      if (!prev.has(pk)) {
+        scrubBlockedPubkeyFromServerStorage(pk)
+      }
+    }
+
+    // In-memory active server channel: strip newly-blocked messages into zero-content placeholders,
+    // and remove placeholders for unblocked pubkeys.
+    setServerMessagesState((state) => {
+      let changed = false
+      const nextItems: ServerMessage[] = []
+      for (const m of state.items) {
+        if (m.isSystem) {
+          nextItems.push(m)
+          continue
+        }
+        const pk = m.pubkey.toLowerCase()
+        if (m.isBlockedPlaceholder) {
+          if (blockedSet.has(pk)) {
+            nextItems.push(m)
+          } else {
+            changed = true
+          }
+          continue
+        }
+        if (blockedSet.has(pk)) {
+          changed = true
+          nextItems.push({
+            id: m.id,
+            serverId: m.serverId,
+            channelId: m.channelId,
+            pubkey: pk,
+            nickname: m.nickname,
+            displayHandle: m.displayHandle,
+            content: '',
+            createdAt: m.createdAt,
+            tags: [],
+            isOwn: false,
+            isBlockedPlaceholder: true,
+            encrypted: m.encrypted,
+            powBits: 0,
+            reactions: [],
+            mentions: [],
+          })
+          continue
+        }
+        nextItems.push(m)
+      }
+      return changed ? { ...state, items: nextItems } : state
+    })
   }, [blockedSet])
 
   useLayoutEffect(() => {
@@ -746,12 +803,13 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     )
     setServerMessagesState((prev) => {
       if (prev.key === targetKey && prev.items.length > 0) {
-        const filtered = prev.items.filter(
-          (m) =>
-            m.isSystem ||
-            (!blockedSetRef.current.has(m.pubkey.toLowerCase()) &&
-              !bannedSet.has(m.pubkey.toLowerCase()))
-        )
+        const filtered = prev.items.filter((m) => {
+          if (m.isSystem) return true
+          const pk = m.pubkey.toLowerCase()
+          if (bannedSet.has(pk)) return false
+          if (m.isBlockedPlaceholder) return blockedSetRef.current.has(pk)
+          return !blockedSetRef.current.has(pk)
+        })
         return filtered.length === prev.items.length ? prev : { key: targetKey, items: filtered }
       }
       return { key: targetKey, items: cached }
@@ -780,7 +838,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     const filters = isVirtual
       ? [
           {
-            kinds: [KIND_VIRTUAL_CHAT, KIND_EPHEMERAL_REACTION, KIND_EVENT_DELETE],
+            kinds: [KIND_VIRTUAL_CHAT, KIND_EPHEMERAL_REACTION],
             '#t': [chanTag],
             since,
             limit: 250,
@@ -836,8 +894,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
         const pk = ev.pubkey.toLowerCase()
 
-        // Deletion event (NIP-09 kind 5 or NIP-29 kind 9005) — verify channel tag ownership
-        if (ev.kind === KIND_EVENT_DELETE || ev.kind === KIND_NIP29_DELETE_EVENT) {
+        // Relay-enforced NIP-29 deletion event (kind 9005 ONLY) — verify group tag ownership
+        if (!isVirtual && ev.kind === KIND_NIP29_DELETE_EVENT) {
           if (!matchesChannelTag(ev.tags)) return
           const targetId = getTagValue(ev.tags, 'e')
           if (!targetId) return
@@ -854,7 +912,46 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           return
         }
 
-        if (blockedSetRef.current.has(pk) || bannedSet.has(pk)) return
+        if (bannedSet.has(pk)) return
+
+        // Blocked sender: discard content (never decrypt!), never store, never notify —
+        // append minimal in-memory-only placeholder for chat messages only.
+        if (blockedSetRef.current.has(pk)) {
+          if (ev.kind === KIND_VIRTUAL_CHAT && !ownPubkeysRef.current.has(pk)) {
+            if (!matchesChannelTag(ev.tags)) return
+            const rawNick = getTagValue(ev.tags, 'n') || presenceTracker.getNickname(pk) || ''
+            const cleanNick = rawNick.trim().slice(0, 32) || `anon${pk.slice(-4)}`
+            const placeholder: ServerMessage = {
+              id: ev.id,
+              serverId: serverSnapshot.id,
+              channelId: chanId,
+              pubkey: pk,
+              nickname: cleanNick,
+              displayHandle: formatDisplayHandle(cleanNick, pk),
+              content: '',
+              createdAt: ev.created_at,
+              tags: [],
+              isOwn: false,
+              isBlockedPlaceholder: true,
+              encrypted: Boolean(serverSnapshot.encrypted),
+              powBits: 0,
+              reactions: [],
+              mentions: [],
+            }
+            updateServerChannelMessages(
+              serverSnapshot.id,
+              chanId,
+              (prev) => {
+                if (prev.some((m) => m.id === placeholder.id)) return null
+                return sortChannelMessagesWithPending([...prev, placeholder], 'pending-srv-').slice(
+                  -350
+                )
+              },
+              { persist: false }
+            )
+          }
+          return
+        }
 
         // Ephemeral reaction (kind 20007) — verify channel tag ownership
         if (ev.kind === KIND_EPHEMERAL_REACTION) {
@@ -1268,22 +1365,27 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   // Apply ban list + blocked list + Trusted Peers Only mode to visible server messages
   const { visibleMessages, hiddenByTrustCount } = useMemo(() => {
     const bannedSet = new Set((activeServer?.bannedPubkeys ?? []).map((p) => p.toLowerCase()))
-    const clean = rawMessages.filter(
-      (m) => m.isSystem || (!blockedSet.has(m.pubkey.toLowerCase()) && !bannedSet.has(m.pubkey.toLowerCase()))
-    )
+    const clean = rawMessages.filter((m) => {
+      if (m.isSystem) return true
+      const pk = m.pubkey.toLowerCase()
+      if (bannedSet.has(pk)) return false
+      if (m.isBlockedPlaceholder) return blockedSet.has(pk)
+      return !blockedSet.has(pk)
+    })
     if (!settings.strictWhitelistMode) {
       return { visibleMessages: clean, hiddenByTrustCount: 0 }
     }
-    const filtered = clean.filter(
-      (m) =>
-        m.isSystem ||
-        m.isOwn ||
-        ownPubkeys.has(m.pubkey.toLowerCase()) ||
-        trustedSet.has(m.pubkey.toLowerCase())
-    )
+    let hidden = 0
+    const filtered = clean.filter((m) => {
+      if (m.isSystem || m.isBlockedPlaceholder || m.isOwn) return true
+      const pk = m.pubkey.toLowerCase()
+      if (ownPubkeys.has(pk) || trustedSet.has(pk)) return true
+      hidden += 1
+      return false
+    })
     return {
       visibleMessages: filtered,
-      hiddenByTrustCount: Math.max(0, clean.length - filtered.length),
+      hiddenByTrustCount: hidden,
     }
   }, [rawMessages, activeServer?.bannedPubkeys, blockedSet, settings.strictWhitelistMode, ownPubkeys, trustedSet])
 
@@ -1338,7 +1440,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       upsert(mPk, { roles: ['member'] })
     }
     for (const m of rawMessages) {
-      if (!m.isSystem) {
+      if (!m.isSystem && !m.isBlockedPlaceholder) {
         upsert(m.pubkey, { nickname: m.nickname, roles: ['member'] })
       }
     }
@@ -2672,6 +2774,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     [activeServer, activeChannel, pool, identityManager, updateServerChannelMessages, pushToast]
   )
 
+  const canDeleteMessages = Boolean(
+    activeServer && activeServer.kind === 'nip29' && canModerate && activeServer.relayUrl
+  )
+
   const deleteMessage = useCallback(
     async (message: ServerMessage): Promise<boolean> => {
       if (!pool) return false
@@ -2679,27 +2785,18 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         joinedServersRef.current.find((s) => s.id === message.serverId) ?? activeServer
       const chanId = message.channelId || activeChannel?.id
       if (!server || !chanId) return false
-
-      const isVirtual = server.kind === 'virtual'
-      const targetRelays = isVirtual
-        ? server.relays.length > 0
-          ? server.relays
-          : [...CORE_DM_RELAYS]
-        : server.relayUrl
-          ? [server.relayUrl]
-          : []
-      if (targetRelays.length === 0) return false
+      if (server.kind !== 'nip29' || !canModerate || !server.relayUrl) {
+        return false
+      }
 
       try {
-        const tmpl =
-          !isVirtual && canModerate
-            ? buildNip29DeleteEventTemplate(server.groupId || chanId, message.id)
-            : buildEventDeleteTemplate(message.id)
-        if (isVirtual) {
-          tmpl.tags.push(['t', getVirtualChannelTag(server, chanId)])
-        }
+        const tmpl = buildNip29DeleteEventTemplate(server.groupId || chanId, message.id)
         const signed = await identityManager.signEvent(tmpl)
-        const res = await pool.publish(targetRelays, signed, 4000)
+        const res = await pool.publish([server.relayUrl], signed, 4000)
+        if (res.acceptedRelays.length === 0) {
+          pushToast('error', 'Relay did not delete message')
+          return false
+        }
         updateServerChannelMessages(
           server.id,
           chanId,
@@ -2709,12 +2806,21 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           },
           { allowBackgroundPersist: true }
         )
-        return res.acceptedRelays.length > 0
+        return true
       } catch {
+        pushToast('error', 'Relay did not delete message')
         return false
       }
     },
-    [activeServer, activeChannel, pool, canModerate, identityManager, updateServerChannelMessages]
+    [
+      activeServer,
+      activeChannel,
+      pool,
+      canModerate,
+      identityManager,
+      updateServerChannelMessages,
+      pushToast,
+    ]
   )
 
   const clearChannelCache = useCallback(() => {
@@ -3179,6 +3285,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       members,
       myRole,
       canModerate,
+      canDeleteMessages,
       sending,
       creating,
       replyingTo,
@@ -3229,6 +3336,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       members,
       myRole,
       canModerate,
+      canDeleteMessages,
       sending,
       creating,
       replyingTo,

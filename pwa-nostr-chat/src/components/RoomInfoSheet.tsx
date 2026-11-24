@@ -43,7 +43,9 @@ import {
   isTopicChannel,
 } from '../lib/bitchatChannel.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
-import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import { AvatarImg } from './AvatarImg.tsx'
+import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import { formatCompactLastActive } from '../utils/relativeTime.ts'
 
 export interface RoomInfoSheetProps {
   open: boolean
@@ -247,6 +249,30 @@ export function RoomInfoSheet({
   const isVisible =
     open || (swipeProgress !== undefined && swipeProgress > 0) || Boolean(isSwiping)
 
+  const sheetPeerPubkeys = useMemo(() => {
+    if (!isVisible) return [] as string[]
+    if (engine.activeView.type === 'dm') {
+      return engine.activeDmThread?.peerPubkey ? [engine.activeDmThread.peerPubkey] : []
+    }
+    if (engine.activeView.type === 'server') {
+      return sortedServerMembers.map((m) => m.pubkey)
+    }
+    return sortedGeoPeers.map((p) => p.pubkey)
+  }, [
+    isVisible,
+    engine.activeView.type,
+    engine.activeDmThread?.peerPubkey,
+    sortedServerMembers,
+    sortedGeoPeers,
+  ])
+
+  const ensureProfilePictures = engine.ensureProfilePictures
+
+  useEffect(() => {
+    if (!isVisible || sheetPeerPubkeys.length === 0) return
+    ensureProfilePictures(sheetPeerPubkeys)
+  }, [isVisible, sheetPeerPubkeys, ensureProfilePictures])
+
   if (!isVisible) return null
 
   const effectiveProgress = Math.max(
@@ -316,13 +342,21 @@ export function RoomInfoSheet({
       onInspectPeer(existing)
       return
     }
+    const pkLower = m.pubkey.toLowerCase()
+    let latestMsgSec = 0
+    for (const msg of servers.messages) {
+      if (msg.isSystem || msg.isBlockedPlaceholder) continue
+      if (msg.pubkey.toLowerCase() === pkLower && msg.createdAt > latestMsgSec) {
+        latestMsgSec = msg.createdAt
+      }
+    }
     onInspectPeer({
       pubkey: m.pubkey,
       npub: m.npub,
       nickname: m.nickname,
       displayHandle: m.displayHandle,
-      lastSeenAt: Math.floor(Date.now() / 1000),
-      isOnline: true,
+      lastSeenAt: m.isSelf ? Math.floor(Date.now() / 1000) : latestMsgSec,
+      isOnline: m.isSelf,
       isSelf: m.isSelf,
       isTeleported: false,
       isMeshBridge: false,
@@ -582,8 +616,9 @@ export function RoomInfoSheet({
               <div className="ag-sheet-call-roster" role="list" aria-label="Peers in Bitchat call">
                 {geoCallRoster.map((p) => (
                   <span key={p.pubkey} role="listitem" className="ag-sheet-call-pill">
-                    <img
-                      src={identiconDataUrl(p.pubkey)}
+                    <AvatarImg
+                      pubkey={p.pubkey}
+                      pictureUrl={engine.getProfilePicture(p.pubkey)}
                       alt=""
                       width={18}
                       height={18}
@@ -737,8 +772,9 @@ export function RoomInfoSheet({
                       }}
                     >
                       <span className="ag-sheet-avatar-wrap">
-                        <img
-                          src={identiconDataUrl(peer.pubkey)}
+                        <AvatarImg
+                          pubkey={peer.pubkey}
+                          pictureUrl={engine.getProfilePicture(peer.pubkey)}
                           alt=""
                           width={36}
                           height={36}
@@ -755,8 +791,19 @@ export function RoomInfoSheet({
                             {peer.displayHandle}
                           </span>
                         </span>
-                        <span className="ag-sheet-person-sub">
-                          {peer.isSelf ? 'You' : peer.isOnline ? 'Online' : 'Recently active'}
+                        <span
+                          className="ag-sheet-person-sub"
+                          title={
+                            !peer.isSelf && !peer.isOnline && peer.lastSeenAt > 0
+                              ? `Last active ${new Date(peer.lastSeenAt * 1000).toLocaleString()}`
+                              : undefined
+                          }
+                        >
+                          {peer.isSelf
+                            ? 'You'
+                            : peer.isOnline
+                              ? 'Online'
+                              : formatCompactLastActive(peer.lastSeenAt)}
                           {trusted && (
                             <span className="ag-sheet-trusted-inline">
                               <ShieldCheck size={12} />
@@ -930,8 +977,9 @@ export function RoomInfoSheet({
             })
           }
         >
-          <img
-            src={identiconDataUrl(thread.peerPubkey)}
+          <AvatarImg
+            pubkey={thread.peerPubkey}
+            pictureUrl={engine.getProfilePicture(thread.peerPubkey)}
             alt=""
             width={72}
             height={72}
@@ -1416,8 +1464,9 @@ export function RoomInfoSheet({
                       }}
                     >
                       <span className="ag-sheet-avatar-wrap">
-                        <img
-                          src={identiconDataUrl(m.pubkey)}
+                        <AvatarImg
+                          pubkey={m.pubkey}
+                          pictureUrl={engine.getProfilePicture(m.pubkey)}
                           alt=""
                           width={36}
                           height={36}

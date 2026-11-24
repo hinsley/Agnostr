@@ -15,7 +15,8 @@ import {
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { ZapTarget } from '../types/wallet.ts'
 import { formatClientDisplayName } from '../lib/bitchatProtocol.ts'
-import { formatHandle, identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
+import { formatHandle, pubkeyToColor } from '../utils/identicon.ts'
+import { AvatarImg } from './AvatarImg.tsx'
 
 export interface PeerInspectorModalProps {
   peer: PeerInfo | null
@@ -27,6 +28,7 @@ export interface PeerInspectorModalProps {
 }
 
 function formatLastSeen(unixSec: number): string {
+  if (!unixSec || !Number.isFinite(unixSec) || unixSec <= 0) return 'Offline'
   const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSec)
   if (diff < 30) return 'Just now'
   if (diff < 60) return `${diff}s ago`
@@ -34,7 +36,10 @@ function formatLastSeen(unixSec: number): string {
   if (mins < 60) return `${mins}m ago`
   const hrs = Math.floor(mins / 60)
   if (hrs < 24) return `${hrs}h ago`
-  return `${Math.floor(hrs / 24)}d ago`
+  const days = Math.floor(hrs / 24)
+  if (days < 30) return `${days}d ago`
+  if (days < 365) return `${Math.max(1, Math.floor(days / 30))}mo ago`
+  return `${Math.max(1, Math.floor(days / 365))}y ago`
 }
 
 export function PeerInspectorModal({
@@ -56,6 +61,13 @@ export function PeerInspectorModal({
     setNoteDraft(savedNote)
     setNoteSavedFlash(false)
   }, [peerPubkeyLower, savedNote])
+
+  const ensureProfilePictures = engine.ensureProfilePictures
+
+  useEffect(() => {
+    if (!peerPubkey) return
+    ensureProfilePictures([peerPubkey])
+  }, [peerPubkey, ensureProfilePictures])
 
   useEffect(() => {
     if (!peerPubkey) return
@@ -183,8 +195,9 @@ export function PeerInspectorModal({
         <div className="ag-peer-modal-head">
           <div className="ag-peer-modal-hero">
             <div className="ag-peer-modal-avatar-wrap">
-              <img
-                src={identiconDataUrl(livePeer.pubkey)}
+              <AvatarImg
+                pubkey={livePeer.pubkey}
+                pictureUrl={engine.getProfilePicture(livePeer.pubkey)}
                 alt=""
                 className={`ag-peer-modal-avatar ${livePeer.isAgnostrClient ? 'ag-avatar-agnostr' : ''}`}
                 width={52}
@@ -254,7 +267,11 @@ export function PeerInspectorModal({
             <span className="ag-kpi-label">LAST SEEN</span>
             <span
               className="ag-kpi-value mono"
-              title={new Date(livePeer.lastSeenAt * 1000).toLocaleString()}
+              title={
+                livePeer.lastSeenAt > 0
+                  ? new Date(livePeer.lastSeenAt * 1000).toLocaleString()
+                  : undefined
+              }
             >
               {formatLastSeen(livePeer.lastSeenAt)}
             </span>

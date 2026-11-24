@@ -188,6 +188,8 @@ export interface GeoMessage {
   isOwn: boolean
   isSystem?: boolean
   isEmote?: boolean
+  /** In-memory-only zero-storage placeholder for a message from a blocked sender */
+  isBlockedPlaceholder?: boolean
   isTeleported: boolean
   isMeshBridge: boolean
   bridgeClient?: string
@@ -516,6 +518,14 @@ export interface AgnostrEngine {
 
   // Identity & settings
   identity: IdentityState
+  /** Verified `kind: 0` HTTPS profile picture strictly keyed by exact pubkey (never aliases Bitchat geohash keys to masterPubkey) */
+  getProfilePicture: (pubkey: string) => string | undefined
+  /** Batch-prefetch verified `kind: 0` profiles for 64-char hex pubkeys */
+  ensureProfilePictures: (pubkeys: readonly string[]) => void
+  /** Upload/set/clear own master `kind: 0` profile picture and publish live to relays */
+  updateMyProfilePicture: (
+    fileOrUrl: File | string | null
+  ) => Promise<{ ok: boolean; error?: string; pictureUrl?: string }>
   settings: AppSettings
   broadcastClientTag: boolean
   setBroadcastClientTag: (enabled: boolean) => void

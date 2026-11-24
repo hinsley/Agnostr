@@ -729,7 +729,7 @@ export function loadServerChannelMessages(serverId: string, channelId: string): 
   let needsRewrite = false
   for (const m of parsed) {
     if (!m || typeof m.id !== 'string' || typeof m.content !== 'string') continue
-    if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) {
+    if (m.isBlockedPlaceholder || isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) {
       needsRewrite = true
       continue
     }
@@ -754,6 +754,7 @@ export function saveServerChannelMessages(
     .filter(
       (m) =>
         !m.isSystem &&
+        !m.isBlockedPlaceholder &&
         m.serverId === serverId &&
         m.channelId === channelId &&
         !isStuckMediaPlaceholder(m) &&
@@ -765,6 +766,38 @@ export function saveServerChannelMessages(
 
 export function clearServerChannelMessagesStorage(serverId: string, channelId: string): void {
   safeRemove(KEYS.serverMsgChannel(serverId, channelId))
+}
+
+export function scrubBlockedPubkeyFromServerStorage(pubkey: string): number {
+  const pk = pubkey.trim().toLowerCase()
+  if (!pk || typeof localStorage === 'undefined') return 0
+  let removed = 0
+  try {
+    const serverPrefix = `${PREFIX}smsgs:`
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith(serverPrefix)) keys.push(k)
+    }
+    for (const key of keys) {
+      const parsed = safeJsonParse<ServerMessage[]>(safeGet(key), [])
+      if (!Array.isArray(parsed) || parsed.length === 0) continue
+      const surviving = parsed.filter(
+        (m) =>
+          m &&
+          !m.isBlockedPlaceholder &&
+          typeof m.pubkey === 'string' &&
+          m.pubkey.toLowerCase() !== pk
+      )
+      if (surviving.length !== parsed.length) {
+        removed += parsed.length - surviving.length
+        safeSet(key, JSON.stringify(surviving.slice(-MAX_MESSAGES_PER_CHANNEL)))
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return removed
 }
 
 export function loadDeviceSeedHex(): string | null {
@@ -816,7 +849,7 @@ export function loadChannelMessages(geohash: string): GeoMessage[] {
   let needsRewrite = false
   for (const m of parsed) {
     if (!m || typeof m.id !== 'string' || typeof m.content !== 'string') continue
-    if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) {
+    if (m.isBlockedPlaceholder || isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) {
       needsRewrite = true
       continue
     }
@@ -839,7 +872,7 @@ export function saveChannelMessages(geohash: string, messages: GeoMessage[]): vo
   const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
   const trimmed = messages
     .filter((m) => {
-      if (m.isSystem) return false
+      if (m.isSystem || m.isBlockedPlaceholder) return false
       if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) return false
       const msgKey = normalizeBitchatChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
       return msgKey === gh
@@ -859,6 +892,38 @@ export function saveChannelMessages(geohash: string, messages: GeoMessage[]): vo
 export function clearChannelMessagesStorage(geohash: string): void {
   const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
   safeRemove(KEYS.msgChannel(gh))
+}
+
+export function scrubBlockedPubkeyFromChannelStorage(pubkey: string): number {
+  const pk = pubkey.trim().toLowerCase()
+  if (!pk || typeof localStorage === 'undefined') return 0
+  let removed = 0
+  try {
+    const bitchatPrefix = `${PREFIX}msgs:`
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith(bitchatPrefix)) keys.push(k)
+    }
+    for (const key of keys) {
+      const parsed = safeJsonParse<GeoMessage[]>(safeGet(key), [])
+      if (!Array.isArray(parsed) || parsed.length === 0) continue
+      const surviving = parsed.filter(
+        (m) =>
+          m &&
+          !m.isBlockedPlaceholder &&
+          typeof m.pubkey === 'string' &&
+          m.pubkey.toLowerCase() !== pk
+      )
+      if (surviving.length !== parsed.length) {
+        removed += parsed.length - surviving.length
+        safeSet(key, JSON.stringify(surviving.slice(-MAX_MESSAGES_PER_CHANNEL)))
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return removed
 }
 
 export function loadDmThreads(): DmThread[] {
@@ -961,7 +1026,11 @@ export function scrubAllPersistedStuckPlaceholders(): number {
             removedInBucket += 1
             continue
           }
-          if (isStuckMediaPlaceholder(item) || isEphemeralPendingMessage(item)) {
+          if (
+            Boolean(item.isBlockedPlaceholder) ||
+            isStuckMediaPlaceholder(item) ||
+            isEphemeralPendingMessage(item)
+          ) {
             removedInBucket += 1
             continue
           }

@@ -148,6 +148,7 @@ import {
   saveSignMode,
   saveTrustedPubkeys,
   scrubAllPersistedStuckPlaceholders,
+  scrubBlockedPubkeyFromChannelStorage,
 } from '../lib/storage.ts'
 import { buildNip42AuthTemplate } from '../lib/nip29.ts'
 import { CALL_SIGNALING_RELAYS } from '../lib/callSignaling.ts'
@@ -189,7 +190,7 @@ function extractLatestVisiblePreview(
 ): BitchatChannelPreview | null {
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const m = items[i]
-    if (!m || m.isSystem) continue
+    if (!m || m.isSystem || m.isBlockedPlaceholder) continue
     const pk = (m.pubkey || '').toLowerCase()
     if (!pk || blocked.has(pk)) continue
     if (strict && !m.isOwn && !own.has(pk) && !trusted.has(pk)) continue
@@ -480,8 +481,12 @@ export function useAgnostrEngine(): AgnostrEngine {
       channelMessagesState.channelKey === activeGeohash
         ? channelMessagesState.items
         : backfillReplyReferences(loadChannelMessages(activeGeohash))
-    if (blockedSet.size === 0) return raw
-    return raw.filter((m) => m.isSystem || !blockedSet.has(m.pubkey.toLowerCase()))
+    return raw.filter((m) => {
+      if (m.isSystem) return true
+      const pk = m.pubkey.toLowerCase()
+      if (m.isBlockedPlaceholder) return blockedSet.has(pk)
+      return !blockedSet.has(pk)
+    })
   }, [channelMessagesState, activeGeohash, blockedSet])
 
   const peers = useMemo(
@@ -1066,6 +1071,44 @@ export function useAgnostrEngine(): AgnostrEngine {
     }
   }, [applyObservedClientHint])
 
+  const matchesBitchatChatEventForChannel = useCallback((gh: string, ev: NostrEvent): boolean => {
+    const isTopic = isTopicChannel(gh)
+    if (isTopic) {
+      if (ev.kind !== KIND_NAMED_BITCHAT_CHAT) return false
+      const expectedSlug = getTopicSlug(gh)
+      const slug = extractTopicChannelTag(ev.tags)
+      return Boolean(expectedSlug && slug && slug === expectedSlug)
+    }
+    if (ev.kind !== KIND_GEOHASH_CHAT) return false
+    return extractGeohashTag(ev.tags) === gh
+  }, [])
+
+  const buildBlockedGeoPlaceholder = useCallback(
+    (gh: string, ev: NostrEvent): GeoMessage => {
+      const pk = ev.pubkey.toLowerCase()
+      const rawNick = getTagValue(ev.tags, 'n') || presenceTracker.getNickname(pk) || ''
+      const cleanNick = rawNick.trim().slice(0, 32) || `anon${pk.slice(-4)}`
+      return {
+        id: ev.id,
+        geohash: gh,
+        pubkey: pk,
+        nickname: cleanNick,
+        displayHandle: formatDisplayHandle(cleanNick, pk),
+        content: '',
+        createdAt: ev.created_at,
+        tags: [],
+        isOwn: false,
+        isBlockedPlaceholder: true,
+        isTeleported: false,
+        isMeshBridge: false,
+        powBits: 0,
+        reactions: [],
+        mentions: [],
+      }
+    },
+    [presenceTracker]
+  )
+
   const parseRetainedPulseEvent = useCallback(
     (
       gh: string,
@@ -1117,6 +1160,24 @@ export function useAgnostrEngine(): AgnostrEngine {
     onLivePulseRoomEventRef.current = (roomKey, ev) => {
       const gh = activeGeohashRef.current
       if (!gh || roomKey.trim().toLowerCase() !== gh.toLowerCase()) return
+
+      const rawPk = ev.pubkey.toLowerCase()
+      if (blockedSetRef.current.has(rawPk)) {
+        if (!ownPubkeysRef.current.has(rawPk) && matchesBitchatChatEventForChannel(gh, ev)) {
+          const placeholder = buildBlockedGeoPlaceholder(gh, ev)
+          updateChannelMessages(
+            gh,
+            (prev) => {
+              if (prev.some((m) => m.id === placeholder.id)) return null
+              return sortChannelMessagesWithPending([...prev, placeholder], 'pending-bitchat-').slice(
+                -200
+              )
+            },
+            { persist: false }
+          )
+        }
+        return
+      }
 
       const findParent = (id: string) =>
         messagesChannelRef.current === gh
@@ -1230,6 +1291,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   }, [
     identityManager,
     presenceTracker,
+    matchesBitchatChatEventForChannel,
+    buildBlockedGeoPlaceholder,
     parseRetainedPulseEvent,
     refreshPeers,
     updateChannelMessages,
@@ -1280,8 +1343,17 @@ export function useAgnostrEngine(): AgnostrEngine {
     )
     const storedIds = new Set<string>(stored.map((m) => m.id))
     const pulseMsgs: GeoMessage[] = []
+    const blockedPulsePlaceholders: GeoMessage[] = []
     for (const rawEv of getPulseRoomEvents(gh)) {
       if (storedIds.has(rawEv.id)) continue
+      const rawPk = rawEv.pubkey.toLowerCase()
+      if (blockedSetRef.current.has(rawPk)) {
+        if (!ownPubkeysRef.current.has(rawPk) && matchesBitchatChatEventForChannel(gh, rawEv)) {
+          storedIds.add(rawEv.id)
+          blockedPulsePlaceholders.push(buildBlockedGeoPlaceholder(gh, rawEv))
+        }
+        continue
+      }
       const parsedPulse = parseRetainedPulseEvent(gh, rawEv, (id) =>
         stored.find((m) => m.id === id) ?? pulseMsgs.find((m) => m.id === id)
       )
@@ -1298,26 +1370,36 @@ export function useAgnostrEngine(): AgnostrEngine {
     if (pulseMsgs.length > 0) {
       saveChannelMessages(gh, cached)
     }
+    const initialInMemory =
+      blockedPulsePlaceholders.length > 0
+        ? sortChannelMessagesWithPending(
+            [...cached, ...blockedPulsePlaceholders],
+            'pending-bitchat-'
+          ).slice(-200)
+        : cached
     setChannelMessagesState((prev) => {
       if (prev.channelKey === gh && prev.items.length > 0) {
-        if (pulseMsgs.length === 0) return prev
+        const allIncoming = [...pulseMsgs, ...blockedPulsePlaceholders]
+        if (allIncoming.length === 0) return prev
         const existingIds = new Set(prev.items.map((m) => m.id))
-        const extras = pulseMsgs.filter((m) => !existingIds.has(m.id))
+        const extras = allIncoming.filter((m) => !existingIds.has(m.id))
         if (extras.length === 0) return prev
         const combined = backfillReplyReferences(
           sortChannelMessagesWithPending([...prev.items, ...extras], 'pending-bitchat-')
         ).slice(-200)
-        saveChannelMessages(gh, combined)
+        if (pulseMsgs.some((m) => !existingIds.has(m.id))) {
+          saveChannelMessages(gh, combined)
+        }
         return { channelKey: gh, items: combined }
       }
-      return { channelKey: gh, items: cached }
+      return { channelKey: gh, items: initialInMemory }
     })
     setReplyingTo(null)
     setUnreadDividerId(null)
 
     // Seed peers from cached + hydrated pulse messages (historical seenAt)
     for (const m of cached) {
-      if (m.isSystem) continue
+      if (m.isSystem || m.isBlockedPlaceholder) continue
       presenceTracker.recordActivity({
         geohash: gh,
         pubkey: m.pubkey,
@@ -1335,7 +1417,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     if (!pool) return
 
     let isHistoryReplay = true
-    const seenIds = new Set<string>(cached.map((m) => m.id))
+    const seenIds = new Set<string>(initialInMemory.map((m) => m.id))
     const pendingReactions = new Map<string, ParsedReaction[]>()
     const eoseFallback = window.setTimeout(() => {
       if (cancelled) return
@@ -1398,7 +1480,23 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
 
           const pk = ev.pubkey.toLowerCase()
-          if (blockedSetRef.current.has(pk)) return
+          if (blockedSetRef.current.has(pk)) {
+            if (!ownPubkeysRef.current.has(pk) && matchesBitchatChatEventForChannel(gh, ev)) {
+              const placeholder = buildBlockedGeoPlaceholder(gh, ev)
+              updateChannelMessages(
+                gh,
+                (prev) => {
+                  if (prev.some((m) => m.id === placeholder.id)) return null
+                  return sortChannelMessagesWithPending(
+                    [...prev, placeholder],
+                    'pending-bitchat-'
+                  ).slice(-350)
+                },
+                { persist: false }
+              )
+            }
+            return
+          }
 
           // Ephemeral reaction (kind 20007)
           if (ev.kind === KIND_EPHEMERAL_REACTION) {
@@ -1688,6 +1786,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     refreshPeers,
     applyObservedClientHint,
     getPulseRoomEvents,
+    matchesBitchatChatEventForChannel,
+    buildBlockedGeoPlaceholder,
     parseRetainedPulseEvent,
     updateChannelMessages,
     identityManager,
@@ -2338,6 +2438,107 @@ export function useAgnostrEngine(): AgnostrEngine {
     onProfileNameSaved: handleAgoraProfileNameSaved,
   })
 
+  // Verified kind: 0 profile pictures (strictly exact pubkey lookup — NEVER aliases Bitchat geohash keys to masterPubkey)
+  const getProfilePicture = useCallback(
+    (pubkey: string): string | undefined => {
+      if (typeof pubkey !== 'string') return undefined
+      const pk = pubkey.trim().toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(pk)) return undefined
+      const raw = agoraEngine.profilesByPubkey[pk]?.picture
+      if (typeof raw !== 'string') return undefined
+      const trimmed = raw.trim()
+      if (!trimmed || !/^https:\/\//i.test(trimmed)) return undefined
+      try {
+        const parsed = new URL(trimmed)
+        return parsed.protocol === 'https:' ? parsed.toString() : undefined
+      } catch {
+        return undefined
+      }
+    },
+    [agoraEngine.profilesByPubkey]
+  )
+
+  const ensureAgoraProfiles = agoraEngine.ensureProfiles
+  const ensureProfilePictures = useCallback(
+    (pubkeys: readonly string[]) => {
+      const valid: string[] = []
+      for (const raw of pubkeys) {
+        if (typeof raw !== 'string') continue
+        const pk = raw.trim().toLowerCase()
+        if (/^[0-9a-f]{64}$/.test(pk)) valid.push(pk)
+      }
+      if (valid.length > 0) {
+        ensureAgoraProfiles(valid)
+      }
+    },
+    [ensureAgoraProfiles]
+  )
+
+  const uploadAgoraMedia = agoraEngine.uploadMedia
+  const updateAgoraProfile = agoraEngine.updateMyProfile
+  const getAgoraProfile = agoraEngine.getProfile
+  const updateMyProfilePicture = useCallback(
+    async (
+      fileOrUrl: File | string | null
+    ): Promise<{ ok: boolean; error?: string; pictureUrl?: string }> => {
+      let nextUrl = ''
+      if (fileOrUrl instanceof File) {
+        const mime = (fileOrUrl.type || '').toLowerCase()
+        if (!mime.startsWith('image/')) {
+          return { ok: false, error: 'Please select an image file.' }
+        }
+        try {
+          const uploaded = await uploadAgoraMedia(fileOrUrl, {
+            alt: 'Profile picture',
+            mime: fileOrUrl.type,
+          })
+          const cleanUploaded = uploaded.url.trim()
+          if (!/^https:\/\//i.test(cleanUploaded)) {
+            return { ok: false, error: 'Uploaded image URL must use HTTPS.' }
+          }
+          nextUrl = new URL(cleanUploaded).toString()
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Failed to upload profile picture.'
+          return { ok: false, error: msg }
+        }
+      } else if (typeof fileOrUrl === 'string') {
+        const trimmed = fileOrUrl.trim()
+        if (trimmed.length > 0) {
+          if (!/^https:\/\//i.test(trimmed)) {
+            return { ok: false, error: 'Profile picture URL must start with https://.' }
+          }
+          try {
+            const parsed = new URL(trimmed)
+            if (parsed.protocol !== 'https:') {
+              return { ok: false, error: 'Profile picture URL must use HTTPS.' }
+            }
+            nextUrl = parsed.toString()
+          } catch {
+            return { ok: false, error: 'Invalid profile picture URL.' }
+          }
+        }
+      }
+
+      const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const existing = getAgoraProfile(masterPk)
+      const res = await updateAgoraProfile({
+        name: existing?.name || identityManager.getNickname(),
+        displayName: existing?.displayName,
+        about: existing?.about,
+        banner: existing?.banner,
+        nip05: existing?.nip05,
+        lud16: existing?.lud16,
+        website: existing?.website,
+        picture: nextUrl,
+      })
+      if (!res.ok) {
+        return { ok: false, error: res.error ?? 'Failed to publish profile update.' }
+      }
+      return { ok: true, pictureUrl: nextUrl || undefined }
+    },
+    [identityManager, uploadAgoraMedia, updateAgoraProfile, getAgoraProfile]
+  )
+
   // Silent Multi-Device Same-Key Background Sync (NIP-44 self-encrypted CRDT + delta messages)
   const getDeviceSyncRelayUrls = useCallback(
     () =>
@@ -2373,24 +2574,67 @@ export function useAgnostrEngine(): AgnostrEngine {
       saveBlockedPubkeys(normalized)
 
       const newlyBlocked = normalized.filter((pk) => !prevSet.has(pk))
-      if (newlyBlocked.length > 0) {
-        const newlySet = new Set(newlyBlocked)
-        setChannelMessagesState((curr) => {
-          const filtered = curr.items.filter(
-            (m) => m.isSystem || !newlySet.has(m.pubkey.toLowerCase())
-          )
-          if (filtered.length === curr.items.length) return curr
-          saveChannelMessages(curr.channelKey, filtered)
-          return { channelKey: curr.channelKey, items: filtered }
-        })
-        setLocationNotesState((curr) => {
-          const filtered = curr.items.filter((n) => !newlySet.has(n.pubkey.toLowerCase()))
-          if (filtered.length === curr.items.length) return curr
-          return { channelKey: curr.channelKey, items: filtered }
-        })
+      const newlyUnblocked = Array.from(prevSet).filter((pk) => !nextSet.has(pk))
+      if (newlyBlocked.length > 0 || newlyUnblocked.length > 0) {
+        const newlyBlockedSet = new Set(newlyBlocked)
+        const newlyUnblockedSet = new Set(newlyUnblocked)
         for (const pk of newlyBlocked) {
-          voiceCacheRef.current?.revokeForSender(pk)
-          contentFilterEngine.revokeForSender(pk)
+          scrubBlockedPubkeyFromChannelStorage(pk)
+        }
+        setChannelMessagesState((curr) => {
+          let changed = false
+          const nextItems: GeoMessage[] = []
+          for (const m of curr.items) {
+            if (m.isSystem) {
+              nextItems.push(m)
+              continue
+            }
+            const mpk = m.pubkey.toLowerCase()
+            if (m.isBlockedPlaceholder) {
+              if (newlyUnblockedSet.has(mpk)) {
+                changed = true
+                continue
+              }
+              nextItems.push(m)
+              continue
+            }
+            if (newlyBlockedSet.has(mpk)) {
+              changed = true
+              nextItems.push({
+                id: m.id,
+                geohash: m.geohash,
+                pubkey: mpk,
+                nickname: m.nickname,
+                displayHandle: m.displayHandle,
+                content: '',
+                createdAt: m.createdAt,
+                tags: [],
+                isOwn: false,
+                isBlockedPlaceholder: true,
+                isTeleported: false,
+                isMeshBridge: false,
+                powBits: 0,
+                reactions: [],
+                mentions: [],
+              })
+              continue
+            }
+            nextItems.push(m)
+          }
+          if (!changed) return curr
+          saveChannelMessages(curr.channelKey, nextItems)
+          return { channelKey: curr.channelKey, items: nextItems }
+        })
+        if (newlyBlocked.length > 0) {
+          setLocationNotesState((curr) => {
+            const filtered = curr.items.filter((n) => !newlyBlockedSet.has(n.pubkey.toLowerCase()))
+            if (filtered.length === curr.items.length) return curr
+            return { channelKey: curr.channelKey, items: filtered }
+          })
+          for (const pk of newlyBlocked) {
+            voiceCacheRef.current?.revokeForSender(pk)
+            contentFilterEngine.revokeForSender(pk)
+          }
         }
       }
       recomputeGeoUnreads()
@@ -3250,11 +3494,34 @@ export function useAgnostrEngine(): AgnostrEngine {
         blockedSetRef.current = new Set(next)
         saveBlockedPubkeys(next)
         if (!exists) {
+          scrubBlockedPubkeyFromChannelStorage(pk)
           setChannelMessagesState((curr) => {
-            const filtered = curr.items.filter((m) => m.isSystem || m.pubkey.toLowerCase() !== pk)
-            if (filtered.length === curr.items.length) return curr
-            saveChannelMessages(curr.channelKey, filtered)
-            return { channelKey: curr.channelKey, items: filtered }
+            let changed = false
+            const nextItems = curr.items.map((m) => {
+              if (m.isSystem || m.pubkey.toLowerCase() !== pk) return m
+              if (m.isBlockedPlaceholder) return m
+              changed = true
+              return {
+                id: m.id,
+                geohash: m.geohash,
+                pubkey: pk,
+                nickname: m.nickname,
+                displayHandle: m.displayHandle,
+                content: '',
+                createdAt: m.createdAt,
+                tags: [],
+                isOwn: false,
+                isBlockedPlaceholder: true,
+                isTeleported: false,
+                isMeshBridge: false,
+                powBits: 0,
+                reactions: [],
+                mentions: [],
+              }
+            })
+            if (!changed) return curr
+            saveChannelMessages(curr.channelKey, nextItems)
+            return { channelKey: curr.channelKey, items: nextItems }
           })
           setLocationNotesState((curr) => {
             const filtered = curr.items.filter((n) => n.pubkey.toLowerCase() !== pk)
@@ -3279,6 +3546,13 @@ export function useAgnostrEngine(): AgnostrEngine {
           refreshPeers(activeGeohashRef.current)
           pushToast('info', `Blocked ${label ?? pk.slice(0, 8)}`, 'Their messages are now hidden.')
         } else {
+          setChannelMessagesState((curr) => {
+            const filtered = curr.items.filter(
+              (m) => !(m.isBlockedPlaceholder && m.pubkey.toLowerCase() === pk)
+            )
+            if (filtered.length === curr.items.length) return curr
+            return { channelKey: curr.channelKey, items: filtered }
+          })
           recomputeGeoUnreads()
           refreshPeers(activeGeohashRef.current)
           pushToast('info', `Unblocked ${label ?? pk.slice(0, 8)}`)
@@ -4887,6 +5161,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     return messages.filter(
       (m) =>
         m.isSystem ||
+        m.isBlockedPlaceholder ||
         m.isOwn ||
         ownPubkeys.has(m.pubkey.toLowerCase()) ||
         trustedSet.has(m.pubkey.toLowerCase())
@@ -4949,7 +5224,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     const ids: string[] = []
     for (let i = Math.max(0, source.length - 80); i < source.length; i += 1) {
       const msg = source[i]
-      if (!msg.isSystem && msg.id) {
+      if (!msg.isSystem && !msg.isBlockedPlaceholder && msg.id) {
         ids.push(msg.id)
       }
     }
@@ -4964,7 +5239,12 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const exportTranscript = useCallback(
     (format: 'markdown' | 'json') =>
-      formatTranscriptExport(format, cell, visibleMessages, activeGeohash),
+      formatTranscriptExport(
+        format,
+        cell,
+        visibleMessages.filter((m) => !m.isBlockedPlaceholder),
+        activeGeohash
+      ),
     [cell, visibleMessages, activeGeohash]
   )
 
@@ -5077,6 +5357,9 @@ export function useAgnostrEngine(): AgnostrEngine {
     reconnectRelays,
 
     identity,
+    getProfilePicture,
+    ensureProfilePictures,
+    updateMyProfilePicture,
     settings,
     broadcastClientTag: settings.broadcastClientTag,
     setBroadcastClientTag,

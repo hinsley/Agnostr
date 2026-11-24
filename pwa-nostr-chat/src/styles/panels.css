@@ -3388,6 +3388,46 @@
   color: var(--text-muted);
 }
 
+.ag-set-pic-card {
+  padding: 0.72rem 0.85rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-set-pic-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  min-width: 0;
+}
+
+.ag-set-pic-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-full);
+  object-fit: cover;
+  border: 1.5px solid var(--border-default);
+  background-color: var(--bg-surface);
+  flex-shrink: 0;
+  display: block;
+}
+
+.ag-set-pic-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-set-pic-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+}
+
 .ag-set-group {
   display: flex;
   flex-direction: column;

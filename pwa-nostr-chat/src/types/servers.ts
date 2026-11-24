@@ -119,6 +119,8 @@ export interface ServerMessage {
   isOwn: boolean
   isSystem?: boolean
   isEmote?: boolean
+  /** In-memory-only zero-storage placeholder for a message from a blocked sender */
+  isBlockedPlaceholder?: boolean
   encrypted: boolean
   decryptFailed?: boolean
   powBits: number
@@ -181,6 +183,8 @@ export interface ServersEngine {
   members: Nip29Member[]
   myRole: ServerRole
   canModerate: boolean
+  /** True ONLY when active group is relay-enforced NIP-29 where we have moderator/admin rights */
+  canDeleteMessages: boolean
   sending: boolean
   creating: boolean
   replyingTo: ServerMessage | null

@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react'
 import {
   AlertCircle,
   ArrowDown,
+  Ban,
   Columns2,
   Crosshair,
   Hash,
@@ -31,11 +32,12 @@ import { detectRoomDominantLanguage, isNonTranslatableText } from '../lib/langua
 import type { ZapTarget } from '../types/wallet'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { LightboxImagePayload } from './ImageLightboxModal'
+import { AvatarImg } from './AvatarImg'
 import { MessageItem } from './MessageItem'
 import { doesContentMentionUser } from '../lib/bitchatProtocol'
 import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel'
 import { isStuckMediaPlaceholder } from '../lib/storage'
-import { identiconDataUrl, formatHandle } from '../utils/identicon'
+import { formatHandle } from '../utils/identicon'
 
 function extractCleanMessageText(msg: GeoMessage): string {
   let text = msg.content.trim()
@@ -133,13 +135,29 @@ interface MessageTranslationSpec {
   badge?: string
 }
 
+interface BlockedRunSender {
+  pubkey: string
+  displayHandle: string
+  count: number
+}
+
+type StreamRenderItem =
+  | { kind: 'message'; msg: GeoMessage }
+  | {
+      kind: 'blocked-run'
+      id: string
+      createdAt: number
+      totalCount: number
+      senders: BlockedRunSender[]
+    }
+
 function resolveMessageTranslationSpec(
   msg: GeoMessage,
   outgoingOrig: OutgoingOriginalEntry | undefined,
   myLanguage: string,
   explicitSourceLang: string | undefined
 ): MessageTranslationSpec {
-  if (msg.isSystem) return { mode: 'skip' }
+  if (msg.isSystem || msg.isBlockedPlaceholder) return { mode: 'skip' }
 
   if (outgoingOrig) {
     const badge = `Sent as ${outgoingOrig.targetLang}`
@@ -221,9 +239,19 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const [showJumpBtn, setShowJumpBtn] = useState(false)
   const [unseenBelow, setUnseenBelow] = useState(0)
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null)
+  const [openBlockedRunId, setOpenBlockedRunId] = useState<string | null>(null)
   const handleToggleOriginalActions = useCallback((id: string | null) => {
     setActiveActionMsgId(id ? `${id}-orig` : null)
   }, [])
+
+  useEffect(() => {
+    if (!openBlockedRunId) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenBlockedRunId(null)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [openBlockedRunId])
 
   const syncViewportRange = useCallback(() => {
     const count = visibleCountRef.current
@@ -315,7 +343,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
             !isStuckMediaPlaceholder(sm) &&
             (sm.isSystem ||
               (sm.serverId === activeServer.id && sm.channelId === activeChannel.id)) &&
-            (sm.isOwn || sm.isSystem || !engine.isPeerBlocked(sm.pubkey))
+            (sm.isOwn || sm.isSystem || sm.isBlockedPlaceholder || !engine.isPeerBlocked(sm.pubkey))
         )
         .map((sm) => ({
           id: sm.id,
@@ -330,6 +358,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
           tags: sm.tags,
           isOwn: sm.isOwn,
           isSystem: sm.isSystem,
+          isBlockedPlaceholder: sm.isBlockedPlaceholder,
           isEmote: sm.isEmote,
           isTeleported: false,
           isMeshBridge: false,
@@ -349,7 +378,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         (m) =>
           !isStuckMediaPlaceholder(m) &&
           (m.isSystem || m.geohash.toLowerCase() === activeKey) &&
-          (m.isOwn || m.isSystem || !engine.isPeerBlocked(m.pubkey))
+          (m.isOwn || m.isSystem || m.isBlockedPlaceholder || !engine.isPeerBlocked(m.pubkey))
       )
     }
     return dmThread.messages
@@ -398,6 +427,66 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     [displayMessages, hiddenEarlierCount]
   )
 
+  // Coalesce consecutive blocked-message placeholders into a single ultra-compact run indicator
+  const renderItems: StreamRenderItem[] = useMemo(() => {
+    const items: StreamRenderItem[] = []
+    for (const msg of visibleMessages) {
+      if (!msg.isBlockedPlaceholder) {
+        items.push({ kind: 'message', msg })
+        continue
+      }
+      const pkKey = msg.pubkey.toLowerCase()
+      const handleLabel = (msg.displayHandle || formatHandle(msg.nickname, msg.pubkey).full)
+        .trim()
+        .replace(/^@+/, '')
+      const prev = items[items.length - 1]
+      if (prev && prev.kind === 'blocked-run') {
+        prev.totalCount += 1
+        const existingSender = prev.senders.find((s) => s.pubkey.toLowerCase() === pkKey)
+        if (existingSender) {
+          existingSender.count += 1
+        } else {
+          prev.senders.push({ pubkey: msg.pubkey, displayHandle: handleLabel, count: 1 })
+        }
+      } else {
+        items.push({
+          kind: 'blocked-run',
+          id: `blocked-${msg.id}`,
+          createdAt: msg.createdAt,
+          totalCount: 1,
+          senders: [{ pubkey: msg.pubkey, displayHandle: handleLabel, count: 1 }],
+        })
+      }
+    }
+    return items
+  }, [visibleMessages])
+
+  // Prefetch verified kind: 0 profile pictures for visible authors and active DM peer
+  const { ensureProfilePictures } = engine
+  const visibleAvatarPubkeysKey = useMemo(() => {
+    const seen = new Set<string>()
+    const pks: string[] = []
+    const addPk = (raw?: string | null) => {
+      const pk = raw?.trim().toLowerCase()
+      if (!pk || seen.has(pk)) return
+      seen.add(pk)
+      pks.push(pk)
+    }
+    if (isDm && dmThread) {
+      addPk(dmThread.peerPubkey)
+    }
+    for (const msg of visibleMessages) {
+      if (msg.isSystem || msg.isBlockedPlaceholder) continue
+      addPk(msg.pubkey)
+    }
+    return pks.join(',')
+  }, [isDm, dmThread, visibleMessages])
+
+  useEffect(() => {
+    if (!visibleAvatarPubkeysKey) return
+    ensureProfilePictures(visibleAvatarPubkeysKey.split(','))
+  }, [visibleAvatarPubkeysKey, ensureProfilePictures])
+
   const loadEarlierMessages = useCallback(() => {
     if (hiddenEarlierCount <= 0) return
     const el = scrollRef.current
@@ -437,28 +526,41 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     setShowJumpBtn(false)
     setUnseenBelow(0)
     setActiveActionMsgId(null)
+    setOpenBlockedRunId(null)
     requestAnimationFrame(() => {
       scrollContainerToBottom(false)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamKey])
 
-  // Auto-scroll when new messages arrive if anchored at bottom
-  const prevCountRef = useRef(displayMessages.length)
+  // Auto-scroll when new messages arrive if anchored at bottom; exclude blocked placeholders from unseenBelow
+  const nonPlaceholderCount = useMemo(
+    () => displayMessages.reduce((acc, m) => (m.isBlockedPlaceholder ? acc : acc + 1), 0),
+    [displayMessages]
+  )
+  const prevTotalCountRef = useRef(displayMessages.length)
+  const prevNonPlaceholderCountRef = useRef(nonPlaceholderCount)
+  const prevStreamKeyForCountRef = useRef(streamKey)
   useEffect(() => {
-    const delta = displayMessages.length - prevCountRef.current
-    prevCountRef.current = displayMessages.length
-
-    if (delta > 0) {
-      if (stickToBottomRef.current) {
-        requestAnimationFrame(() => {
-          scrollContainerToBottom(false)
-        })
-      } else {
-        setUnseenBelow((c) => c + delta)
-      }
+    if (prevStreamKeyForCountRef.current !== streamKey) {
+      prevStreamKeyForCountRef.current = streamKey
+      prevTotalCountRef.current = displayMessages.length
+      prevNonPlaceholderCountRef.current = nonPlaceholderCount
+      return
     }
-  }, [displayMessages.length, scrollContainerToBottom])
+    const totalDelta = displayMessages.length - prevTotalCountRef.current
+    const realDelta = nonPlaceholderCount - prevNonPlaceholderCountRef.current
+    prevTotalCountRef.current = displayMessages.length
+    prevNonPlaceholderCountRef.current = nonPlaceholderCount
+
+    if (totalDelta > 0 && stickToBottomRef.current) {
+      requestAnimationFrame(() => {
+        scrollContainerToBottom(false)
+      })
+    } else if (realDelta > 0 && !stickToBottomRef.current) {
+      setUnseenBelow((c) => c + realDelta)
+    }
+  }, [streamKey, displayMessages.length, nonPlaceholderCount, scrollContainerToBottom])
 
   // Keep pinned to latest message when the virtual keyboard opens or composer height changes
   useEffect(() => {
@@ -699,10 +801,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     [engine]
   )
 
-  const hottestPulse = useMemo(() => {
-    return engine.pulseRooms.find((r) => r.geohash !== engine.activeGeohash) ?? null
-  }, [engine.pulseRooms, engine.activeGeohash])
-
   // Memoized list of known peer, member, self & author handles (including multi-word names with spaces)
   // so inline `@John Doe` and `@John Doe#a1b2` highlight cleanly as one clickable chip.
   const knownHandles = useMemo(() => {
@@ -737,7 +835,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     }
 
     for (const msg of displayMessages) {
-      if (msg.isSystem) continue
+      if (msg.isSystem || msg.isBlockedPlaceholder) continue
       add(msg.displayHandle)
       add(msg.nickname)
     }
@@ -773,7 +871,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     }
 
     for (const msg of displayMessages) {
-      if (msg.isSystem) continue
+      if (msg.isSystem || msg.isBlockedPlaceholder) continue
       setPreferred(msg.pubkey, msg.nickname)
     }
     for (const entry of engine.trustedPubkeys) {
@@ -819,7 +917,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     const ids: string[] = []
     for (let i = Math.max(0, displayMessages.length - 40); i < displayMessages.length; i += 1) {
       const m = displayMessages[i]
-      if (!m.isSystem && m.id) ids.push(m.id)
+      if (!m.isSystem && !m.isBlockedPlaceholder && m.id) ids.push(m.id)
     }
     return ids.join(',')
   }, [isDm, displayMessages])
@@ -869,7 +967,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     let nonSystemCount = 0
     for (const m of displayMessages) {
       existingIds.add(m.id)
-      if (!m.isSystem) {
+      if (!m.isSystem && !m.isBlockedPlaceholder) {
         nonSystemCount += 1
         if (m.createdAt > maxCreatedAt) maxCreatedAt = m.createdAt
       }
@@ -896,7 +994,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     const allTexts: string[] = []
     for (let i = Math.max(0, displayMessages.length - 40); i < displayMessages.length; i += 1) {
       const m = displayMessages[i]
-      if (m.isSystem) continue
+      if (m.isSystem || m.isBlockedPlaceholder) continue
       const clean = extractCleanMessageText(m)
       if (!clean || isNonTranslatableText(clean)) continue
       allTexts.push(clean)
@@ -962,7 +1060,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     // Pass 1 ('live'): ALL untranslated live incoming messages (newest first), never blocked behind backfill cap
     for (let i = total - 1; i >= 0; i -= 1) {
       const msg = visibleMessages[i]
-      if (!msg || msg.isSystem || msg.id.startsWith('pending-')) continue
+      if (!msg || msg.isSystem || msg.isBlockedPlaceholder || msg.id.startsWith('pending-')) continue
       if (!isLiveIncoming(msg)) continue
       const spec = resolveMessageTranslationSpec(
         msg,
@@ -997,7 +1095,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     // Pass 2 ('visible' & 'normal' backfill): previously-existing messages strictly NEWEST -> OLDEST
     const inspectBackfill = (idx: number, priority: 'visible' | 'normal') => {
       const msg = visibleMessages[idx]
-      if (!msg || msg.isSystem || msg.id.startsWith('pending-')) return
+      if (!msg || msg.isSystem || msg.isBlockedPlaceholder || msg.id.startsWith('pending-')) return
       if (isLiveIncoming(msg)) return
       const spec = resolveMessageTranslationSpec(
         msg,
@@ -1068,7 +1166,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     let doneCount = 0
     let pendingCount = 0
     for (const msg of visibleMessages) {
-      if (msg.isSystem || msg.id.startsWith('pending-')) continue
+      if (msg.isSystem || msg.isBlockedPlaceholder || msg.id.startsWith('pending-')) continue
       const spec = resolveMessageTranslationSpec(
         msg,
         originalOutgoingById[msg.id],
@@ -1315,8 +1413,12 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         className={`ag-stream-scroll ${translatorEnabled ? 'is-translator-active' : ''}`}
         onScroll={handleScroll}
         onClick={(e) => {
-          if (activeActionMsgId && !(e.target as HTMLElement | null)?.closest('.ag-msg-row')) {
+          const target = e.target as HTMLElement | null
+          if (activeActionMsgId && !target?.closest('.ag-msg-row')) {
             setActiveActionMsgId(null)
+          }
+          if (openBlockedRunId && !target?.closest('.ag-blocked-run-anchor')) {
+            setOpenBlockedRunId(null)
           }
         }}
         role="log"
@@ -1328,9 +1430,12 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
             isDm && dmThread ? (
               /* Serene Encrypted DM Empty State */
               <div className="ag-empty-stage">
-                <img
-                  src={identiconDataUrl(dmThread.peerPubkey)}
+                <AvatarImg
+                  pubkey={dmThread.peerPubkey}
+                  pictureUrl={engine.getProfilePicture(dmThread.peerPubkey)}
                   alt=""
+                  width={56}
+                  height={56}
                   className="ag-empty-avatar"
                 />
                 <div className="ag-empty-copy">
@@ -1414,10 +1519,6 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
               (() => {
                 const activeIsTopic = isTopicChannel(engine.activeGeohash)
                 const activeBitchatLabel = formatBitchatChannelLabel(engine.activeGeohash)
-                const hottestIsTopic = hottestPulse ? isTopicChannel(hottestPulse.geohash) : false
-                const hottestLabel = hottestPulse
-                  ? formatBitchatChannelLabel(hottestPulse.geohash)
-                  : ''
                 return (
               <div className="ag-empty-stage">
                 <div className="ag-empty-bitchat-icon" aria-hidden="true">
@@ -1436,39 +1537,19 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   </p>
                 </div>
 
-                <div className="ag-empty-actions">
-                  {!activeIsTopic && (
+                {!activeIsTopic && (
+                  <div className="ag-empty-actions">
                     <button type="button" className="ag-cta-btn primary" onClick={onLocateMe}>
                       <Crosshair size={15} />
                       <span>Locate Me</span>
                     </button>
-                  )}
 
-                  {hottestPulse ? (
-                    <button
-                      type="button"
-                      className={`ag-cta-btn ${activeIsTopic ? 'primary' : ''}`}
-                      onClick={() => onTuneChannel(hottestPulse.geohash)}
-                    >
-                      {hottestIsTopic ? (
-                        <Hash size={15} style={{ color: activeIsTopic ? 'currentColor' : 'var(--accent)' }} />
-                      ) : (
-                        <Waves size={15} style={{ color: activeIsTopic ? 'currentColor' : 'var(--accent)' }} />
-                      )}
-                      <span>
-                        Join {hottestLabel}
-                        {!hottestIsTopic && hottestPulse.nearestCity
-                          ? ` · ${hottestPulse.nearestCity}`
-                          : ''}
-                      </span>
-                    </button>
-                  ) : (
                     <button type="button" className="ag-cta-btn" onClick={onExpandRadar}>
                       <MapIcon size={15} />
                       <span>Open Map</span>
                     </button>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
                 )
               })()
@@ -1525,11 +1606,89 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 </div>
               )}
 
-              {visibleMessages.map((msg, idx) => {
-                const prev = idx > 0 ? visibleMessages[idx - 1] : null
-                const showDateDivider = !prev || dateDayKey(prev.createdAt) !== dateDayKey(msg.createdAt)
+              {renderItems.map((item, idx) => {
+                const prevItem = idx > 0 ? renderItems[idx - 1] : null
+                const prevCreatedAt = prevItem
+                  ? prevItem.kind === 'message'
+                    ? prevItem.msg.createdAt
+                    : prevItem.createdAt
+                  : null
+                const itemCreatedAt = item.kind === 'message' ? item.msg.createdAt : item.createdAt
+                const showDateDivider =
+                  prevCreatedAt === null || dateDayKey(prevCreatedAt) !== dateDayKey(itemCreatedAt)
+
+                if (item.kind === 'blocked-run') {
+                  const isOpen = openBlockedRunId === item.id
+                  const label =
+                    item.totalCount === 1
+                      ? '1 blocked message'
+                      : `${item.totalCount} blocked messages`
+                  const fallbackTitle = `Blocked senders: ${item.senders
+                    .map((s) => (s.count > 1 ? `@${s.displayHandle} ×${s.count}` : `@${s.displayHandle}`))
+                    .join(', ')}`
+
+                  return (
+                    <React.Fragment key={item.id}>
+                      {showDateDivider && (
+                        <div className="ag-date-divider" role="separator">
+                          <span className="ag-date-pill">{formatDateHeading(item.createdAt)}</span>
+                        </div>
+                      )}
+
+                      <div className="ag-blocked-run" role="note">
+                        <div
+                          className={`ag-blocked-run-anchor ${isOpen ? 'is-open' : ''} ${idx === 0 ? 'is-below' : ''}`}
+                        >
+                          <button
+                            type="button"
+                            className="ag-blocked-run-trigger tabular"
+                            title={fallbackTitle}
+                            aria-expanded={isOpen}
+                            aria-describedby={`blocked-tip-${item.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setOpenBlockedRunId((curr) => (curr === item.id ? null : item.id))
+                            }}
+                          >
+                            <Ban size={10} className="ag-blocked-run-icon" aria-hidden="true" />
+                            <span>{label}</span>
+                          </button>
+
+                          <div
+                            id={`blocked-tip-${item.id}`}
+                            className="ag-blocked-run-tooltip"
+                            role="tooltip"
+                          >
+                            <span className="ag-blocked-run-tooltip-head">Blocked senders</span>
+                            <ul className="ag-blocked-run-tooltip-list">
+                              {item.senders.map((sender) => (
+                                <li key={sender.pubkey} className="ag-blocked-run-sender-row">
+                                  <span className="ag-blocked-run-sender-handle mono truncate">
+                                    @{sender.displayHandle}
+                                  </span>
+                                  {sender.count > 1 && (
+                                    <span className="ag-blocked-run-sender-count tabular">
+                                      ×{sender.count}
+                                    </span>
+                                  )}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
+                    </React.Fragment>
+                  )
+                }
+
+                const msg = item.msg
+                const prev = prevItem?.kind === 'message' ? prevItem.msg : null
                 const showUnreadDivider =
-                  !isDm && !isServer && engine.unreadDividerId !== null && msg.id === engine.unreadDividerId
+                  !isDm &&
+                  !isServer &&
+                  !msg.isBlockedPlaceholder &&
+                  engine.unreadDividerId !== null &&
+                  msg.id === engine.unreadDividerId
 
                 const grouped =
                   !showDateDivider &&
@@ -1671,7 +1830,10 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   onReact: !isDm ? handleReactUnified : undefined,
                   resolveReactorName: !isDm ? resolveReactorName : undefined,
                   onDelete:
-                    isServer && !msg.isSystem && (engine.servers.canModerate || msg.isOwn)
+                    isServer &&
+                    !msg.isSystem &&
+                    !msg.isBlockedPlaceholder &&
+                    engine.servers.canDeleteMessages
                       ? handleDeleteServerMessage
                       : undefined,
                   onInspectAuthor: handleInspectAuthor,
@@ -1681,6 +1843,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   onCopyText: () => engine.pushToast('info', 'Copied to clipboard'),
                   onNotify: (title: string) => engine.pushToast('info', title),
                   contentFilter: engine.contentFilter,
+                  senderAvatarUrl: engine.getProfilePicture(msg.pubkey),
                   senderLightningAddress: senderLud16,
                   canZapSender: senderCanZap,
                   zapTotalSats,

@@ -35,8 +35,9 @@ import type {
 } from '../types/transcription'
 import type { CashuTokenPreview, ZapTarget } from '../types/wallet'
 import { decodeCashuTokenPreview, extractCashuTokensFromText } from '../lib/cashuWallet'
-import { identiconDataUrl, pubkeyToColor, formatHandle } from '../utils/identicon'
+import { pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
+import { AvatarImg } from './AvatarImg'
 import { useContextMenu, type ContextMenuItem, type ContextMenuReaction } from './ContextMenu'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
 import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
@@ -140,6 +141,8 @@ export interface MessageItemProps {
   onNotify?: (title: string) => void
   // On-device Image Content Filter
   contentFilter?: ContentFilterEngine
+  // Verified kind: 0 profile picture URL (falls back to identicon)
+  senderAvatarUrl?: string
   // Cashu Ecash, NIP-57 Lightning Zaps & NIP-61 Nutzaps
   senderLightningAddress?: string | null
   canZapSender?: boolean
@@ -201,6 +204,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onCopyText,
     onNotify,
     contentFilter,
+    senderAvatarUrl,
     senderLightningAddress = null,
     canZapSender: canZapSenderProp,
     zapTotalSats = 0,
@@ -750,9 +754,12 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
               title={`View ${handle.full}`}
               aria-label={`View ${handle.full}`}
             >
-              <img
-                src={identiconDataUrl(message.pubkey)}
+              <AvatarImg
+                pubkey={message.pubkey}
+                pictureUrl={senderAvatarUrl}
                 alt=""
+                width={34}
+                height={34}
                 className={`ag-stream-avatar ${message.isAgnostrClient ? 'ag-avatar-agnostr' : ''}`}
                 loading="lazy"
               />

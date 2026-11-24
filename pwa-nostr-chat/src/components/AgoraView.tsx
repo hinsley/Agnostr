@@ -10,6 +10,7 @@ import {
   Ban,
   Bell,
   Bookmark,
+  Camera,
   Check,
   Copy,
   Flame,
@@ -31,6 +32,7 @@ import {
   Search,
   Share2,
   ShieldAlert,
+  Trash2,
   Upload,
   User,
   Users,
@@ -68,6 +70,7 @@ import { isNonTranslatableText } from '../lib/languageDetect.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { identiconDataUrl, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
+import { AvatarImg } from './AvatarImg.tsx'
 import type { LightboxImagePayload } from './ImageLightboxModal.tsx'
 import '../styles/agora.css'
 
@@ -1618,14 +1621,14 @@ const EditProfileModal: React.FC<{
     setSaving(true)
     try {
       const draft: AgoraProfileDraft = {
-        displayName: displayName.trim() || undefined,
-        name: name.trim() || undefined,
-        about: about.trim() || undefined,
-        picture: picture.trim() || undefined,
-        banner: banner.trim() || undefined,
-        nip05: nip05.trim() || undefined,
-        lud16: lud16.trim() || undefined,
-        website: website.trim() || undefined,
+        displayName: displayName.trim(),
+        name: name.trim(),
+        about: about.trim(),
+        picture: picture.trim(),
+        banner: banner.trim(),
+        nip05: nip05.trim(),
+        lud16: lud16.trim(),
+        website: website.trim(),
       }
       const res = await agora.updateMyProfile(draft)
       if (res.ok) {
@@ -1668,20 +1671,93 @@ const EditProfileModal: React.FC<{
         </header>
 
         <div className="ag-agora-modal-body">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <AgoraAvatar
-              pubkey={agora.myPubkey}
-              picture={picture}
-              size="md"
-              alt="Avatar preview"
-            />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', minWidth: 0 }}>
-              <span style={{ fontSize: 13, fontWeight: 600 }}>
-                {displayName.trim() || name.trim() || getProfileDisplayName(current, agora.myPubkey)}
-              </span>
-              <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                {shortPubkey(encodeNpubSafe(agora.myPubkey), 10, 6)}
-              </span>
+          <div className="ag-agora-edit-photo-card">
+            <div className="ag-agora-edit-photo-top">
+              <button
+                type="button"
+                className="ag-agora-edit-avatar-btn"
+                disabled={uploadingField !== null}
+                onClick={() => avatarFileRef.current?.click()}
+                aria-label="Upload profile photo"
+                title="Upload profile photo"
+              >
+                <AvatarImg
+                  pubkey={agora.myPubkey}
+                  pictureUrl={picture}
+                  width={72}
+                  height={72}
+                  className="ag-agora-edit-avatar-img"
+                  alt="Avatar preview"
+                />
+                <span className="ag-agora-edit-avatar-cam" aria-hidden="true">
+                  {uploadingField === 'picture' ? (
+                    <Loader2 size={14} className="ag-agora-spin" />
+                  ) : (
+                    <Camera size={14} />
+                  )}
+                </span>
+              </button>
+
+              <div className="ag-agora-edit-photo-meta">
+                <span className="ag-agora-edit-photo-name truncate">
+                  {displayName.trim() ||
+                    name.trim() ||
+                    getProfileDisplayName(current, agora.myPubkey)}
+                </span>
+                <span className="ag-agora-edit-photo-npub mono truncate">
+                  {shortPubkey(encodeNpubSafe(agora.myPubkey), 10, 6)}
+                </span>
+                <div className="ag-agora-edit-photo-actions">
+                  <input
+                    ref={avatarFileRef}
+                    type="file"
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                    onChange={(e) => void handlePhotoUpload('picture', e)}
+                  />
+                  <button
+                    type="button"
+                    className="ag-agora-pill-btn primary"
+                    disabled={uploadingField !== null}
+                    onClick={() => avatarFileRef.current?.click()}
+                  >
+                    {uploadingField === 'picture' ? (
+                      <Loader2 size={13} className="ag-agora-spin" />
+                    ) : (
+                      <Camera size={13} />
+                    )}
+                    <span>{uploadingField === 'picture' ? 'Uploading…' : 'Upload Photo'}</span>
+                  </button>
+                  {picture.trim() && (
+                    <button
+                      type="button"
+                      className="ag-agora-pill-btn"
+                      disabled={uploadingField !== null}
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setPicture('')
+                      }}
+                    >
+                      <Trash2 size={13} />
+                      <span>Remove</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="ag-agora-edit-photo-url-wrap">
+              <label className="ag-agora-label" htmlFor="ag-agora-prof-picture">
+                Direct Image URL (optional HTTPS)
+              </label>
+              <input
+                id="ag-agora-prof-picture"
+                type="url"
+                className="ag-agora-input"
+                value={picture}
+                onChange={(e) => setPicture(e.target.value)}
+                placeholder="https://…"
+              />
             </div>
           </div>
 
@@ -1727,42 +1803,6 @@ const EditProfileModal: React.FC<{
               placeholder="Tell people on Nostr about yourself…"
               maxLength={500}
             />
-          </div>
-
-          <div className="ag-agora-field">
-            <label className="ag-agora-label" htmlFor="ag-agora-prof-picture">
-              Avatar URL
-            </label>
-            <div className="ag-agora-input-with-btn">
-              <input
-                id="ag-agora-prof-picture"
-                type="url"
-                className="ag-agora-input"
-                value={picture}
-                onChange={(e) => setPicture(e.target.value)}
-                placeholder="https://…"
-              />
-              <input
-                ref={avatarFileRef}
-                type="file"
-                accept="image/*"
-                style={{ display: 'none' }}
-                onChange={(e) => void handlePhotoUpload('picture', e)}
-              />
-              <button
-                type="button"
-                className="ag-agora-pill-btn"
-                disabled={uploadingField !== null}
-                onClick={() => avatarFileRef.current?.click()}
-              >
-                {uploadingField === 'picture' ? (
-                  <Loader2 size={13} className="ag-agora-spin" />
-                ) : (
-                  <Upload size={13} />
-                )}
-                <span>Upload</span>
-              </button>
-            </div>
           </div>
 
           <div className="ag-agora-field">
@@ -3058,12 +3098,35 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
 
                 <div className="ag-agora-profile-body">
                   <div className="ag-agora-profile-top-row">
-                    <AgoraAvatar
-                      pubkey={agora.profileView.pubkey}
-                      picture={profileTarget?.picture}
-                      size="lg"
-                      alt={profileTargetName}
-                    />
+                    {isMyProfileOpen ? (
+                      <button
+                        type="button"
+                        className="ag-agora-profile-avatar-edit-btn"
+                        onClick={() => {
+                          onPlaySound?.('click')
+                          setEditProfileOpen(true)
+                        }}
+                        aria-label="Change profile picture"
+                        title="Change profile picture"
+                      >
+                        <AgoraAvatar
+                          pubkey={agora.profileView.pubkey}
+                          picture={profileTarget?.picture}
+                          size="lg"
+                          alt={profileTargetName}
+                        />
+                        <span className="ag-agora-profile-avatar-cam" aria-hidden="true">
+                          <Camera size={14} />
+                        </span>
+                      </button>
+                    ) : (
+                      <AgoraAvatar
+                        pubkey={agora.profileView.pubkey}
+                        picture={profileTarget?.picture}
+                        size="lg"
+                        alt={profileTargetName}
+                      />
+                    )}
 
                     <div className="ag-agora-profile-actions">
                       {isMyProfileOpen ? (

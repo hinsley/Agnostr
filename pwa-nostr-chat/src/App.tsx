@@ -2162,6 +2162,10 @@ export function App() {
                 onOpenCommandPalette={() => setCmdkOpen(true)}
                 onExpandRadar={handleExpandRadar}
                 onOpenSettings={handleOpenSettings}
+                onOpenOwnAgoraProfile={() => {
+                  handleSelectWorkspace('agora')
+                  engine.agora.openProfile(engine.identity.masterPubkey)
+                }}
                 amailOpen={false}
                 onOpenAmail={handleOpenAmail}
                 onOpenAmailCompose={handleOpenAmailCompose}

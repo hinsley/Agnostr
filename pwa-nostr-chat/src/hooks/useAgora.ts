@@ -57,6 +57,7 @@ import {
   MAX_MEDIA_BLOB_BYTES,
   uploadBlobToBlossom,
 } from '../lib/blossom.ts'
+import { verifyEventCached } from '../lib/bitchatProtocol.ts'
 import { normalizeRelayUrl } from '../lib/geoRelays.ts'
 import { encodeNpubSafe, type IdentityManager } from '../lib/identity.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
@@ -150,6 +151,31 @@ function bucketToStats(bucket: NoteStatsBucket, myPubkey: string): AgoraNoteStat
   }
 }
 
+function sanitizeHttpsPictureUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  if (!trimmed || !/^https:\/\//i.test(trimmed)) return undefined
+  try {
+    const parsed = new URL(trimmed)
+    return parsed.protocol === 'https:' ? parsed.toString() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function parseVerifiedProfileEvent(ev: NostrEvent): AgoraProfile | null {
+  if (!ev || ev.kind !== KIND_AGORA_PROFILE || !isHex64(ev.pubkey)) return null
+  if (!verifyEventCached(ev)) return null
+  const parsed = parseAgoraProfile(ev)
+  if (!parsed) return null
+  const verifiedPubkey = ev.pubkey.toLowerCase()
+  return {
+    ...parsed,
+    pubkey: verifiedPubkey,
+    picture: sanitizeHttpsPictureUrl(parsed.picture),
+  }
+}
+
 function loadCachedProfiles(): Record<string, AgoraProfile> {
   try {
     const raw = localStorage.getItem(AGORA_PROFILES_STORAGE_KEY)
@@ -169,7 +195,7 @@ function loadCachedProfiles(): Record<string, AgoraProfile> {
         displayName:
           typeof entry.displayName === 'string' ? entry.displayName.slice(0, 80) : undefined,
         about: typeof entry.about === 'string' ? entry.about.slice(0, 1200) : undefined,
-        picture: sanitizeHttpUrl(entry.picture),
+        picture: sanitizeHttpsPictureUrl(entry.picture),
         banner: sanitizeHttpUrl(entry.banner),
         nip05: typeof entry.nip05 === 'string' ? entry.nip05.slice(0, 160) : undefined,
         lud16: typeof entry.lud16 === 'string' ? entry.lud16.slice(0, 160) : undefined,
@@ -620,8 +646,15 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       const updates: Record<string, AgoraProfile> = {}
       let changed = false
 
-      for (const profile of incoming) {
-        const existing = profilesRef.current[profile.pubkey]
+      for (const rawProfile of incoming) {
+        if (!isHex64(rawProfile.pubkey)) continue
+        const pk = rawProfile.pubkey.toLowerCase()
+        const profile: AgoraProfile = {
+          ...rawProfile,
+          pubkey: pk,
+          picture: sanitizeHttpsPictureUrl(rawProfile.picture),
+        }
+        const existing = profilesRef.current[pk]
         if (existing && existing.updatedAt > profile.updatedAt) continue
         if (
           existing &&
@@ -635,11 +668,11 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         ) {
           continue
         }
-        updates[profile.pubkey] = profile
-        profileTouchedAtRef.current.set(profile.pubkey, nowMs)
-        profileNegativeRef.current.delete(profile.pubkey)
+        updates[pk] = profile
+        profileTouchedAtRef.current.set(pk, nowMs)
+        profileNegativeRef.current.delete(pk)
         if (profile.lud16) {
-          onDiscoverLud16Ref.current?.(profile.pubkey, profile.lud16)
+          onDiscoverLud16Ref.current?.(pk, profile.lud16)
         }
         changed = true
       }
@@ -740,7 +773,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
           timeoutMs: 3600,
           targetEose: Math.min(2, relays.length),
           onEvent: (ev) => {
-            const parsed = parseAgoraProfile(ev)
+            const parsed = parseVerifiedProfileEvent(ev)
             if (!parsed) return
             const prev = foundByPk.get(parsed.pubkey)
             if (!prev || parsed.updatedAt > prev.updatedAt) {
@@ -1081,7 +1114,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         onEvent: (ev) => {
           if (ev.pubkey.toLowerCase() !== myPubkey) return
           if (ev.kind === KIND_AGORA_PROFILE) {
-            const p = parseAgoraProfile(ev)
+            const p = parseVerifiedProfileEvent(ev)
             if (p && (!bestProfile || p.updatedAt > bestProfile.updatedAt)) {
               bestProfile = p
             }
@@ -1139,6 +1172,20 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       cancel()
     }
   }, [active, myPubkey, queryOneShot, ingestProfilesBatch, ensureProfiles])
+
+  // Lightweight boot-time fetch of our own master `kind: 0` profile even before visiting Agora
+  const bootSelfProfileFetchedForRef = useRef<string>('')
+  useEffect(() => {
+    if (!isHex64(myPubkey)) return
+    if (bootSelfProfileFetchedForRef.current === myPubkey) return
+    const timer = window.setTimeout(() => {
+      bootSelfProfileFetchedForRef.current = myPubkey
+      ensureProfiles([myPubkey], true)
+    }, 350)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [myPubkey, ensureProfiles])
 
   // 2. Live notifications subscription while Agora is active
   useEffect(() => {
@@ -1998,7 +2045,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         const signed = await signMasterEvent(template)
         const relays = Array.from(new Set([...writeRelaysRef.current, ...AGORA_PROFILE_RELAYS]))
         const res = await relayPool.publish(relays, signed)
-        const parsed = parseAgoraProfile(signed)
+        const parsed = parseVerifiedProfileEvent(signed)
         if (parsed) {
           ingestProfilesBatch([parsed])
         }
@@ -2580,7 +2627,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
               const parsed = parseAgoraNote(ev)
               if (parsed) noteMap.set(parsed.id, parsed)
             } else if (ev.kind === KIND_AGORA_PROFILE) {
-              const parsed = parseAgoraProfile(ev)
+              const parsed = parseVerifiedProfileEvent(ev)
               if (parsed) {
                 const prev = profMap.get(parsed.pubkey)
                 if (!prev || parsed.updatedAt > prev.updatedAt) {
@@ -2707,6 +2754,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     }
 
     pendingItemsRef.current.clear()
+    bootSelfProfileFetchedForRef.current = ''
     profileTouchedAtRef.current.clear()
     profileQueueRef.current.clear()
     profileInFlightRef.current.clear()

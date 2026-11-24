@@ -276,7 +276,6 @@
 /* Workspace Active States */
 .ag-rail-agora.active,
 .ag-rail-bitchat.active,
-.ag-rail-groups.active,
 .ag-rail-mail.active,
 .ag-rail-wallet.active {
   color: var(--accent);
@@ -1895,6 +1894,368 @@
 }
 
 /* --------------------------------------------------------------------------
+   Bottom User Dock Quick Profile Card Popover (Discord-inspired, 4-theme matte)
+   -------------------------------------------------------------------------- */
+.ag-profile-bar-btn.active {
+  background-color: var(--bg-hover);
+}
+
+@keyframes ag-qp-pop-up {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.ag-quick-profile-popover {
+  position: fixed;
+  z-index: var(--z-popover, 60);
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 96px);
+  overflow-y: auto;
+  padding: 14px;
+  border-radius: 14px;
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  animation: ag-qp-pop-up 140ms var(--ease-out);
+  box-sizing: border-box;
+}
+
+.ag-qp-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.ag-qp-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ag-qp-avatar-btn {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  cursor: pointer;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  transition:
+    border-color var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
+}
+
+.ag-qp-avatar-btn:hover:not(:disabled),
+.ag-qp-avatar-btn:focus-visible {
+  border-color: var(--accent);
+}
+
+.ag-qp-avatar-btn:disabled {
+  cursor: wait;
+}
+
+.ag-qp-avatar {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-full);
+  display: block;
+  object-fit: cover;
+}
+
+.ag-qp-avatar-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-full);
+  background-color: rgba(0, 0, 0, 0.46);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease;
+}
+
+.ag-qp-avatar-btn:hover .ag-qp-avatar-overlay,
+.ag-qp-avatar-btn:focus-visible .ag-qp-avatar-overlay,
+.ag-qp-avatar-btn:disabled .ag-qp-avatar-overlay {
+  opacity: 1;
+}
+
+.ag-qp-status-ring {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 13px;
+  height: 13px;
+  border-radius: var(--radius-full);
+  border: 2.5px solid var(--bg-elevated);
+  box-sizing: border-box;
+}
+
+.ag-qp-status-ring.online {
+  background-color: var(--status-ok);
+}
+
+.ag-qp-status-ring.reconnecting {
+  background-color: var(--status-warn);
+}
+
+.ag-qp-photo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-qp-photo-btn,
+.ag-qp-photo-remove {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-qp-photo-btn {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+}
+
+.ag-qp-photo-btn:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.ag-qp-photo-remove {
+  background-color: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+}
+
+.ag-qp-photo-remove:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--status-danger) 12%, transparent);
+  color: var(--status-danger);
+}
+
+.ag-qp-photo-btn:disabled,
+.ag-qp-photo-remove:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.ag-qp-error {
+  font-size: 11.5px;
+  color: var(--status-danger);
+  background-color: color-mix(in srgb, var(--status-danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-danger) 28%, transparent);
+  border-radius: var(--radius-xs);
+  padding: 6px 8px;
+  line-height: 1.35;
+}
+
+.ag-qp-name-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ag-qp-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ag-qp-display-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  min-width: 0;
+}
+
+.ag-qp-name-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ag-qp-name-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--radius-xs);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+  transition: border-color var(--dur-fast) ease;
+}
+
+.ag-qp-name-input:focus {
+  border-color: var(--accent);
+}
+
+.ag-qp-icon-btn {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-qp-icon-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-qp-icon-btn.primary {
+  background-color: var(--accent);
+  color: #ffffff;
+}
+
+.ag-qp-icon-btn.primary:hover {
+  filter: brightness(1.06);
+}
+
+.ag-qp-status-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.3;
+  min-width: 0;
+}
+
+.ag-qp-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.ag-qp-status-dot.online {
+  background-color: var(--status-ok);
+}
+
+.ag-qp-status-dot.reconnecting {
+  background-color: var(--status-warn);
+}
+
+.ag-qp-npub-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.ag-qp-npub-code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-qp-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: var(--radius-xs);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-qp-copy-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+
+.ag-qp-copy-btn.copied {
+  color: var(--status-ok);
+  border-color: color-mix(in srgb, var(--status-ok) 45%, transparent);
+}
+
+.ag-qp-footer {
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ag-qp-agora-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  transition:
+    background-color var(--dur-fast) ease,
+    filter var(--dur-fast) ease;
+}
+
+.ag-qp-agora-btn:hover {
+  filter: brightness(1.06);
+}
+
+/* --------------------------------------------------------------------------
    Mobile Responsive Server Modal & Discord Drawer Adjustments (< 868px)
    -------------------------------------------------------------------------- */
 @media (max-width: 867px) {
@@ -1905,7 +2266,8 @@
   .ag-srv-modal .ag-input,
   .ag-srv-modal .ag-textarea,
   .ag-srv-modal select,
-  .ag-srv-discord-pane .ag-srv-inline-input {
+  .ag-srv-discord-pane .ag-srv-inline-input,
+  .ag-qp-name-input {
     font-size: 16px;
   }
 

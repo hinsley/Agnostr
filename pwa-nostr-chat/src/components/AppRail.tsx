@@ -15,7 +15,6 @@ import {
   Plus,
   Search,
   Settings,
-  Users,
   Wallet,
   Waves,
 } from 'lucide-react'
@@ -98,7 +97,6 @@ export const AppRail: React.FC<AppRailProps> = ({
   onToggleSuiteLauncher,
   onSelectWorkspace,
   onSelectChatTab,
-  onSelectGroups,
   onSelectServer,
   onOpenServerHub,
   onOpenServerSettings,
@@ -189,7 +187,6 @@ export const AppRail: React.FC<AppRailProps> = ({
   const isAgoraActive = workspace === 'agora'
   const isBitchatActive = workspace === 'chat' && listTab === 'bitchat'
   const isPeopleActive = workspace === 'chat' && listTab === 'dms'
-  const isGroupsActive = workspace === 'chat' && listTab === 'servers'
   const isMailActive = workspace === 'mail'
   const isWalletActive = workspace === 'wallet'
 
@@ -199,13 +196,6 @@ export const AppRail: React.FC<AppRailProps> = ({
   const mailUnread = engine.amail.unreadInboxCount
   const walletSats = engine.wallet.totalBalanceSats
   const activeCall = engine.calls.activeCall
-
-  let totalServerUnread = 0
-  let totalServerMentions = 0
-  for (const s of engine.servers.joinedServers) {
-    totalServerUnread += Math.max(s.unreadCount, engine.servers.getServerUnreadCount(s.id))
-    totalServerMentions += Math.max(s.mentionCount, engine.servers.getServerMentionCount(s.id))
-  }
 
   const openServerMenu = (e: React.MouseEvent, server: ServerSummary) => {
     hideTooltip()
@@ -356,7 +346,7 @@ export const AppRail: React.FC<AppRailProps> = ({
         </button>
       </div>
 
-      {/* Consistent 6-App Primary Stack */}
+      {/* Consistent Primary App Stack */}
       <div className="ag-rail-group" role="list" aria-label="Agnostr apps">
         {/* 1. Agora */}
         <div className="ag-rail-slot" role="listitem">
@@ -465,43 +455,7 @@ export const AppRail: React.FC<AppRailProps> = ({
           </button>
         </div>
 
-        {/* 4. Groups */}
-        <div className="ag-rail-slot" role="listitem">
-          <button
-            type="button"
-            className={`ag-rail-app-tile ag-rail-groups ${isGroupsActive ? 'active' : ''} ${totalServerUnread > 0 || totalServerMentions > 0 ? 'has-unread' : ''}`}
-            onClick={() => {
-              onPlaySound?.('click')
-              if (onSelectGroups) {
-                onSelectGroups()
-              } else {
-                if (workspace !== 'chat') onSelectWorkspace('chat')
-                onSelectChatTab('servers')
-              }
-            }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Groups', 'Alt+4')}
-            onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'Groups', 'Alt+4')}
-            onBlur={hideTooltip}
-            aria-label="Groups"
-            aria-current={isGroupsActive ? 'page' : undefined}
-          >
-            <span className="ag-rail-indicator" aria-hidden="true" />
-            <Users size={18} strokeWidth={isGroupsActive ? 2.15 : 1.8} />
-            <span className="ag-rail-app-label">Groups</span>
-            {totalServerMentions > 0 ? (
-              <span className="ag-rail-badge ping tabular">
-                {formatBadgeCount(totalServerMentions)}
-              </span>
-            ) : totalServerUnread > 0 ? (
-              <span className="ag-rail-badge unread tabular">
-                {formatBadgeCount(totalServerUnread)}
-              </span>
-            ) : null}
-          </button>
-        </div>
-
-        {/* 5. Agmail */}
+        {/* 4. Agmail */}
         <div className="ag-rail-slot" role="listitem">
           <button
             type="button"

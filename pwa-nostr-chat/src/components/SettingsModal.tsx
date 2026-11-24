@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { FormEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -8,6 +8,7 @@ import {
   Bell,
   BellOff,
   BellRing,
+  Camera,
   Captions,
   Check,
   ChevronDown,
@@ -71,7 +72,8 @@ import { DEFAULT_TRANSCRIPTION_MODEL_ID } from '../lib/transcriptionModels.ts'
 import { DEFAULT_PUSH_BRIDGE_URL, DEFAULT_VAPID_PUBLIC_KEY } from '../lib/storage.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { bitchatAudio, type SoundCue } from '../utils/sound.ts'
-import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import { AvatarImg } from './AvatarImg.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 
 export type SettingsTab =
@@ -320,6 +322,75 @@ export function SettingsModal({
   const [lud16Draft, setLud16Draft] = useState(() => engine.zaps.lightningAddress ?? '')
   const [lud16Saving, setLud16Saving] = useState(false)
   const [lud16Feedback, setLud16Feedback] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [profilePicBusy, setProfilePicBusy] = useState(false)
+  const profilePicInputRef = useRef<HTMLInputElement | null>(null)
+
+  const myProfilePicture = engine.getProfilePicture(identity.masterPubkey)
+  const ensureProfilePictures = engine.ensureProfilePictures
+
+  useEffect(() => {
+    if (!open) return
+    const pks = new Set<string>([identity.masterPubkey, identity.activePubkey])
+    if (activeTab === 'privacy') {
+      for (const entry of trustedPubkeys) pks.add(entry.pubkey)
+      for (const pk of blockedPubkeys) pks.add(pk)
+    }
+    ensureProfilePictures(Array.from(pks))
+  }, [
+    open,
+    activeTab,
+    identity.masterPubkey,
+    identity.activePubkey,
+    trustedPubkeys,
+    blockedPubkeys,
+    ensureProfilePictures,
+  ])
+
+  const handleProfilePictureSelect = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file || profilePicBusy) return
+    setProfilePicBusy(true)
+    try {
+      const res = await engine.updateMyProfilePicture(file)
+      if (res.ok) {
+        onPlaySound?.('send')
+        engine.pushToast('success', 'Profile picture updated')
+      } else {
+        engine.pushToast('error', 'Profile picture update failed', res.error)
+      }
+    } catch (err) {
+      engine.pushToast(
+        'error',
+        'Profile picture update failed',
+        err instanceof Error ? err.message : 'Unable to upload image.',
+      )
+    } finally {
+      setProfilePicBusy(false)
+    }
+  }
+
+  const handleRemoveProfilePicture = async () => {
+    if (profilePicBusy) return
+    setProfilePicBusy(true)
+    try {
+      const res = await engine.updateMyProfilePicture(null)
+      if (res.ok) {
+        onPlaySound?.('click')
+        engine.pushToast('success', 'Profile picture removed')
+      } else {
+        engine.pushToast('error', 'Unable to remove picture', res.error)
+      }
+    } catch (err) {
+      engine.pushToast(
+        'error',
+        'Unable to remove picture',
+        err instanceof Error ? err.message : 'Failed to clear profile picture.',
+      )
+    } finally {
+      setProfilePicBusy(false)
+    }
+  }
 
   useEffect(() => {
     setLud16Draft(engine.zaps.lightningAddress ?? '')
@@ -946,8 +1017,9 @@ export function SettingsModal({
   const renderProfileTab = () => (
     <div className="ag-set-pane-stack">
       <div className="ag-set-profile-hero">
-        <img
-          src={identiconDataUrl(identity.activePubkey)}
+        <AvatarImg
+          pubkey={identity.activePubkey}
+          pictureUrl={engine.getProfilePicture(identity.activePubkey)}
           alt=""
           width={56}
           height={56}
@@ -982,6 +1054,62 @@ export function SettingsModal({
           <RefreshCw size={13} />
           <span>Rotate</span>
         </button>
+      </div>
+
+      {/* Global Profile Picture (verified kind: 0) */}
+      <div className="ag-set-group">
+        <span className="ag-set-label">Profile Picture</span>
+        <div className="ag-set-pic-card">
+          <div className="ag-set-pic-row">
+            <AvatarImg
+              pubkey={identity.masterPubkey}
+              pictureUrl={myProfilePicture}
+              alt=""
+              width={52}
+              height={52}
+              className="ag-set-pic-avatar"
+            />
+            <div className="ag-set-pic-copy">
+              <div className="ag-set-pic-actions">
+                <input
+                  ref={profilePicInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={(e) => void handleProfilePictureSelect(e)}
+                />
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-primary ag-btn-sm"
+                  disabled={profilePicBusy}
+                  onClick={() => profilePicInputRef.current?.click()}
+                >
+                  {profilePicBusy ? (
+                    <Loader2 size={13} className="ag-spin" />
+                  ) : (
+                    <Camera size={13} />
+                  )}
+                  <span>{profilePicBusy ? 'Updating…' : 'Change Photo'}</span>
+                </button>
+                {myProfilePicture && (
+                  <button
+                    type="button"
+                    className="ag-btn ag-btn-secondary ag-btn-sm"
+                    disabled={profilePicBusy}
+                    onClick={() => void handleRemoveProfilePicture()}
+                  >
+                    <Trash2 size={13} />
+                    <span>Remove</span>
+                  </button>
+                )}
+              </div>
+              <p className="ag-set-helper">
+                Your verified <span className="mono">kind: 0</span> picture is shared across Agora,
+                People, and Groups. Bitchat geohash aliases stay private.
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Shareable Direct Message Link & QR Code */}
@@ -2338,8 +2466,9 @@ export function SettingsModal({
           <div className="ag-set-card-list" role="list">
             {trustedPubkeys.map((entry) => (
               <div key={entry.pubkey} role="listitem" className="ag-set-peer-row">
-                <img
-                  src={identiconDataUrl(entry.pubkey)}
+                <AvatarImg
+                  pubkey={entry.pubkey}
+                  pictureUrl={engine.getProfilePicture(entry.pubkey)}
                   alt=""
                   width={32}
                   height={32}
@@ -2428,8 +2557,9 @@ export function SettingsModal({
               const label = known?.displayHandle ?? shortPubkey(pk, 10, 6)
               return (
                 <div key={pk} role="listitem" className="ag-set-peer-row">
-                  <img
-                    src={identiconDataUrl(pk)}
+                  <AvatarImg
+                    pubkey={pk}
+                    pictureUrl={engine.getProfilePicture(pk)}
                     alt=""
                     width={32}
                     height={32}
