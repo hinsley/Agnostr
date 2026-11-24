@@ -10,6 +10,7 @@ import type {
   DeviceSyncAmailChunkPacket,
   DeviceSyncCrdtState,
   DeviceSyncHelloPacket,
+  DeviceSyncMergeDiff,
   DeviceSyncMessageScopeKind,
   DeviceSyncMsgChunkPacket,
   DeviceSyncMsgDigests,
@@ -23,6 +24,7 @@ import type {
   SyncedDmPeerNameRecord,
   SyncedPeerNoteRecord,
   SyncedRecentMessagesTail,
+  SyncedServerOrderState,
   SyncedServerRecord,
   SyncedTrustedRecord,
   SyncedWalletState,
@@ -110,6 +112,7 @@ export function createEmptyCrdtState(): DeviceSyncCrdtState {
   return {
     v: 1,
     servers: {},
+    serverOrder: { updatedAt: 0, ids: [] },
     trusted: {},
     blocked: {},
     pinned: { updatedAt: 0, items: [] },
@@ -142,6 +145,35 @@ function areServersEqual(a: ServerSummary | undefined, b: ServerSummary | undefi
   if (!a && !b) return true
   if (!a || !b) return false
   return JSON.stringify(stripServerRuntimeCounts(a)) === JSON.stringify(stripServerRuntimeCounts(b))
+}
+
+function areStringListsEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
+function sanitizeServerOrder(raw: unknown): SyncedServerOrderState {
+  if (!isRecord(raw)) return { updatedAt: 0, ids: [] }
+  const updatedAt =
+    typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) && raw.updatedAt > 0
+      ? Math.floor(raw.updatedAt)
+      : 0
+  const ids: string[] = []
+  if (Array.isArray(raw.ids)) {
+    const seen = new Set<string>()
+    for (const item of raw.ids) {
+      if (typeof item !== 'string') continue
+      const clean = item.trim().slice(0, 160)
+      if (!clean || seen.has(clean)) continue
+      seen.add(clean)
+      ids.push(clean)
+      if (ids.length >= 128) break
+    }
+  }
+  return { updatedAt, ids }
 }
 
 function arePinnedListsEqual(a: readonly PinnedChannel[], b: readonly PinnedChannel[]): boolean {
@@ -238,6 +270,31 @@ export function reconcileLocalSnapshotIntoCrdt(
         changed = true
       }
     }
+  }
+
+  // 1b. Joined Servers custom order (LWW register)
+  const prevOrder = prev.serverOrder ?? { updatedAt: 0, ids: [] }
+  const nextOrderIds: string[] = []
+  const seenOrderIds = new Set<string>()
+  for (const s of snapshot.joinedServers) {
+    const id = typeof s.id === 'string' ? s.id.trim().slice(0, 160) : ''
+    if (!id || seenOrderIds.has(id)) continue
+    seenOrderIds.add(id)
+    nextOrderIds.push(id)
+    if (nextOrderIds.length >= 128) break
+  }
+  let nextServerOrder: SyncedServerOrderState = prevOrder
+  if (!areStringListsEqual(prevOrder.ids, nextOrderIds)) {
+    const updatedAt = isInitialSeed
+      ? nextOrderIds.length > 0
+        ? 1
+        : 0
+      : Math.max(nowMs, prevOrder.updatedAt + 1)
+    nextServerOrder = {
+      updatedAt,
+      ids: nextOrderIds,
+    }
+    changed = true
   }
 
   // 2. Trusted Peers (LWW-Element-Set)
@@ -492,6 +549,7 @@ export function reconcileLocalSnapshotIntoCrdt(
     crdt: {
       v: 1,
       servers: nextServers,
+      serverOrder: nextServerOrder,
       trusted: nextTrusted,
       blocked: nextBlocked,
       pinned: nextPinned,
@@ -505,18 +563,7 @@ export function reconcileLocalSnapshotIntoCrdt(
   }
 }
 
-export interface CrdtMergeDiff {
-  serversChanged: boolean
-  trustedChanged: boolean
-  blockedChanged: boolean
-  pinnedChanged: boolean
-  dmClearedChanged: boolean
-  lud16Changed: boolean
-  nicknameChanged: boolean
-  peerNotesChanged: boolean
-  dmPeerNamesChanged: boolean
-  itemsUpdated: number
-}
+export type CrdtMergeDiff = DeviceSyncMergeDiff
 
 /**
  * Commutative, idempotent, conflict-free CRDT merge between two same-key devices.
@@ -528,6 +575,7 @@ export function mergeCrdtStates(
 ): { merged: DeviceSyncCrdtState; changed: boolean; diff: CrdtMergeDiff } {
   const diff: CrdtMergeDiff = {
     serversChanged: false,
+    serverOrderChanged: false,
     trustedChanged: false,
     blockedChanged: false,
     pinnedChanged: false,
@@ -600,6 +648,36 @@ export function mergeCrdtStates(
       diff.serversChanged = true
       diff.itemsUpdated += 1
     }
+  }
+
+  // 1b. Merge Joined Servers Custom Order (LWW register)
+  const localServerOrder = local.serverOrder ?? { updatedAt: 0, ids: [] }
+  const remoteServerOrder = remote.serverOrder ?? { updatedAt: 0, ids: [] }
+  const mergedServerOrder: SyncedServerOrderState =
+    remoteServerOrder.updatedAt > localServerOrder.updatedAt
+      ? {
+          updatedAt: remoteServerOrder.updatedAt,
+          ids: [...remoteServerOrder.ids],
+        }
+      : {
+          updatedAt: localServerOrder.updatedAt,
+          ids: [...localServerOrder.ids],
+        }
+  const localActiveServerIds = extractActiveServers(local).map((s) => s.id)
+  const mergedActiveServerIds = extractActiveServers({
+    ...local,
+    servers: mergedServers,
+    serverOrder: mergedServerOrder,
+  }).map((s) => s.id)
+  if (!areStringListsEqual(localActiveServerIds, mergedActiveServerIds)) {
+    diff.serversChanged = true
+    diff.serverOrderChanged = true
+    diff.itemsUpdated += 1
+  } else if (
+    mergedServerOrder.updatedAt !== localServerOrder.updatedAt ||
+    !areStringListsEqual(localServerOrder.ids, mergedServerOrder.ids)
+  ) {
+    diff.serverOrderChanged = true
   }
 
   // 2. Merge Blocked Peers
@@ -853,6 +931,7 @@ export function mergeCrdtStates(
 
   const changed =
     diff.serversChanged ||
+    Boolean(diff.serverOrderChanged) ||
     diff.trustedChanged ||
     diff.blockedChanged ||
     diff.pinnedChanged ||
@@ -866,6 +945,7 @@ export function mergeCrdtStates(
     merged: {
       v: 1,
       servers: mergedServers,
+      serverOrder: mergedServerOrder,
       trusted: mergedTrusted,
       blocked: mergedBlocked,
       pinned: mergedPinned,
@@ -881,9 +961,26 @@ export function mergeCrdtStates(
 }
 
 export function extractActiveServers(crdt: DeviceSyncCrdtState): ServerSummary[] {
+  const orderIds = crdt.serverOrder?.ids ?? []
+  const orderIndex = new Map<string, number>()
+  for (let i = 0; i < orderIds.length; i += 1) {
+    if (!orderIndex.has(orderIds[i])) {
+      orderIndex.set(orderIds[i], i)
+    }
+  }
   return Object.values(crdt.servers)
-    .filter((r): r is SyncedServerRecord & { summary: ServerSummary } => r.joinedAt > r.leftAt && Boolean(r.summary))
-    .sort((a, b) => b.joinedAt - a.joinedAt)
+    .filter(
+      (r): r is SyncedServerRecord & { summary: ServerSummary } =>
+        r.joinedAt > r.leftAt && Boolean(r.summary)
+    )
+    .sort((a, b) => {
+      const idxA = orderIndex.get(a.id)
+      const idxB = orderIndex.get(b.id)
+      if (idxA !== undefined && idxB !== undefined) return idxA - idxB
+      if (idxA !== undefined) return -1
+      if (idxB !== undefined) return 1
+      return b.joinedAt - a.joinedAt
+    })
     .map((r) => r.summary)
 }
 
@@ -963,6 +1060,7 @@ export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
           s.summary?.bannedPubkeys.join(',') ?? '',
         ]
       }),
+    serverOrder: [crdt.serverOrder?.updatedAt ?? 0, crdt.serverOrder?.ids ?? []],
     trusted: Object.keys(crdt.trusted)
       .sort()
       .map((k) => {
@@ -1032,6 +1130,7 @@ export function fitCheckpointStateWithinBudget(
   const base: DeviceSyncCrdtState = {
     v: 1,
     servers: crdt.servers,
+    serverOrder: crdt.serverOrder ?? { updatedAt: 0, ids: [] },
     trusted: crdt.trusted,
     blocked: crdt.blocked,
     pinned: crdt.pinned,
@@ -1580,9 +1679,12 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     recentMessages = raw.recentMessages as SyncedRecentMessagesTail
   }
 
+  const serverOrder = sanitizeServerOrder(raw.serverOrder)
+
   return {
     v: 1,
     servers,
+    serverOrder,
     trusted,
     blocked,
     pinned: { updatedAt: pinnedUpdatedAt, items: pinnedItems },

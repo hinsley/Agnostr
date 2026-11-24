@@ -116,7 +116,11 @@
   overflow-x: hidden;
   scrollbar-width: none;
   -ms-overflow-style: none;
-  padding: 2px 0 6px;
+  padding: 6px 0 8px;
+}
+
+.ag-rail-servers.is-reordering {
+  touch-action: none;
 }
 
 .ag-rail-servers::-webkit-scrollbar {
@@ -331,6 +335,55 @@
   font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0.03em;
+}
+
+/* Tactile Drag-to-Reorder States (Desktop Rail & Mobile Group Strip) */
+.ag-rail-servers .ag-rail-srv,
+.ag-srv-mobile-rail .ag-rail-tile {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ag-rail-slot[draggable='true'] .ag-rail-srv {
+  cursor: grab;
+}
+
+.ag-rail-slot.is-dragging {
+  z-index: 3;
+}
+
+.ag-rail-slot.is-dragging .ag-rail-srv {
+  opacity: 0.62;
+  cursor: grabbing;
+  transform: scale(1.06);
+  border-radius: 10px;
+  box-shadow:
+    0 0 0 2px var(--accent),
+    var(--shadow-md);
+}
+
+.ag-rail-slot.drop-before::before,
+.ag-rail-slot.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 34px;
+  height: 2.5px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 65%, transparent);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.ag-rail-slot.drop-before::before {
+  top: -5px;
+}
+
+.ag-rail-slot.drop-after::after {
+  bottom: -5px;
 }
 
 /* Add / Join Group '+' Squircle */
@@ -1177,6 +1230,10 @@
 
 .ag-srv-mobile-rail::-webkit-scrollbar {
   display: none;
+}
+
+.ag-srv-mobile-rail.is-reordering {
+  touch-action: none;
 }
 
 .ag-srv-mobile-main {

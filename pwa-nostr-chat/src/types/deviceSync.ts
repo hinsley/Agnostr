@@ -85,6 +85,12 @@ export interface SyncedBlockedRecord {
   removedAt: number
 }
 
+/** LWW-Register for custom Joined Groups / Servers sidebar ordering */
+export interface SyncedServerOrderState {
+  updatedAt: number
+  ids: string[]
+}
+
 /** LWW-Register for ordered Pinned Bitchat Channels */
 export interface SyncedPinnedState {
   updatedAt: number
@@ -140,6 +146,7 @@ export interface SyncedRecentMessagesTail {
 export interface DeviceSyncCrdtState {
   v: 1
   servers: Record<string, SyncedServerRecord>
+  serverOrder?: SyncedServerOrderState
   trusted: Record<string, SyncedTrustedRecord>
   blocked: Record<string, SyncedBlockedRecord>
   pinned: SyncedPinnedState
@@ -263,6 +270,21 @@ export type DeviceSyncWirePacket =
   | DeviceSyncMsgChunkPacket
   | DeviceSyncAmailChunkPacket
   | DeviceSyncWalletChunkPacket
+
+/** Diff flags returned by CRDT merges between same-key devices */
+export interface DeviceSyncMergeDiff {
+  serversChanged: boolean
+  serverOrderChanged?: boolean
+  trustedChanged: boolean
+  blockedChanged: boolean
+  pinnedChanged: boolean
+  dmClearedChanged: boolean
+  lud16Changed: boolean
+  nicknameChanged: boolean
+  peerNotesChanged: boolean
+  dmPeerNamesChanged: boolean
+  itemsUpdated: number
+}
 
 /** Persisted local CRDT journal + sync settings (under `agnostr:v2:` prefix) */
 export interface PersistedDeviceSyncState {

@@ -2991,6 +2991,28 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     [mutateVirtualServer, pool, identityManager]
   )
 
+  const reorderJoinedServers = useCallback((fromIndex: number, toIndex: number) => {
+    setJoinedServers((prev) => {
+      if (
+        !Number.isInteger(fromIndex) ||
+        !Number.isInteger(toIndex) ||
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= prev.length ||
+        toIndex >= prev.length ||
+        fromIndex === toIndex
+      ) {
+        return prev
+      }
+      const next = [...prev]
+      const [moved] = next.splice(fromIndex, 1)
+      next.splice(toIndex, 0, moved)
+      joinedServersRef.current = next
+      saveJoinedServers(next)
+      return next
+    })
+  }, [])
+
   const applySyncedJoinedServers = useCallback(
     (incomingServers: ServerSummary[]) => {
       const prevMap = new Map<string, ServerSummary>()
@@ -3183,6 +3205,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       joinNip29Group,
       sendInviteViaDm,
       leaveServer,
+      reorderJoinedServers,
       sendMessage,
       sendVoiceMemo,
       sendImageAttachment,
@@ -3230,6 +3253,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       joinNip29Group,
       sendInviteViaDm,
       leaveServer,
+      reorderJoinedServers,
       sendMessage,
       sendVoiceMemo,
       sendImageAttachment,

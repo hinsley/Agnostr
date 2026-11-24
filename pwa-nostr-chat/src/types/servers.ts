@@ -220,6 +220,7 @@ export interface ServersEngine {
   ) => Promise<ServerSummary | null>
   sendInviteViaDm: (serverId: string, recipientPubkey: string) => Promise<boolean>
   leaveServer: (serverId: string) => Promise<void>
+  reorderJoinedServers: (fromIndex: number, toIndex: number) => void
 
   // Messaging, voice, images & reactions (all media strictly honors Trusted Peers gate)
   sendMessage: (

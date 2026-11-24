@@ -13,6 +13,7 @@ import type {
   PersistedDeviceSyncState,
   SyncedDmPeerNameRecord,
   SyncedPeerNoteRecord,
+  SyncedServerOrderState,
 } from '../types/deviceSync.ts'
 import type {
   NotificationFilterMode,
@@ -1220,6 +1221,30 @@ function sanitizeDmPeerNamesMap(raw: unknown): Record<string, SyncedDmPeerNameRe
   return out
 }
 
+function sanitizeServerOrderState(raw: unknown): SyncedServerOrderState {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { updatedAt: 0, ids: [] }
+  }
+  const obj = raw as Partial<SyncedServerOrderState>
+  const updatedAt =
+    typeof obj.updatedAt === 'number' && Number.isFinite(obj.updatedAt) && obj.updatedAt > 0
+      ? Math.floor(obj.updatedAt)
+      : 0
+  const ids: string[] = []
+  if (Array.isArray(obj.ids)) {
+    const seen = new Set<string>()
+    for (const item of obj.ids) {
+      if (typeof item !== 'string') continue
+      const clean = item.trim().slice(0, 160)
+      if (!clean || seen.has(clean)) continue
+      seen.add(clean)
+      ids.push(clean)
+      if (ids.length >= 128) break
+    }
+  }
+  return { updatedAt, ids }
+}
+
 export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
   const parsed = safeJsonParse<Partial<PersistedDeviceSyncState> | null>(
     safeGet(KEYS.deviceSyncState),
@@ -1235,6 +1260,7 @@ export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
       rawCrdt.servers && typeof rawCrdt.servers === 'object' && !Array.isArray(rawCrdt.servers)
         ? rawCrdt.servers
         : {},
+    serverOrder: sanitizeServerOrderState(rawCrdt.serverOrder),
     trusted:
       rawCrdt.trusted && typeof rawCrdt.trusted === 'object' && !Array.isArray(rawCrdt.trusted)
         ? rawCrdt.trusted
@@ -1352,6 +1378,7 @@ export function saveDeviceSyncState(state: PersistedDeviceSyncState): void {
     crdt: {
       v: 1,
       servers: state.crdt.servers,
+      serverOrder: sanitizeServerOrderState(state.crdt.serverOrder),
       trusted: state.crdt.trusted,
       blocked: state.crdt.blocked,
       pinned: state.crdt.pinned,

@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import {
+  ArrowDown,
+  ArrowUp,
   Download,
   Landmark,
   LayoutGrid,
@@ -72,6 +74,17 @@ function getServerMonogram(name: string): string {
   return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
 }
 
+function computeReorderToIndex(
+  fromIndex: number,
+  targetIndex: number,
+  position: 'before' | 'after',
+  total: number
+): number {
+  const slot = position === 'after' ? targetIndex + 1 : targetIndex
+  const adjusted = fromIndex < slot ? slot - 1 : slot
+  return Math.max(0, Math.min(total - 1, adjusted))
+}
+
 export const AppRail: React.FC<AppRailProps> = ({
   engine,
   workspace,
@@ -97,6 +110,48 @@ export const AppRail: React.FC<AppRailProps> = ({
 }) => {
   const { openContextMenu } = useContextMenu()
   const [tooltip, setTooltip] = useState<RailTooltipState | null>(null)
+  const [dragServerIndex, setDragServerIndex] = useState<number | null>(null)
+  const [dropServerTarget, setDropServerTarget] = useState<{
+    index: number
+    position: 'before' | 'after'
+  } | null>(null)
+  const serversRailRef = useRef<HTMLDivElement | null>(null)
+  const touchDragRef = useRef<{
+    pointerId: number
+    fromIndex: number
+    startX: number
+    startY: number
+    active: boolean
+    timerId: number | null
+    targetIndex: number
+    position: 'before' | 'after'
+  } | null>(null)
+  const suppressNextClickRef = useRef(false)
+  const suppressResetTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (touchDragRef.current?.timerId !== null && touchDragRef.current?.timerId !== undefined) {
+        window.clearTimeout(touchDragRef.current.timerId)
+      }
+      if (suppressResetTimerRef.current !== null) {
+        window.clearTimeout(suppressResetTimerRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (dragServerIndex === null) return
+    const rail = serversRailRef.current
+    if (!rail) return
+    const onTouchMove = (ev: TouchEvent) => {
+      if (touchDragRef.current?.active) {
+        ev.preventDefault()
+      }
+    }
+    rail.addEventListener('touchmove', onTouchMove, { passive: false })
+    return () => rail.removeEventListener('touchmove', onTouchMove)
+  }, [dragServerIndex])
 
   const hideTooltip = useCallback(() => {
     setTooltip(null)
@@ -155,6 +210,8 @@ export const AppRail: React.FC<AppRailProps> = ({
   const openServerMenu = (e: React.MouseEvent, server: ServerSummary) => {
     hideTooltip()
     const invite = engine.servers.buildInviteLink(server.id)
+    const serverIndex = engine.servers.joinedServers.findIndex((s) => s.id === server.id)
+    const totalServers = engine.servers.joinedServers.length
     const items: ContextMenuItem[] = [
       {
         id: `rail-srv-invite-${server.id}`,
@@ -179,24 +236,100 @@ export const AppRail: React.FC<AppRailProps> = ({
           onOpenServerSettings(server.id, 'overview')
         },
       },
-      {
-        id: `rail-srv-leave-${server.id}`,
-        label: 'Leave Group',
-        icon: <LogOut size={14} />,
-        danger: true,
-        dividerBefore: true,
-        onSelect: () => {
-          onPlaySound?.('click')
-          void engine.servers.leaveServer(server.id)
-        },
-      },
     ]
+
+    if (serverIndex !== -1 && totalServers > 1) {
+      if (serverIndex > 0) {
+        items.push({
+          id: `rail-srv-move-up-${server.id}`,
+          label: 'Move Up',
+          icon: <ArrowUp size={14} />,
+          dividerBefore: true,
+          onSelect: () => {
+            onPlaySound?.('click')
+            engine.servers.reorderJoinedServers(serverIndex, serverIndex - 1)
+          },
+        })
+      }
+      if (serverIndex < totalServers - 1) {
+        items.push({
+          id: `rail-srv-move-down-${server.id}`,
+          label: 'Move Down',
+          icon: <ArrowDown size={14} />,
+          dividerBefore: serverIndex === 0,
+          onSelect: () => {
+            onPlaySound?.('click')
+            engine.servers.reorderJoinedServers(serverIndex, serverIndex + 1)
+          },
+        })
+      }
+    }
+
+    items.push({
+      id: `rail-srv-leave-${server.id}`,
+      label: 'Leave Group',
+      icon: <LogOut size={14} />,
+      danger: true,
+      dividerBefore: true,
+      onSelect: () => {
+        onPlaySound?.('click')
+        void engine.servers.leaveServer(server.id)
+      },
+    })
 
     openContextMenu(e, {
       header: server.name,
       items,
     })
   }
+
+  const joinedServers = engine.servers.joinedServers
+  const canReorderServers = joinedServers.length > 1
+
+  const hitTestRailServerSlot = useCallback(
+    (clientY: number): { index: number; position: 'before' | 'after' } | null => {
+      const slots = serversRailRef.current?.querySelectorAll<HTMLElement>('[data-rail-srv-index]')
+      if (!slots || slots.length === 0) return null
+      let bestIdx = 0
+      let bestPos: 'before' | 'after' = 'before'
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i]
+        const rect = slot.getBoundingClientRect()
+        const slotIdx = Number(slot.dataset.railSrvIndex)
+        if (clientY < rect.top + rect.height / 2) {
+          bestIdx = slotIdx
+          bestPos = 'before'
+          break
+        }
+        bestIdx = slotIdx
+        bestPos = 'after'
+      }
+      return { index: bestIdx, position: bestPos }
+    },
+    []
+  )
+
+  const autoScrollRail = useCallback((clientY: number) => {
+    const rail = serversRailRef.current
+    if (!rail) return
+    const rect = rail.getBoundingClientRect()
+    const edge = 36
+    if (clientY < rect.top + edge) {
+      rail.scrollTop -= Math.max(4, Math.round((rect.top + edge - clientY) * 0.4))
+    } else if (clientY > rect.bottom - edge) {
+      rail.scrollTop += Math.max(4, Math.round((clientY - (rect.bottom - edge)) * 0.4))
+    }
+  }, [])
+
+  const scheduleSuppressReset = useCallback(() => {
+    if (suppressResetTimerRef.current !== null) {
+      window.clearTimeout(suppressResetTimerRef.current)
+    }
+    suppressResetTimerRef.current = window.setTimeout(() => {
+      suppressNextClickRef.current = false
+      suppressResetTimerRef.current = null
+    }, 350)
+  }, [])
 
   return (
     <nav className="ag-app-rail ag-desktop-only" aria-label="Agnostr Suite and groups">
@@ -445,8 +578,45 @@ export const AppRail: React.FC<AppRailProps> = ({
       <div className="ag-rail-divider" aria-hidden="true" />
 
       {/* Compact Joined Groups Quick-Jump Strip */}
-      <div className="ag-rail-servers" onScroll={hideTooltip} role="list" aria-label="Joined groups">
-        {engine.servers.joinedServers.map((server) => {
+      <div
+        ref={serversRailRef}
+        className={`ag-rail-servers ${dragServerIndex !== null ? 'is-reordering' : ''}`}
+        onScroll={hideTooltip}
+        onDragOver={(e) => {
+          if (dragServerIndex === null || !canReorderServers) return
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'move'
+          autoScrollRail(e.clientY)
+          const hit = hitTestRailServerSlot(e.clientY)
+          if (hit) {
+            setDropServerTarget((prev) =>
+              prev && prev.index === hit.index && prev.position === hit.position ? prev : hit
+            )
+          }
+        }}
+        onDrop={(e) => {
+          if (dragServerIndex === null || !canReorderServers) return
+          e.preventDefault()
+          const hit = hitTestRailServerSlot(e.clientY) ?? dropServerTarget
+          if (hit) {
+            const toIndex = computeReorderToIndex(
+              dragServerIndex,
+              hit.index,
+              hit.position,
+              joinedServers.length
+            )
+            if (toIndex !== dragServerIndex) {
+              onPlaySound?.('click')
+              engine.servers.reorderJoinedServers(dragServerIndex, toIndex)
+            }
+          }
+          setDragServerIndex(null)
+          setDropServerTarget(null)
+        }}
+        role="list"
+        aria-label="Joined groups"
+      >
+        {joinedServers.map((server, idx) => {
           const active =
             workspace === 'chat' &&
             listTab === 'servers' &&
@@ -470,22 +640,227 @@ export const AppRail: React.FC<AppRailProps> = ({
           const accentStyle = {
             '--srv-accent': server.accentColor || 'var(--accent)',
           } as CSSProperties
+          const isDragging = dragServerIndex === idx
+          const isDropBefore =
+            dropServerTarget !== null &&
+            dropServerTarget.index === idx &&
+            dropServerTarget.position === 'before' &&
+            dragServerIndex !== null &&
+            dragServerIndex !== idx
+          const isDropAfter =
+            dropServerTarget !== null &&
+            dropServerTarget.index === idx &&
+            dropServerTarget.position === 'after' &&
+            dragServerIndex !== null &&
+            dragServerIndex !== idx
 
           return (
-            <div key={server.id} className="ag-rail-slot" role="listitem">
+            <div
+              key={server.id}
+              data-rail-srv-index={idx}
+              draggable={canReorderServers}
+              className={`ag-rail-slot ${isDragging ? 'is-dragging' : ''} ${isDropBefore ? 'drop-before' : ''} ${isDropAfter ? 'drop-after' : ''}`}
+              role="listitem"
+              onDragStart={(e) => {
+                if (!canReorderServers || touchDragRef.current?.active) {
+                  e.preventDefault()
+                  return
+                }
+                hideTooltip()
+                setDragServerIndex(idx)
+                e.dataTransfer.effectAllowed = 'move'
+                try {
+                  e.dataTransfer.setData('text/plain', server.id)
+                } catch {
+                  // Ignore browser dataTransfer restrictions
+                }
+              }}
+              onDragOver={(e) => {
+                if (dragServerIndex === null || !canReorderServers) return
+                e.preventDefault()
+                e.stopPropagation()
+                e.dataTransfer.dropEffect = 'move'
+                autoScrollRail(e.clientY)
+                const rect = e.currentTarget.getBoundingClientRect()
+                const pos: 'before' | 'after' =
+                  e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+                setDropServerTarget((prev) =>
+                  prev && prev.index === idx && prev.position === pos
+                    ? prev
+                    : { index: idx, position: pos }
+                )
+              }}
+              onDrop={(e) => {
+                if (dragServerIndex === null || !canReorderServers) return
+                e.preventDefault()
+                e.stopPropagation()
+                const rect = e.currentTarget.getBoundingClientRect()
+                const pos: 'before' | 'after' =
+                  e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+                const toIndex = computeReorderToIndex(
+                  dragServerIndex,
+                  idx,
+                  pos,
+                  joinedServers.length
+                )
+                if (toIndex !== dragServerIndex) {
+                  onPlaySound?.('click')
+                  engine.servers.reorderJoinedServers(dragServerIndex, toIndex)
+                }
+                setDragServerIndex(null)
+                setDropServerTarget(null)
+              }}
+              onDragEnd={() => {
+                setDragServerIndex(null)
+                setDropServerTarget(null)
+              }}
+            >
               <button
                 type="button"
+                data-no-swipe={canReorderServers ? 'true' : undefined}
                 className={`ag-rail-tile compact ag-rail-srv ${active ? 'active' : ''} ${hasUnread ? 'has-unread' : ''}`}
                 style={accentStyle}
-                onClick={() => {
+                onClick={(e) => {
+                  if (suppressNextClickRef.current) {
+                    suppressNextClickRef.current = false
+                    e.preventDefault()
+                    e.stopPropagation()
+                    return
+                  }
                   onPlaySound?.('click')
                   if (workspace !== 'chat') onSelectWorkspace('chat')
                   onSelectServer(server.id)
                 }}
-                onContextMenu={(e) => openServerMenu(e, server)}
-                onMouseEnter={(e) => showTooltip(e.currentTarget, server.name, voiceSub)}
+                onContextMenu={(e) => {
+                  if (touchDragRef.current?.active || dragServerIndex !== null) {
+                    e.preventDefault()
+                    return
+                  }
+                  openServerMenu(e, server)
+                }}
+                onKeyDown={(e) => {
+                  if (!canReorderServers || !e.altKey) return
+                  if (e.key === 'ArrowUp' && idx > 0) {
+                    e.preventDefault()
+                    onPlaySound?.('click')
+                    engine.servers.reorderJoinedServers(idx, idx - 1)
+                  } else if (e.key === 'ArrowDown' && idx < joinedServers.length - 1) {
+                    e.preventDefault()
+                    onPlaySound?.('click')
+                    engine.servers.reorderJoinedServers(idx, idx + 1)
+                  }
+                }}
+                onPointerDown={(e) => {
+                  if (e.pointerType === 'mouse' || !canReorderServers) return
+                  if (
+                    touchDragRef.current?.timerId !== null &&
+                    touchDragRef.current?.timerId !== undefined
+                  ) {
+                    window.clearTimeout(touchDragRef.current.timerId)
+                  }
+                  const pointerId = e.pointerId
+                  const targetEl = e.currentTarget
+                  const timerId = window.setTimeout(() => {
+                    const drag = touchDragRef.current
+                    if (!drag || drag.pointerId !== pointerId) return
+                    drag.active = true
+                    drag.timerId = null
+                    if (suppressResetTimerRef.current !== null) {
+                      window.clearTimeout(suppressResetTimerRef.current)
+                      suppressResetTimerRef.current = null
+                    }
+                    suppressNextClickRef.current = true
+                    hideTooltip()
+                    try {
+                      targetEl.setPointerCapture(pointerId)
+                    } catch {
+                      // Ignore capture errors
+                    }
+                    try {
+                      navigator.vibrate?.(10)
+                    } catch {
+                      // Ignore unsupported vibrate
+                    }
+                    setDragServerIndex(idx)
+                    setDropServerTarget({ index: idx, position: 'before' })
+                  }, 220)
+                  touchDragRef.current = {
+                    pointerId,
+                    fromIndex: idx,
+                    startX: e.clientX,
+                    startY: e.clientY,
+                    active: false,
+                    timerId,
+                    targetIndex: idx,
+                    position: 'before',
+                  }
+                }}
+                onPointerMove={(e) => {
+                  const drag = touchDragRef.current
+                  if (!drag || drag.pointerId !== e.pointerId) return
+                  if (!drag.active) {
+                    if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 8) {
+                      if (drag.timerId !== null) window.clearTimeout(drag.timerId)
+                      touchDragRef.current = null
+                    }
+                    return
+                  }
+                  e.preventDefault()
+                  autoScrollRail(e.clientY)
+                  const hit = hitTestRailServerSlot(e.clientY)
+                  if (!hit) return
+                  drag.targetIndex = hit.index
+                  drag.position = hit.position
+                  setDropServerTarget((prev) =>
+                    prev && prev.index === hit.index && prev.position === hit.position ? prev : hit
+                  )
+                }}
+                onPointerUp={(e) => {
+                  const drag = touchDragRef.current
+                  if (!drag || drag.pointerId !== e.pointerId) return
+                  if (drag.timerId !== null) window.clearTimeout(drag.timerId)
+                  if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                    e.currentTarget.releasePointerCapture(e.pointerId)
+                  }
+                  if (drag.active) {
+                    e.stopPropagation()
+                    const toIndex = computeReorderToIndex(
+                      drag.fromIndex,
+                      drag.targetIndex,
+                      drag.position,
+                      joinedServers.length
+                    )
+                    if (toIndex !== drag.fromIndex) {
+                      onPlaySound?.('click')
+                      engine.servers.reorderJoinedServers(drag.fromIndex, toIndex)
+                    }
+                    scheduleSuppressReset()
+                  }
+                  touchDragRef.current = null
+                  setDragServerIndex(null)
+                  setDropServerTarget(null)
+                }}
+                onPointerCancel={(e) => {
+                  const drag = touchDragRef.current
+                  if (!drag || drag.pointerId !== e.pointerId) return
+                  if (drag.timerId !== null) window.clearTimeout(drag.timerId)
+                  if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                    e.currentTarget.releasePointerCapture(e.pointerId)
+                  }
+                  if (drag.active) {
+                    scheduleSuppressReset()
+                  }
+                  touchDragRef.current = null
+                  setDragServerIndex(null)
+                  setDropServerTarget(null)
+                }}
+                onMouseEnter={(e) => {
+                  if (dragServerIndex === null) showTooltip(e.currentTarget, server.name, voiceSub)
+                }}
                 onMouseLeave={hideTooltip}
-                onFocus={(e) => showTooltip(e.currentTarget, server.name, voiceSub)}
+                onFocus={(e) => {
+                  if (dragServerIndex === null) showTooltip(e.currentTarget, server.name, voiceSub)
+                }}
                 onBlur={hideTooltip}
                 aria-label={voiceSub ? `${server.name} (${voiceSub})` : server.name}
                 aria-current={active ? 'page' : undefined}
@@ -497,6 +872,7 @@ export const AppRail: React.FC<AppRailProps> = ({
                     alt=""
                     loading="lazy"
                     referrerPolicy="no-referrer"
+                    draggable={false}
                     className="ag-rail-srv-img"
                   />
                 ) : server.icon?.trim() ? (

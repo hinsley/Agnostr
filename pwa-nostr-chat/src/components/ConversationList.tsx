@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent } from 'react'
 import {
   ArrowDown,
@@ -185,6 +185,97 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     targetIndex: number
     position: 'before' | 'after'
   } | null>(null)
+  const [dragServerIndex, setDragServerIndex] = useState<number | null>(null)
+  const [dropServerTarget, setDropServerTarget] = useState<{
+    index: number
+    position: 'before' | 'after'
+  } | null>(null)
+  const mobileSrvRailRef = useRef<HTMLDivElement | null>(null)
+  const mobileSrvTouchDragRef = useRef<{
+    pointerId: number
+    fromIndex: number
+    startX: number
+    startY: number
+    active: boolean
+    timerId: number | null
+    targetIndex: number
+    position: 'before' | 'after'
+  } | null>(null)
+  const suppressNextServerClickRef = useRef(false)
+  const suppressServerResetTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (
+        mobileSrvTouchDragRef.current?.timerId !== null &&
+        mobileSrvTouchDragRef.current?.timerId !== undefined
+      ) {
+        window.clearTimeout(mobileSrvTouchDragRef.current.timerId)
+      }
+      if (suppressServerResetTimerRef.current !== null) {
+        window.clearTimeout(suppressServerResetTimerRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (dragServerIndex === null) return
+    const rail = mobileSrvRailRef.current
+    if (!rail) return
+    const onTouchMove = (ev: TouchEvent) => {
+      if (mobileSrvTouchDragRef.current?.active) {
+        ev.preventDefault()
+      }
+    }
+    rail.addEventListener('touchmove', onTouchMove, { passive: false })
+    return () => rail.removeEventListener('touchmove', onTouchMove)
+  }, [dragServerIndex])
+
+  const hitTestMobileServerSlot = useCallback(
+    (clientY: number): { index: number; position: 'before' | 'after' } | null => {
+      const slots =
+        mobileSrvRailRef.current?.querySelectorAll<HTMLElement>('[data-mobile-srv-index]')
+      if (!slots || slots.length === 0) return null
+      let bestIdx = 0
+      let bestPos: 'before' | 'after' = 'before'
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i]
+        const rect = slot.getBoundingClientRect()
+        const slotIdx = Number(slot.dataset.mobileSrvIndex)
+        if (clientY < rect.top + rect.height / 2) {
+          bestIdx = slotIdx
+          bestPos = 'before'
+          break
+        }
+        bestIdx = slotIdx
+        bestPos = 'after'
+      }
+      return { index: bestIdx, position: bestPos }
+    },
+    []
+  )
+
+  const autoScrollMobileSrvRail = useCallback((clientY: number) => {
+    const rail = mobileSrvRailRef.current
+    if (!rail) return
+    const rect = rail.getBoundingClientRect()
+    const edge = 36
+    if (clientY < rect.top + edge) {
+      rail.scrollTop -= Math.max(4, Math.round((rect.top + edge - clientY) * 0.4))
+    } else if (clientY > rect.bottom - edge) {
+      rail.scrollTop += Math.max(4, Math.round((clientY - (rect.bottom - edge)) * 0.4))
+    }
+  }, [])
+
+  const scheduleSuppressServerReset = useCallback(() => {
+    if (suppressServerResetTimerRef.current !== null) {
+      window.clearTimeout(suppressServerResetTimerRef.current)
+    }
+    suppressServerResetTimerRef.current = window.setTimeout(() => {
+      suppressNextServerClickRef.current = false
+      suppressServerResetTimerRef.current = null
+    }, 350)
+  }, [])
 
   const handleQuickTune = (e: FormEvent) => {
     e.preventDefault()
@@ -644,6 +735,35 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               codeLabel: 'Invite Code',
               codeValue: invite.code,
             })
+          },
+        })
+      }
+    }
+
+    const serverIndex = engine.servers.joinedServers.findIndex((s) => s.id === server.id)
+    const totalServers = engine.servers.joinedServers.length
+    if (!channel && serverIndex !== -1 && totalServers > 1) {
+      if (serverIndex > 0) {
+        items.push({
+          id: `srv-move-up-${server.id}`,
+          label: 'Move Up',
+          icon: <ArrowUp size={15} />,
+          dividerBefore: true,
+          onSelect: () => {
+            onPlaySound?.('click')
+            engine.servers.reorderJoinedServers(serverIndex, serverIndex - 1)
+          },
+        })
+      }
+      if (serverIndex < totalServers - 1) {
+        items.push({
+          id: `srv-move-down-${server.id}`,
+          label: 'Move Down',
+          icon: <ArrowDown size={15} />,
+          dividerBefore: serverIndex === 0,
+          onSelect: () => {
+            onPlaySound?.('click')
+            engine.servers.reorderJoinedServers(serverIndex, serverIndex + 1)
           },
         })
       }
@@ -1367,8 +1487,45 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       {activeTab === 'servers' ? (
         isMobileServersSplit ? (
           <div className="ag-srv-mobile-split">
-            <div className="ag-srv-mobile-rail" role="list" aria-label="Groups">
-              {joinedServers.map((server) => {
+            <div
+              ref={mobileSrvRailRef}
+              className={`ag-srv-mobile-rail ${dragServerIndex !== null ? 'is-reordering' : ''}`}
+              data-no-swipe={dragServerIndex !== null ? 'true' : undefined}
+              onDragOver={(e) => {
+                if (dragServerIndex === null || joinedServers.length <= 1) return
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                autoScrollMobileSrvRail(e.clientY)
+                const hit = hitTestMobileServerSlot(e.clientY)
+                if (hit) {
+                  setDropServerTarget((prev) =>
+                    prev && prev.index === hit.index && prev.position === hit.position ? prev : hit
+                  )
+                }
+              }}
+              onDrop={(e) => {
+                if (dragServerIndex === null || joinedServers.length <= 1) return
+                e.preventDefault()
+                const hit = hitTestMobileServerSlot(e.clientY) ?? dropServerTarget
+                if (hit) {
+                  const toIndex = computeReorderToIndex(
+                    dragServerIndex,
+                    hit.index,
+                    hit.position,
+                    joinedServers.length
+                  )
+                  if (toIndex !== dragServerIndex) {
+                    onPlaySound?.('click')
+                    engine.servers.reorderJoinedServers(dragServerIndex, toIndex)
+                  }
+                }
+                setDragServerIndex(null)
+                setDropServerTarget(null)
+              }}
+              role="list"
+              aria-label="Groups"
+            >
+              {joinedServers.map((server, idx) => {
                 const active = selectedServer?.id === server.id
                 const srvUnread = Math.max(
                   server.unreadCount,
@@ -1390,17 +1547,219 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 const accentStyle = {
                   '--srv-accent': server.accentColor || 'var(--accent)',
                 } as CSSProperties
+                const canReorderServers = joinedServers.length > 1
+                const isDragging = dragServerIndex === idx
+                const isDropBefore =
+                  dropServerTarget !== null &&
+                  dropServerTarget.index === idx &&
+                  dropServerTarget.position === 'before' &&
+                  dragServerIndex !== null &&
+                  dragServerIndex !== idx
+                const isDropAfter =
+                  dropServerTarget !== null &&
+                  dropServerTarget.index === idx &&
+                  dropServerTarget.position === 'after' &&
+                  dragServerIndex !== null &&
+                  dragServerIndex !== idx
                 return (
-                  <div key={server.id} className="ag-rail-slot" role="listitem">
+                  <div
+                    key={server.id}
+                    data-mobile-srv-index={idx}
+                    draggable={canReorderServers}
+                    className={`ag-rail-slot ${isDragging ? 'is-dragging' : ''} ${isDropBefore ? 'drop-before' : ''} ${isDropAfter ? 'drop-after' : ''}`}
+                    role="listitem"
+                    onDragStart={(e) => {
+                      if (!canReorderServers || mobileSrvTouchDragRef.current?.active) {
+                        e.preventDefault()
+                        return
+                      }
+                      setDragServerIndex(idx)
+                      e.dataTransfer.effectAllowed = 'move'
+                      try {
+                        e.dataTransfer.setData('text/plain', server.id)
+                      } catch {
+                        // Ignore browser dataTransfer restrictions
+                      }
+                    }}
+                    onDragOver={(e) => {
+                      if (dragServerIndex === null || !canReorderServers) return
+                      e.preventDefault()
+                      e.stopPropagation()
+                      e.dataTransfer.dropEffect = 'move'
+                      autoScrollMobileSrvRail(e.clientY)
+                      const rect = e.currentTarget.getBoundingClientRect()
+                      const pos: 'before' | 'after' =
+                        e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+                      setDropServerTarget((prev) =>
+                        prev && prev.index === idx && prev.position === pos
+                          ? prev
+                          : { index: idx, position: pos }
+                      )
+                    }}
+                    onDrop={(e) => {
+                      if (dragServerIndex === null || !canReorderServers) return
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const rect = e.currentTarget.getBoundingClientRect()
+                      const pos: 'before' | 'after' =
+                        e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+                      const toIndex = computeReorderToIndex(
+                        dragServerIndex,
+                        idx,
+                        pos,
+                        joinedServers.length
+                      )
+                      if (toIndex !== dragServerIndex) {
+                        onPlaySound?.('click')
+                        engine.servers.reorderJoinedServers(dragServerIndex, toIndex)
+                      }
+                      setDragServerIndex(null)
+                      setDropServerTarget(null)
+                    }}
+                    onDragEnd={() => {
+                      setDragServerIndex(null)
+                      setDropServerTarget(null)
+                    }}
+                  >
                     <button
                       type="button"
+                      data-no-swipe={canReorderServers ? 'true' : undefined}
                       className={`ag-rail-tile ag-rail-srv compact ${active ? 'active' : ''} ${hasUnread ? 'has-unread' : ''}`}
                       style={accentStyle}
-                      onClick={() => {
+                      onClick={(e) => {
+                        if (suppressNextServerClickRef.current) {
+                          suppressNextServerClickRef.current = false
+                          e.preventDefault()
+                          e.stopPropagation()
+                          return
+                        }
                         onPlaySound?.('click')
                         handleSelectServerEntry(server.id)
                       }}
-                      onContextMenu={(e) => openServerContextMenu(e, server)}
+                      onContextMenu={(e) => {
+                        if (mobileSrvTouchDragRef.current?.active || dragServerIndex !== null) {
+                          e.preventDefault()
+                          return
+                        }
+                        openServerContextMenu(e, server)
+                      }}
+                      onKeyDown={(e) => {
+                        if (!canReorderServers || !e.altKey) return
+                        if (e.key === 'ArrowUp' && idx > 0) {
+                          e.preventDefault()
+                          onPlaySound?.('click')
+                          engine.servers.reorderJoinedServers(idx, idx - 1)
+                        } else if (e.key === 'ArrowDown' && idx < joinedServers.length - 1) {
+                          e.preventDefault()
+                          onPlaySound?.('click')
+                          engine.servers.reorderJoinedServers(idx, idx + 1)
+                        }
+                      }}
+                      onPointerDown={(e) => {
+                        if (e.pointerType === 'mouse' || !canReorderServers) return
+                        if (
+                          mobileSrvTouchDragRef.current?.timerId !== null &&
+                          mobileSrvTouchDragRef.current?.timerId !== undefined
+                        ) {
+                          window.clearTimeout(mobileSrvTouchDragRef.current.timerId)
+                        }
+                        const pointerId = e.pointerId
+                        const targetEl = e.currentTarget
+                        const timerId = window.setTimeout(() => {
+                          const drag = mobileSrvTouchDragRef.current
+                          if (!drag || drag.pointerId !== pointerId) return
+                          drag.active = true
+                          drag.timerId = null
+                          if (suppressServerResetTimerRef.current !== null) {
+                            window.clearTimeout(suppressServerResetTimerRef.current)
+                            suppressServerResetTimerRef.current = null
+                          }
+                          suppressNextServerClickRef.current = true
+                          try {
+                            targetEl.setPointerCapture(pointerId)
+                          } catch {
+                            // Ignore capture errors
+                          }
+                          try {
+                            navigator.vibrate?.(10)
+                          } catch {
+                            // Ignore unsupported vibrate
+                          }
+                          setDragServerIndex(idx)
+                          setDropServerTarget({ index: idx, position: 'before' })
+                        }, 220)
+                        mobileSrvTouchDragRef.current = {
+                          pointerId,
+                          fromIndex: idx,
+                          startX: e.clientX,
+                          startY: e.clientY,
+                          active: false,
+                          timerId,
+                          targetIndex: idx,
+                          position: 'before',
+                        }
+                      }}
+                      onPointerMove={(e) => {
+                        const drag = mobileSrvTouchDragRef.current
+                        if (!drag || drag.pointerId !== e.pointerId) return
+                        if (!drag.active) {
+                          if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 8) {
+                            if (drag.timerId !== null) window.clearTimeout(drag.timerId)
+                            mobileSrvTouchDragRef.current = null
+                          }
+                          return
+                        }
+                        e.preventDefault()
+                        autoScrollMobileSrvRail(e.clientY)
+                        const hit = hitTestMobileServerSlot(e.clientY)
+                        if (!hit) return
+                        drag.targetIndex = hit.index
+                        drag.position = hit.position
+                        setDropServerTarget((prev) =>
+                          prev && prev.index === hit.index && prev.position === hit.position
+                            ? prev
+                            : hit
+                        )
+                      }}
+                      onPointerUp={(e) => {
+                        const drag = mobileSrvTouchDragRef.current
+                        if (!drag || drag.pointerId !== e.pointerId) return
+                        if (drag.timerId !== null) window.clearTimeout(drag.timerId)
+                        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                          e.currentTarget.releasePointerCapture(e.pointerId)
+                        }
+                        if (drag.active) {
+                          e.stopPropagation()
+                          const toIndex = computeReorderToIndex(
+                            drag.fromIndex,
+                            drag.targetIndex,
+                            drag.position,
+                            joinedServers.length
+                          )
+                          if (toIndex !== drag.fromIndex) {
+                            onPlaySound?.('click')
+                            engine.servers.reorderJoinedServers(drag.fromIndex, toIndex)
+                          }
+                          scheduleSuppressServerReset()
+                        }
+                        mobileSrvTouchDragRef.current = null
+                        setDragServerIndex(null)
+                        setDropServerTarget(null)
+                      }}
+                      onPointerCancel={(e) => {
+                        const drag = mobileSrvTouchDragRef.current
+                        if (!drag || drag.pointerId !== e.pointerId) return
+                        if (drag.timerId !== null) window.clearTimeout(drag.timerId)
+                        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                          e.currentTarget.releasePointerCapture(e.pointerId)
+                        }
+                        if (drag.active) {
+                          scheduleSuppressServerReset()
+                        }
+                        mobileSrvTouchDragRef.current = null
+                        setDragServerIndex(null)
+                        setDropServerTarget(null)
+                      }}
                       aria-label={server.name}
                       aria-current={active ? 'page' : undefined}
                     >
@@ -1411,6 +1770,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           alt=""
                           loading="lazy"
                           referrerPolicy="no-referrer"
+                          draggable={false}
                           className="ag-rail-srv-img"
                         />
                       ) : server.icon?.trim() ? (
