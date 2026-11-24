@@ -35,6 +35,7 @@ import type { ServerSettingsTab } from './ServerSettingsModal.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 import { formatClientDisplayName } from '../lib/bitchatProtocol.ts'
+import { isAutoAnonNickname } from '../lib/deviceSync.ts'
 import { encodeGeohash } from '../lib/geohash.ts'
 import {
   buildBitchatChannelShareUrl,
@@ -73,6 +74,32 @@ function getMonogram(name: string): string {
   if (words.length === 0) return 'SV'
   if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
   return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
+}
+
+function comparePeerPriority(
+  a: {
+    isSelf: boolean
+    isBlocked: boolean
+    isTrusted: boolean
+    isAgnostrClient: boolean
+    nickname: string
+  },
+  b: {
+    isSelf: boolean
+    isBlocked: boolean
+    isTrusted: boolean
+    isAgnostrClient: boolean
+    nickname: string
+  },
+): number {
+  if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1
+  if (a.isBlocked !== b.isBlocked) return a.isBlocked ? 1 : -1
+  if (a.isTrusted !== b.isTrusted) return a.isTrusted ? -1 : 1
+  if (a.isAgnostrClient !== b.isAgnostrClient) return a.isAgnostrClient ? -1 : 1
+  const aHasCustomName = !isAutoAnonNickname(a.nickname)
+  const bHasCustomName = !isAutoAnonNickname(b.nickname)
+  if (aHasCustomName !== bHasCustomName) return aHasCustomName ? -1 : 1
+  return 0
 }
 
 export function RoomInfoSheet({
@@ -136,12 +163,86 @@ export function RoomInfoSheet({
   }, [dmPeerPubkey, engine.zaps])
 
   const sortedGeoPeers = useMemo(() => {
-    return [...engine.peers].sort((a, b) => {
-      if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1
-      if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1
-      return b.lastSeenAt - a.lastSeenAt
+    const decorated = engine.peers.map((p) => {
+      const pk = p.pubkey.toLowerCase()
+      const isAgnostrClient = p.isSelf
+        ? Boolean(p.isAgnostrClient ?? engine.broadcastClientTag)
+        : Boolean(p.isAgnostrClient)
+      const isBlocked = !p.isSelf && engine.isPeerBlocked(pk)
+      const isTrusted = !p.isSelf && engine.isExplicitlyTrusted(pk)
+      return { peer: p, isAgnostrClient, isBlocked, isTrusted }
     })
-  }, [engine.peers])
+
+    decorated.sort((a, b) => {
+      if (a.peer.isSelf !== b.peer.isSelf) return a.peer.isSelf ? -1 : 1
+      if (a.peer.isOnline !== b.peer.isOnline) return a.peer.isOnline ? -1 : 1
+      const prio = comparePeerPriority(
+        {
+          isSelf: a.peer.isSelf,
+          isBlocked: a.isBlocked,
+          isTrusted: a.isTrusted,
+          isAgnostrClient: a.isAgnostrClient,
+          nickname: a.peer.nickname,
+        },
+        {
+          isSelf: b.peer.isSelf,
+          isBlocked: b.isBlocked,
+          isTrusted: b.isTrusted,
+          isAgnostrClient: b.isAgnostrClient,
+          nickname: b.peer.nickname,
+        },
+      )
+      if (prio !== 0) return prio
+      if (b.peer.lastSeenAt !== a.peer.lastSeenAt) {
+        return b.peer.lastSeenAt - a.peer.lastSeenAt
+      }
+      return a.peer.nickname.localeCompare(b.peer.nickname, undefined, { sensitivity: 'base' })
+    })
+
+    return decorated.map((entry) => entry.peer)
+  }, [engine])
+
+  const sortedServerMembers = useMemo(() => {
+    const decorated = engine.servers.members.map((m) => {
+      const pk = m.pubkey.toLowerCase()
+      const known = engine.getPeerByPubkey(pk)
+      const isAgnostrClient = m.isSelf
+        ? Boolean(known?.isAgnostrClient ?? engine.broadcastClientTag)
+        : Boolean(known?.isAgnostrClient)
+      const isOnline = m.isSelf ? true : Boolean(known?.isOnline)
+      const isBlocked = !m.isSelf && engine.isPeerBlocked(pk)
+      const isTrusted = !m.isSelf && engine.isExplicitlyTrusted(pk)
+      return { member: m, isAgnostrClient, isOnline, isBlocked, isTrusted }
+    })
+
+    decorated.sort((a, b) => {
+      if (Boolean(a.member.isFounder) !== Boolean(b.member.isFounder)) {
+        return a.member.isFounder ? -1 : 1
+      }
+      if (a.member.isSelf !== b.member.isSelf) return a.member.isSelf ? -1 : 1
+      if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1
+      const prio = comparePeerPriority(
+        {
+          isSelf: a.member.isSelf,
+          isBlocked: a.isBlocked,
+          isTrusted: a.isTrusted,
+          isAgnostrClient: a.isAgnostrClient,
+          nickname: a.member.nickname,
+        },
+        {
+          isSelf: b.member.isSelf,
+          isBlocked: b.isBlocked,
+          isTrusted: b.isTrusted,
+          isAgnostrClient: b.isAgnostrClient,
+          nickname: b.member.nickname,
+        },
+      )
+      if (prio !== 0) return prio
+      return a.member.nickname.localeCompare(b.member.nickname, undefined, { sensitivity: 'base' })
+    })
+
+    return decorated.map((entry) => entry.member)
+  }, [engine])
 
   const isVisible =
     open || (swipeProgress !== undefined && swipeProgress > 0) || Boolean(isSwiping)
@@ -1272,11 +1373,11 @@ export function RoomInfoSheet({
             <span className="ag-sheet-section-meta">{servers.members.length}</span>
           </div>
 
-          {servers.members.length === 0 ? (
+          {sortedServerMembers.length === 0 ? (
             <p className="ag-sheet-empty">Members appear here as they join or send messages.</p>
           ) : (
             <div className="ag-sheet-list" role="list">
-              {servers.members.map((m) => {
+              {sortedServerMembers.map((m) => {
                 const trusted = !m.isSelf && engine.isExplicitlyTrusted(m.pubkey)
                 const memberLud16 = !m.isSelf
                   ? engine.zaps.getPeerLightningAddress(m.pubkey)

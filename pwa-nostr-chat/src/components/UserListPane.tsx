@@ -16,6 +16,7 @@ import {
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
 import type { ZapTarget } from '../types/wallet.ts'
 import type { SoundCue } from '../utils/sound.ts'
+import { isAutoAnonNickname } from '../lib/deviceSync.ts'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 import { formatHandle, identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
 
@@ -62,6 +63,20 @@ function formatRoleLabel(raw: string): string {
   if (lower === 'admin' || lower === 'administrator') return 'Admin'
   if (lower === 'founder' || lower === 'owner') return 'Founder'
   return clean.charAt(0).toUpperCase() + clean.slice(1)
+}
+
+function comparePeerPriority(
+  a: Pick<NormalizedUserItem, 'isSelf' | 'isBlocked' | 'isTrusted' | 'isAgnostrClient' | 'nickname'>,
+  b: Pick<NormalizedUserItem, 'isSelf' | 'isBlocked' | 'isTrusted' | 'isAgnostrClient' | 'nickname'>,
+): number {
+  if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1
+  if (a.isBlocked !== b.isBlocked) return a.isBlocked ? 1 : -1
+  if (a.isTrusted !== b.isTrusted) return a.isTrusted ? -1 : 1
+  if (a.isAgnostrClient !== b.isAgnostrClient) return a.isAgnostrClient ? -1 : 1
+  const aHasCustomName = !isAutoAnonNickname(a.nickname)
+  const bHasCustomName = !isAutoAnonNickname(b.nickname)
+  if (aHasCustomName !== bHasCustomName) return aHasCustomName ? -1 : 1
+  return 0
 }
 
 export function UserListPane({
@@ -183,6 +198,8 @@ export function UserListPane({
         if (Boolean(a.isFounder) !== Boolean(b.isFounder)) return a.isFounder ? -1 : 1
         if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1
         if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1
+        const prio = comparePeerPriority(a, b)
+        if (prio !== 0) return prio
         return a.nickname.localeCompare(b.nickname, undefined, { sensitivity: 'base' })
       }
 
@@ -334,11 +351,17 @@ export function UserListPane({
       else offline.push(item)
     }
 
-    online.sort((a, b) => {
-      if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1
-      return b.peerInfo.lastSeenAt - a.peerInfo.lastSeenAt
-    })
-    offline.sort((a, b) => b.peerInfo.lastSeenAt - a.peerInfo.lastSeenAt)
+    const sortBitchatPeers = (a: NormalizedUserItem, b: NormalizedUserItem) => {
+      const prio = comparePeerPriority(a, b)
+      if (prio !== 0) return prio
+      if (b.peerInfo.lastSeenAt !== a.peerInfo.lastSeenAt) {
+        return b.peerInfo.lastSeenAt - a.peerInfo.lastSeenAt
+      }
+      return a.nickname.localeCompare(b.nickname, undefined, { sensitivity: 'base' })
+    }
+
+    online.sort(sortBitchatPeers)
+    offline.sort(sortBitchatPeers)
 
     const out: UserListGroup[] = []
     if (online.length > 0) out.push({ id: 'online', label: 'Online', items: online })
