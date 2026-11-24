@@ -11,6 +11,7 @@ import type {
   DeviceSyncCrdtState,
   LinkedDeviceInfo,
   PersistedDeviceSyncState,
+  SyncedDmPeerNameRecord,
   SyncedPeerNoteRecord,
 } from '../types/deviceSync.ts'
 import type {
@@ -1185,6 +1186,40 @@ export function resetDeviceId(): string {
   return fresh
 }
 
+const MAX_PERSISTED_SYNCED_DM_PEER_NAMES = 60
+
+function isGenericAnonNickname(nick: string | null | undefined): boolean {
+  const clean = (nick ?? '').trim()
+  return !clean || /^anon[0-9a-f]{4}$/i.test(clean)
+}
+
+function sanitizeDmPeerNamesMap(raw: unknown): Record<string, SyncedDmPeerNameRecord> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const seen = new Map<string, SyncedDmPeerNameRecord>()
+  for (const [rawPk, entry] of Object.entries(raw as Record<string, unknown>)) {
+    const pk = rawPk.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || !entry || typeof entry !== 'object') continue
+    const rec = entry as Partial<SyncedDmPeerNameRecord>
+    const name = typeof rec.name === 'string' ? rec.name.trim().slice(0, 32) : ''
+    if (isGenericAnonNickname(name)) continue
+    const updatedAt =
+      typeof rec.updatedAt === 'number' && Number.isFinite(rec.updatedAt) && rec.updatedAt > 0
+        ? Math.floor(rec.updatedAt)
+        : 1
+    const prev = seen.get(pk)
+    if (!prev || updatedAt > prev.updatedAt || (updatedAt === prev.updatedAt && name > prev.name)) {
+      seen.set(pk, { name, updatedAt })
+    }
+  }
+  const entries = Array.from(seen.entries())
+  entries.sort((a, b) => b[1].updatedAt - a[1].updatedAt || a[0].localeCompare(b[0]))
+  const out: Record<string, SyncedDmPeerNameRecord> = {}
+  for (const [pk, rec] of entries.slice(0, MAX_PERSISTED_SYNCED_DM_PEER_NAMES)) {
+    out[pk] = rec
+  }
+  return out
+}
+
 export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
   const parsed = safeJsonParse<Partial<PersistedDeviceSyncState> | null>(
     safeGet(KEYS.deviceSyncState),
@@ -1267,6 +1302,7 @@ export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
             return cleaned
           })()
         : {},
+    dmPeerNames: sanitizeDmPeerNamesMap(rawCrdt.dmPeerNames),
   }
 
   const linkedDevices: LinkedDeviceInfo[] = Array.isArray(parsed.linkedDevices)
@@ -1323,6 +1359,7 @@ export function saveDeviceSyncState(state: PersistedDeviceSyncState): void {
       lud16: state.crdt.lud16,
       nickname: state.crdt.nickname,
       peerNotes: state.crdt.peerNotes ?? {},
+      dmPeerNames: sanitizeDmPeerNamesMap(state.crdt.dmPeerNames),
     },
     linkedDevices: state.linkedDevices.slice(0, 16),
   }

@@ -12,6 +12,7 @@ import type {
   DeviceSyncStatePacket,
   DeviceSyncWirePacket,
   LinkedDeviceInfo,
+  SyncedDmPeerNameRecord,
   SyncedRecentMessagesTail,
   SyncedWalletState,
   WalletSyncProvider,
@@ -42,10 +43,12 @@ import {
   DEVICE_SYNC_ONLINE_TTL_MS,
   DEVICE_SYNC_TAG,
   extractActiveBlocked,
+  extractActiveDmPeerNames,
   extractActivePeerNotes,
   extractActiveServers,
   extractActiveTrusted,
   fitCheckpointStateWithinBudget,
+  isAutoAnonNickname,
   KIND_DEVICE_SYNC_CHECKPOINT,
   KIND_DEVICE_SYNC_EPHEMERAL,
   MAX_NIP44_CHUNK_BYTES,
@@ -115,6 +118,7 @@ export interface UseDeviceSyncOptions {
   onApplyLightningAddress: (addr: string | null) => void
   onApplyNickname: (nick: string) => void
   onApplyPeerNotes: (notes: Record<string, string>) => void
+  onApplyDmPeerNames: (namesByPubkey: Record<string, string>) => void
   onMergeDmMessages: (
     peerPubkey: string,
     messages: DmMessage[],
@@ -179,6 +183,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyLightningAddress,
     onApplyNickname,
     onApplyPeerNotes,
+    onApplyDmPeerNames,
     onMergeDmMessages,
     onMergeServerMessages,
     onMergeRadioMessages,
@@ -240,6 +245,30 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   const walletNotifyTimerRef = useRef<number | null>(null)
   const subSeqRef = useRef<number>(0)
 
+  const activeDmPeerNames = useMemo<Record<string, SyncedDmPeerNameRecord>>(() => {
+    const blocked = new Set(blockedPubkeys.map((p) => p.toLowerCase()))
+    const out: Record<string, SyncedDmPeerNameRecord> = {}
+    for (const thread of dmThreads) {
+      const pk = thread.peerPubkey.trim().toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(pk) || blocked.has(pk)) continue
+      const cleanName = thread.peerNickname.trim().slice(0, 32)
+      if (isAutoAnonNickname(cleanName)) continue
+      const cutoff = dmClearedAt[pk] ?? 0
+      const hasVisibleMessages = thread.messages.some(
+        (m) =>
+          !isStuckMediaPlaceholder(m) &&
+          !isEphemeralPendingMessage(m) &&
+          (cutoff > 0 ? m.createdAt > cutoff : true)
+      )
+      const latestMsgTs = thread.messages[thread.messages.length - 1]?.createdAt ?? 0
+      const activitySec = Math.max(thread.lastMessageAt || 0, latestMsgTs)
+      if (!hasVisibleMessages && cutoff > 0 && activitySec <= cutoff) continue
+      const updatedAt = Math.max(activitySec * 1000, cutoff > 0 ? cutoff * 1000 + 1 : 1)
+      out[pk] = { name: cleanName, updatedAt }
+    }
+    return out
+  }, [dmThreads, blockedPubkeys, dmClearedAt])
+
   // Always-fresh refs for callbacks and live snapshots
   const getSyncRelayUrlsRef = useRef(getSyncRelayUrls)
   const snapshotRef = useRef<LocalSyncSnapshot>({
@@ -251,6 +280,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     lightningAddress,
     nickname,
     peerNotes,
+    dmPeerNames: activeDmPeerNames,
   })
   const dmThreadsRef = useRef<DmThread[]>(dmThreads)
   const activeGeohashRef = useRef<string>(activeGeohash)
@@ -266,6 +296,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyLightningAddress,
     onApplyNickname,
     onApplyPeerNotes,
+    onApplyDmPeerNames,
     onMergeDmMessages,
     onMergeServerMessages,
     onMergeRadioMessages,
@@ -301,6 +332,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       lightningAddress,
       nickname,
       peerNotes,
+      dmPeerNames: activeDmPeerNames,
     }
   }, [
     joinedServers,
@@ -311,6 +343,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     lightningAddress,
     nickname,
     peerNotes,
+    activeDmPeerNames,
   ])
 
   useLayoutEffect(() => {
@@ -330,6 +363,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       onApplyLightningAddress,
       onApplyNickname,
       onApplyPeerNotes,
+      onApplyDmPeerNames,
       onMergeDmMessages,
       onMergeServerMessages,
       onMergeRadioMessages,
@@ -343,6 +377,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyLightningAddress,
     onApplyNickname,
     onApplyPeerNotes,
+    onApplyDmPeerNames,
     onMergeDmMessages,
     onMergeServerMessages,
     onMergeRadioMessages,
@@ -429,7 +464,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       )
       if (msgs.length > 0) {
         dmMap.set(pk, {
-          peerNickname: thread.peerNickname,
+          peerNickname: !isAutoAnonNickname(thread.peerNickname)
+            ? thread.peerNickname.trim().slice(0, 32)
+            : undefined,
           protocol: thread.protocol,
           messages: msgs.slice(-150),
         })
@@ -833,37 +870,45 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       const { merged, changed, diff } = mergeCrdtStates(crdtRef.current, remoteState)
       let itemsApplied = 0
 
-      if (changed) {
+      const mergedDmNames = extractActiveDmPeerNames(merged)
+      const hasMergedDmNames = Object.keys(mergedDmNames).length > 0
+
+      if (changed || hasMergedDmNames) {
         isApplyingRemoteRef.current = true
         try {
-          crdtRef.current = merged
-          stateRevisionRef.current += 1
+          if (changed) {
+            crdtRef.current = merged
+            stateRevisionRef.current += 1
 
-          if (diff.dmClearedChanged) {
-            callbacksRef.current.onApplyDmClearedAt(merged.dmClearedAt)
+            if (diff.dmClearedChanged) {
+              callbacksRef.current.onApplyDmClearedAt(merged.dmClearedAt)
+            }
+            if (diff.blockedChanged) {
+              callbacksRef.current.onApplyBlocked(extractActiveBlocked(merged))
+            }
+            if (diff.trustedChanged) {
+              callbacksRef.current.onApplyTrusted(extractActiveTrusted(merged))
+            }
+            if (diff.serversChanged) {
+              callbacksRef.current.onApplyServers(extractActiveServers(merged))
+            }
+            if (diff.pinnedChanged) {
+              callbacksRef.current.onApplyPinned(merged.pinned.items)
+            }
+            if (diff.lud16Changed) {
+              callbacksRef.current.onApplyLightningAddress(merged.lud16.value)
+            }
+            if (diff.nicknameChanged && merged.nickname.value) {
+              callbacksRef.current.onApplyNickname(merged.nickname.value)
+            }
+            if (diff.peerNotesChanged) {
+              callbacksRef.current.onApplyPeerNotes(extractActivePeerNotes(merged))
+            }
+            itemsApplied += diff.itemsUpdated
           }
-          if (diff.blockedChanged) {
-            callbacksRef.current.onApplyBlocked(extractActiveBlocked(merged))
+          if (hasMergedDmNames) {
+            callbacksRef.current.onApplyDmPeerNames(mergedDmNames)
           }
-          if (diff.trustedChanged) {
-            callbacksRef.current.onApplyTrusted(extractActiveTrusted(merged))
-          }
-          if (diff.serversChanged) {
-            callbacksRef.current.onApplyServers(extractActiveServers(merged))
-          }
-          if (diff.pinnedChanged) {
-            callbacksRef.current.onApplyPinned(merged.pinned.items)
-          }
-          if (diff.lud16Changed) {
-            callbacksRef.current.onApplyLightningAddress(merged.lud16.value)
-          }
-          if (diff.nicknameChanged && merged.nickname.value) {
-            callbacksRef.current.onApplyNickname(merged.nickname.value)
-          }
-          if (diff.peerNotesChanged) {
-            callbacksRef.current.onApplyPeerNotes(extractActivePeerNotes(merged))
-          }
-          itemsApplied += diff.itemsUpdated
         } finally {
           // Release guard on microtask boundary after batched React state updates flush
           queueMicrotask(() => {
@@ -1312,6 +1357,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         lightningAddress,
         nickname,
         peerNotes,
+        dmPeerNames: activeDmPeerNames,
       },
       Date.now(),
       isInitialSeed
@@ -1343,10 +1389,39 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     lightningAddress,
     nickname,
     peerNotes,
+    activeDmPeerNames,
     persistLocalJournal,
     scheduleCheckpointPublish,
     sendStateToPeer,
   ])
+
+  // If a DM thread arrived from relays with `anonXXXX` after the CRDT checkpoint already hydrated a real name, upgrade it immediately
+  useEffect(() => {
+    if (isApplyingRemoteRef.current) return
+    const syncedNames = extractActiveDmPeerNames(crdtRef.current)
+    if (Object.keys(syncedNames).length === 0) return
+    const upgrades: Record<string, string> = {}
+    let count = 0
+    for (const thread of dmThreads) {
+      if (!isAutoAnonNickname(thread.peerNickname)) continue
+      const pk = thread.peerPubkey.trim().toLowerCase()
+      const known = syncedNames[pk]
+      if (known && !isAutoAnonNickname(known)) {
+        upgrades[pk] = known
+        count += 1
+      }
+    }
+    if (count > 0) {
+      isApplyingRemoteRef.current = true
+      try {
+        callbacksRef.current.onApplyDmPeerNames(upgrades)
+      } finally {
+        queueMicrotask(() => {
+          isApplyingRemoteRef.current = false
+        })
+      }
+    }
+  }, [dmThreads])
 
   // When new local messages appear (sent or received), silently nudge online siblings & refresh checkpoint
   const msgActivitySignature = useMemo(() => {

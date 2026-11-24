@@ -20,6 +20,7 @@ import type {
   DeviceSyncWalletChunkPacket,
   DeviceSyncWirePacket,
   SyncedBlockedRecord,
+  SyncedDmPeerNameRecord,
   SyncedPeerNoteRecord,
   SyncedRecentMessagesTail,
   SyncedServerRecord,
@@ -61,6 +62,9 @@ export const MAX_NIP44_CHUNK_BYTES = 45_000
 
 /** Max age for ephemeral kind:25055 packets (allows clock skew while preventing stale replays) */
 export const MAX_EPHEMERAL_SYNC_AGE_SEC = 180
+
+/** Strict cap for synced active DM peer names (keeps checkpoint footprint ~2–5 KB max) */
+export const MAX_SYNCED_DM_PEER_NAMES = 60
 
 const utf8Encoder = new TextEncoder()
 
@@ -113,6 +117,7 @@ export function createEmptyCrdtState(): DeviceSyncCrdtState {
     lud16: { value: null, updatedAt: 0 },
     nickname: { value: '', updatedAt: 0 },
     peerNotes: {},
+    dmPeerNames: {},
   }
 }
 
@@ -158,6 +163,22 @@ export interface LocalSyncSnapshot {
   lightningAddress: string | null
   nickname: string
   peerNotes: Record<string, string>
+  dmPeerNames: Record<string, SyncedDmPeerNameRecord>
+}
+
+function capSyncedDmPeerNames(
+  map: Record<string, SyncedDmPeerNameRecord>
+): { capped: Record<string, SyncedDmPeerNameRecord>; trimmed: boolean } {
+  const entries = Object.entries(map)
+  if (entries.length <= MAX_SYNCED_DM_PEER_NAMES) {
+    return { capped: map, trimmed: false }
+  }
+  entries.sort((a, b) => b[1].updatedAt - a[1].updatedAt || a[0].localeCompare(b[0]))
+  const capped: Record<string, SyncedDmPeerNameRecord> = {}
+  for (const [pk, rec] of entries.slice(0, MAX_SYNCED_DM_PEER_NAMES)) {
+    capped[pk] = rec
+  }
+  return { capped, trimmed: true }
 }
 
 /**
@@ -405,6 +426,60 @@ export function reconcileLocalSnapshotIntoCrdt(
     }
   }
 
+  // 9. Active DM Peer Names (compact LWW-Map for real non-generic names, pruned on block/close)
+  const nextDmPeerNames: Record<string, SyncedDmPeerNameRecord> = { ...(prev.dmPeerNames ?? {}) }
+  const activeSnapshotDmNamePks = new Set<string>()
+  for (const [rawPk, rec] of Object.entries(snapshot.dmPeerNames ?? {})) {
+    const pk = rawPk.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || currentBlockedSet.has(pk) || !rec) continue
+    const cleanName = typeof rec.name === 'string' ? rec.name.trim().slice(0, 32) : ''
+    if (isAutoAnonNickname(cleanName)) continue
+    const recUpdatedAt =
+      typeof rec.updatedAt === 'number' && Number.isFinite(rec.updatedAt) && rec.updatedAt > 0
+        ? Math.floor(rec.updatedAt)
+        : Math.max(nowMs, 1)
+    const clearedMs = (nextDmCleared[pk] ?? 0) * 1000
+    if (clearedMs > 0 && clearedMs >= recUpdatedAt) continue
+
+    activeSnapshotDmNamePks.add(pk)
+    const existing = nextDmPeerNames[pk]
+    if (!existing) {
+      nextDmPeerNames[pk] = {
+        name: cleanName,
+        updatedAt: Math.max(recUpdatedAt, 1),
+      }
+      changed = true
+    } else if (existing.name !== cleanName) {
+      nextDmPeerNames[pk] = {
+        name: cleanName,
+        updatedAt: Math.max(nowMs, recUpdatedAt, existing.updatedAt + 1),
+      }
+      changed = true
+    }
+  }
+
+  for (const [pk, rec] of Object.entries(nextDmPeerNames)) {
+    const clearedSec = nextDmCleared[pk] ?? 0
+    const clearedMs = clearedSec * 1000
+    const isStaleAfterClear = clearedMs > 0 && clearedMs >= rec.updatedAt
+    const isClosedThread = !isInitialSeed && !activeSnapshotDmNamePks.has(pk) && clearedSec > 0
+    if (
+      currentBlockedSet.has(pk) ||
+      isAutoAnonNickname(rec.name) ||
+      isStaleAfterClear ||
+      isClosedThread
+    ) {
+      delete nextDmPeerNames[pk]
+      changed = true
+    }
+  }
+
+  const { capped: cappedDmPeerNames, trimmed: dmNamesTrimmed } =
+    capSyncedDmPeerNames(nextDmPeerNames)
+  if (dmNamesTrimmed) {
+    changed = true
+  }
+
   if (!changed) {
     return { crdt: prev, changed: false }
   }
@@ -420,6 +495,7 @@ export function reconcileLocalSnapshotIntoCrdt(
       lud16: nextLud16,
       nickname: nextNickname,
       peerNotes: nextPeerNotes,
+      dmPeerNames: cappedDmPeerNames,
     },
     changed: true,
   }
@@ -434,6 +510,7 @@ export interface CrdtMergeDiff {
   lud16Changed: boolean
   nicknameChanged: boolean
   peerNotesChanged: boolean
+  dmPeerNamesChanged: boolean
   itemsUpdated: number
 }
 
@@ -454,6 +531,7 @@ export function mergeCrdtStates(
     lud16Changed: false,
     nicknameChanged: false,
     peerNotesChanged: false,
+    dmPeerNamesChanged: false,
     itemsUpdated: 0,
   }
 
@@ -700,6 +778,75 @@ export function mergeCrdtStates(
     }
   }
 
+  // 9. Merge Active DM Peer Names (LWW real non-generic names, pruned by active blocks & dmClearedAt)
+  const localDmNames = local.dmPeerNames ?? {}
+  const remoteDmNames = remote.dmPeerNames ?? {}
+  const rawMergedDmNames: Record<string, SyncedDmPeerNameRecord> = {}
+  const dmNameKeys = new Set([
+    ...Object.keys(localDmNames).map((k) => k.toLowerCase()),
+    ...Object.keys(remoteDmNames).map((k) => k.toLowerCase()),
+  ])
+
+  for (const pk of dmNameKeys) {
+    if (!/^[0-9a-f]{64}$/.test(pk)) continue
+    const rawA = localDmNames[pk]
+    const rawB = remoteDmNames[pk]
+    const bRec = mergedBlocked[pk]
+    const isBlocked = Boolean(bRec && bRec.addedAt > bRec.removedAt)
+    const clearedMs = (mergedDmCleared[pk] ?? 0) * 1000
+
+    const validA =
+      !isBlocked &&
+      rawA &&
+      !isAutoAnonNickname(rawA.name) &&
+      !(clearedMs > 0 && clearedMs >= rawA.updatedAt)
+        ? { name: rawA.name.trim().slice(0, 32), updatedAt: Math.floor(rawA.updatedAt) }
+        : null
+    const validB =
+      !isBlocked &&
+      rawB &&
+      !isAutoAnonNickname(rawB.name) &&
+      !(clearedMs > 0 && clearedMs >= rawB.updatedAt)
+        ? { name: rawB.name.trim().slice(0, 32), updatedAt: Math.floor(rawB.updatedAt) }
+        : null
+
+    if (!validA && !validB) {
+      if (rawA) {
+        diff.dmPeerNamesChanged = true
+      }
+      continue
+    }
+    if (validA && !validB) {
+      rawMergedDmNames[pk] = validA
+      continue
+    }
+    if (!validA && validB) {
+      rawMergedDmNames[pk] = validB
+      diff.dmPeerNamesChanged = true
+      diff.itemsUpdated += 1
+      continue
+    }
+    if (!validA || !validB) continue
+
+    const bWins =
+      validB.updatedAt > validA.updatedAt ||
+      (validB.updatedAt === validA.updatedAt && validB.name > validA.name)
+    const winner = bWins ? validB : validA
+    rawMergedDmNames[pk] = winner
+    if (winner.name !== validA.name || winner.updatedAt !== validA.updatedAt) {
+      diff.dmPeerNamesChanged = true
+      diff.itemsUpdated += 1
+    }
+  }
+
+  const { capped: mergedDmPeerNames } = capSyncedDmPeerNames(rawMergedDmNames)
+  for (const pk of Object.keys(localDmNames)) {
+    if (!mergedDmPeerNames[pk.toLowerCase()]) {
+      diff.dmPeerNamesChanged = true
+      break
+    }
+  }
+
   const changed =
     diff.serversChanged ||
     diff.trustedChanged ||
@@ -708,7 +855,8 @@ export function mergeCrdtStates(
     diff.dmClearedChanged ||
     diff.lud16Changed ||
     diff.nicknameChanged ||
-    diff.peerNotesChanged
+    diff.peerNotesChanged ||
+    diff.dmPeerNamesChanged
 
   return {
     merged: {
@@ -721,6 +869,7 @@ export function mergeCrdtStates(
       lud16: mergedLud16,
       nickname: mergedNickname,
       peerNotes: mergedPeerNotes,
+      dmPeerNames: mergedDmPeerNames,
     },
     changed,
     diff,
@@ -770,8 +919,30 @@ export function extractActivePeerNotes(crdt: DeviceSyncCrdtState): Record<string
   return out
 }
 
+export function extractActiveDmPeerNames(crdt: DeviceSyncCrdtState): Record<string, string> {
+  const out: Record<string, string> = {}
+  const entries = Object.entries(crdt.dmPeerNames ?? {})
+  entries.sort((a, b) => b[1].updatedAt - a[1].updatedAt || a[0].localeCompare(b[0]))
+  let count = 0
+  for (const [rawPk, rec] of entries) {
+    if (count >= MAX_SYNCED_DM_PEER_NAMES) break
+    const pk = rawPk.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || !rec || typeof rec.name !== 'string') continue
+    const bRec = crdt.blocked[pk]
+    if (bRec && bRec.addedAt > bRec.removedAt) continue
+    const clearedMs = (crdt.dmClearedAt[pk] ?? 0) * 1000
+    if (clearedMs > 0 && clearedMs >= rec.updatedAt) continue
+    const clean = rec.name.trim().slice(0, 32)
+    if (isAutoAnonNickname(clean)) continue
+    out[pk] = clean
+    count += 1
+  }
+  return out
+}
+
 export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
   const notes = crdt.peerNotes ?? {}
+  const dmNames = crdt.dmPeerNames ?? {}
   const canonical = {
     servers: Object.keys(crdt.servers)
       .sort()
@@ -809,6 +980,9 @@ export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
     peerNotes: Object.keys(notes)
       .sort()
       .map((k) => [k, notes[k].updatedAt, notes[k].text]),
+    dmPeerNames: Object.keys(dmNames)
+      .sort()
+      .map((k) => [k, dmNames[k].updatedAt, dmNames[k].name]),
   }
   return sha256ShortHex(JSON.stringify(canonical))
 }
@@ -861,6 +1035,7 @@ export function fitCheckpointStateWithinBudget(
     lud16: crdt.lud16,
     nickname: crdt.nickname,
     peerNotes: crdt.peerNotes ?? {},
+    dmPeerNames: crdt.dmPeerNames ?? {},
   }
 
   // 1. Full (`base + wallet + amail + recentMessages`)
@@ -1350,6 +1525,22 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     }
   }
 
+  const rawDmPeerNames: Record<string, SyncedDmPeerNameRecord> = {}
+  if (isRecord(raw.dmPeerNames)) {
+    for (const [rawPk, val] of Object.entries(raw.dmPeerNames)) {
+      const pk = rawPk.trim().toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(pk) || !isRecord(val)) continue
+      const name = typeof val.name === 'string' ? val.name.trim().slice(0, 32) : ''
+      if (isAutoAnonNickname(name)) continue
+      const updatedAt =
+        typeof val.updatedAt === 'number' && Number.isFinite(val.updatedAt) && val.updatedAt > 0
+          ? Math.floor(val.updatedAt)
+          : 1
+      rawDmPeerNames[pk] = { name, updatedAt }
+    }
+  }
+  const { capped: dmPeerNames } = capSyncedDmPeerNames(rawDmPeerNames)
+
   let wallet: DeviceSyncCrdtState['wallet'] = undefined
   if (
     isRecord(raw.wallet) &&
@@ -1395,6 +1586,7 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     lud16,
     nickname,
     peerNotes,
+    dmPeerNames,
     ...(wallet ? { wallet } : {}),
     ...(amail ? { amail } : {}),
     ...(recentMessages ? { recentMessages } : {}),

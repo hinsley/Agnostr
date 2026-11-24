@@ -8,6 +8,7 @@ import type {
   VoiceMemoAttachment,
 } from '../types/protocol.ts'
 import { KIND_GIFT_WRAP, verifyEventCached } from '../lib/bitchatProtocol.ts'
+import { isAutoAnonNickname } from '../lib/deviceSync.ts'
 import {
   createEncryptedDmEvent,
   decodeDmImagePayload,
@@ -40,6 +41,19 @@ const DM_LOOKBACK_SEC = 3 * 24 * 60 * 60 // 3 days to account for NIP-59 ±2d ra
 const DM_BACKLOG_FALLBACK_MS = 2500
 const DM_EOSE_GRACE_MS = 500
 const LIVE_RECENCY_WINDOW_MS = 10 * 60 * 1000 // 10 minutes tolerance for live clock skew
+
+export function pickBestPeerNickname(
+  pubkey: string,
+  ...candidates: Array<string | null | undefined>
+): string {
+  for (const raw of candidates) {
+    const clean = (raw ?? '').trim().slice(0, 32)
+    if (!isAutoAnonNickname(clean)) {
+      return clean
+    }
+  }
+  return `anon${pubkey.toLowerCase().slice(-4)}`
+}
 
 export function getDmOrderKey(msg: Pick<DmMessage, 'orderMs' | 'createdAt'>): number {
   return typeof msg.orderMs === 'number' && Number.isFinite(msg.orderMs)
@@ -315,8 +329,9 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                     : '🖼️ Image'
                 : decrypted.content.slice(0, 96)
 
-            const nick = presenceTracker.getNickname(senderPk) || `anon${senderPk.slice(-4)}`
-            const handle = formatDisplayHandle(nick, senderPk)
+            const presenceNick = presenceTracker.getNickname(senderPk)
+            const initialNick = pickBestPeerNickname(senderPk, presenceNick)
+            let resolvedHandle = formatDisplayHandle(initialNick, senderPk)
             const isViewing = activeDmPeerRef.current?.toLowerCase() === senderPk
 
             const rawMsgMs = decrypted.timestampMs ?? decrypted.createdAt * 1000
@@ -344,6 +359,9 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                 const existing = prev[existingIdx]
                 if (existing.messages.some((m) => m.id === baseMsg.id)) return prev
                 added = true
+                const nextNick = pickBestPeerNickname(senderPk, presenceNick, existing.peerNickname)
+                const nextHandle = formatDisplayHandle(nextNick, senderPk)
+                resolvedHandle = nextHandle
                 const lastOrder = getMaxOrderMs(existing.messages)
                 const newMsg: DmMessage = {
                   ...baseMsg,
@@ -353,8 +371,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                 const tail = nextMsgs[nextMsgs.length - 1]
                 const updated: DmThread = {
                   ...existing,
-                  peerNickname: nick,
-                  peerDisplayHandle: handle,
+                  peerNickname: nextNick,
+                  peerDisplayHandle: nextHandle,
                   protocol: decrypted.protocol,
                   messages: nextMsgs,
                   unreadCount: isViewing ? 0 : existing.unreadCount + 1,
@@ -374,8 +392,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               const created: DmThread = {
                 peerPubkey: senderPk,
                 peerNpub: encodeNpubSafe(senderPk),
-                peerNickname: nick,
-                peerDisplayHandle: handle,
+                peerNickname: initialNick,
+                peerDisplayHandle: resolvedHandle,
                 protocol: decrypted.protocol,
                 messages: [newMsg],
                 unreadCount: isViewing ? 0 : 1,
@@ -386,7 +404,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             })
 
             if (added && !isViewing && !blockedRef.current.has(senderPk)) {
-              onIncomingRef.current?.(handle, previewText.slice(0, 80), senderPk)
+              onIncomingRef.current?.(resolvedHandle, previewText.slice(0, 80), senderPk)
             }
           })
         },
@@ -404,7 +422,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   const ensureThread = useCallback(
     (peerPubkey: string, nicknameHint?: string, preferredProtocol?: DmProtocol): DmThread => {
       const pk = peerPubkey.toLowerCase()
-      const nick = nicknameHint?.trim() || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
+      const presenceNick = presenceTracker.getNickname(pk)
+      const nick = pickBestPeerNickname(pk, nicknameHint, presenceNick)
       const handle = formatDisplayHandle(nick, pk)
       const defaultProto: DmProtocol =
         preferredProtocol ?? (identityManager.getSignMode() === 'extension' ? 'nip17' : 'bitchat')
@@ -414,10 +433,16 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         const idx = prev.findIndex((t) => t.peerPubkey === pk)
         if (idx !== -1) {
           const existing = prev[idx]
+          const nextNick = pickBestPeerNickname(
+            pk,
+            nicknameHint,
+            existing.peerNickname,
+            presenceNick
+          )
           target = {
             ...existing,
-            peerNickname: nicknameHint?.trim() || existing.peerNickname,
-            peerDisplayHandle: formatDisplayHandle(nicknameHint?.trim() || existing.peerNickname, pk),
+            peerNickname: nextNick,
+            peerDisplayHandle: formatDisplayHandle(nextNick, pk),
             protocol: preferredProtocol ?? existing.protocol,
             unreadCount: 0,
           }
@@ -1047,12 +1072,21 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           protocol: raw.protocol === 'nip17' ? 'nip17' : 'bitchat',
         })
       }
-      if (validIncoming.length === 0) return 0
+      const metaNick =
+        peerMeta?.peerNickname && !isAutoAnonNickname(peerMeta.peerNickname)
+          ? peerMeta.peerNickname.trim().slice(0, 32)
+          : undefined
 
       const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+      const shouldUpgradeNameOnly = Boolean(
+        existingThread && metaNick && isAutoAnonNickname(existingThread.peerNickname)
+      )
+
+      if (validIncoming.length === 0 && !shouldUpgradeNameOnly) return 0
+
       const existingIds = new Set(existingThread?.messages.map((m) => m.id) ?? [])
       const uniqueNew = validIncoming.filter((m) => !existingIds.has(m.id))
-      if (uniqueNew.length === 0) return 0
+      if (uniqueNew.length === 0 && !shouldUpgradeNameOnly) return 0
 
       setThreads((prev) => {
         const idx = prev.findIndex((t) => t.peerPubkey === pk)
@@ -1060,11 +1094,31 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           const existing = prev[idx]
           const seen = new Set(existing.messages.map((m) => m.id))
           const toAdd = validIncoming.filter((m) => !seen.has(m.id))
-          if (toAdd.length === 0) return prev
+          const nextNick = pickBestPeerNickname(
+            pk,
+            metaNick,
+            existing.peerNickname,
+            presenceTracker.getNickname(pk)
+          )
+          const nameChanged = nextNick !== existing.peerNickname
+          if (toAdd.length === 0 && !nameChanged) return prev
+
+          if (toAdd.length === 0) {
+            const copy = [...prev]
+            copy[idx] = {
+              ...existing,
+              peerNickname: nextNick,
+              peerDisplayHandle: formatDisplayHandle(nextNick, pk),
+            }
+            return copy
+          }
+
           const merged = [...existing.messages, ...toAdd].sort(compareDmMessages).slice(-150)
           const tail = merged[merged.length - 1]
           const updated: DmThread = {
             ...existing,
+            peerNickname: nextNick,
+            peerDisplayHandle: formatDisplayHandle(nextNick, pk),
             messages: merged,
             lastMessageAt: tail ? tail.createdAt : existing.lastMessageAt,
             lastPreview: tail ? formatDmPreview(tail) : existing.lastPreview,
@@ -1074,12 +1128,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
           return copy
         }
+        if (validIncoming.length === 0) return prev
         const sorted = [...validIncoming].sort(compareDmMessages).slice(-150)
         const tail = sorted[sorted.length - 1]
-        const nick =
-          peerMeta?.peerNickname?.trim() ||
-          presenceTracker.getNickname(pk) ||
-          `anon${pk.slice(-4)}`
+        const nick = pickBestPeerNickname(pk, metaNick, presenceTracker.getNickname(pk))
         const created: DmThread = {
           peerPubkey: pk,
           peerNpub: encodeNpubSafe(pk),
@@ -1093,9 +1145,50 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         }
         return [created, ...prev].sort((a, b) => b.lastMessageAt - a.lastMessageAt)
       })
-      return uniqueNew.length
+      return uniqueNew.length > 0 ? uniqueNew.length : shouldUpgradeNameOnly ? 1 : 0
     },
     [identityManager, presenceTracker]
+  )
+
+  const applySyncedDmPeerNames = useCallback(
+    (namesByPubkey: Record<string, string>, opts?: { upgradeAnonOnly?: boolean }): number => {
+      const cleanMap = new Map<string, string>()
+      for (const [rawPk, rawName] of Object.entries(namesByPubkey)) {
+        const pk = rawPk.trim().toLowerCase()
+        if (!/^[0-9a-f]{64}$/.test(pk)) continue
+        const cleanName = typeof rawName === 'string' ? rawName.trim().slice(0, 32) : ''
+        if (isAutoAnonNickname(cleanName)) continue
+        cleanMap.set(pk, cleanName)
+      }
+      if (cleanMap.size === 0) return 0
+
+      let expectedCount = 0
+      for (const t of threadsRef.current) {
+        const incomingName = cleanMap.get(t.peerPubkey.toLowerCase())
+        if (!incomingName) continue
+        if (opts?.upgradeAnonOnly && !isAutoAnonNickname(t.peerNickname)) continue
+        if (incomingName !== t.peerNickname) expectedCount += 1
+      }
+
+      setThreads((prev) => {
+        let changed = false
+        const next = prev.map((t) => {
+          const incomingName = cleanMap.get(t.peerPubkey.toLowerCase())
+          if (!incomingName) return t
+          if (opts?.upgradeAnonOnly && !isAutoAnonNickname(t.peerNickname)) return t
+          if (incomingName === t.peerNickname) return t
+          changed = true
+          return {
+            ...t,
+            peerNickname: incomingName,
+            peerDisplayHandle: formatDisplayHandle(incomingName, t.peerPubkey),
+          }
+        })
+        return changed ? next : prev
+      })
+      return expectedCount
+    },
+    []
   )
 
   const clearAllDms = useCallback(() => {
@@ -1133,6 +1226,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     closeThread,
     mergeSyncedDmClearedAt,
     mergeSyncedDmMessages,
+    applySyncedDmPeerNames,
     clearAllDms,
   }
 }

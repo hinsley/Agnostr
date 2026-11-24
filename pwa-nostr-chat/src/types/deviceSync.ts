@@ -109,6 +109,12 @@ export interface SyncedPeerNoteRecord {
   updatedAt: number
 }
 
+/** Compact LWW-Register record for an active DM peer's latest known non-generic display name */
+export interface SyncedDmPeerNameRecord {
+  name: string
+  updatedAt: number
+}
+
 /** Optional Amail sync snapshot bundled when size permits */
 export interface SyncedAmailState {
   updatedAt: number
@@ -141,6 +147,7 @@ export interface DeviceSyncCrdtState {
   lud16: SyncedLightningAddressState
   nickname: SyncedNicknameState
   peerNotes?: Record<string, SyncedPeerNoteRecord>
+  dmPeerNames?: Record<string, SyncedDmPeerNameRecord>
   wallet?: SyncedWalletState | null
   amail?: SyncedAmailState | null
   recentMessages?: SyncedRecentMessagesTail

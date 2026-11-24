@@ -63,6 +63,7 @@ import {
   type ParsedReaction,
 } from '../lib/bitchatProtocol.ts'
 import { executeSlashCommand, SLASH_COMMANDS } from '../lib/commands.ts'
+import { isAutoAnonNickname } from '../lib/deviceSync.ts'
 import {
   buildGeohashCell,
   DEFAULT_GEOHASH,
@@ -1796,6 +1797,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     closeThread: closeDmThreadRaw,
     mergeSyncedDmClearedAt,
     mergeSyncedDmMessages,
+    applySyncedDmPeerNames,
     clearAllDms,
   } = useDirectMessages({
     pool,
@@ -2173,6 +2175,13 @@ export function useAgnostrEngine(): AgnostrEngine {
     savePeerNotes(clean)
   }, [])
 
+  const handleApplySyncedDmPeerNames = useCallback(
+    (namesByPubkey: Record<string, string>) => {
+      applySyncedDmPeerNames(namesByPubkey)
+    },
+    [applySyncedDmPeerNames]
+  )
+
   const {
     deviceSync: deviceSyncEngine,
     registerAmailSyncProvider,
@@ -2206,6 +2215,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     onApplyLightningAddress: handleApplySyncedLightningAddress,
     onApplyNickname: handleApplySyncedNickname,
     onApplyPeerNotes: handleApplySyncedPeerNotes,
+    onApplyDmPeerNames: handleApplySyncedDmPeerNames,
     onMergeDmMessages: mergeSyncedDmMessages,
     onMergeServerMessages: mergeSyncedServerMessages,
     onMergeRadioMessages: handleMergeSyncedRadioMessages,
@@ -3114,6 +3124,147 @@ export function useAgnostrEngine(): AgnostrEngine {
       return changed ? next : prev
     })
   }, [trustedPubkeys, dmThreads, serversEngine.members, presenceTracker])
+
+  // Upgrade active DM threads still showing generic `anonXXXX` from already-in-memory sources (zero extra storage)
+  useEffect(() => {
+    if (dmThreads.length === 0) return
+    const resolved: Record<string, string> = {}
+    for (const thread of dmThreads) {
+      if (!isAutoAnonNickname(thread.peerNickname)) continue
+      const pk = thread.peerPubkey.toLowerCase()
+      const candidates = [
+        trustedPubkeys.find((t) => t.pubkey.toLowerCase() === pk)?.label,
+        amailEngine.contacts.find((c) => c.pubkey.toLowerCase() === pk)?.nickname,
+        serversEngine.members.find((m) => m.pubkey.toLowerCase() === pk)?.nickname,
+        presenceTracker.getNickname(pk),
+      ]
+      for (const raw of candidates) {
+        const clean = raw?.trim().slice(0, 32)
+        if (clean && !isAutoAnonNickname(clean)) {
+          resolved[pk] = clean
+          break
+        }
+      }
+    }
+    if (Object.keys(resolved).length > 0) {
+      applySyncedDmPeerNames(resolved, { upgradeAnonOnly: true })
+    }
+  }, [
+    dmThreads,
+    trustedPubkeys,
+    amailEngine.contacts,
+    serversEngine.members,
+    peers,
+    presenceTracker,
+    applySyncedDmPeerNames,
+  ])
+
+  // Lightweight, zero-extra-storage, once-per-session `kind: 0` fallback ONLY for active DM threads still showing `anonXXXX`
+  const queriedDmProfilePksRef = useRef<Set<string>>(new Set())
+  const dmProfileLookupUnsubsRef = useRef<Set<() => void>>(new Set())
+  const dmProfileUnmountedRef = useRef(false)
+
+  useEffect(() => {
+    dmProfileUnmountedRef.current = false
+    const unsubs = dmProfileLookupUnsubsRef.current
+    return () => {
+      dmProfileUnmountedRef.current = true
+      for (const unsub of unsubs) {
+        try {
+          unsub()
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+      unsubs.clear()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!pool || dmThreads.length === 0) return
+    const needLookup: string[] = []
+    for (const thread of dmThreads) {
+      if (!isAutoAnonNickname(thread.peerNickname)) continue
+      const pk = thread.peerPubkey.toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(pk)) continue
+      if (blockedSetRef.current.has(pk) || queriedDmProfilePksRef.current.has(pk)) continue
+      needLookup.push(pk)
+      if (needLookup.length >= 25) break
+    }
+    if (needLookup.length === 0) return
+
+    const relays = Array.from(
+      new Set([...relaySelection.dmRelays, ...relaySelection.channelRelays])
+    )
+    if (relays.length === 0) return
+
+    for (const pk of needLookup) {
+      queriedDmProfilePksRef.current.add(pk)
+    }
+
+    const targetSet = new Set(needLookup)
+    const latestByPk = new Map<string, { createdAt: number; name: string }>()
+    let finished = false
+    let eoseCount = 0
+    let unsub: (() => void) | null = null
+    let timer = 0
+
+    const finish = () => {
+      if (finished) return
+      finished = true
+      window.clearTimeout(timer)
+      if (unsub) {
+        dmProfileLookupUnsubsRef.current.delete(unsub)
+        try {
+          unsub()
+        } catch {
+          // Ignore unsubscribe errors
+        }
+      }
+      if (dmProfileUnmountedRef.current || latestByPk.size === 0) return
+      const resolved: Record<string, string> = {}
+      for (const [pk, rec] of latestByPk.entries()) {
+        resolved[pk] = rec.name
+      }
+      applySyncedDmPeerNames(resolved, { upgradeAnonOnly: true })
+    }
+
+    timer = window.setTimeout(finish, 4500)
+    unsub = pool.subscribe(
+      `agnostr-dm-k0-${Date.now().toString(36)}`,
+      relays,
+      [{ kinds: [0], authors: needLookup, limit: needLookup.length * 2 }],
+      {
+        onEvent: (ev) => {
+          if (ev.kind !== 0) return
+          const pk = ev.pubkey.toLowerCase()
+          if (!targetSet.has(pk) || !ev.content) return
+          try {
+            const parsed = JSON.parse(ev.content) as Record<string, unknown>
+            const rawName =
+              (typeof parsed.display_name === 'string' && parsed.display_name.trim()) ||
+              (typeof parsed.name === 'string' && parsed.name.trim()) ||
+              ''
+            const cleanName = rawName.trim().slice(0, 32)
+            if (isAutoAnonNickname(cleanName)) return
+            const prev = latestByPk.get(pk)
+            if (!prev || ev.created_at > prev.createdAt) {
+              latestByPk.set(pk, { createdAt: ev.created_at, name: cleanName })
+            }
+          } catch {
+            // Ignore malformed kind: 0 JSON
+          }
+        },
+        onEose: () => {
+          eoseCount += 1
+          if (eoseCount >= relays.length) {
+            finish()
+          }
+        },
+      }
+    )
+    dmProfileLookupUnsubsRef.current.add(unsub)
+  }, [pool, dmThreads, relaySelection.dmRelays, relaySelection.channelRelays, applySyncedDmPeerNames])
 
   const untrustPubkey = useCallback(
     (pubkey: string) => {
@@ -4192,6 +4343,15 @@ export function useAgnostrEngine(): AgnostrEngine {
     presenceTracker.clear()
     clearPulse()
     setChannelPreviews({})
+    queriedDmProfilePksRef.current.clear()
+    for (const unsub of dmProfileLookupUnsubsRef.current) {
+      try {
+        unsub()
+      } catch {
+        // Ignore
+      }
+    }
+    dmProfileLookupUnsubsRef.current.clear()
     clearAllDms()
     resetAllServers()
     resetLocation()
