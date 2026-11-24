@@ -113,6 +113,9 @@ export type WalletTxType =
   | 'receive_btc'
   | 'send_btc'
   | 'zap_out'
+  | 'zap_in'
+  | 'nutzap_in'
+  | 'nutzap_out'
   | 'reclaim'
 
 export type WalletTxStatus = 'pending' | 'completed' | 'failed' | 'expired'
@@ -273,6 +276,59 @@ export interface ZapReceiptSummary {
   targetEventId?: string
   comment?: string
   createdAt: number
+  kind?: 'nip57' | 'nip61'
+}
+
+/* --------------------------------------------------------------------------
+   NIP-61 Nutzaps (kind: 10019 / kind: 9321) & Built-in npub.cash v2 Auto-Sweep
+   -------------------------------------------------------------------------- */
+
+export type ZapAddressMode = 'builtin' | 'custom'
+
+export interface NutzapInfoRecord {
+  pubkey: string
+  p2pkPubkey: string
+  mints: Array<{ url: string; units: string[] }>
+  relays: string[]
+  createdAt: number
+}
+
+export interface NutzapEventParsed {
+  id: string
+  senderPubkey: string
+  recipientPubkey: string
+  mintUrl: string
+  unit: string
+  proofs: StoredCashuProof[]
+  amountSats: number
+  targetEventId?: string
+  comment?: string
+  createdAt: number
+}
+
+export interface NpubCashQuote {
+  createdAt: number
+  paidAt: number | null
+  expiresAt: number | null
+  mintUrl: string
+  quoteId: string
+  request: string
+  amount: number
+  state: string
+  locked: boolean
+  zapRequest?: string
+}
+
+export interface NpubCashStatus {
+  enabled: boolean
+  mode: ZapAddressMode
+  builtinAddress: string
+  activeAddress: string | null
+  mintUrl: string | null
+  sweeping: boolean
+  lastSweptAt: number | null
+  lastSweptSats: number
+  lastError: string | null
 }
 
 /* --------------------------------------------------------------------------
@@ -307,6 +363,8 @@ export interface WalletEngine {
   initialized: boolean
   mnemonic: string | null
   privateKeyHex: string | null
+  /** 32-byte x-only hex P2PK pubkey derived from the wallet's `privateKeyHex` (used for NIP-61 Nutzaps) */
+  nutzapP2pkPubkeyHex: string | null
 
   // Multi-mint balances & state
   mints: CashuMintAccount[]
@@ -370,6 +428,44 @@ export interface WalletEngine {
   ) => Promise<CashuSentTokenRecord>
   checkSentTokenStatus: (sentId: string) => Promise<CashuSentTokenStatus>
   reclaimSentToken: (sentId: string) => Promise<number>
+
+  // NIP-61 P2PK Nutzaps & External Mint Quote Sweeping (npub.cash v2)
+  sendP2pkNutzapProofs: (params: {
+    amountSats: number
+    recipientP2pkPubkey: string
+    mintUrl?: string
+    counterparty?: string
+    memo?: string
+  }) => Promise<{
+    mintUrl: string
+    proofs: StoredCashuProof[]
+    amountSats: number
+    feeSats: number
+  }>
+  claimP2pkNutzapProofs: (params: {
+    mintUrl: string
+    proofs: StoredCashuProof[]
+    candidatePrivkeysHex: string[]
+    senderPubkey?: string
+    memo?: string
+    nutzapEventId?: string
+  }) => Promise<{
+    claimedSats: number
+    mintUrl: string
+  }>
+  claimExternalMintQuote: (params: {
+    mintUrl: string
+    quoteId: string
+    amountSats: number
+    privkeyHex?: string
+    counterparty?: string
+    memo?: string
+    txType?: 'zap_in' | 'receive_ln'
+  }) => Promise<{
+    state: CashuMintQuoteState
+    claimedSats: number
+    mintUrl: string
+  }>
 
   // Lightning NUT-04 receive & NUT-05 send
   createLightningReceiveQuote: (
@@ -441,8 +537,18 @@ export interface WalletEngine {
 
 export interface ZapEngine {
   lightningAddress: string | null
+  zapMode: ZapAddressMode
+  builtinLightningAddress: string
+  customLightningAddress: string | null
+  npubCashAutoSweep: boolean
+  npubCashSweeping: boolean
+  npubCashLastSweptAt: number | null
+  npubCashLastError: string | null
+  npubCashMintUrl: string | null
+  nutzapInfoPublished: boolean
   publishingProfile: boolean
   peerLightningAddresses: Record<string, string>
+  peerNutzapInfo: Record<string, NutzapInfoRecord>
   zapTotalsByEventId: Record<string, number>
   zapReceiptsByEventId: Record<string, ZapReceiptSummary[]>
 
@@ -452,8 +558,30 @@ export interface ZapEngine {
     publishedRelays: number
     error?: string
   }>
+  setZapAddressMode: (
+    mode: ZapAddressMode,
+    customAddress?: string | null
+  ) => Promise<{
+    ok: boolean
+    normalized: string | null
+    publishedRelays: number
+    error?: string
+  }>
+  setNpubCashAutoSweep: (enabled: boolean) => void
+  sweepNpubCashNow: (opts?: { silent?: boolean }) => Promise<{
+    claimedCount: number
+    claimedSats: number
+    error?: string
+  }>
+  publishNutzapInfo: () => Promise<{
+    ok: boolean
+    publishedRelays: number
+    error?: string
+  }>
   getPeerLightningAddress: (pubkey: string) => string | null
   lookupPeerLightningAddress: (pubkey: string, force?: boolean) => Promise<string | null>
+  getPeerNutzapInfo: (pubkey: string) => NutzapInfoRecord | null
+  lookupPeerNutzapInfo: (pubkey: string, force?: boolean) => Promise<NutzapInfoRecord | null>
   ingestPeerLightningAddress: (pubkey: string, lud16: string | null | undefined) => void
   ingestEventTags: (pubkey: string, tags: string[][]) => void
   ingestZapReceipt: (event: NostrEvent) => ZapReceiptSummary | null
@@ -464,5 +592,18 @@ export interface ZapEngine {
     amountSats: number
     comment?: string
   }) => Promise<ZapInvoiceResult>
+  sendNutzap: (params: {
+    target: ZapTarget
+    amountSats: number
+    comment?: string
+    mintUrl?: string
+  }) => Promise<{
+    eventId: string
+    amountSats: number
+    feeSats: number
+    mintUrl: string
+    publishedRelays: number
+  }>
+  canZapPeer: (pubkey: string) => boolean
   resetAll: () => void
 }

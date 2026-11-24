@@ -388,6 +388,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     const blocked = engine.isPeerBlocked(peer.peerPubkey)
     const existingNote = engine.peerNotes[peer.peerPubkey.toLowerCase()] ?? ''
     const peerLud16 = engine.zaps.getPeerLightningAddress(peer.peerPubkey)
+    const peerCanZap = engine.zaps.canZapPeer(peer.peerPubkey)
     const npub = encodeNpubSafe(peer.peerPubkey)
     const dmUrl = buildDmShareUrl(peer.peerPubkey, peer.peerNickname)
     const items: ContextMenuItem[] = [
@@ -408,7 +409,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       })
     }
 
-    if (peerLud16 && onOpenZap) {
+    if (peerCanZap && onOpenZap) {
       items.push({
         id: `dm-zap-${peer.peerPubkey}`,
         label: `Zap @${peer.peerNickname}`,

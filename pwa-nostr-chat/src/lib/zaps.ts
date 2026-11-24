@@ -3,10 +3,12 @@ import {
   type EventTemplate,
   type VerifiedEvent,
 } from 'nostr-tools'
-import type { LnurlPayMetadata, ZapReceiptSummary } from '../types/wallet.ts'
+import type { LnurlPayMetadata, ZapAddressMode, ZapReceiptSummary } from '../types/wallet.ts'
 
 export const LIGHTNING_ADDRESS_STORAGE_KEY = 'agnostr:v2:lightning_address'
 export const PEER_LUD16_CACHE_STORAGE_KEY = 'agnostr:v2:peer_lud16_cache'
+export const ZAP_MODE_STORAGE_KEY = 'agnostr:v2:zap_address_mode'
+export const NPUBCASH_AUTOSWEEP_STORAGE_KEY = 'agnostr:v2:npubcash_autosweep'
 
 export const KIND_PROFILE_METADATA = 0
 export const KIND_ZAP_REQUEST = 9734
@@ -121,6 +123,14 @@ export function normalizeLightningAddress(raw: string | null | undefined): strin
 
 export function isValidLightningAddress(raw: string): boolean {
   return normalizeLightningAddress(raw) !== null
+}
+
+/**
+ * Returns true if the supplied Lightning Address belongs to the built-in `npub.cash` domain.
+ */
+export function isNpubCashAddress(addr: string | null | undefined): boolean {
+  const normalized = normalizeLightningAddress(addr)
+  return Boolean(normalized && normalized.endsWith('@npub.cash'))
 }
 
 /**
@@ -579,6 +589,7 @@ export function parseZapReceiptEvent(event: NostrEvent): ZapReceiptSummary | nul
     targetEventId,
     comment,
     createdAt: event.created_at,
+    kind: 'nip57',
   }
 }
 
@@ -637,6 +648,50 @@ export function saveStoredPeerLud16Cache(addresses: Record<string, string>): voi
       addresses: Object.fromEntries(entries),
     }
     localStorage.setItem(PEER_LUD16_CACHE_STORAGE_KEY, JSON.stringify(payload))
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function loadStoredZapAddressMode(storedCustomAddr?: string | null): ZapAddressMode {
+  try {
+    const raw = localStorage.getItem(ZAP_MODE_STORAGE_KEY)
+    if (raw === 'builtin' || raw === 'custom') return raw
+    // Preserve existing custom non-npub.cash addresses for upgraded users
+    const existing =
+      storedCustomAddr !== undefined
+        ? normalizeLightningAddress(storedCustomAddr)
+        : loadStoredLightningAddress()
+    if (existing && !isNpubCashAddress(existing)) {
+      return 'custom'
+    }
+    return 'builtin'
+  } catch {
+    return 'builtin'
+  }
+}
+
+export function saveStoredZapAddressMode(mode: ZapAddressMode): void {
+  try {
+    localStorage.setItem(ZAP_MODE_STORAGE_KEY, mode)
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function loadStoredNpubCashAutoSweep(): boolean {
+  try {
+    const raw = localStorage.getItem(NPUBCASH_AUTOSWEEP_STORAGE_KEY)
+    if (raw === 'false' || raw === '0') return false
+    return true
+  } catch {
+    return true
+  }
+}
+
+export function saveStoredNpubCashAutoSweep(enabled: boolean): void {
+  try {
+    localStorage.setItem(NPUBCASH_AUTOSWEEP_STORAGE_KEY, enabled ? 'true' : 'false')
   } catch {
     // Ignore storage errors
   }

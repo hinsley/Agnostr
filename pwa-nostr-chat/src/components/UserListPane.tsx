@@ -375,6 +375,7 @@ export function UserListPane({
   const handleRowContextMenu = (e: ReactMouseEvent, item: NormalizedUserItem) => {
     const savedNote = peerNotes[item.pubkey] ?? ''
     const peerLud16 = !item.isSelf ? engine.zaps.getPeerLightningAddress(item.pubkey) : null
+    const peerCanZap = !item.isSelf && engine.zaps.canZapPeer(item.pubkey)
     const items: ContextMenuItem[] = [
       {
         id: 'profile',
@@ -443,7 +444,7 @@ export function UserListPane({
         },
       })
 
-      if (peerLud16 && onOpenZap) {
+      if (peerCanZap && onOpenZap) {
         items.push({
           id: 'zap',
           label: 'Zap',

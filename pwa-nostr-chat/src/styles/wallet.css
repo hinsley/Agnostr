@@ -1212,6 +1212,235 @@
   color: var(--text-primary);
 }
 
+/* Self-Contained Receive Zaps Card (Overview) & Permanent Address Strip (Receive -> Lightning) */
+.ag-wallet-zap-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.85rem 0.95rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-elevated);
+  min-width: 0;
+}
+
+.ag-wallet-zap-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.ag-wallet-zap-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.ag-wallet-zap-addr-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.55rem 0.45rem 0.7rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-canvas);
+  min-width: 0;
+}
+
+.ag-wallet-zap-addr {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-wallet-zap-addr-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.ag-wallet-zap-meta {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.ag-wallet-zap-error {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--status-danger);
+}
+
+.ag-wallet-zap-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  padding-top: 0.2rem;
+}
+
+.ag-wallet-zap-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.ag-wallet-zap-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.ag-wallet-zap-switch {
+  position: relative;
+  width: 30px;
+  height: 17px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-subtle);
+  transition: background-color var(--dur-fast) ease;
+  flex-shrink: 0;
+}
+
+.ag-wallet-zap-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: var(--radius-full);
+  background-color: var(--text-primary);
+  transition: transform var(--dur-fast) ease, background-color var(--dur-fast) ease;
+}
+
+.ag-wallet-zap-toggle input:checked + .ag-wallet-zap-switch {
+  background-color: var(--accent);
+}
+
+.ag-wallet-zap-toggle input:checked + .ag-wallet-zap-switch::after {
+  transform: translateX(13px);
+  background-color: #ffffff;
+}
+
+.ag-wallet-zap-toggle input:focus-visible + .ag-wallet-zap-switch {
+  box-shadow: var(--accent-glow);
+}
+
+.ag-wallet-perm-zap-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.62rem 0.78rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-elevated);
+  min-width: 0;
+}
+
+.ag-wallet-perm-zap-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+
+.ag-wallet-perm-zap-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ag-wallet-perm-zap-addr {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Zap Modal Nutzap vs Lightning Segmented Toggle */
+.ag-zap-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.25rem;
+  padding: 0.24rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-elevated);
+}
+
+.ag-zap-mode-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.1rem;
+  padding: 0.48rem 0.5rem;
+  border-radius: calc(var(--radius-lg) - 3px);
+  background-color: transparent;
+  color: var(--text-secondary);
+  min-width: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
+}
+
+.ag-zap-mode-btn:hover:not(.active) {
+  color: var(--text-primary);
+}
+
+.ag-zap-mode-btn.active {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.ag-zap-mode-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.ag-zap-mode-btn.active .ag-zap-mode-title svg {
+  color: var(--accent);
+}
+
+.ag-zap-mode-sub {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  line-height: 1.2;
+}
+
+.ag-zap-hint {
+  margin: -0.3rem 0 0;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
 /* Zap Modal Tonal Rows (Zero Borders) */
 .ag-zap-recipient-row {
   display: flex;
@@ -1615,5 +1844,27 @@
 
   .ag-wallet-qr-frame {
     width: 188px;
+  }
+
+  .ag-wallet-zap-card {
+    padding: 0.78rem 0.82rem;
+  }
+
+  .ag-wallet-zap-addr-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.45rem;
+    padding: 0.55rem 0.62rem;
+  }
+
+  .ag-wallet-zap-addr-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.4rem;
+    width: 100%;
+  }
+
+  .ag-wallet-zap-addr-actions .ag-wbtn {
+    width: 100%;
   }
 }

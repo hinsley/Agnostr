@@ -292,6 +292,10 @@ export function SettingsModal({
   const [lud16Draft, setLud16Draft] = useState(() => engine.zaps.lightningAddress ?? '')
   const [lud16Saving, setLud16Saving] = useState(false)
   const [lud16Feedback, setLud16Feedback] = useState<{ ok: boolean; msg: string } | null>(null)
+
+  useEffect(() => {
+    setLud16Draft(engine.zaps.lightningAddress ?? '')
+  }, [engine.zaps.lightningAddress])
   const [secretDraft, setSecretDraft] = useState('')
   const [secretFeedback, setSecretFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [revealNsec, setRevealNsec] = useState(false)
@@ -719,22 +723,56 @@ export function SettingsModal({
     setLud16Feedback(null)
     try {
       const cleaned = lud16Draft.trim()
-      const res = await engine.zaps.setLightningAddress(cleaned || null)
+      const useBuiltin =
+        !cleaned ||
+        cleaned.toLowerCase() === engine.zaps.builtinLightningAddress.toLowerCase()
+      const res = useBuiltin
+        ? await engine.zaps.setZapAddressMode('builtin')
+        : await engine.zaps.setZapAddressMode('custom', cleaned)
       if (res.ok) {
         onPlaySound?.('click')
-        setLud16Draft(res.normalized ?? '')
+        setLud16Draft(res.normalized ?? engine.zaps.builtinLightningAddress)
         setLud16Feedback({
           ok: true,
-          msg: res.normalized
+          msg: useBuiltin
             ? res.publishedRelays > 0
+              ? `Using built-in Agwallet Zap address (published to ${res.publishedRelays} ${res.publishedRelays === 1 ? 'relay' : 'relays'})`
+              : 'Using built-in Agwallet Zap address'
+            : res.publishedRelays > 0
               ? `Saved & published to ${res.publishedRelays} ${res.publishedRelays === 1 ? 'relay' : 'relays'}`
-              : 'Saved Lightning Address locally'
-            : 'Lightning Address cleared',
+              : 'Saved custom Lightning Address locally',
         })
       } else {
         setLud16Feedback({
           ok: false,
           msg: res.error || 'Enter a valid Lightning Address (e.g. you@domain.com)',
+        })
+      }
+    } finally {
+      setLud16Saving(false)
+    }
+  }
+
+  const handleUseBuiltinZapAddress = async () => {
+    if (lud16Saving) return
+    setLud16Saving(true)
+    setLud16Feedback(null)
+    try {
+      const res = await engine.zaps.setZapAddressMode('builtin')
+      if (res.ok) {
+        onPlaySound?.('click')
+        setLud16Draft(res.normalized ?? engine.zaps.builtinLightningAddress)
+        setLud16Feedback({
+          ok: true,
+          msg:
+            res.publishedRelays > 0
+              ? `Switched to built-in Agwallet Zap address (${res.publishedRelays} ${res.publishedRelays === 1 ? 'relay' : 'relays'})`
+              : 'Switched to built-in Agwallet Zap address',
+        })
+      } else {
+        setLud16Feedback({
+          ok: false,
+          msg: res.error || 'Could not switch to built-in Zap address',
         })
       }
     } finally {
@@ -960,18 +998,30 @@ export function SettingsModal({
         </div>
       </form>
 
-      {/* Lightning Address (for NIP-57 Zaps) */}
+      {/* Lightning Address (for Zaps) */}
       <form className="ag-set-group" onSubmit={(e) => void handleSaveLightningAddress(e)}>
         <div className="ag-set-label-row">
           <label className="ag-set-label" htmlFor="ag-set-lud16">
             Lightning Address (for Zaps)
           </label>
-          {engine.zaps.lightningAddress && (
-            <span className="ag-badge ag-badge-zap mono">
-              <Zap size={10} />
-              <span>Active</span>
-            </span>
-          )}
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+            {engine.zaps.zapMode === 'custom' && (
+              <button
+                type="button"
+                className="ag-btn ag-btn-ghost ag-btn-sm"
+                disabled={lud16Saving}
+                onClick={() => void handleUseBuiltinZapAddress()}
+              >
+                Use built-in
+              </button>
+            )}
+            {engine.zaps.lightningAddress && (
+              <span className="ag-badge ag-badge-zap mono">
+                <Zap size={10} />
+                <span>{engine.zaps.zapMode === 'builtin' ? 'Built-in' : 'Custom'}</span>
+              </span>
+            )}
+          </div>
         </div>
         <div className="ag-set-inline-row">
           <input
@@ -987,7 +1037,7 @@ export function SettingsModal({
               setLud16Draft(e.target.value)
               if (lud16Feedback) setLud16Feedback(null)
             }}
-            placeholder="you@domain.com"
+            placeholder={engine.zaps.builtinLightningAddress || 'you@domain.com'}
           />
           <button
             type="submit"
@@ -1001,7 +1051,9 @@ export function SettingsModal({
           </button>
         </div>
         <p className="ag-set-helper">
-          Lets others send you Lightning zaps.
+          {engine.zaps.zapMode === 'builtin'
+            ? 'Built-in Zaps sweep straight into Agwallet. Enter a custom address to override.'
+            : 'Using a custom Lightning address. Clear or click Use built-in to sweep into Agwallet.'}
         </p>
         {lud16Feedback && (
           <p

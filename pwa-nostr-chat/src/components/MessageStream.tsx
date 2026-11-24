@@ -1476,6 +1476,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   !msg.isOwn && !msg.isSystem
                     ? engine.zaps.getPeerLightningAddress(msg.pubkey)
                     : null
+                const senderCanZap =
+                  !msg.isOwn && !msg.isSystem && engine.zaps.canZapPeer(msg.pubkey)
                 const zapTotalSats = !msg.isSystem ? (engine.zaps.zapTotalsByEventId[msg.id] ?? 0) : 0
 
                 // Compute Left-column translation state when Translator Mode is active
@@ -1581,6 +1583,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                     onNotify={(title) => engine.pushToast('info', title)}
                     contentFilter={engine.contentFilter}
                     senderLightningAddress={senderLud16}
+                    canZapSender={senderCanZap}
                     zapTotalSats={zapTotalSats}
                     onOpenZap={onOpenZap}
                     onClaimCashuToken={onClaimCashuToken}

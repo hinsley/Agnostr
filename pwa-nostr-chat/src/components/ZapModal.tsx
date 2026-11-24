@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
   Check,
+  Coins,
   Copy,
   ExternalLink,
   Loader2,
@@ -12,6 +13,7 @@ import {
   Zap,
 } from 'lucide-react'
 import type {
+  NutzapInfoRecord,
   WalletEngine,
   WalletInitialIntent,
   ZapEngine,
@@ -32,7 +34,13 @@ export interface ZapModalProps {
   onOpenWallet?: (intent?: WalletInitialIntent) => void
 }
 
+type ZapMethod = 'nutzap' | 'lightning'
+
 const ZAP_PRESETS = [21, 100, 500, 1000, 5000] as const
+
+function normalizeMintKey(url: string): string {
+  return url.trim().replace(/\/+$/, '').toLowerCase()
+}
 
 async function copyTextSafe(text: string): Promise<boolean> {
   try {
@@ -57,8 +65,15 @@ function ZapModalInner({
   onOpenWallet?: (intent?: WalletInitialIntent) => void
 }) {
   const initialLud16 = target.lud16 || zaps.getPeerLightningAddress(target.pubkey)
+  const initialNutzapInfo = zaps.getPeerNutzapInfo(target.pubkey)
+
   const [resolvedLud16, setResolvedLud16] = useState<string | null>(initialLud16)
-  const [resolvingAddress, setResolvingAddress] = useState<boolean>(!initialLud16)
+  const [resolvedNutzapInfo, setResolvedNutzapInfo] = useState<NutzapInfoRecord | null>(
+    initialNutzapInfo
+  )
+  const [resolvingLud16, setResolvingLud16] = useState<boolean>(!initialLud16)
+  const [resolvingNutzap, setResolvingNutzap] = useState<boolean>(!initialNutzapInfo)
+  const [manualMethod, setManualMethod] = useState<ZapMethod | null>(null)
   const [amountInput, setAmountInput] = useState<string>('100')
   const [comment, setComment] = useState<string>('')
 
@@ -71,6 +86,7 @@ function ZapModalInner({
   const [paidSummary, setPaidSummary] = useState<{
     amountSats: number
     feePaidSats: number
+    method: ZapMethod
   } | null>(null)
 
   useBackHandler(true, onClose)
@@ -86,26 +102,43 @@ function ZapModalInner({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose])
 
+  // Look up BOTH NIP-57 Lightning address and NIP-61 Nutzap info in parallel
   useEffect(() => {
-    if (resolvedLud16) return
     let cancelled = false
-    zaps
-      .lookupPeerLightningAddress(target.pubkey)
+
+    const lud16Task = initialLud16
+      ? Promise.resolve(initialLud16)
+      : zaps.lookupPeerLightningAddress(target.pubkey)
+    const nutzapTask = initialNutzapInfo
+      ? Promise.resolve(initialNutzapInfo)
+      : zaps.lookupPeerNutzapInfo(target.pubkey)
+
+    void lud16Task
       .then((found) => {
         if (!cancelled) {
           setResolvedLud16(found)
-          setResolvingAddress(false)
+          setResolvingLud16(false)
         }
       })
       .catch(() => {
+        if (!cancelled) setResolvingLud16(false)
+      })
+
+    void nutzapTask
+      .then((info) => {
         if (!cancelled) {
-          setResolvingAddress(false)
+          setResolvedNutzapInfo(info)
+          setResolvingNutzap(false)
         }
       })
+      .catch(() => {
+        if (!cancelled) setResolvingNutzap(false)
+      })
+
     return () => {
       cancelled = true
     }
-  }, [resolvedLud16, target.pubkey, zaps])
+  }, [initialLud16, initialNutzapInfo, target.pubkey, zaps])
 
   useEffect(() => {
     if (!invoiceResult?.invoice) return
@@ -125,6 +158,72 @@ function ZapModalInner({
   const parsedAmount = Math.floor(Number.parseInt(amountInput, 10) || 0)
   const recipientName = target.nickname?.trim() || formatShortPubkey(target.pubkey)
 
+  const canNutzap = Boolean(
+    resolvedNutzapInfo &&
+      resolvedNutzapInfo.p2pkPubkey &&
+      resolvedNutzapInfo.mints.length > 0
+  )
+  const canLightning = Boolean(resolvedLud16)
+  const resolvingAny = resolvingLud16 || resolvingNutzap
+
+  // Resolve best shared mint for NIP-61 Nutzap
+  const { sharedNutzapMintUrl, sharedNutzapMintBalance } = useMemo(() => {
+    if (!resolvedNutzapInfo || resolvedNutzapInfo.mints.length === 0) {
+      return { sharedNutzapMintUrl: null as string | null, sharedNutzapMintBalance: 0 }
+    }
+
+    const walletBalancesByNorm = new Map<string, { url: string; balance: number }>()
+    for (const [url, bal] of Object.entries(wallet.balancesByMint)) {
+      walletBalancesByNorm.set(normalizeMintKey(url), { url, balance: bal })
+    }
+
+    const activeNorm = normalizeMintKey(wallet.activeMintUrl)
+    let bestUrl: string = resolvedNutzapInfo.mints[0].url
+    let bestBal = -1
+    let activeMatch: { url: string; balance: number } | null = null
+
+    for (const m of resolvedNutzapInfo.mints) {
+      const norm = normalizeMintKey(m.url)
+      const hit = walletBalancesByNorm.get(norm)
+      const bal = hit?.balance ?? 0
+      const canonicalUrl = hit?.url ?? m.url
+      if (norm === activeNorm && bal >= Math.max(1, parsedAmount)) {
+        activeMatch = { url: canonicalUrl, balance: bal }
+      }
+      if (bal > bestBal) {
+        bestBal = bal
+        bestUrl = canonicalUrl
+      }
+    }
+
+    if (activeMatch) {
+      return {
+        sharedNutzapMintUrl: activeMatch.url,
+        sharedNutzapMintBalance: activeMatch.balance,
+      }
+    }
+
+    return {
+      sharedNutzapMintUrl: bestUrl,
+      sharedNutzapMintBalance: Math.max(0, bestBal),
+    }
+  }, [parsedAmount, resolvedNutzapInfo, wallet.activeMintUrl, wallet.balancesByMint])
+
+  const canSendNutzapNow =
+    canNutzap && Boolean(sharedNutzapMintUrl) && parsedAmount > 0 && sharedNutzapMintBalance >= parsedAmount
+
+  // Default method: auto-select 'nutzap' when funded on a shared mint or when recipient is Nutzap-only
+  const zapMethod: ZapMethod = (() => {
+    if (manualMethod === 'nutzap' && canNutzap) return 'nutzap'
+    if (manualMethod === 'lightning' && canLightning) return 'lightning'
+    if (canNutzap && (sharedNutzapMintBalance >= Math.max(1, parsedAmount) || !canLightning)) {
+      return 'nutzap'
+    }
+    if (canLightning) return 'lightning'
+    if (canNutzap) return 'nutzap'
+    return 'lightning'
+  })()
+
   const bestMintUrl = (() => {
     if (wallet.activeMintBalanceSats >= parsedAmount) return wallet.activeMintUrl
     let best = wallet.activeMintUrl
@@ -139,6 +238,33 @@ function ZapModalInner({
   })()
   const bestMintBalance = wallet.balancesByMint[bestMintUrl] ?? 0
   const canPayWithCashu = parsedAmount > 0 && bestMintBalance >= parsedAmount
+
+  const handleSendNutzap = useCallback(async () => {
+    if (parsedAmount <= 0) {
+      setError('Enter a positive amount in sats.')
+      return
+    }
+    setWorking(true)
+    setError(null)
+    try {
+      const res = await zaps.sendNutzap({
+        target,
+        amountSats: parsedAmount,
+        comment: comment.trim() || undefined,
+        mintUrl: sharedNutzapMintUrl ?? undefined,
+      })
+      setPaidSummary({
+        amountSats: res.amountSats,
+        feePaidSats: res.feeSats,
+        method: 'nutzap',
+      })
+      setStage('paid')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Nutzap failed.')
+    } finally {
+      setWorking(false)
+    }
+  }, [comment, parsedAmount, sharedNutzapMintUrl, target, zaps])
 
   const handleGetInvoice = useCallback(async () => {
     if (parsedAmount <= 0) {
@@ -192,6 +318,7 @@ function ZapModalInner({
       setPaidSummary({
         amountSats: payRes.amountSats,
         feePaidSats: payRes.feePaidSats,
+        method: 'lightning',
       })
       setStage('paid')
     } catch (err) {
@@ -224,6 +351,17 @@ function ZapModalInner({
     onClose()
     onOpenWallet?.({ tab: 'receive', receiveMode: 'lightning' })
   }, [onClose, onOpenWallet])
+
+  const activeProtocolPill =
+    stage === 'paid' && paidSummary
+      ? paidSummary.method === 'nutzap'
+        ? 'NIP-61'
+        : 'NIP-57'
+      : zapMethod === 'nutzap' && canNutzap
+        ? 'NIP-61'
+        : canLightning
+          ? 'NIP-57'
+          : null
 
   return (
     <div
@@ -264,18 +402,63 @@ function ZapModalInner({
           <div className="ag-zap-recipient-row">
             <div className="ag-zap-recipient-copy">
               <span className="ag-zap-recipient-name truncate">{recipientName}</span>
-              {resolvingAddress ? (
+              {!canNutzap && !canLightning && resolvingAny ? (
                 <span className="ag-wallet-meta">Looking up…</span>
+              ) : zapMethod === 'nutzap' && sharedNutzapMintUrl ? (
+                <span className="ag-zap-recipient-lud16" title={sharedNutzapMintUrl}>
+                  ⚡ Cashu · {formatMintHost(sharedNutzapMintUrl)}
+                </span>
               ) : resolvedLud16 ? (
                 <span className="ag-zap-recipient-lud16" title={resolvedLud16}>
                   ⚡ {resolvedLud16}
                 </span>
               ) : (
-                <span className="ag-wallet-meta">No Lightning address</span>
+                <span className="ag-wallet-meta">No Zap address or Nutzap info</span>
               )}
             </div>
-            {invoiceResult?.allowsNostr && <span className="ag-wallet-pill accent">NIP-57</span>}
+            {activeProtocolPill && (
+              <span className="ag-wallet-pill accent">{activeProtocolPill}</span>
+            )}
           </div>
+
+          {/* Sleek Method Toggle when BOTH NIP-61 Nutzap & NIP-57 Lightning are available */}
+          {stage === 'compose' && canNutzap && canLightning && (
+            <div className="ag-zap-mode-switch" role="tablist" aria-label="Zap method">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={zapMethod === 'nutzap'}
+                className={`ag-zap-mode-btn ${zapMethod === 'nutzap' ? 'active' : ''}`}
+                onClick={() => {
+                  setManualMethod('nutzap')
+                  setError(null)
+                }}
+              >
+                <span className="ag-zap-mode-title">
+                  <Coins size={13} />
+                  <span>Nutzap</span>
+                </span>
+                <span className="ag-zap-mode-sub">Instant · Cashu</span>
+              </button>
+
+              <button
+                type="button"
+                role="tab"
+                aria-selected={zapMethod === 'lightning'}
+                className={`ag-zap-mode-btn ${zapMethod === 'lightning' ? 'active' : ''}`}
+                onClick={() => {
+                  setManualMethod('lightning')
+                  setError(null)
+                }}
+              >
+                <span className="ag-zap-mode-title">
+                  <Zap size={13} />
+                  <span>Lightning</span>
+                </span>
+                <span className="ag-zap-mode-sub">NIP-57</span>
+              </button>
+            </div>
+          )}
 
           {error && (
             <div className="ag-wallet-banner danger" role="alert">
@@ -295,7 +478,9 @@ function ZapModalInner({
                   <span className="ag-wallet-balance-unit">sats</span>
                 </div>
                 <p className="ag-wallet-subtitle" style={{ marginTop: '0.35rem' }}>
-                  Sent to {recipientName}
+                  {paidSummary.method === 'nutzap'
+                    ? `Nutzap sent to ${recipientName}`
+                    : `Sent to ${recipientName}`}
                   {paidSummary.feePaidSats > 0 ? ` · ${paidSummary.feePaidSats} sat fee` : ''}
                 </p>
               </div>
@@ -454,59 +639,129 @@ function ZapModalInner({
                 />
               </div>
 
-              <div className="ag-zap-wallet-strip">
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Agwallet</div>
-                  <div className="ag-wallet-meta truncate">
-                    {formatMintHost(bestMintUrl)} · {bestMintBalance.toLocaleString()} sats
+              {zapMethod === 'nutzap' ? (
+                <>
+                  <div className="ag-zap-wallet-strip">
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                        Shared Mint
+                      </div>
+                      <div className="ag-wallet-meta truncate">
+                        {sharedNutzapMintUrl
+                          ? `${formatMintHost(sharedNutzapMintUrl)} · ${sharedNutzapMintBalance.toLocaleString()} sats`
+                          : 'No shared mint'}
+                      </div>
+                    </div>
+                    {!canSendNutzapNow &&
+                      (canLightning ? (
+                        <button
+                          type="button"
+                          className="ag-wbtn ag-wbtn-link"
+                          onClick={() => {
+                            setManualMethod('lightning')
+                            setError(null)
+                          }}
+                        >
+                          Use Lightning
+                        </button>
+                      ) : onOpenWallet ? (
+                        <button
+                          type="button"
+                          className="ag-wbtn ag-wbtn-link"
+                          onClick={handleOpenTopUp}
+                        >
+                          Top up
+                        </button>
+                      ) : null)}
                   </div>
-                </div>
-                {!canPayWithCashu && onOpenWallet && (
-                  <button
-                    type="button"
-                    className="ag-wbtn ag-wbtn-link"
-                    onClick={handleOpenTopUp}
-                  >
-                    Top up
-                  </button>
-                )}
-              </div>
 
-              <div className="ag-wallet-btn-row">
-                <button
-                  type="button"
-                  className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
-                  disabled={working || resolvingAddress || !resolvedLud16 || !canPayWithCashu}
-                  onClick={() => void handlePayWithCashu()}
-                >
-                  {working ? (
-                    <Loader2 size={15} className="ag-wallet-spin" />
-                  ) : (
-                    <Zap size={15} />
+                  {!canSendNutzapNow && parsedAmount > 0 && (
+                    <p className="ag-zap-hint">
+                      {canLightning
+                        ? 'Switch to Lightning to pay from your active mint.'
+                        : 'Top up your wallet on this mint to send a Nutzap.'}
+                    </p>
                   )}
-                  <span>
-                    {working
-                      ? 'Zapping…'
-                      : canPayWithCashu
-                        ? `Pay ${parsedAmount.toLocaleString()} sats`
-                        : 'Insufficient Balance'}
-                  </span>
-                </button>
 
-                <button
-                  type="button"
-                  className="ag-wbtn ag-wbtn-secondary ag-wbtn-full"
-                  disabled={working || resolvingAddress || !resolvedLud16 || parsedAmount <= 0}
-                  onClick={() => void handleGetInvoice()}
-                >
-                  {working ? (
-                    <Loader2 size={15} className="ag-wallet-spin" />
-                  ) : (
-                    <QrCode size={15} />
-                  )}
-                  <span>Show QR Invoice</span>
-                </button>
-              </div>
+                  <div className="ag-wallet-btn-row">
+                    <button
+                      type="button"
+                      className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
+                      disabled={working || !canSendNutzapNow}
+                      onClick={() => void handleSendNutzap()}
+                    >
+                      {working ? (
+                        <Loader2 size={15} className="ag-wallet-spin" />
+                      ) : (
+                        <Coins size={15} />
+                      )}
+                      <span>
+                        {working
+                          ? 'Sending Nutzap…'
+                          : canSendNutzapNow
+                            ? `Send ${parsedAmount.toLocaleString()} sat Nutzap`
+                            : 'Insufficient Mint Balance'}
+                      </span>
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="ag-zap-wallet-strip">
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Agwallet</div>
+                      <div className="ag-wallet-meta truncate">
+                        {formatMintHost(bestMintUrl)} · {bestMintBalance.toLocaleString()} sats
+                      </div>
+                    </div>
+                    {!canPayWithCashu && onOpenWallet && (
+                      <button
+                        type="button"
+                        className="ag-wbtn ag-wbtn-link"
+                        onClick={handleOpenTopUp}
+                      >
+                        Top up
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="ag-wallet-btn-row">
+                    <button
+                      type="button"
+                      className="ag-wbtn ag-wbtn-primary ag-wbtn-full"
+                      disabled={working || resolvingLud16 || !resolvedLud16 || !canPayWithCashu}
+                      onClick={() => void handlePayWithCashu()}
+                    >
+                      {working ? (
+                        <Loader2 size={15} className="ag-wallet-spin" />
+                      ) : (
+                        <Zap size={15} />
+                      )}
+                      <span>
+                        {working
+                          ? 'Zapping…'
+                          : canPayWithCashu
+                            ? `Pay ${parsedAmount.toLocaleString()} sats`
+                            : 'Insufficient Balance'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      className="ag-wbtn ag-wbtn-secondary ag-wbtn-full"
+                      disabled={working || resolvingLud16 || !resolvedLud16 || parsedAmount <= 0}
+                      onClick={() => void handleGetInvoice()}
+                    >
+                      {working ? (
+                        <Loader2 size={15} className="ag-wallet-spin" />
+                      ) : (
+                        <QrCode size={15} />
+                      )}
+                      <span>Show QR Invoice</span>
+                    </button>
+                  </div>
+                </>
+              )}
             </>
           )}
         </div>

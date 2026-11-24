@@ -132,6 +132,7 @@ export function RoomInfoSheet({
   useEffect(() => {
     if (!dmPeerPubkey) return
     void engine.zaps.lookupPeerLightningAddress(dmPeerPubkey)
+    void engine.zaps.lookupPeerNutzapInfo(dmPeerPubkey)
   }, [dmPeerPubkey, engine.zaps])
 
   const sortedGeoPeers = useMemo(() => {
@@ -337,7 +338,8 @@ export function RoomInfoSheet({
 
     if (!target.isSelf) {
       const targetLud16 = engine.zaps.getPeerLightningAddress(target.pubkey)
-      if (targetLud16 && onOpenZap) {
+      const canZapTarget = engine.zaps.canZapPeer(target.pubkey)
+      if (canZapTarget && onOpenZap) {
         items.push({
           id: 'zap-peer',
           label: `Zap ${target.displayHandle}`,
@@ -360,7 +362,7 @@ export function RoomInfoSheet({
           id: 'trust',
           label: trusted ? 'Remove Trust' : 'Trust Peer',
           icon: <ShieldCheck size={14} />,
-          dividerBefore: !(targetLud16 && onOpenZap),
+          dividerBefore: !(canZapTarget && onOpenZap),
           onSelect: () => {
             onPlaySound?.('click')
             if (trusted) {
@@ -608,6 +610,7 @@ export function RoomInfoSheet({
                 const peerLud16 = !peer.isSelf
                   ? engine.zaps.getPeerLightningAddress(peer.pubkey)
                   : null
+                const peerCanZap = !peer.isSelf && engine.zaps.canZapPeer(peer.pubkey)
                 return (
                   <div
                     key={peer.pubkey}
@@ -659,7 +662,7 @@ export function RoomInfoSheet({
                               Trusted
                             </span>
                           )}
-                          {peerLud16 && (
+                          {peerLud16 ? (
                             <span
                               className="ag-sheet-zap-inline mono truncate"
                               title={`Lightning Address: ${peerLud16}`}
@@ -667,14 +670,22 @@ export function RoomInfoSheet({
                               <Zap size={10} />
                               {peerLud16}
                             </span>
-                          )}
+                          ) : peerCanZap ? (
+                            <span
+                              className="ag-sheet-zap-inline truncate"
+                              title="Accepts instant NIP-61 Nutzaps"
+                            >
+                              <Zap size={10} />
+                              Nutzap
+                            </span>
+                          ) : null}
                         </span>
                       </span>
                     </button>
 
                     {!peer.isSelf && (
                       <div className="ag-sheet-person-actions">
-                        {peerLud16 && onOpenZap && (
+                        {peerCanZap && onOpenZap && (
                           <button
                             type="button"
                             className="ag-sheet-mini-btn zap"
@@ -688,7 +699,11 @@ export function RoomInfoSheet({
                                 channelLabel,
                               })
                             }}
-                            title={`Zap ${peer.displayHandle} (${peerLud16})`}
+                            title={
+                              peerLud16
+                                ? `Zap ${peer.displayHandle} (${peerLud16})`
+                                : `Zap ${peer.displayHandle} (Nutzap)`
+                            }
                             aria-label={`Zap ${peer.displayHandle}`}
                           >
                             <Zap size={14} />
@@ -785,6 +800,7 @@ export function RoomInfoSheet({
     const trusted = engine.isExplicitlyTrusted(thread.peerPubkey)
     const blocked = engine.isPeerBlocked(thread.peerPubkey)
     const peerLud16 = engine.zaps.getPeerLightningAddress(thread.peerPubkey)
+    const peerCanZap = engine.zaps.canZapPeer(thread.peerPubkey)
     const dmPeerInfo = engine.getPeerByPubkey(thread.peerPubkey)
     const dmIsAgnostr = Boolean(dmPeerInfo?.isAgnostrClient)
     const dmClientLabel =
@@ -889,7 +905,7 @@ export function RoomInfoSheet({
             <Video size={17} />
             <span>Video Call</span>
           </button>
-          {peerLud16 && onOpenZap && (
+          {peerCanZap && onOpenZap && (
             <button
               type="button"
               className="ag-sheet-action-btn zap"
@@ -903,6 +919,11 @@ export function RoomInfoSheet({
                   channelLabel: thread.peerDisplayHandle,
                 })
               }}
+              title={
+                peerLud16
+                  ? `Zap ${thread.peerDisplayHandle} (${peerLud16})`
+                  : `Zap ${thread.peerDisplayHandle} (Nutzap)`
+              }
             >
               <Zap size={16} />
               <span>Zap</span>
@@ -1257,6 +1278,10 @@ export function RoomInfoSheet({
             <div className="ag-sheet-list" role="list">
               {servers.members.map((m) => {
                 const trusted = !m.isSelf && engine.isExplicitlyTrusted(m.pubkey)
+                const memberLud16 = !m.isSelf
+                  ? engine.zaps.getPeerLightningAddress(m.pubkey)
+                  : null
+                const memberCanZap = !m.isSelf && engine.zaps.canZapPeer(m.pubkey)
                 const roleLabel = m.isFounder
                   ? 'Founder'
                   : m.isAdmin
@@ -1319,6 +1344,32 @@ export function RoomInfoSheet({
 
                     {!m.isSelf && (
                       <div className="ag-sheet-person-actions">
+                        {memberCanZap && onOpenZap && (
+                          <button
+                            type="button"
+                            className="ag-sheet-mini-btn zap"
+                            onClick={() => {
+                              onPlaySound?.('click')
+                              onClose()
+                              onOpenZap({
+                                pubkey: m.pubkey,
+                                nickname: m.nickname,
+                                lud16: memberLud16,
+                                channelLabel: servers.activeChannel?.name
+                                  ? `#${servers.activeChannel.name}`
+                                  : activeServer.name,
+                              })
+                            }}
+                            title={
+                              memberLud16
+                                ? `Zap ${m.displayHandle} (${memberLud16})`
+                                : `Zap ${m.displayHandle} (Nutzap)`
+                            }
+                            aria-label={`Zap ${m.displayHandle}`}
+                          >
+                            <Zap size={14} />
+                          </button>
+                        )}
                         <button
                           type="button"
                           className={`ag-sheet-mini-btn ${trusted ? 'active' : ''}`}

@@ -78,12 +78,14 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     isDm && dmThread && engine.isExplicitlyTrusted(dmThread.peerPubkey)
   )
   const dmPeerLud16 = dmPeerPubkey ? engine.zaps.getPeerLightningAddress(dmPeerPubkey) : null
+  const dmPeerCanZap = dmPeerPubkey ? engine.zaps.canZapPeer(dmPeerPubkey) : false
   const translatorEnabled = engine.translator.settings.enabled
   const translatorLang = engine.translator.settings.myLanguage
 
   useEffect(() => {
     if (!dmPeerPubkey) return
     void engine.zaps.lookupPeerLightningAddress(dmPeerPubkey)
+    void engine.zaps.lookupPeerNutzapInfo(dmPeerPubkey)
   }, [dmPeerPubkey, engine.zaps])
 
   const handleToggleTranslator = () => {
@@ -329,7 +331,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
         <div className="ag-header-actions">
           {isDm && dmThread ? (
             <>
-              {dmPeerLud16 && onOpenZap && (
+              {dmPeerCanZap && onOpenZap && (
                 <button
                   type="button"
                   className="ag-circle-btn ag-zap-btn"
@@ -341,7 +343,11 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                       channelLabel: dmThread.peerDisplayHandle,
                     })
                   }
-                  title={`Zap ${dmThread.peerNickname} (${dmPeerLud16})`}
+                  title={
+                    dmPeerLud16
+                      ? `Zap ${dmThread.peerNickname} (${dmPeerLud16})`
+                      : `Zap ${dmThread.peerNickname} (Nutzap)`
+                  }
                   aria-label={`Zap ${dmThread.peerNickname}`}
                 >
                   <Zap size={17} />

@@ -60,6 +60,7 @@ export function PeerInspectorModal({
   useEffect(() => {
     if (!peerPubkey) return
     void engine.zaps.lookupPeerLightningAddress(peerPubkey)
+    void engine.zaps.lookupPeerNutzapInfo(peerPubkey)
   }, [peerPubkey, engine.zaps])
 
   useEffect(() => {
@@ -86,6 +87,8 @@ export function PeerInspectorModal({
   const isBlocked = engine.isPeerBlocked(livePeer.pubkey)
   const isTrustedPeer = !livePeer.isSelf && engine.isExplicitlyTrusted(livePeer.pubkey)
   const peerLud16 = engine.zaps.getPeerLightningAddress(livePeer.pubkey)
+  const peerNutzapInfo = engine.zaps.getPeerNutzapInfo(livePeer.pubkey)
+  const canZapPeer = engine.zaps.canZapPeer(livePeer.pubkey)
   const handle = formatHandle(livePeer.nickname, livePeer.pubkey)
   const handleColor = pubkeyToColor(livePeer.pubkey)
   const resolvedClient = formatClientDisplayName(
@@ -213,6 +216,15 @@ export function PeerInspectorModal({
                   >
                     <ShieldCheck size={9} />
                     <span>TRUSTED</span>
+                  </span>
+                )}
+                {peerNutzapInfo && (
+                  <span
+                    className="ag-badge ag-badge-accent"
+                    title={`Accepts instant NIP-61 Nutzaps (${peerNutzapInfo.mints.length} mint${peerNutzapInfo.mints.length === 1 ? '' : 's'})`}
+                  >
+                    <Zap size={9} />
+                    <span>NUTZAP</span>
                   </span>
                 )}
                 {livePeer.isTeleported && <span className="ag-badge ag-badge-warn">TELEPORT</span>}
@@ -343,6 +355,21 @@ export function PeerInspectorModal({
                 </button>
               </div>
             )}
+
+            {peerNutzapInfo && (
+              <div className="ag-key-row ag-key-row-zap">
+                <div className="ag-key-meta">
+                  <span className="ag-key-label ag-key-label-zap">
+                    <Zap size={10} />
+                    <span>NUTZAP (NIP-61)</span>
+                  </span>
+                  <span className="ag-key-value truncate">
+                    Instant Cashu · {peerNutzapInfo.mints.length}{' '}
+                    {peerNutzapInfo.mints.length === 1 ? 'mint' : 'mints'}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -407,7 +434,7 @@ export function PeerInspectorModal({
 
         {/* Actions */}
         <div className={`ag-peer-modal-actions ${!livePeer.isSelf ? 'ag-peer-modal-actions-grid' : ''}`}>
-          {!livePeer.isSelf && peerLud16 && onOpenZap && (
+          {!livePeer.isSelf && canZapPeer && onOpenZap && (
             <button
               type="button"
               className="ag-btn ag-btn-zap"
@@ -419,7 +446,11 @@ export function PeerInspectorModal({
                   lud16: peerLud16,
                 })
               }}
-              title={`Zap ${livePeer.displayHandle} (${peerLud16})`}
+              title={
+                peerLud16
+                  ? `Zap ${livePeer.displayHandle} (${peerLud16})`
+                  : `Zap ${livePeer.displayHandle} (Nutzap)`
+              }
             >
               <Zap size={14} />
               <span>Zap</span>

@@ -41,6 +41,8 @@ import {
   checkAndMintCashuQuote,
   checkCashuSentTokenClaimed,
   claimCashuTokenProofs,
+  claimExternalMintQuoteProofs,
+  claimP2pkCashuProofs,
   clearCashuWalletInstanceCache,
   configureCashuWalletRuntime,
   createCashuMeltQuote,
@@ -49,6 +51,7 @@ import {
   decodeCashuTokenPreview,
   deduplicateProofs,
   derivePrivateKeyHexFromSeed,
+  deriveWalletP2pkPubkeyHex,
   detectWalletImportFormat,
   executeCashuMeltQuote,
   generateCashuWalletKeys,
@@ -62,6 +65,7 @@ import {
   restoreCashuProofsFromMint,
   savePersistedCashuWallet,
   sendCashuTokenProofs,
+  sendP2pkCashuProofs,
   sumStoredProofs,
   verifyCashuProofsOnMint,
   type PersistedCashuWalletState,
@@ -155,13 +159,17 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
   const ensureInitializedWithKeys = useCallback(() => {
     const cur = stateRef.current
-    if (cur.initialized && (cur.mnemonic || cur.privateKeyHex)) return
+    if (cur.initialized && cur.privateKeyHex) return
+    const derivedFromMnemonic =
+      !cur.privateKeyHex && cur.mnemonic && isValidBip39Mnemonic(cur.mnemonic)
+        ? derivePrivateKeyHexFromSeed(mnemonicToSeedSync(normalizeMnemonicPhrase(cur.mnemonic)))
+        : null
     const fresh = !cur.mnemonic && !cur.privateKeyHex ? generateCashuWalletKeys() : null
     const next = commitState((prev) => ({
       ...prev,
       initialized: true,
       mnemonic: prev.mnemonic ?? fresh?.mnemonic,
-      privateKeyHex: prev.privateKeyHex ?? fresh?.privateKeyHex,
+      privateKeyHex: prev.privateKeyHex ?? derivedFromMnemonic ?? fresh?.privateKeyHex,
     }))
     syncRuntimeSeed(next)
   }, [commitState, syncRuntimeSeed])
@@ -207,13 +215,21 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         id: tx.id ?? makeId('tx'),
         createdAt: tx.createdAt ?? Date.now(),
       }
-      commitState((prev) => ({
-        ...prev,
-        history: [entry, ...prev.history].slice(0, 250),
-      }))
+      commitState((prev) => {
+        if (prev.history.some((h) => h.id === entry.id)) return prev
+        return {
+          ...prev,
+          history: [entry, ...prev.history].slice(0, 250),
+        }
+      })
       return entry
     },
     [commitState]
+  )
+
+  const nutzapP2pkPubkeyHex = useMemo(
+    () => deriveWalletP2pkPubkeyHex(walletState.privateKeyHex),
+    [walletState.privateKeyHex]
   )
 
   // Derived per-mint & total balances
@@ -972,6 +988,156 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
   )
 
   /* ------------------------------------------------------------------------
+     NIP-61 P2PK Nutzaps & External Mint Quote Sweeping (npub.cash v2)
+     ------------------------------------------------------------------------ */
+
+  const sendP2pkNutzapProofs = useCallback(
+    async (params: {
+      amountSats: number
+      recipientP2pkPubkey: string
+      mintUrl?: string
+      counterparty?: string
+      memo?: string
+    }): Promise<{
+      mintUrl: string
+      proofs: StoredCashuProof[]
+      amountSats: number
+      feeSats: number
+    }> => {
+      const targetMintUrl = normalizeMintUrl(params.mintUrl ?? stateRef.current.activeMintUrl)
+      if (!targetMintUrl) throw new Error('No mint selected.')
+      setBusy(true)
+      setLastError(null)
+      try {
+        const availableProofs = stateRef.current.proofsByMint[targetMintUrl] ?? []
+        const res = await sendP2pkCashuProofs(
+          targetMintUrl,
+          params.amountSats,
+          availableProofs,
+          params.recipientP2pkPubkey
+        )
+        commitState((prev) => ({
+          ...prev,
+          proofsByMint: {
+            ...prev.proofsByMint,
+            [targetMintUrl]: res.keepProofs,
+          },
+        }))
+        recordTransaction({
+          type: 'nutzap_out',
+          status: 'completed',
+          amountSats: res.sentSats,
+          feeSats: res.feeSats > 0 ? res.feeSats : undefined,
+          mintUrl: targetMintUrl,
+          counterparty: params.counterparty,
+          memo: params.memo?.trim() || undefined,
+        })
+        return {
+          mintUrl: targetMintUrl,
+          proofs: res.sendProofs,
+          amountSats: res.sentSats,
+          feeSats: res.feeSats,
+        }
+      } catch (err) {
+        const msg = normalizeMintError(err, 'Failed to prepare Nutzap proofs.')
+        setLastError(msg)
+        throw new Error(msg)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [commitState, recordTransaction]
+  )
+
+  const claimP2pkNutzapProofs = useCallback(
+    async (params: {
+      mintUrl: string
+      proofs: StoredCashuProof[]
+      candidatePrivkeysHex: string[]
+      senderPubkey?: string
+      memo?: string
+      nutzapEventId?: string
+    }): Promise<{
+      claimedSats: number
+      mintUrl: string
+    }> => {
+      const normMint = normalizeMintUrl(params.mintUrl)
+      if (!normMint) throw new Error('Invalid mint URL.')
+      ensureInitializedWithKeys()
+
+      const allCandidateKeys = Array.from(
+        new Set(
+          [stateRef.current.privateKeyHex, ...params.candidatePrivkeysHex].filter(
+            (k): k is string => typeof k === 'string' && k.trim().length > 0
+          )
+        )
+      )
+
+      const freshProofs = await claimP2pkCashuProofs(normMint, params.proofs, allCandidateKeys)
+      const claimedSats = sumStoredProofs(freshProofs)
+      if (freshProofs.length > 0 && claimedSats > 0) {
+        appendProofsToMint(normMint, freshProofs)
+        recordTransaction({
+          id: params.nutzapEventId ? `nz-${params.nutzapEventId.slice(0, 16)}` : undefined,
+          type: 'nutzap_in',
+          status: 'completed',
+          amountSats: claimedSats,
+          mintUrl: normMint,
+          counterparty: params.senderPubkey,
+          memo: params.memo?.trim() || 'NIP-61 Nutzap',
+        })
+      }
+      return { claimedSats, mintUrl: normMint }
+    },
+    [appendProofsToMint, ensureInitializedWithKeys, recordTransaction]
+  )
+
+  const claimExternalMintQuote = useCallback(
+    async (params: {
+      mintUrl: string
+      quoteId: string
+      amountSats: number
+      privkeyHex?: string
+      counterparty?: string
+      memo?: string
+      txType?: 'zap_in' | 'receive_ln'
+    }): Promise<{
+      state: CashuMintQuoteState
+      claimedSats: number
+      mintUrl: string
+    }> => {
+      const normMint = normalizeMintUrl(params.mintUrl)
+      if (!normMint) throw new Error('Invalid mint URL.')
+      ensureInitializedWithKeys()
+
+      const res = await claimExternalMintQuoteProofs(
+        normMint,
+        params.quoteId,
+        params.amountSats,
+        params.privkeyHex
+      )
+      if (res.proofs.length > 0 && res.claimedSats > 0) {
+        appendProofsToMint(normMint, res.proofs)
+        recordTransaction({
+          id: `ext-${params.quoteId.slice(0, 20)}`,
+          type: params.txType ?? 'zap_in',
+          status: 'completed',
+          amountSats: res.claimedSats,
+          mintUrl: normMint,
+          counterparty: params.counterparty,
+          memo: params.memo?.trim() || 'Lightning Zap (npub.cash)',
+        })
+      }
+      return {
+        state: res.state,
+        claimedSats: res.claimedSats,
+        mintUrl: res.mintUrl,
+      }
+    },
+    [appendProofsToMint, ensureInitializedWithKeys, recordTransaction]
+  )
+
+  /* ------------------------------------------------------------------------
      Lightning NUT-04 Receive & NUT-05 Send
      ------------------------------------------------------------------------ */
 
@@ -1519,6 +1685,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       initialized: walletState.initialized,
       mnemonic: walletState.mnemonic ?? null,
       privateKeyHex: walletState.privateKeyHex ?? null,
+      nutzapP2pkPubkeyHex,
       mints: walletState.mints,
       activeMintUrl: walletState.activeMintUrl,
       balancesByMint,
@@ -1547,6 +1714,9 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       createCashuToken,
       checkSentTokenStatus,
       reclaimSentToken,
+      sendP2pkNutzapProofs,
+      claimP2pkNutzapProofs,
+      claimExternalMintQuote,
       createLightningReceiveQuote,
       checkAndClaimMintQuote,
       clearActiveMintQuote,
@@ -1569,6 +1739,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       walletState.initialized,
       walletState.mnemonic,
       walletState.privateKeyHex,
+      nutzapP2pkPubkeyHex,
       walletState.mints,
       walletState.activeMintUrl,
       walletState.history,
@@ -1597,6 +1768,9 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       createCashuToken,
       checkSentTokenStatus,
       reclaimSentToken,
+      sendP2pkNutzapProofs,
+      claimP2pkNutzapProofs,
+      claimExternalMintQuote,
       createLightningReceiveQuote,
       checkAndClaimMintQuote,
       clearActiveMintQuote,

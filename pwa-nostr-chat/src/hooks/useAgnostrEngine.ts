@@ -1833,6 +1833,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   const zapsEngine = useZaps({
     relayPool: pool,
     identityManager,
+    wallet: walletEngine,
+    masterPubkey: identity.masterPubkey,
     getPublishRelayUrls: getZapPublishRelayUrls,
     ownPubkeys,
     activeNickname: identity.nickname,

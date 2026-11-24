@@ -139,8 +139,9 @@ export interface MessageItemProps {
   onNotify?: (title: string) => void
   // On-device Image Content Filter
   contentFilter?: ContentFilterEngine
-  // Cashu Ecash & NIP-57 Lightning Zaps
+  // Cashu Ecash, NIP-57 Lightning Zaps & NIP-61 Nutzaps
   senderLightningAddress?: string | null
+  canZapSender?: boolean
   zapTotalSats?: number
   onOpenZap?: (target: ZapTarget) => void
   onClaimCashuToken?: (token: string) => void
@@ -198,6 +199,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onNotify,
     contentFilter,
     senderLightningAddress = null,
+    canZapSender: canZapSenderProp,
     zapTotalSats = 0,
     onOpenZap,
     onClaimCashuToken,
@@ -369,7 +371,9 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
           translationStatus === 'error')) ||
         translationStatus === 'loading')
 
-    const canZapSender = Boolean(!message.isOwn && senderLightningAddress && onOpenZap)
+    const canZapSender = Boolean(
+      !message.isOwn && (canZapSenderProp || senderLightningAddress) && onOpenZap
+    )
 
     const handleTriggerZap = () => {
       if (!canZapSender || !onOpenZap) return
@@ -1126,7 +1130,11 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 handleTriggerZap()
                 onToggleActions(null)
               }}
-              title={`Zap @${handle.base} (${senderLightningAddress})`}
+              title={
+                senderLightningAddress
+                  ? `Zap @${handle.base} (${senderLightningAddress})`
+                  : `Zap @${handle.base} (Nutzap)`
+              }
               aria-label={`Zap ${handle.base}`}
             >
               <Zap size={14} />

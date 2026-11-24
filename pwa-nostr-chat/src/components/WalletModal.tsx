@@ -122,6 +122,8 @@ function isIncomingTx(type: WalletTransaction['type']): boolean {
     type === 'receive_ecash' ||
     type === 'receive_ln' ||
     type === 'receive_btc' ||
+    type === 'zap_in' ||
+    type === 'nutzap_in' ||
     type === 'reclaim'
   )
 }
@@ -142,6 +144,12 @@ function formatTxLabel(type: WalletTransaction['type']): string {
       return 'Bitcoin Send'
     case 'zap_out':
       return 'Zap'
+    case 'zap_in':
+      return 'Zap Received'
+    case 'nutzap_in':
+      return 'Nutzap Received'
+    case 'nutzap_out':
+      return 'Nutzap'
     case 'reclaim':
       return 'Reclaimed Ecash'
   }
@@ -258,8 +266,11 @@ function WalletModalInner({
   } | null>(null)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
-  // Overview inline Lightning Address
-  const [lud16Draft, setLud16Draft] = useState<string>(zaps.lightningAddress ?? '')
+  // Overview Receive Zaps (built-in npub.cash / NIP-61 or custom address)
+  const [lud16Draft, setLud16Draft] = useState<string>(
+    () => zaps.customLightningAddress ?? (zaps.zapMode === 'custom' ? (zaps.lightningAddress ?? '') : '')
+  )
+  const [editingCustomZap, setEditingCustomZap] = useState(false)
   const [savingLud16, setSavingLud16] = useState(false)
 
   // Receive: Ecash
@@ -644,20 +655,63 @@ function WalletModalInner({
     setSavingLud16(true)
     setFeedback(null)
     try {
-      const res = await zaps.setLightningAddress(lud16Draft.trim() || null)
+      const cleaned = lud16Draft.trim()
+      if (!cleaned) {
+        const res = await zaps.setZapAddressMode('builtin')
+        if (!res.ok) {
+          setFeedback({ kind: 'danger', text: res.error || 'Unable to switch to built-in Zaps.' })
+        } else {
+          setEditingCustomZap(false)
+          setFeedback({ kind: 'accent', text: 'Switched back to built-in Agwallet Zaps' })
+        }
+        return
+      }
+      const res = await zaps.setZapAddressMode('custom', cleaned)
       if (!res.ok) {
         setFeedback({ kind: 'danger', text: res.error || 'Invalid Lightning address.' })
       } else {
         setLud16Draft(res.normalized ?? '')
+        setEditingCustomZap(false)
         setFeedback({
           kind: 'accent',
-          text: res.normalized ? `Saved ${res.normalized}` : 'Cleared Lightning address',
+          text: res.normalized ? `Saved ${res.normalized}` : 'Updated Zap address',
         })
       }
     } finally {
       setSavingLud16(false)
     }
   }, [lud16Draft, zaps])
+
+  const handleSwitchToBuiltinZaps = useCallback(async () => {
+    setSavingLud16(true)
+    setFeedback(null)
+    try {
+      const res = await zaps.setZapAddressMode('builtin')
+      if (!res.ok) {
+        setFeedback({ kind: 'danger', text: res.error || 'Unable to switch to built-in Zaps.' })
+      } else {
+        setEditingCustomZap(false)
+        setFeedback({ kind: 'accent', text: 'Using built-in Agwallet Zaps' })
+      }
+    } finally {
+      setSavingLud16(false)
+    }
+  }, [zaps])
+
+  const handleCheckZapsNow = useCallback(async () => {
+    setFeedback(null)
+    const res = await zaps.sweepNpubCashNow()
+    if (res.error) {
+      setFeedback({ kind: 'danger', text: res.error })
+    } else if (res.claimedSats > 0) {
+      setFeedback({
+        kind: 'accent',
+        text: `Received ${res.claimedSats.toLocaleString()} sats from Zaps`,
+      })
+    } else {
+      setFeedback({ kind: 'accent', text: 'Up to date — no new Zaps yet' })
+    }
+  }, [zaps])
 
   const handlePasteInto = useCallback(async (setter: (v: string) => void) => {
     try {
@@ -1590,33 +1644,147 @@ function WalletModalInner({
             </section>
           )}
 
-          {/* Lightning Address */}
-          <section className="ag-wallet-field">
-            <label className="ag-wallet-label" htmlFor="ag-wallet-lud16">
-              Lightning Address
-            </label>
-            <div className="ag-wallet-input-row">
-              <input
-                id="ag-wallet-lud16"
-                type="text"
-                className="ag-wallet-input mono"
-                value={lud16Draft}
-                onChange={(e) => setLud16Draft(e.target.value)}
-                placeholder="you@domain.com"
-              />
-              <button
-                type="button"
-                className="ag-wbtn ag-wbtn-secondary"
-                disabled={savingLud16 || zaps.publishingProfile}
-                onClick={() => void handleSaveLud16()}
-              >
-                {savingLud16 || zaps.publishingProfile ? (
-                  <Loader2 size={14} className="ag-wallet-spin" />
+          {/* Self-Contained Receive Zaps Card */}
+          <section className="ag-wallet-zap-card" aria-label="Receive Zaps">
+            <div className="ag-wallet-zap-head">
+              <h3 className="ag-wallet-section-title">Receive Zaps</h3>
+              <div className="ag-wallet-zap-pills">
+                {zaps.zapMode === 'builtin' ? (
+                  <span
+                    className={`ag-wallet-pill ${zaps.npubCashAutoSweep ? 'accent' : ''}`}
+                  >
+                    {zaps.npubCashAutoSweep ? 'Auto-sweep' : 'Manual'}
+                  </span>
                 ) : (
-                  'Save'
+                  <span className="ag-wallet-pill">Custom</span>
                 )}
-              </button>
+                {zaps.nutzapInfoPublished && (
+                  <span className="ag-wallet-pill accent">NIP-61</span>
+                )}
+              </div>
             </div>
+
+            {zaps.zapMode === 'builtin' && !editingCustomZap ? (
+              <>
+                <div className="ag-wallet-zap-addr-row">
+                  <span
+                    className="ag-wallet-zap-addr mono"
+                    title={zaps.builtinLightningAddress}
+                  >
+                    {zaps.builtinLightningAddress}
+                  </span>
+                  <div className="ag-wallet-zap-addr-actions">
+                    <button
+                      type="button"
+                      className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
+                      onClick={() =>
+                        void markCopied('zap-addr', zaps.builtinLightningAddress)
+                      }
+                      aria-label="Copy Zap address"
+                    >
+                      {copiedKey === 'zap-addr' ? <Check size={13} /> : <Copy size={13} />}
+                      <span>{copiedKey === 'zap-addr' ? 'Copied' : 'Copy'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
+                      disabled={zaps.npubCashSweeping}
+                      onClick={() => void handleCheckZapsNow()}
+                      aria-label="Check for incoming Zaps"
+                    >
+                      <RefreshCw
+                        size={13}
+                        className={zaps.npubCashSweeping ? 'ag-wallet-spin' : undefined}
+                      />
+                      <span>{zaps.npubCashSweeping ? 'Checking…' : 'Check Zaps'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {zaps.npubCashLastError ? (
+                  <div className="ag-wallet-zap-error" role="status">
+                    <AlertCircle size={13} />
+                    <span>{zaps.npubCashLastError}</span>
+                  </div>
+                ) : (
+                  <p className="ag-wallet-zap-meta">
+                    {zaps.npubCashLastSweptAt
+                      ? `Checked ${formatRelativeTime(zaps.npubCashLastSweptAt)} · Lightning Zaps & NIP-61 Nutzaps sweep straight into Agwallet`
+                      : 'Lightning Zaps & NIP-61 Nutzaps sweep straight into Agwallet'}
+                  </p>
+                )}
+
+                <div className="ag-wallet-zap-footer">
+                  <label className="ag-wallet-zap-toggle">
+                    <input
+                      type="checkbox"
+                      checked={zaps.npubCashAutoSweep}
+                      onChange={(e) => zaps.setNpubCashAutoSweep(e.target.checked)}
+                    />
+                    <span className="ag-wallet-zap-switch" aria-hidden="true" />
+                    <span>Auto-sweep</span>
+                  </label>
+
+                  <button
+                    type="button"
+                    className="ag-wbtn ag-wbtn-link"
+                    onClick={() => {
+                      setLud16Draft(zaps.customLightningAddress ?? '')
+                      setEditingCustomZap(true)
+                    }}
+                  >
+                    Use custom address
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="ag-wallet-input-row">
+                  <input
+                    id="ag-wallet-lud16"
+                    type="text"
+                    className="ag-wallet-input mono"
+                    value={lud16Draft}
+                    onChange={(e) => setLud16Draft(e.target.value)}
+                    placeholder="you@domain.com"
+                    aria-label="Custom Lightning address"
+                  />
+                  <button
+                    type="button"
+                    className="ag-wbtn ag-wbtn-secondary"
+                    disabled={savingLud16 || zaps.publishingProfile}
+                    onClick={() => void handleSaveLud16()}
+                  >
+                    {savingLud16 || zaps.publishingProfile ? (
+                      <Loader2 size={14} className="ag-wallet-spin" />
+                    ) : (
+                      'Save'
+                    )}
+                  </button>
+                </div>
+
+                <div className="ag-wallet-zap-footer">
+                  {zaps.zapMode === 'custom' ? (
+                    <button
+                      type="button"
+                      className="ag-wbtn ag-wbtn-link"
+                      disabled={savingLud16 || zaps.publishingProfile}
+                      onClick={() => void handleSwitchToBuiltinZaps()}
+                    >
+                      Switch back to built-in Agwallet Zaps
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="ag-wbtn ag-wbtn-link"
+                      onClick={() => setEditingCustomZap(false)}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </section>
 
           {/* Active Bitcoin Swaps */}
@@ -1878,6 +2046,33 @@ function WalletModalInner({
                   {/* Receive: Lightning (NUT-04) */}
                   {receiveMode === 'lightning' && (
                     <section className="ag-wallet-section">
+                      {zaps.builtinLightningAddress && (
+                        <div className="ag-wallet-perm-zap-strip">
+                          <div className="ag-wallet-perm-zap-copy">
+                            <span className="ag-wallet-perm-zap-label">
+                              Permanent Zap Address
+                            </span>
+                            <span
+                              className="ag-wallet-perm-zap-addr mono"
+                              title={zaps.builtinLightningAddress}
+                            >
+                              {zaps.builtinLightningAddress}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            className="ag-wbtn ag-wbtn-secondary ag-wbtn-sm"
+                            onClick={() =>
+                              void markCopied('perm-zap', zaps.builtinLightningAddress)
+                            }
+                            aria-label="Copy permanent Zap address"
+                          >
+                            {copiedKey === 'perm-zap' ? <Check size={13} /> : <Copy size={13} />}
+                            <span>{copiedKey === 'perm-zap' ? 'Copied' : 'Copy'}</span>
+                          </button>
+                        </div>
+                      )}
+
                       {wallet.activeMintQuote ? (
                         <>
                           <div className="ag-wallet-section-head">

@@ -46,6 +46,7 @@ import {
   hexToBytes,
   parseSecretKey,
 } from './identity.ts'
+import { toCompressedP2pkPubkey } from './nutzaps.ts'
 
 export const CASHU_WALLET_STORAGE_KEY = 'agnostr:v2:cashu_wallet'
 
@@ -154,6 +155,23 @@ export function parseWalletPrivateKeyHex(raw: string): string | null {
   const parsed = parseSecretKey(raw)
   if (!parsed || parsed.length !== 32) return null
   return bytesToHex(parsed)
+}
+
+/**
+ * Derives the 32-byte x-only hex P2PK public key (64 chars) from a wallet's secp256k1 private key.
+ * Used as the `pubkey` tag in NIP-61 `kind: 10019` Nutzap info events.
+ */
+export function deriveWalletP2pkPubkeyHex(privateKeyHex: string | null | undefined): string | null {
+  if (!privateKeyHex) return null
+  const cleanHex = parseWalletPrivateKeyHex(privateKeyHex)
+  if (!cleanHex) return null
+  const bytes = hexToBytes(cleanHex)
+  if (!bytes || bytes.length !== 32) return null
+  try {
+    return getPublicKey(bytes).toLowerCase()
+  } catch {
+    return null
+  }
 }
 
 export interface DetectedWalletImport {
@@ -913,6 +931,181 @@ export async function sendCashuTokenProofs(params: {
     sendProofs,
     sentSats,
     feeSats,
+  }
+}
+
+/**
+ * NUT-11 / NIP-61: Splits proofs on `mintUrl` into P2PK-locked proofs addressed to
+ * `recipientP2pkPubkeyHex` (compressed `02` + 32-byte x-only pubkey), with receiver swap
+ * fees included and NUT-12 `dleq` proofs preserved for Nutzap verification.
+ */
+export async function sendP2pkCashuProofs(
+  mintUrl: string,
+  amountSats: number,
+  storedProofs: StoredCashuProof[],
+  recipientP2pkPubkeyHex: string
+): Promise<{
+  mintUrl: string
+  keepProofs: StoredCashuProof[]
+  sendProofs: StoredCashuProof[]
+  sentSats: number
+  feeSats: number
+}> {
+  const cleanSats = Math.floor(amountSats)
+  if (!Number.isFinite(cleanSats) || cleanSats <= 0) {
+    throw new Error('Enter a valid positive satoshi amount.')
+  }
+  const available = sumStoredProofs(storedProofs)
+  if (available < cleanSats) {
+    throw new Error(`Insufficient balance (${available} sats available on this mint).`)
+  }
+  const normalized = normalizeMintUrl(mintUrl)
+  if (!normalized) throw new Error('Invalid mint URL.')
+
+  const compressedPubkey = toCompressedP2pkPubkey(recipientP2pkPubkeyHex)
+  if (!compressedPubkey) {
+    throw new Error('Invalid recipient P2PK public key for Nutzap.')
+  }
+
+  const wallet = await getLoadedCashuWallet(normalized)
+  const proofInputs = storedProofs.map(toCashuProof)
+  const { keep, send } = await wallet.ops
+    .send(cleanSats, proofInputs)
+    .asLocked({ pubkey: compressedPubkey })
+    .includeFees(true)
+    .run()
+
+  const keepProofs = deduplicateProofs(keep.map(toStoredProof))
+  const sendProofs = deduplicateProofs(send.map(toStoredProof))
+  const sentSats = sumStoredProofs(sendProofs)
+  const keepSats = sumStoredProofs(keepProofs)
+  const feeSats = Math.max(0, available - sentSats - keepSats)
+
+  if (sendProofs.length === 0 || sentSats <= 0) {
+    throw new Error('Mint returned no P2PK-locked proofs for this Nutzap.')
+  }
+
+  return {
+    mintUrl: normalized,
+    keepProofs,
+    sendProofs,
+    sentSats,
+    feeSats,
+  }
+}
+
+/**
+ * NUT-11 / NIP-61: Redeems P2PK-locked Cashu proofs on `mintUrl` using one or more candidate
+ * private keys, swapping them into fresh unlocked proofs owned by this wallet (using NUT-13
+ * deterministic outputs when a recovery seed is configured).
+ */
+export async function claimP2pkCashuProofs(
+  mintUrl: string,
+  lockedProofs: StoredCashuProof[],
+  candidatePrivkeysHex: string[]
+): Promise<StoredCashuProof[]> {
+  const normalized = normalizeMintUrl(mintUrl)
+  if (!normalized) throw new Error('Invalid mint URL.')
+  if (!Array.isArray(lockedProofs) || lockedProofs.length === 0) {
+    throw new Error('No Cashu proofs provided to claim.')
+  }
+
+  const validKeys = Array.from(
+    new Set(
+      candidatePrivkeysHex
+        .map((k) => parseWalletPrivateKeyHex(k))
+        .filter((k): k is string => k !== null)
+    )
+  )
+
+  const wallet = await getLoadedCashuWallet(normalized)
+  let builder = wallet.ops.receive({
+    mint: normalized,
+    proofs: lockedProofs.map(toCashuProof),
+    unit: 'sat',
+  })
+
+  if (activeSeedBytes) {
+    builder = builder.asDeterministic()
+  }
+  if (validKeys.length > 0) {
+    builder = builder.privkey(validKeys)
+  }
+
+  const received = await builder.run()
+  const stored = deduplicateProofs(received.map(toStoredProof))
+  if (stored.length === 0 || sumStoredProofs(stored) <= 0) {
+    throw new Error('Mint returned no spendable proofs when claiming Nutzap.')
+  }
+  return stored
+}
+
+/**
+ * NUT-04 / NUT-20: Checks an external BOLT-11 mint quote (e.g. from `npub.cash` v2) and mints
+ * proofs when `PAID`. Handles `ISSUED` cleanly without throwing, and signs NUT-20 locked quotes
+ * automatically when `privkeyHex` is provided.
+ */
+export async function claimExternalMintQuoteProofs(
+  mintUrl: string,
+  quoteId: string,
+  amountSats: number,
+  privkeyHex?: string
+): Promise<{
+  state: CashuMintQuoteState
+  proofs: StoredCashuProof[]
+  claimedSats: number
+  mintUrl: string
+}> {
+  const normalized = normalizeMintUrl(mintUrl)
+  if (!normalized) throw new Error('Invalid mint URL.')
+  const cleanQuoteId = quoteId.trim()
+  if (!cleanQuoteId) throw new Error('Missing mint quote ID.')
+
+  const wallet = await getLoadedCashuWallet(normalized)
+  const checked = await wallet.checkMintQuoteBolt11(cleanQuoteId)
+  const state = mapMintQuoteState(checked.state)
+
+  if (state === 'ISSUED') {
+    return { state: 'ISSUED', proofs: [], claimedSats: 0, mintUrl: normalized }
+  }
+  if (state !== 'PAID') {
+    const nowSec = Math.floor(Date.now() / 1000)
+    if (checked.expiry && nowSec > checked.expiry) {
+      return { state: 'EXPIRED', proofs: [], claimedSats: 0, mintUrl: normalized }
+    }
+    return { state, proofs: [], claimedSats: 0, mintUrl: normalized }
+  }
+
+  const mintAmount = amountToNumberSafe(checked.amount) || Math.floor(amountSats)
+  if (!Number.isFinite(mintAmount) || mintAmount <= 0) {
+    throw new Error('Mint quote amount is invalid.')
+  }
+
+  const quotePubkey =
+    'pubkey' in checked && typeof checked.pubkey === 'string' && checked.pubkey.trim()
+      ? checked.pubkey.trim()
+      : null
+  const cleanPrivkey = privkeyHex ? parseWalletPrivateKeyHex(privkeyHex) : null
+
+  if (quotePubkey && !cleanPrivkey) {
+    throw new Error('This mint quote is locked (NUT-20) and requires your signing key to claim.')
+  }
+
+  let builder = wallet.ops.mintBolt11(mintAmount, checked)
+  if (activeSeedBytes) {
+    builder = builder.asDeterministic()
+  }
+  if (quotePubkey && cleanPrivkey) {
+    builder = builder.privkey(cleanPrivkey)
+  }
+
+  const minted = await builder.run()
+  const stored = deduplicateProofs(minted.map(toStoredProof))
+  return {
+    state: 'ISSUED',
+    proofs: stored,
+    claimedSats: sumStoredProofs(stored),
+    mintUrl: normalized,
   }
 }
 
