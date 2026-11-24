@@ -34,6 +34,7 @@ import { MessageItem } from './MessageItem'
 import { doesContentMentionUser } from '../lib/bitchatProtocol'
 import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel'
 import { isStuckMediaPlaceholder } from '../lib/storage'
+import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import { formatHandle } from '../utils/identicon'
 
 function extractCleanMessageText(msg: GeoMessage): string {
@@ -46,13 +47,6 @@ function extractCleanMessageText(msg: GeoMessage): string {
     text = text.split(target).join('')
   }
   return text.replace(/\n{3,}/g, '\n\n').trim()
-}
-
-function getServerMonogram(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean)
-  if (words.length === 0) return 'SV'
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
-  return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
 }
 
 function buildFallbackPeer(
@@ -247,6 +241,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const [unseenBelow, setUnseenBelow] = useState(0)
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null)
   const [openBlockedRunId, setOpenBlockedRunId] = useState<string | null>(null)
+  const [failedServerPictureUrl, setFailedServerPictureUrl] = useState<string | null>(null)
 
   useEffect(() => {
     if (!openBlockedRunId) return
@@ -375,6 +370,10 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const dmThread = engine.activeDmThread
   const activeServer = engine.servers.activeServer
   const activeChannel = engine.servers.activeChannel
+  const activeServerPicture = activeServer?.picture?.trim() || ''
+  const showServerPicture =
+    hasUploadedGroupPicture(activeServerPicture) &&
+    failedServerPictureUrl !== activeServerPicture
   const isEncryptedContext = Boolean(isDm || (isServer && activeServer?.encrypted))
   const streamKey = isDm
     ? `dm:${dmThread?.peerPubkey}`
@@ -1722,17 +1721,18 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   }
                   aria-hidden="true"
                 >
-                  {activeServer.picture && /^https?:\/\//i.test(activeServer.picture) ? (
+                  {showServerPicture ? (
                     <img
-                      src={activeServer.picture}
+                      src={activeServerPicture}
                       alt=""
                       loading="lazy"
                       referrerPolicy="no-referrer"
+                      onError={() => setFailedServerPictureUrl(activeServerPicture)}
                     />
-                  ) : activeServer.icon?.trim() ? (
-                    <span>{activeServer.icon}</span>
                   ) : (
-                    <span className="mono">{getServerMonogram(activeServer.name)}</span>
+                    <span className="mono">
+                      {getGroupSpecifier(activeServer.name, activeServer.icon)}
+                    </span>
                   )}
                 </div>
 

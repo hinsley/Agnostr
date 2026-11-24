@@ -392,12 +392,14 @@ export function buildNip29EditMetadataTemplate(opts: {
   groupId: string
   name?: string
   about?: string
+  picture?: string
   isPrivate?: boolean
   isClosed?: boolean
 }): EventTemplate {
   const tags: string[][] = [['h', opts.groupId]]
   if (opts.name !== undefined) tags.push(['name', opts.name.trim()])
   if (opts.about !== undefined) tags.push(['about', opts.about.trim()])
+  if (opts.picture !== undefined) tags.push(['picture', opts.picture.trim()])
   if (opts.isPrivate !== undefined) tags.push([opts.isPrivate ? 'private' : 'public'])
   if (opts.isClosed !== undefined) tags.push([opts.isClosed ? 'closed' : 'open'])
   return {

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ChangeEvent, CSSProperties, FormEvent } from 'react'
 import {
   AlertTriangle,
   Ban,
+  Camera,
   Check,
   Copy,
   Hash,
@@ -18,6 +19,7 @@ import {
   ShieldCheck,
   ShieldOff,
   Trash2,
+  Upload,
   UserCheck,
   Users,
   X,
@@ -26,7 +28,13 @@ import type { AgnostrEngine } from '../types/protocol.ts'
 import type { ServersEngine, ServerSummary } from '../types/servers.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
+import {
+  getGroupSpecifier,
+  hasUploadedGroupPicture,
+  sanitizeGroupSpecifier,
+} from '../utils/groupIcon.ts'
 import { AvatarImg } from './AvatarImg.tsx'
+import { IconCropModal } from './IconCropModal.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 
 export type ServerSettingsTab = 'overview' | 'channels' | 'members' | 'bans'
@@ -74,12 +82,17 @@ export function ServerSettingsModal({
   const [sentDmPubkeys, setSentDmPubkeys] = useState<Record<string, boolean>>({})
   const [sendingDmPubkey, setSendingDmPubkey] = useState<string | null>(null)
 
-  // Metadata edit drafts
+  // Metadata & icon edit drafts
   const [nameDraft, setNameDraft] = useState('')
   const [descDraft, setDescDraft] = useState('')
-  const [iconDraft, setIconDraft] = useState('')
+  const [specifierDraft, setSpecifierDraft] = useState('')
   const [accentDraft, setAccentDraft] = useState('#22E584')
   const [savingMeta, setSavingMeta] = useState(false)
+  const [iconCropFile, setIconCropFile] = useState<File | null>(null)
+  const [iconUploading, setIconUploading] = useState(false)
+  const [iconError, setIconError] = useState<string | null>(null)
+  const [failedPictureUrl, setFailedPictureUrl] = useState<string | null>(null)
+  const iconFileInputRef = useRef<HTMLInputElement | null>(null)
 
   // Channels edit drafts
   const [newChanName, setNewChanName] = useState('')
@@ -102,8 +115,11 @@ export function ServerSettingsModal({
     setTab(initialTab)
     setNameDraft(liveServer.name)
     setDescDraft(liveServer.description)
-    setIconDraft(liveServer.icon)
+    setSpecifierDraft(sanitizeGroupSpecifier(liveServer.icon))
     setAccentDraft(liveServer.accentColor || '#22E584')
+    setIconCropFile(null)
+    setIconError(null)
+    setFailedPictureUrl(null)
     setConfirmLeave(false)
     setSentDmPubkeys({})
   }, [liveServer?.id, initialTab]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -112,13 +128,16 @@ export function ServerSettingsModal({
     if (!liveServer) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (iconCropFile || document.querySelector('[data-icon-crop-modal="true"]')) {
+          return
+        }
         e.preventDefault()
         onClose()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [liveServer, onClose])
+  }, [liveServer, iconCropFile, onClose])
 
   // Known peers/contacts for "Send Invite via Encrypted DM"
   const dmContacts = useMemo<ContactOption[]>(() => {
@@ -191,6 +210,13 @@ export function ServerSettingsModal({
     liveServer.moderators.some((pk) => myKeys.has(pk)) ||
     Boolean(liveServer.admins?.some((a) => myKeys.has(a.pubkey))) ||
     (servers.activeServer?.id === liveServer.id && servers.canModerate)
+  const canEditIcon = liveServer.kind === 'virtual' ? isFounder : isModOrAdmin
+
+  const hasCustomPicture = hasUploadedGroupPicture(liveServer.picture)
+  const showCustomPicture = hasCustomPicture && failedPictureUrl !== liveServer.picture
+  const liveSpecifier = getGroupSpecifier(liveServer.name, liveServer.icon)
+  const draftSpecifier = getGroupSpecifier(nameDraft || liveServer.name, specifierDraft)
+  const autoSpecifierPlaceholder = getGroupSpecifier(nameDraft || liveServer.name)
 
   const inviteData = servers.buildInviteLink(liveServer.id)
 
@@ -229,12 +255,63 @@ export function ServerSettingsModal({
       const ok = await servers.updateServerMetadata(liveServer.id, {
         name: nameDraft.trim(),
         description: descDraft.trim(),
-        icon: iconDraft.trim(),
+        ...(canEditIcon ? { icon: sanitizeGroupSpecifier(specifierDraft) } : {}),
         accentColor: accentDraft,
       })
       if (ok) onPlaySound?.('click')
     } finally {
       setSavingMeta(false)
+    }
+  }
+
+  const handleIconFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file || !canEditIcon || iconUploading) return
+    if (!file.type.startsWith('image/')) {
+      setIconError('Choose an image file (PNG, JPG, GIF, or WebP).')
+      return
+    }
+    setIconError(null)
+    setIconCropFile(file)
+  }
+
+  const handleIconCropConfirm = async (croppedBlob: Blob) => {
+    if (!canEditIcon || iconUploading) return
+    setIconUploading(true)
+    setIconError(null)
+    try {
+      const res = await servers.uploadServerIcon(liveServer.id, croppedBlob)
+      if (res.ok) {
+        setFailedPictureUrl(null)
+        setIconCropFile(null)
+        onPlaySound?.('send')
+      } else {
+        setIconError(res.error || 'Could not upload group icon.')
+        setIconCropFile(null)
+      }
+    } catch (err) {
+      setIconError(err instanceof Error ? err.message : 'Could not upload group icon.')
+      setIconCropFile(null)
+    } finally {
+      setIconUploading(false)
+    }
+  }
+
+  const handleRemoveIcon = async () => {
+    if (!canEditIcon || iconUploading || !hasCustomPicture) return
+    setIconUploading(true)
+    setIconError(null)
+    try {
+      const ok = await servers.updateServerMetadata(liveServer.id, { picture: null })
+      if (ok) {
+        setFailedPictureUrl(null)
+        onPlaySound?.('click')
+      } else {
+        setIconError('Could not remove group icon.')
+      }
+    } finally {
+      setIconUploading(false)
     }
   }
 
@@ -305,30 +382,52 @@ export function ServerSettingsModal({
       >
         {/* Header */}
         <div className="ag-srv-modal-head">
-          <div className="ag-srv-modal-title-group">
-            <h2 id="ag-srv-settings-title" className="ag-srv-modal-title truncate">
-              {liveServer.icon ? `${liveServer.icon} ` : ''}
-              {liveServer.name}
-            </h2>
-            <div className="ag-srv-info-badges">
-              {liveServer.kind === 'nip29' ? (
-                <span className="ag-badge ag-badge-mesh">
-                  <Server size={9} />
-                  <span>HOSTED</span>
-                </span>
-              ) : liveServer.encrypted ? (
-                <span className="ag-badge ag-badge-dm">
-                  <Lock size={9} />
-                  <span>ENCRYPTED</span>
-                </span>
+          <div className="ag-srv-head-identity">
+            <div
+              className="ag-srv-head-emblem"
+              style={
+                {
+                  '--srv-accent': liveServer.accentColor || 'var(--accent)',
+                } as CSSProperties
+              }
+              aria-hidden="true"
+            >
+              {showCustomPicture ? (
+                <img
+                  src={liveServer.picture}
+                  alt=""
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  onError={() => setFailedPictureUrl(liveServer.picture ?? null)}
+                />
               ) : (
-                <span className="ag-badge ag-badge-accent">PUBLIC</span>
+                <span className="mono">{liveSpecifier}</span>
               )}
-              {isModOrAdmin && (
-                <span className="ag-badge ag-badge-ok">
-                  {isFounder ? 'FOUNDER' : 'MODERATOR'}
-                </span>
-              )}
+            </div>
+            <div className="ag-srv-modal-title-group">
+              <h2 id="ag-srv-settings-title" className="ag-srv-modal-title truncate">
+                {liveServer.name}
+              </h2>
+              <div className="ag-srv-info-badges">
+                {liveServer.kind === 'nip29' ? (
+                  <span className="ag-badge ag-badge-mesh">
+                    <Server size={9} />
+                    <span>HOSTED</span>
+                  </span>
+                ) : liveServer.encrypted ? (
+                  <span className="ag-badge ag-badge-dm">
+                    <Lock size={9} />
+                    <span>ENCRYPTED</span>
+                  </span>
+                ) : (
+                  <span className="ag-badge ag-badge-accent">PUBLIC</span>
+                )}
+                {isModOrAdmin && (
+                  <span className="ag-badge ag-badge-ok">
+                    {isFounder ? 'FOUNDER' : 'MODERATOR'}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 
@@ -537,35 +636,177 @@ export function ServerSettingsModal({
                 )}
               </section>
 
-              {/* Edit Server Metadata (Moderators / Founders) */}
-              {isModOrAdmin && (
-                <section className="ag-panel-card">
-                  <div className="ag-panel-card-head">
-                    <div className="ag-panel-card-title">
-                      <Server size={13} />
-                      <span>GROUP PROFILE</span>
-                    </div>
+              {/* Group Profile (Editable for Moderators/Founders; Icon strictly Founder / NIP-29 Admin) */}
+              <section className="ag-panel-card">
+                <div className="ag-panel-card-head">
+                  <div className="ag-panel-card-title">
+                    <Server size={13} />
+                    <span>GROUP PROFILE</span>
                   </div>
+                </div>
+
+                <div className="ag-srv-emblem-row">
+                  {canEditIcon && (
+                    <input
+                      ref={iconFileInputRef}
+                      type="file"
+                      accept="image/*"
+                      style={{ display: 'none' }}
+                      onChange={handleIconFileSelect}
+                    />
+                  )}
+
+                  {canEditIcon ? (
+                    <button
+                      type="button"
+                      className="ag-srv-emblem-preview ag-srv-emblem-btn"
+                      style={
+                        {
+                          '--srv-accent': accentDraft || liveServer.accentColor || 'var(--accent)',
+                        } as CSSProperties
+                      }
+                      disabled={iconUploading}
+                      onClick={() => iconFileInputRef.current?.click()}
+                      aria-label={hasCustomPicture ? 'Change group icon' : 'Upload group icon'}
+                      title={hasCustomPicture ? 'Change group icon' : 'Upload group icon'}
+                    >
+                      {showCustomPicture ? (
+                        <img
+                          src={liveServer.picture}
+                          alt=""
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          onError={() => setFailedPictureUrl(liveServer.picture ?? null)}
+                        />
+                      ) : (
+                        <span className="mono">{draftSpecifier}</span>
+                      )}
+                      <span
+                        className={`ag-srv-emblem-overlay${iconUploading ? ' is-busy' : ''}`}
+                        aria-hidden="true"
+                      >
+                        {iconUploading ? (
+                          <Loader2 size={16} className="ag-spin" />
+                        ) : (
+                          <Camera size={16} />
+                        )}
+                      </span>
+                    </button>
+                  ) : (
+                    <div
+                      className="ag-srv-emblem-preview"
+                      style={
+                        {
+                          '--srv-accent': liveServer.accentColor || 'var(--accent)',
+                        } as CSSProperties
+                      }
+                      aria-label={`Group emblem ${liveSpecifier}`}
+                    >
+                      {showCustomPicture ? (
+                        <img
+                          src={liveServer.picture}
+                          alt=""
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          onError={() => setFailedPictureUrl(liveServer.picture ?? null)}
+                        />
+                      ) : (
+                        <span className="mono">{liveSpecifier}</span>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="ag-srv-emblem-copy">
+                    {canEditIcon ? (
+                      <>
+                        <div className="ag-srv-emblem-actions">
+                          <button
+                            type="button"
+                            className="ag-btn ag-btn-secondary ag-btn-xs"
+                            disabled={iconUploading}
+                            onClick={() => iconFileInputRef.current?.click()}
+                          >
+                            {iconUploading ? (
+                              <Loader2 size={12} className="ag-spin" />
+                            ) : (
+                              <Upload size={12} />
+                            )}
+                            <span>{hasCustomPicture ? 'Change Icon' : 'Upload Icon'}</span>
+                          </button>
+                          {hasCustomPicture && (
+                            <button
+                              type="button"
+                              className="ag-btn ag-btn-ghost ag-btn-xs"
+                              disabled={iconUploading}
+                              onClick={() => void handleRemoveIcon()}
+                            >
+                              <Trash2 size={12} />
+                              <span>Remove Icon</span>
+                            </button>
+                          )}
+                        </div>
+                        <p className="ag-field-hint">
+                          {hasCustomPicture
+                            ? 'Custom square icon uploaded. Remove to revert to the 2-letter specifier.'
+                            : 'Defaults to a 2-letter specifier. Upload an image to crop a custom icon.'}
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <span className="ag-srv-readonly-name truncate">{liveServer.name}</span>
+                        <p className="ag-field-hint">
+                          {liveServer.description ||
+                            'Only the group founder can change the group icon.'}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {iconError && (
+                  <p className="ag-field-hint ag-field-hint-danger" role="alert">
+                    {iconError}
+                  </p>
+                )}
+
+                {isModOrAdmin && (
                   <form className="ag-srv-form" onSubmit={(e) => void handleSaveMetadata(e)}>
-                    <div className="ag-srv-meta-inputs">
-                      <input
-                        type="text"
-                        maxLength={4}
-                        className="ag-input ag-srv-icon-input"
-                        value={iconDraft}
-                        onChange={(e) => setIconDraft(e.target.value)}
-                        aria-label="Group icon emoji"
-                        title="Icon emoji"
-                      />
-                      <input
-                        type="text"
-                        maxLength={48}
-                        className="ag-input"
-                        value={nameDraft}
-                        onChange={(e) => setNameDraft(e.target.value)}
-                        placeholder="Group name"
-                        aria-label="Group name"
-                      />
+                    <div className="ag-srv-meta-fields">
+                      {canEditIcon && (
+                        <div className="ag-srv-meta-specifier-col">
+                          <label className="ag-field-label" htmlFor="ag-srv-settings-specifier">
+                            2-Letter Specifier
+                          </label>
+                          <input
+                            id="ag-srv-settings-specifier"
+                            type="text"
+                            maxLength={2}
+                            className="ag-input mono ag-srv-specifier-input"
+                            value={specifierDraft}
+                            onChange={(e) =>
+                              setSpecifierDraft(sanitizeGroupSpecifier(e.target.value))
+                            }
+                            placeholder={autoSpecifierPlaceholder}
+                            aria-label="2-letter group specifier"
+                            title="2-letter group specifier (optional)"
+                          />
+                        </div>
+                      )}
+                      <div className="ag-srv-meta-name-col">
+                        <label className="ag-field-label" htmlFor="ag-srv-settings-name">
+                          Group Name
+                        </label>
+                        <input
+                          id="ag-srv-settings-name"
+                          type="text"
+                          maxLength={48}
+                          className="ag-input"
+                          value={nameDraft}
+                          onChange={(e) => setNameDraft(e.target.value)}
+                          placeholder="Group name"
+                          aria-label="Group name"
+                        />
+                      </div>
                     </div>
                     <input
                       type="text"
@@ -600,8 +841,8 @@ export function ServerSettingsModal({
                       </button>
                     </div>
                   </form>
-                </section>
-              )}
+                )}
+              </section>
 
               {/* Leave Server */}
               <section className="ag-panel-card ag-danger-card">
@@ -932,6 +1173,16 @@ export function ServerSettingsModal({
           )}
         </div>
       </div>
+
+      <IconCropModal
+        file={iconCropFile}
+        label={liveServer.name}
+        busy={iconUploading}
+        onCancel={() => {
+          if (!iconUploading) setIconCropFile(null)
+        }}
+        onConfirm={handleIconCropConfirm}
+      />
     </div>
   )
 }

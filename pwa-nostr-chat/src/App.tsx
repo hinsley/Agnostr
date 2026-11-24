@@ -364,6 +364,19 @@ export function App() {
     if (!pendingNotifAction) return
     const { action, payload, receivedAt } = pendingNotifAction
 
+    // If this notification belongs to another saved profile on this device, switch into it
+    const targetProfilePk = payload.recipientPubkey?.trim().toLowerCase()
+    if (
+      targetProfilePk &&
+      /^[0-9a-f]{64}$/.test(targetProfilePk) &&
+      targetProfilePk !== engine.profiles.activeProfileId.toLowerCase() &&
+      engine.profiles.profiles.some((p) => p.id.toLowerCase() === targetProfilePk)
+    ) {
+      engine.notifications.consumePendingAction()
+      void engine.profiles.switchProfile(targetProfilePk)
+      return
+    }
+
     // Navigate to target room/DM/server/Agmail once per pending notification action
     if (navigatedNotifTsRef.current !== receivedAt) {
       navigatedNotifTsRef.current = receivedAt

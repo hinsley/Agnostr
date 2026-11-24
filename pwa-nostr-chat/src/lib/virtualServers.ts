@@ -22,6 +22,11 @@ import {
 } from './bitchatProtocol.ts'
 import { CORE_DM_RELAYS, normalizeRelayUrl } from './geoRelays.ts'
 import { bytesToHex, formatDisplayHandle } from './identity.ts'
+import {
+  getGroupSpecifier,
+  hasUploadedGroupPicture,
+  sanitizeGroupSpecifier,
+} from '../utils/groupIcon.ts'
 
 export const KIND_VIRTUAL_MANIFEST = 30078
 export const KIND_VIRTUAL_CHAT = 9
@@ -96,11 +101,7 @@ export function slugifyChannelName(raw: string): string {
 }
 
 export function defaultMonogram(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean)
-  if (words.length >= 2) {
-    return `${words[0][0]}${words[1][0]}`.toUpperCase()
-  }
-  return name.trim().slice(0, 2).toUpperCase() || 'SV'
+  return getGroupSpecifier(name)
 }
 
 export function manifestDTag(serverId: string): string {
@@ -278,12 +279,21 @@ export function parseVirtualManifestEvent(
         .filter((r): r is string => r !== null)
     : []
 
+  const rawPicture =
+    typeof parsed.picture === 'string'
+      ? parsed.picture.trim()
+      : typeof (parsed as Record<string, unknown>).p === 'string'
+        ? String((parsed as Record<string, unknown>).p).trim()
+        : ''
+  const picture = hasUploadedGroupPicture(rawPicture) ? rawPicture : undefined
+
   return {
     v: 1,
     id: idFromTag,
     name: parsed.name.trim().slice(0, 48),
     description: typeof parsed.description === 'string' ? parsed.description.trim().slice(0, 200) : '',
-    icon: typeof parsed.icon === 'string' && parsed.icon.trim() ? parsed.icon.trim().slice(0, 4) : defaultMonogram(parsed.name),
+    icon: getGroupSpecifier(parsed.name, typeof parsed.icon === 'string' ? parsed.icon : undefined),
+    ...(picture ? { picture } : {}),
     accentColor:
       typeof parsed.accentColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(parsed.accentColor)
         ? parsed.accentColor
@@ -493,7 +503,8 @@ interface CompactInvitePayload {
   id: string
   n: string // name
   d?: string // description
-  i?: string // icon
+  i?: string // 1-2 char alphanumeric specifier
+  p?: string // optional HTTPS uploaded icon URL
   c?: string // accentColor
   f?: string // founderPubkey
   e?: 1 // encrypted
@@ -509,6 +520,11 @@ export function encodeServerInvite(
   server: ServerSummary,
   inviterPubkey?: string
 ): { code: string; url: string } {
+  const safeSpec = sanitizeGroupSpecifier(server.icon) || undefined
+  const safePicture =
+    hasUploadedGroupPicture(server.picture) && (server.picture?.trim().length ?? 0) <= 240
+      ? server.picture!.trim()
+      : undefined
   const payload: CompactInvitePayload =
     server.kind === 'virtual'
       ? {
@@ -517,7 +533,8 @@ export function encodeServerInvite(
           id: server.id,
           n: server.name.slice(0, 48),
           d: server.description ? server.description.slice(0, 140) : undefined,
-          i: server.icon || undefined,
+          i: safeSpec,
+          p: safePicture,
           c: server.accentColor || undefined,
           f: server.founderPubkey || undefined,
           e: server.encrypted ? 1 : undefined,
@@ -532,7 +549,8 @@ export function encodeServerInvite(
           id: server.groupId || server.id,
           n: server.name.slice(0, 48),
           d: server.description ? server.description.slice(0, 140) : undefined,
-          i: server.icon || undefined,
+          i: safeSpec,
+          p: safePicture,
           c: server.accentColor || undefined,
           r: server.relayUrl,
           by: inviterPubkey,
@@ -563,6 +581,9 @@ export function parseServerInvite(rawInput: string): ServerInvite | null {
     try {
       const p = JSON.parse(utf8Decoder.decode(bytes)) as Partial<CompactInvitePayload>
       if (p.v !== 1 || typeof p.id !== 'string' || !p.id || typeof p.n !== 'string') return null
+      const parsedPicture =
+        typeof p.p === 'string' && hasUploadedGroupPicture(p.p) ? p.p.trim() : undefined
+      const parsedSpec = sanitizeGroupSpecifier(typeof p.i === 'string' ? p.i : undefined) || undefined
       if (p.k === 'v') {
         const relays = Array.isArray(p.rs)
           ? p.rs.map((u) => normalizeRelayUrl(u)).filter((u): u is string => u !== null)
@@ -573,7 +594,8 @@ export function parseServerInvite(rawInput: string): ServerInvite | null {
           id: p.id,
           name: p.n.trim().slice(0, 48) || 'Agnostr Group',
           description: typeof p.d === 'string' ? p.d : undefined,
-          icon: typeof p.i === 'string' ? p.i : undefined,
+          icon: parsedSpec,
+          ...(parsedPicture ? { picture: parsedPicture } : {}),
           accentColor: typeof p.c === 'string' ? p.c : undefined,
           founderPubkey: typeof p.f === 'string' && /^[0-9a-f]{64}$/i.test(p.f) ? p.f.toLowerCase() : undefined,
           encrypted: p.e === 1,
@@ -595,7 +617,8 @@ export function parseServerInvite(rawInput: string): ServerInvite | null {
           id: p.id,
           name: p.n.trim().slice(0, 48) || p.id,
           description: typeof p.d === 'string' ? p.d : undefined,
-          icon: typeof p.i === 'string' ? p.i : undefined,
+          icon: parsedSpec,
+          ...(parsedPicture ? { picture: parsedPicture } : {}),
           accentColor: typeof p.c === 'string' ? p.c : undefined,
           relayUrl,
           inviteCode: typeof p.code === 'string' ? p.code : undefined,

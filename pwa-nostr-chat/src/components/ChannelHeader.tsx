@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
   ArrowLeft,
@@ -18,14 +18,8 @@ import {
 import type { AgnostrEngine } from '../types/protocol'
 import type { ZapTarget } from '../types/wallet'
 import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel'
+import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import { AvatarImg } from './AvatarImg'
-
-function getServerMonogram(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean)
-  if (words.length === 0) return 'SV'
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
-  return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
-}
 
 export interface ChannelHeaderProps {
   engine: AgnostrEngine
@@ -70,6 +64,11 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   const dmThread = engine.activeDmThread
   const activeServer = engine.servers.activeServer
   const activeChannel = engine.servers.activeChannel
+  const [failedServerPictureUrl, setFailedServerPictureUrl] = useState<string | null>(null)
+  const activeServerPicture = activeServer?.picture?.trim() || ''
+  const showServerPicture =
+    hasUploadedGroupPicture(activeServerPicture) &&
+    failedServerPictureUrl !== activeServerPicture
 
   const activeCall = engine.calls.activeCall
   const dmPeerPubkey = isDm && dmThread ? dmThread.peerPubkey : null
@@ -258,17 +257,18 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                   }
                   aria-hidden="true"
                 >
-                  {activeServer.picture && /^https?:\/\//i.test(activeServer.picture) ? (
+                  {showServerPicture ? (
                     <img
-                      src={activeServer.picture}
+                      src={activeServerPicture}
                       alt=""
                       loading="lazy"
                       referrerPolicy="no-referrer"
+                      onError={() => setFailedServerPictureUrl(activeServerPicture)}
                     />
-                  ) : activeServer.icon?.trim() ? (
-                    <span>{activeServer.icon}</span>
                   ) : (
-                    <span className="mono">{getServerMonogram(activeServer.name)}</span>
+                    <span className="mono">
+                      {getGroupSpecifier(activeServer.name, activeServer.icon)}
+                    </span>
                   )}
                 </div>
                 <div className="ag-header-text">

@@ -26,6 +26,7 @@ export interface VirtualServerManifest {
   name: string
   description: string
   icon: string
+  picture?: string
   accentColor: string
   founderPubkey: string
   encrypted: boolean
@@ -141,6 +142,7 @@ export interface ServerInvite {
   name: string
   description?: string
   icon?: string
+  picture?: string
   accentColor?: string
   founderPubkey?: string
   encrypted?: boolean
@@ -240,8 +242,18 @@ export interface ServersEngine {
   // Administration & moderation
   updateServerMetadata: (
     serverId: string,
-    patch: { name?: string; description?: string; icon?: string; accentColor?: string }
+    patch: {
+      name?: string
+      description?: string
+      icon?: string
+      picture?: string | null
+      accentColor?: string
+    }
   ) => Promise<boolean>
+  uploadServerIcon: (
+    serverId: string,
+    blob: Blob
+  ) => Promise<{ ok: boolean; pictureUrl?: string; error?: string }>
   addChannel: (serverId: string, name: string, topic?: string) => Promise<boolean>
   removeChannel: (serverId: string, channelId: string) => Promise<boolean>
   addModerator: (serverId: string, pubkeyOrNpub: string) => Promise<boolean>

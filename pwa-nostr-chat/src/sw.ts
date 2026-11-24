@@ -225,12 +225,18 @@ swSelf.addEventListener('push', (event) => {
       return
     }
 
+    const rawRecipient = payload.data?.recipientPubkey
+    const recipientPubkey =
+      typeof rawRecipient === 'string' && /^[0-9a-f]{64}$/i.test(rawRecipient.trim())
+        ? rawRecipient.trim().toLowerCase()
+        : undefined
     const data: NotificationPayloadData = {
       category: payload.data?.category ?? 'dm',
       tag: payload.tag ?? payload.data?.tag,
       callId,
       mediaType: payload.data?.mediaType,
       peerPubkey: payload.data?.peerPubkey,
+      recipientPubkey,
       serverId: payload.data?.serverId,
       channelId: payload.data?.channelId,
       geohash: payload.data?.geohash,
@@ -241,6 +247,24 @@ swSelf.addEventListener('push', (event) => {
       type: 'window',
       includeUncontrolled: true,
     })
+
+    // Notify controlled client windows so inactive saved profiles update unread badges live
+    if (recipientPubkey && windowClients.length > 0) {
+      for (const client of windowClients) {
+        try {
+          client.postMessage({
+            type: 'agnostr-profile-push',
+            recipientPubkey,
+            category: data.category,
+            title: payload.title,
+            body: payload.body,
+            ts: Date.now(),
+          })
+        } catch {
+          // Ignore detached window postMessage errors
+        }
+      }
+    }
     const hasFocusedClient = windowClients.some(
       (c) => c.visibilityState === 'visible' && c.focused
     )

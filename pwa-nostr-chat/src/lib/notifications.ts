@@ -127,6 +127,11 @@ export function parseNotifyHash(rawHash: string): PendingNotificationAction | nu
       rawAction === 'decline'
         ? rawAction
         : 'open'
+    const rawRecipient = decoded.payload.recipientPubkey
+    const recipientPubkey =
+      typeof rawRecipient === 'string' && /^[0-9a-f]{64}$/i.test(rawRecipient.trim())
+        ? rawRecipient.trim().toLowerCase()
+        : undefined
     return {
       action,
       payload: {
@@ -135,6 +140,7 @@ export function parseNotifyHash(rawHash: string): PendingNotificationAction | nu
         callId: decoded.payload.callId,
         mediaType: decoded.payload.mediaType,
         peerPubkey: decoded.payload.peerPubkey,
+        recipientPubkey,
         serverId: decoded.payload.serverId,
         channelId: decoded.payload.channelId,
         geohash: decoded.payload.geohash,

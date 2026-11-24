@@ -72,6 +72,7 @@ export interface NotificationPayloadData {
   callId?: string
   mediaType?: 'audio' | 'video'
   peerPubkey?: string
+  recipientPubkey?: string
   serverId?: string
   channelId?: string
   geohash?: string

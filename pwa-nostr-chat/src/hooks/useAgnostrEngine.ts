@@ -181,6 +181,7 @@ import {
   type NotifyGeoMessageInput,
   type NotifyLocationNoteInput,
 } from './useNotifications.ts'
+import { useProfileNotifications } from './useProfileNotifications.ts'
 import { useServers } from './useServers.ts'
 import { useToasts } from './useToasts.ts'
 import { useTranscription } from './useTranscription.ts'
@@ -2667,27 +2668,6 @@ export function useAgnostrEngine(): AgnostrEngine {
     [identityManager, pushToast]
   )
 
-  const profilesEngine = useMemo<ProfileSwitcherEngine>(
-    () => ({
-      profiles: storedProfiles,
-      activeProfileId: myMasterPkLower,
-      switching: profileSwitching,
-      switchProfile,
-      createProfile,
-      importProfile,
-      deleteProfile,
-    }),
-    [
-      storedProfiles,
-      myMasterPkLower,
-      profileSwitching,
-      switchProfile,
-      createProfile,
-      importProfile,
-      deleteProfile,
-    ]
-  )
-
   const ensureAgoraProfiles = agoraEngine.ensureProfiles
   const ensureProfilePictures = useCallback(
     (pubkeys: readonly string[]) => {
@@ -4827,6 +4807,47 @@ export function useAgnostrEngine(): AgnostrEngine {
   useLayoutEffect(() => {
     notifyAmailRef.current = notifyAmail
   }, [notifyAmail])
+
+  const {
+    notificationsByProfile,
+    otherProfilesUnreadCount,
+    clearProfileNotifications,
+  } = useProfileNotifications({
+    relayPool: pool,
+    profiles: storedProfiles,
+    activeProfileId: myMasterPkLower,
+    notificationsEnabled: notificationsEngine.settings.enabled,
+    soundEnabled: settings.soundEnabled,
+    onSwitchProfile: switchProfile,
+    pushToast,
+  })
+
+  const profilesEngine = useMemo<ProfileSwitcherEngine>(
+    () => ({
+      profiles: storedProfiles,
+      activeProfileId: myMasterPkLower,
+      switching: profileSwitching,
+      notificationsByProfile,
+      otherProfilesUnreadCount,
+      clearProfileNotifications,
+      switchProfile,
+      createProfile,
+      importProfile,
+      deleteProfile,
+    }),
+    [
+      storedProfiles,
+      myMasterPkLower,
+      profileSwitching,
+      notificationsByProfile,
+      otherProfilesUnreadCount,
+      clearProfileNotifications,
+      switchProfile,
+      createProfile,
+      importProfile,
+      deleteProfile,
+    ]
+  )
 
   const sendImageAttachment = useCallback(
     async (image: PreparedImage, caption?: string): Promise<boolean> => {

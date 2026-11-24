@@ -1420,6 +1420,17 @@ export function SettingsModal({
             <span className="ag-badge ag-badge-muted mono">
               {engine.profiles.profiles.length}
             </span>
+            {engine.profiles.otherProfilesUnreadCount > 0 && (
+              <span
+                className="ag-set-profile-notif-badge tabular"
+                aria-label={`${engine.profiles.otherProfilesUnreadCount} unread notification${engine.profiles.otherProfilesUnreadCount === 1 ? '' : 's'} on other profiles`}
+              >
+                {engine.profiles.otherProfilesUnreadCount > 99
+                  ? '99+'
+                  : engine.profiles.otherProfilesUnreadCount}{' '}
+                new
+              </span>
+            )}
           </div>
           <div className="ag-set-profiles-head-actions">
             <button
@@ -1572,12 +1583,19 @@ export function SettingsModal({
               const avatarUrl = isActive
                 ? myProfilePicture
                 : (engine.getProfilePicture(prof.pubkey) ?? prof.picture)
+              const profNotif = !isActive
+                ? (engine.profiles.notificationsByProfile[prof.id] ??
+                  engine.profiles.notificationsByProfile[prof.pubkey.toLowerCase()])
+                : undefined
+              const unreadCount = profNotif?.unreadCount ?? 0
 
               return (
                 <div
                   key={prof.id}
                   role="listitem"
-                  className={`ag-set-profile-item-wrap${isActive ? ' is-active' : ''}`}
+                  className={`ag-set-profile-item-wrap${isActive ? ' is-active' : ''}${
+                    unreadCount > 0 ? ' has-notifs' : ''
+                  }`}
                 >
                   <div className="ag-set-profile-item">
                     <AvatarImg
@@ -1597,10 +1615,26 @@ export function SettingsModal({
                           {displayNick}
                         </span>
                         {isActive && <span className="ag-badge ag-badge-accent">Active</span>}
+                        {!isActive && unreadCount > 0 && (
+                          <span
+                            className="ag-set-profile-notif-badge tabular"
+                            aria-label={`${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}`}
+                          >
+                            {unreadCount > 99 ? '99+' : unreadCount} new
+                          </span>
+                        )}
                       </div>
                       <span className="ag-set-row-sub mono truncate">
                         {shortPubkey(prof.npub, 10, 6)}
                       </span>
+                      {!isActive && unreadCount > 0 && profNotif?.lastSummary && (
+                        <span
+                          className="ag-set-profile-notif-summary truncate"
+                          title={profNotif.lastSummary}
+                        >
+                          {profNotif.lastSummary}
+                        </span>
+                      )}
                     </div>
 
                     {!isActive && (

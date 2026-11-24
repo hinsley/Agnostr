@@ -2,6 +2,7 @@ import type {
   IdentitySignMode,
   IdentityState,
   ProfileAccountRecord,
+  ProfileNotificationSummary,
 } from '../types/protocol.ts'
 import { AMAIL_DB_NAME } from './amailStorage.ts'
 import {
@@ -14,11 +15,13 @@ import {
 export const PROFILES_REGISTRY_KEY = 'agnostr:v3:profiles'
 export const ACTIVE_PROFILE_ID_KEY = 'agnostr:v3:active_profile_id'
 export const LEGACY_AMAIL_OWNER_KEY = 'agnostr:v3:legacy_amail_owner'
+export const PROFILE_NOTIFS_KEY = 'agnostr:v3:profile_notifs'
 
 export const GLOBAL_KEYS: ReadonlySet<string> = new Set([
   PROFILES_REGISTRY_KEY,
   ACTIVE_PROFILE_ID_KEY,
   LEGACY_AMAIL_OWNER_KEY,
+  PROFILE_NOTIFS_KEY,
 ])
 
 const PROFILE_VAULT_DB_NAME = 'agnostr-profile-vault-v1'
@@ -396,6 +399,127 @@ export function getActiveProfileId(): string | null {
   return normalizePubkey(safeGet(ACTIVE_PROFILE_ID_KEY))
 }
 
+export function loadProfileNotifications(): Record<string, ProfileNotificationSummary> {
+  const raw = safeGet(PROFILE_NOTIFS_KEY)
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out: Record<string, ProfileNotificationSummary> = {}
+    for (const [rawPk, val] of Object.entries(parsed as Record<string, unknown>)) {
+      const pk = normalizePubkey(rawPk)
+      if (!pk || !val || typeof val !== 'object') continue
+      const entry = val as Partial<ProfileNotificationSummary>
+      const unreadCount =
+        typeof entry.unreadCount === 'number' && Number.isFinite(entry.unreadCount)
+          ? Math.max(0, Math.floor(entry.unreadCount))
+          : 0
+      const lastNotifAt =
+        typeof entry.lastNotifAt === 'number' && Number.isFinite(entry.lastNotifAt)
+          ? Math.max(0, Math.floor(entry.lastNotifAt))
+          : 0
+      const lastCheckedAt =
+        typeof entry.lastCheckedAt === 'number' && Number.isFinite(entry.lastCheckedAt)
+          ? Math.max(0, Math.floor(entry.lastCheckedAt))
+          : 0
+      const lastSummary =
+        typeof entry.lastSummary === 'string' && entry.lastSummary.trim()
+          ? entry.lastSummary.trim().slice(0, 120)
+          : undefined
+      out[pk] = {
+        unreadCount,
+        lastNotifAt,
+        ...(lastSummary ? { lastSummary } : {}),
+        lastCheckedAt,
+      }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+export function saveProfileNotifications(
+  map: Record<string, ProfileNotificationSummary>
+): void {
+  const clean: Record<string, ProfileNotificationSummary> = {}
+  for (const [rawPk, entry] of Object.entries(map)) {
+    const pk = normalizePubkey(rawPk)
+    if (!pk || !entry || typeof entry !== 'object') continue
+    const lastSummary =
+      typeof entry.lastSummary === 'string' && entry.lastSummary.trim()
+        ? entry.lastSummary.trim().slice(0, 120)
+        : undefined
+    clean[pk] = {
+      unreadCount: Math.max(0, Math.floor(Number(entry.unreadCount) || 0)),
+      lastNotifAt: Math.max(0, Math.floor(Number(entry.lastNotifAt) || 0)),
+      ...(lastSummary ? { lastSummary } : {}),
+      lastCheckedAt: Math.max(0, Math.floor(Number(entry.lastCheckedAt) || 0)),
+    }
+  }
+  safeSet(PROFILE_NOTIFS_KEY, JSON.stringify(clean))
+}
+
+export function recordInactiveProfileNotification(
+  pubkey: string,
+  summary: string,
+  eventTsSec?: number
+): Record<string, ProfileNotificationSummary> {
+  const pk = normalizePubkey(pubkey)
+  const map = loadProfileNotifications()
+  if (!pk) return map
+  const nowSec = Math.floor(Date.now() / 1000)
+  const tsSec =
+    typeof eventTsSec === 'number' && Number.isFinite(eventTsSec) && eventTsSec > 0
+      ? Math.floor(eventTsSec)
+      : nowSec
+  const prev = map[pk]
+  const cleanSummary = summary.trim().slice(0, 120) || 'New activity'
+  const next: Record<string, ProfileNotificationSummary> = {
+    ...map,
+    [pk]: {
+      unreadCount: (prev?.unreadCount ?? 0) + 1,
+      lastNotifAt: Math.max(prev?.lastNotifAt ?? 0, tsSec),
+      lastSummary: cleanSummary,
+      lastCheckedAt: prev?.lastCheckedAt ?? nowSec,
+    },
+  }
+  saveProfileNotifications(next)
+  return next
+}
+
+export function markProfileChecked(
+  pubkey: string,
+  nowSec = Math.floor(Date.now() / 1000)
+): Record<string, ProfileNotificationSummary> {
+  const pk = normalizePubkey(pubkey)
+  const map = loadProfileNotifications()
+  if (!pk) return map
+  const prev = map[pk]
+  const next: Record<string, ProfileNotificationSummary> = {
+    ...map,
+    [pk]: {
+      unreadCount: 0,
+      lastNotifAt: prev?.lastNotifAt ?? 0,
+      lastCheckedAt: Math.max(prev?.lastCheckedAt ?? 0, Math.floor(nowSec)),
+    },
+  }
+  saveProfileNotifications(next)
+  return next
+}
+
+export function clearProfileNotificationEntry(
+  pubkey: string
+): Record<string, ProfileNotificationSummary> {
+  const pk = normalizePubkey(pubkey)
+  const map = loadProfileNotifications()
+  if (!pk || !(pk in map)) return map
+  const next = { ...map }
+  delete next[pk]
+  saveProfileNotifications(next)
+  return next
+}
+
 export async function snapshotCurrentProfileToVault(activePubkey: string): Promise<void> {
   const pk = normalizePubkey(activePubkey)
   if (!pk) return
@@ -457,6 +581,7 @@ export function bootstrapActiveProfile(
 
   saveProfilesRegistry(next)
   safeSet(ACTIVE_PROFILE_ID_KEY, pk)
+  markProfileChecked(pk)
   void snapshotCurrentProfileToVault(pk)
   return next
 }
@@ -533,6 +658,7 @@ export async function switchToProfile(
   if (targetIdx < 0 && !targetBucket) return false
 
   if (curPk) {
+    markProfileChecked(curPk)
     await snapshotCurrentProfileToVault(curPk)
   }
 
@@ -548,6 +674,7 @@ export async function switchToProfile(
     saveProfilesRegistry(next)
   }
   safeSet(ACTIVE_PROFILE_ID_KEY, tgtPk)
+  markProfileChecked(tgtPk)
   triggerAppReload()
   return true
 }
@@ -567,6 +694,7 @@ export async function createAndSwitchProfile(
 ): Promise<ProfileAccountRecord> {
   const curPk = normalizePubkey(currentPubkey)
   if (curPk) {
+    markProfileChecked(curPk)
     await snapshotCurrentProfileToVault(curPk)
   }
 
@@ -590,6 +718,7 @@ export async function createAndSwitchProfile(
   const list = loadProfilesRegistry().filter((p) => p.id !== pubkey)
   saveProfilesRegistry([...list, record])
   safeSet(ACTIVE_PROFILE_ID_KEY, pubkey)
+  markProfileChecked(pubkey)
   await snapshotCurrentProfileToVault(pubkey)
   triggerAppReload()
   return record
@@ -618,6 +747,7 @@ export async function importAndSwitchProfile(
   }
 
   if (curPk) {
+    markProfileChecked(curPk)
     await snapshotCurrentProfileToVault(curPk)
   }
 
@@ -642,6 +772,7 @@ export async function importAndSwitchProfile(
 
   saveProfilesRegistry([...list, record])
   safeSet(ACTIVE_PROFILE_ID_KEY, parsed.pubkey)
+  markProfileChecked(parsed.pubkey)
   await snapshotCurrentProfileToVault(parsed.pubkey)
   triggerAppReload()
   return { ok: true, profile: record }
@@ -661,6 +792,7 @@ export async function deleteStoredProfile(
   const amailDbName = getProfileAmailDbName(tgtPk)
   const remaining = list.filter((p) => p.id !== tgtPk)
   saveProfilesRegistry(remaining)
+  clearProfileNotificationEntry(tgtPk)
 
   if (safeGet(LEGACY_AMAIL_OWNER_KEY)?.trim().toLowerCase() === tgtPk) {
     // Sentinel prevents any other profile from reclaiming the deleted legacy DB slot
@@ -688,6 +820,7 @@ export async function deleteStoredProfile(
     )
     saveProfilesRegistry(updatedRemaining)
     safeSet(ACTIVE_PROFILE_ID_KEY, nextProfile.id)
+    markProfileChecked(nextProfile.id)
     triggerAppReload()
     return { deleted: true, reloaded: true, profiles: updatedRemaining }
   }
@@ -709,6 +842,7 @@ export async function deleteStoredProfile(
   }
   saveProfilesRegistry([freshRecord])
   safeSet(ACTIVE_PROFILE_ID_KEY, pubkey)
+  markProfileChecked(pubkey)
   await snapshotCurrentProfileToVault(pubkey)
   triggerAppReload()
   return { deleted: true, reloaded: true, profiles: [freshRecord] }

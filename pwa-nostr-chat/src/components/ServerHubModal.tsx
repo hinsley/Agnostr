@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { CSSProperties, FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ChangeEvent, CSSProperties, FormEvent } from 'react'
 import {
+  Camera,
   Check,
   Compass,
   Globe,
@@ -15,6 +16,8 @@ import {
   Server,
   ShieldAlert,
   Sparkles,
+  Trash2,
+  Upload,
   Users,
   X,
 } from 'lucide-react'
@@ -27,7 +30,13 @@ import type {
 } from '../types/servers.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { shortPubkey } from '../utils/identicon.ts'
+import {
+  getGroupSpecifier,
+  hasUploadedGroupPicture,
+  sanitizeGroupSpecifier,
+} from '../utils/groupIcon.ts'
 import { AvatarImg } from './AvatarImg.tsx'
+import { IconCropModal } from './IconCropModal.tsx'
 import type { QrShareTarget } from './QrShareModal.tsx'
 
 export type ServerHubTab = 'create' | 'join' | 'explore'
@@ -46,11 +55,6 @@ export interface ServerHubModalProps {
 
 type CreateKindMode = 'virtual-public' | 'virtual-e2ee' | 'nip29'
 
-const EMOJI_CHOICES = [
-  '📡', '🔐', '⚡', '🛰️', '🛡️', '🌐',
-  '🔥', '🧪', '🎯', '🧭', '🎙️', '🏴‍☠️',
-] as const
-
 const ACCENT_CHOICES = [
   { id: 'blue', hex: '#3B82F6', label: 'Cobalt' },
   { id: 'indigo', hex: '#6366F1', label: 'Indigo' },
@@ -62,13 +66,6 @@ const ACCENT_CHOICES = [
 
 function stripWs(url: string): string {
   return url.replace(/^wss?:\/\//i, '').replace(/\/+$/, '')
-}
-
-function getMonogram(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean)
-  if (words.length === 0) return 'SV'
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
-  return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
 }
 
 function readVerifiedCachedPicture(pubkey: string | undefined): string | undefined {
@@ -108,18 +105,50 @@ export function ServerHubModal({
 }: ServerHubModalProps) {
   const [tab, setTab] = useState<ServerHubTab>(initialTab)
 
-  // Create Server state
+  // Create Group state
   const [createMode, setCreateMode] = useState<CreateKindMode>('virtual-e2ee')
   const [nameDraft, setNameDraft] = useState('')
   const [descDraft, setDescDraft] = useState('')
-  const [iconDraft, setIconDraft] = useState('📡')
+  const [specifierDraft, setSpecifierDraft] = useState('')
   const [accentDraft, setAccentDraft] = useState<string>(ACCENT_CHOICES[0].hex)
+  const [pendingIconBlob, setPendingIconBlob] = useState<Blob | null>(null)
+  const [pendingIconPreviewUrl, setPendingIconPreviewUrl] = useState<string | null>(null)
+  const [cropFile, setCropFile] = useState<File | null>(null)
+  const [uploadingPendingIcon, setUploadingPendingIcon] = useState(false)
+  const [failedPictureUrls, setFailedPictureUrls] = useState<Record<string, boolean>>({})
+  const createIconInputRef = useRef<HTMLInputElement | null>(null)
+  const pendingIconUrlRef = useRef<string | null>(null)
   const [channelsDraft, setChannelsDraft] = useState<string[]>(['general', 'off-topic'])
   const [newChannelDraft, setNewChannelDraft] = useState('')
   const [nip29CreateRelay, setNip29CreateRelay] = useState('')
   const [nip29Private, setNip29Private] = useState(false)
   const [nip29Closed, setNip29Closed] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+
+  const setPendingIcon = useCallback((blob: Blob | null) => {
+    if (pendingIconUrlRef.current) {
+      URL.revokeObjectURL(pendingIconUrlRef.current)
+      pendingIconUrlRef.current = null
+    }
+    if (blob) {
+      const nextUrl = URL.createObjectURL(blob)
+      pendingIconUrlRef.current = nextUrl
+      setPendingIconBlob(blob)
+      setPendingIconPreviewUrl(nextUrl)
+    } else {
+      setPendingIconBlob(null)
+      setPendingIconPreviewUrl(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (pendingIconUrlRef.current) {
+        URL.revokeObjectURL(pendingIconUrlRef.current)
+        pendingIconUrlRef.current = null
+      }
+    }
+  }, [])
 
   // Join Invite state
   const [inviteDraft, setInviteDraft] = useState('')
@@ -176,6 +205,9 @@ export function ServerHubModal({
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (cropFile || document.querySelector('[data-icon-crop-modal="true"]')) {
+          return
+        }
         e.preventDefault()
         if (servers.pendingInvite) servers.clearPendingInvite()
         onClose()
@@ -183,7 +215,7 @@ export function ServerHubModal({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose, servers])
+  }, [open, cropFile, onClose, servers])
 
   const parsedInvite: ServerInvite | null = useMemo(() => {
     const trimmed = inviteDraft.trim()
@@ -245,6 +277,18 @@ export function ServerHubModal({
     setNewChannelDraft('')
   }
 
+  const handleCreateIconSelect = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file || servers.creating || uploadingPendingIcon) return
+    if (!file.type.startsWith('image/')) {
+      setCreateError('Choose an image file (PNG, JPG, GIF, or WebP).')
+      return
+    }
+    setCreateError(null)
+    setCropFile(file)
+  }
+
   const handleCreateSubmit = async (e: FormEvent) => {
     e.preventDefault()
     const cleanName = nameDraft.trim()
@@ -253,6 +297,7 @@ export function ServerHubModal({
       return
     }
     setCreateError(null)
+    const cleanSpecifier = sanitizeGroupSpecifier(specifierDraft)
 
     if (createMode === 'nip29') {
       const relay = nip29CreateRelay.trim()
@@ -264,16 +309,30 @@ export function ServerHubModal({
         relayUrl: relay,
         name: cleanName,
         about: descDraft.trim() || undefined,
-        icon: iconDraft.trim() || undefined,
+        icon: cleanSpecifier || undefined,
         accentColor: accentDraft,
         isPrivate: nip29Private,
         isClosed: nip29Closed,
       })
       if (created) {
+        let finalServer = created
+        if (pendingIconBlob) {
+          setUploadingPendingIcon(true)
+          try {
+            const uploadRes = await servers.uploadServerIcon(created.id, pendingIconBlob)
+            if (uploadRes.ok && uploadRes.pictureUrl) {
+              finalServer = { ...created, picture: uploadRes.pictureUrl }
+            }
+          } finally {
+            setUploadingPendingIcon(false)
+          }
+        }
         onPlaySound?.('tune')
         setNameDraft('')
         setDescDraft('')
-        onJoinedServer?.(created)
+        setSpecifierDraft('')
+        setPendingIcon(null)
+        onJoinedServer?.(finalServer)
         onClose()
       } else {
         setCreateError('Relay did not accept group creation. Try another relay.')
@@ -284,17 +343,31 @@ export function ServerHubModal({
     const created = await servers.createVirtualServer({
       name: cleanName,
       description: descDraft.trim() || undefined,
-      icon: iconDraft.trim() || undefined,
+      icon: cleanSpecifier || undefined,
       accentColor: accentDraft,
       encrypted: createMode === 'virtual-e2ee',
       channels: channelsDraft,
     })
 
     if (created) {
+      let finalServer = created
+      if (pendingIconBlob) {
+        setUploadingPendingIcon(true)
+        try {
+          const uploadRes = await servers.uploadServerIcon(created.id, pendingIconBlob)
+          if (uploadRes.ok && uploadRes.pictureUrl) {
+            finalServer = { ...created, picture: uploadRes.pictureUrl }
+          }
+        } finally {
+          setUploadingPendingIcon(false)
+        }
+      }
       onPlaySound?.('tune')
       setNameDraft('')
       setDescDraft('')
-      onJoinedServer?.(created)
+      setSpecifierDraft('')
+      setPendingIcon(null)
+      onJoinedServer?.(finalServer)
       onClose()
     } else {
       setCreateError('Failed to publish group manifest. Check relay connectivity.')
@@ -445,8 +518,7 @@ export function ServerHubModal({
                   title="Encrypted invite-only group"
                   onClick={() => {
                     setCreateMode('virtual-e2ee')
-                    setIconDraft('🔐')
-                    setAccentDraft('#A78BFA')
+                    setAccentDraft('#8B5CF6')
                   }}
                 >
                   <div className="ag-srv-mode-top">
@@ -465,7 +537,6 @@ export function ServerHubModal({
                   title="Open public group"
                   onClick={() => {
                     setCreateMode('virtual-public')
-                    setIconDraft('📡')
                     setAccentDraft('#3B82F6')
                   }}
                 >
@@ -485,7 +556,6 @@ export function ServerHubModal({
                   title="Relay-hosted moderated group"
                   onClick={() => {
                     setCreateMode('nip29')
-                    setIconDraft('🛰️')
                     setAccentDraft('#38BDF8')
                   }}
                 >
@@ -542,21 +612,83 @@ export function ServerHubModal({
                 />
               </div>
 
-              {/* Icon & Accent Color */}
+              {/* Emblem Preview, 2-Letter Specifier, Custom Icon Upload & Accent Color */}
               <div className="ag-srv-customize-grid">
-                <div>
-                  <span className="ag-field-label">Icon</span>
-                  <div className="ag-emoji-grid">
-                    {EMOJI_CHOICES.map((em) => (
-                      <button
-                        key={em}
-                        type="button"
-                        className={`ag-emoji-pill ${iconDraft === em ? 'active' : ''}`}
-                        onClick={() => setIconDraft(em)}
-                      >
-                        {em}
-                      </button>
-                    ))}
+                <div className="ag-srv-create-identity">
+                  <span className="ag-field-label">Group Icon</span>
+                  <div className="ag-srv-create-emblem-row">
+                    <input
+                      ref={createIconInputRef}
+                      type="file"
+                      accept="image/*"
+                      style={{ display: 'none' }}
+                      onChange={handleCreateIconSelect}
+                    />
+                    <button
+                      type="button"
+                      className="ag-srv-create-emblem-preview ag-srv-emblem-btn"
+                      style={{ '--srv-accent': accentDraft } as CSSProperties}
+                      disabled={servers.creating || uploadingPendingIcon}
+                      onClick={() => createIconInputRef.current?.click()}
+                      aria-label={pendingIconPreviewUrl ? 'Change group icon' : 'Upload group icon'}
+                      title={pendingIconPreviewUrl ? 'Change group icon' : 'Upload group icon'}
+                    >
+                      {pendingIconPreviewUrl ? (
+                        <img src={pendingIconPreviewUrl} alt="" />
+                      ) : (
+                        <span className="mono">
+                          {getGroupSpecifier(nameDraft, specifierDraft)}
+                        </span>
+                      )}
+                      <span className="ag-srv-emblem-overlay" aria-hidden="true">
+                        <Camera size={15} />
+                      </span>
+                    </button>
+
+                    <div className="ag-srv-create-emblem-controls">
+                      <div className="ag-srv-emblem-actions">
+                        <button
+                          type="button"
+                          className="ag-btn ag-btn-secondary ag-btn-xs"
+                          disabled={servers.creating || uploadingPendingIcon}
+                          onClick={() => createIconInputRef.current?.click()}
+                        >
+                          <Upload size={12} />
+                          <span>{pendingIconPreviewUrl ? 'Change Icon' : 'Upload Icon'}</span>
+                        </button>
+                        {pendingIconPreviewUrl && (
+                          <button
+                            type="button"
+                            className="ag-btn ag-btn-ghost ag-btn-xs"
+                            disabled={servers.creating || uploadingPendingIcon}
+                            onClick={() => setPendingIcon(null)}
+                          >
+                            <Trash2 size={12} />
+                            <span>Remove</span>
+                          </button>
+                        )}
+                      </div>
+                      <div className="ag-srv-specifier-inline">
+                        <label
+                          className="ag-srv-specifier-inline-label"
+                          htmlFor="ag-srv-create-specifier"
+                        >
+                          2-Letter Specifier
+                        </label>
+                        <input
+                          id="ag-srv-create-specifier"
+                          type="text"
+                          maxLength={2}
+                          className="ag-input mono ag-srv-specifier-input"
+                          value={specifierDraft}
+                          onChange={(e) =>
+                            setSpecifierDraft(sanitizeGroupSpecifier(e.target.value))
+                          }
+                          placeholder={getGroupSpecifier(nameDraft)}
+                          aria-label="2-letter group specifier (optional)"
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -690,12 +822,12 @@ export function ServerHubModal({
                 <button
                   type="submit"
                   className="ag-btn ag-btn-primary"
-                  disabled={servers.creating || !nameDraft.trim()}
+                  disabled={servers.creating || uploadingPendingIcon || !nameDraft.trim()}
                 >
-                  {servers.creating ? (
+                  {servers.creating || uploadingPendingIcon ? (
                     <>
                       <Loader2 size={14} className="ag-spin" />
-                      <span>Creating…</span>
+                      <span>{uploadingPendingIcon ? 'Uploading icon…' : 'Creating…'}</span>
                     </>
                   ) : (
                     <>
@@ -761,10 +893,24 @@ export function ServerHubModal({
                 >
                   <div className="ag-srv-preview-head">
                     <div className="ag-srv-info-avatar">
-                      {parsedInvite.icon ? (
-                        <span>{parsedInvite.icon}</span>
+                      {hasUploadedGroupPicture(parsedInvite.picture) &&
+                      !failedPictureUrls[parsedInvite.picture!] ? (
+                        <img
+                          src={parsedInvite.picture}
+                          alt=""
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          onError={() =>
+                            setFailedPictureUrls((prev) => ({
+                              ...prev,
+                              [parsedInvite.picture!]: true,
+                            }))
+                          }
+                        />
                       ) : (
-                        <span className="mono">{getMonogram(parsedInvite.name)}</span>
+                        <span className="mono">
+                          {getGroupSpecifier(parsedInvite.name, parsedInvite.icon)}
+                        </span>
                       )}
                     </div>
                     <div className="ag-srv-info-meta">
@@ -976,15 +1122,24 @@ export function ServerHubModal({
                     return (
                       <div key={`${group.relayUrl}-${group.groupId}`} role="listitem" className="ag-srv-group-card">
                         <div className="ag-srv-group-avatar">
-                          {group.picture && /^https?:\/\//i.test(group.picture) ? (
+                          {hasUploadedGroupPicture(group.picture) &&
+                          !failedPictureUrls[group.picture!] ? (
                             <img
                               src={group.picture}
                               alt=""
                               loading="lazy"
                               referrerPolicy="no-referrer"
+                              onError={() =>
+                                setFailedPictureUrls((prev) => ({
+                                  ...prev,
+                                  [group.picture!]: true,
+                                }))
+                              }
                             />
                           ) : (
-                            <span className="mono">{getMonogram(group.name || group.groupId)}</span>
+                            <span className="mono">
+                              {getGroupSpecifier(group.name || group.groupId)}
+                            </span>
                           )}
                         </div>
 
@@ -1035,6 +1190,17 @@ export function ServerHubModal({
           )}
         </div>
       </div>
+
+      <IconCropModal
+        file={cropFile}
+        label={nameDraft.trim() || 'New Group'}
+        onCancel={() => setCropFile(null)}
+        onConfirm={(croppedBlob) => {
+          setPendingIcon(croppedBlob)
+          setCropFile(null)
+          onPlaySound?.('click')
+        }}
+      />
     </div>
   )
 }

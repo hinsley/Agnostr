@@ -74,6 +74,7 @@ import {
 } from '../lib/bitchatChannel'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
 import { formatHandle, pubkeyToColor } from '../utils/identicon'
+import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import { AvatarImg } from './AvatarImg'
 import { DeleteProfileConfirmModal } from './DeleteProfileConfirmModal'
 
@@ -93,13 +94,6 @@ function formatRelativeTime(tsMsOrSec: number): string {
   if (hrs < 24) return `${hrs}h`
   const days = Math.floor(hrs / 24)
   return `${days}d`
-}
-
-function getServerMonogram(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean)
-  if (words.length === 0) return 'SV'
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
-  return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
 }
 
 function computeReorderToIndex(
@@ -179,6 +173,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onPlaySound,
 }) => {
   const { openContextMenu } = useContextMenu()
+  const [failedIconUrls, setFailedIconUrls] = useState<Set<string>>(() => new Set())
+  const markIconFailed = useCallback((url: string) => {
+    setFailedIconUrls((prev) => {
+      if (prev.has(url)) return prev
+      const next = new Set(prev)
+      next.add(url)
+      return next
+    })
+  }, [])
   const [freqDraft, setFreqDraft] = useState('')
   const [dmDraft, setDmDraft] = useState('')
   const [localSelectedServerId, setLocalSelectedServerId] = useState<string | null>(null)
@@ -2169,7 +2172,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       aria-current={active ? 'page' : undefined}
                     >
                       <span className="ag-rail-indicator" aria-hidden="true" />
-                      {server.picture && /^https?:\/\//i.test(server.picture) ? (
+                      {hasUploadedGroupPicture(server.picture) &&
+                      !failedIconUrls.has(server.picture!) ? (
                         <img
                           src={server.picture}
                           alt=""
@@ -2177,14 +2181,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           referrerPolicy="no-referrer"
                           draggable={false}
                           className="ag-rail-srv-img"
+                          onError={() => markIconFailed(server.picture!)}
                         />
-                      ) : server.icon?.trim() ? (
-                        <span className="ag-rail-srv-emoji" aria-hidden="true">
-                          {server.icon}
-                        </span>
                       ) : (
-                        <span className="ag-rail-srv-mono mono" aria-hidden="true">
-                          {getServerMonogram(server.name)}
+                        <span
+                          className="ag-rail-srv-mono mono ag-group-specifier"
+                          aria-hidden="true"
+                        >
+                          {getGroupSpecifier(server.name, server.icon)}
                         </span>
                       )}
                       {srvMentions > 0 && (
@@ -3067,6 +3071,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               {engine.connectedRelayCount > 0 ? 'Online' : 'Reconnecting…'}
             </span>
           </div>
+          {engine.profiles.otherProfilesUnreadCount > 0 && (
+            <span
+              className="ag-profile-dock-badge tabular"
+              aria-label={`${engine.profiles.otherProfilesUnreadCount} notifications on other profiles`}
+              title={`${engine.profiles.otherProfilesUnreadCount} notification${engine.profiles.otherProfilesUnreadCount === 1 ? '' : 's'} on other profiles`}
+            >
+              {formatBadgeCount(engine.profiles.otherProfilesUnreadCount)}
+            </span>
+          )}
         </button>
 
         <div className="ag-conv-footer-actions ag-mobile-only">
@@ -3119,6 +3132,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             : { left: '8px', bottom: '68px', width: '296px' }
           const storedProfiles = engine.profiles.profiles
           const activeProfileId = engine.profiles.activeProfileId
+          const otherNotifs = engine.profiles.otherProfilesUnreadCount
+          const notificationsByProfile = engine.profiles.notificationsByProfile
           const isProfileActionBusy = engine.profiles.switching || qpProfileBusy
 
           return createPortal(
@@ -3336,6 +3351,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   <div className="ag-qp-profiles-title-wrap">
                     <span className="ag-qp-profiles-title">Profiles</span>
                     <span className="ag-qp-profiles-count tabular">{storedProfiles.length}</span>
+                    {otherNotifs > 0 && (
+                      <span
+                        className="ag-qp-profiles-notif-pill tabular"
+                        title={`${otherNotifs} notification${otherNotifs === 1 ? '' : 's'} on other profiles`}
+                        aria-label={`${otherNotifs} notifications on other profiles`}
+                      >
+                        {formatBadgeCount(otherNotifs)} new
+                      </span>
+                    )}
                   </div>
                   <div className="ag-qp-profiles-actions">
                     <button
@@ -3487,11 +3511,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       p.npub.length > 15
                         ? `${p.npub.slice(0, 9)}…${p.npub.slice(-4)}`
                         : p.npub
+                    const pNotif = !isActive ? notificationsByProfile[p.id] : undefined
+                    const pUnread = pNotif?.unreadCount ?? 0
                     return (
                       <div
                         key={p.id}
                         role="listitem"
-                        className={`ag-qp-profile-row ${isActive ? 'is-active' : ''}`}
+                        className={`ag-qp-profile-row ${isActive ? 'is-active' : ''} ${
+                          pUnread > 0 ? 'has-notif' : ''
+                        }`}
                       >
                         <button
                           type="button"
@@ -3501,7 +3529,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           title={
                             isActive
                               ? `${profileLabel} (Active)`
-                              : `Switch to ${profileLabel}`
+                              : pUnread > 0 && pNotif?.lastSummary
+                                ? `Switch to ${profileLabel} · ${pNotif.lastSummary}`
+                                : `Switch to ${profileLabel}`
                           }
                           onClick={() => {
                             if (!isActive) handleSwitchProfile(p.pubkey)
@@ -3520,11 +3550,20 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           />
                           <div className="ag-qp-profile-meta">
                             <span className="ag-qp-profile-name truncate">{profileLabel}</span>
-                            <span className="ag-qp-profile-sub mono truncate">
-                              #{p.pubkey.slice(-4)} · {shortNpub}
-                            </span>
+                            {pUnread > 0 && pNotif?.lastSummary ? (
+                              <span
+                                className="ag-qp-profile-notif-summary truncate"
+                                title={pNotif.lastSummary}
+                              >
+                                {pNotif.lastSummary}
+                              </span>
+                            ) : (
+                              <span className="ag-qp-profile-sub mono truncate">
+                                #{p.pubkey.slice(-4)} · {shortNpub}
+                              </span>
+                            )}
                           </div>
-                          {isActive && (
+                          {isActive ? (
                             <span
                               className="ag-qp-profile-check"
                               aria-label="Active profile"
@@ -3532,7 +3571,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                             >
                               <Check size={14} aria-hidden="true" />
                             </span>
-                          )}
+                          ) : pUnread > 0 ? (
+                            <span
+                              className="ag-qp-profile-badge tabular"
+                              aria-label={`${pUnread} unread notification${pUnread === 1 ? '' : 's'}`}
+                              title={pNotif?.lastSummary || `${pUnread} unread`}
+                            >
+                              {formatBadgeCount(pUnread)}
+                            </span>
+                          ) : null}
                         </button>
 
                         {!isActive && (

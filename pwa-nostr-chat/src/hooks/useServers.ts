@@ -25,10 +25,12 @@ import type {
 } from '../types/servers.ts'
 import {
   cleanMimeType,
+  DEFAULT_BLOSSOM_SERVERS,
   encryptMediaBytesAesGcm,
   encryptVoiceBytesAesGcm,
   uploadBlobToBlossom,
 } from '../lib/blossom.ts'
+import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon.ts'
 import { revokeImagePreviewUrl } from '../lib/imageProcessor.ts'
 import {
   clampTimestamp,
@@ -674,7 +676,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                   ...s,
                   name: manifest.name,
                   description: manifest.description,
-                  icon: manifest.icon,
+                  icon: getGroupSpecifier(manifest.name, manifest.icon),
+                  picture: manifest.picture,
                   accentColor: manifest.accentColor,
                   founderPubkey: manifest.founderPubkey,
                   channels: mergedChannels,
@@ -1638,7 +1641,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         id: server.id,
         name: server.name,
         description: server.description,
-        icon: server.icon,
+        icon: getGroupSpecifier(server.name, server.icon),
+        ...(hasUploadedGroupPicture(server.picture) ? { picture: server.picture!.trim() } : {}),
         accentColor: server.accentColor,
         founderPubkey: server.founderPubkey,
         encrypted: server.encrypted,
@@ -1682,7 +1686,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           kind: 'virtual',
           name,
           description: input.description?.trim().slice(0, 200) ?? '',
-          icon: input.icon?.trim().slice(0, 4) || defaultMonogram(name),
+          icon: getGroupSpecifier(name, input.icon),
           accentColor: input.accentColor || SERVER_ACCENT_SWATCHES[0],
           encrypted: Boolean(input.encrypted),
           encryptionKeyB64: input.encrypted ? generateServerKeyB64() : undefined,
@@ -1761,7 +1765,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           kind: 'nip29',
           name,
           description: input.about?.trim() ?? '',
-          icon: input.icon?.trim().slice(0, 4) || defaultMonogram(name),
+          icon: getGroupSpecifier(name, input.icon),
           accentColor: input.accentColor || SERVER_ACCENT_SWATCHES[1],
           encrypted: false,
           founderPubkey: masterPk,
@@ -1901,6 +1905,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             groupId: invite.id,
             name: invite.name,
             about: invite.description ?? '',
+            ...(hasUploadedGroupPicture(invite.picture) ? { picture: invite.picture!.trim() } : {}),
             isPrivate: false,
             isClosed: false,
             isRestricted: false,
@@ -1925,9 +1930,11 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           ? invite.channels.map((c) => ({ id: slugifyChannelName(c.id || c.name), name: slugifyChannelName(c.name) }))
           : [{ id: 'general', name: 'general' }]
 
+      const invitePicture = hasUploadedGroupPicture(invite.picture) ? invite.picture!.trim() : undefined
       const server: ServerSummary = existing
         ? {
             ...existing,
+            ...(invitePicture && !existing.picture ? { picture: invitePicture } : {}),
             encryptionKeyB64: invite.key ?? existing.encryptionKeyB64,
             relays: invite.relays && invite.relays.length > 0 ? invite.relays : existing.relays,
           }
@@ -1936,7 +1943,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             kind: 'virtual',
             name: invite.name,
             description: invite.description ?? '',
-            icon: invite.icon || defaultMonogram(invite.name),
+            icon: getGroupSpecifier(invite.name, invite.icon),
+            ...(invitePicture ? { picture: invitePicture } : {}),
             accentColor: invite.accentColor || SERVER_ACCENT_SWATCHES[0],
             encrypted: Boolean(invite.encrypted),
             encryptionKeyB64: invite.key,
@@ -2856,19 +2864,48 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const updateServerMetadata = useCallback(
     async (
       serverId: string,
-      patch: { name?: string; description?: string; icon?: string; accentColor?: string }
+      patch: {
+        name?: string
+        description?: string
+        icon?: string
+        picture?: string | null
+        accentColor?: string
+      }
     ): Promise<boolean> => {
       const target = joinedServersRef.current.find((s) => s.id === serverId)
       if (!target) return false
 
+      const nextName = patch.name?.trim().slice(0, 48) || target.name
+      const nextIcon =
+        patch.icon !== undefined
+          ? getGroupSpecifier(nextName, patch.icon)
+          : getGroupSpecifier(nextName, target.icon)
+      let nextPicture = target.picture
+      if (patch.picture !== undefined) {
+        if (patch.picture === null || patch.picture.trim() === '') {
+          nextPicture = undefined
+        } else if (hasUploadedGroupPicture(patch.picture)) {
+          nextPicture = patch.picture.trim()
+        } else {
+          return false
+        }
+      }
+
       if (target.kind === 'virtual') {
+        const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+        if (target.founderPubkey && target.founderPubkey.toLowerCase() !== masterPk) {
+          pushToast('warning', 'Founder permission required', 'Only the group founder can update group metadata.')
+          return false
+        }
         return await mutateVirtualServer(
           serverId,
           (s) => ({
             ...s,
-            name: patch.name?.trim().slice(0, 48) || s.name,
-            description: patch.description !== undefined ? patch.description.trim().slice(0, 200) : s.description,
-            icon: patch.icon?.trim().slice(0, 4) || s.icon,
+            name: nextName,
+            description:
+              patch.description !== undefined ? patch.description.trim().slice(0, 200) : s.description,
+            icon: nextIcon,
+            picture: nextPicture,
             accentColor: patch.accentColor || s.accentColor,
           }),
           'Group details updated'
@@ -2879,27 +2916,37 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         try {
           const tmpl = buildNip29EditMetadataTemplate({
             groupId: target.groupId,
-            name: patch.name ?? target.name,
+            name: nextName,
             about: patch.description ?? target.description,
+            ...(patch.picture !== undefined ? { picture: nextPicture ?? '' } : {}),
           })
           const signed = await identityManager.signEvent(tmpl)
           const res = await pool.publish([target.relayUrl], signed, 5000)
           const ok = res.acceptedRelays.length > 0
-          setJoinedServers((prev) =>
-            prev.map((s) =>
-              s.id === serverId
-                ? {
-                    ...s,
-                    name: patch.name?.trim() || s.name,
-                    description: patch.description !== undefined ? patch.description.trim() : s.description,
-                    icon: patch.icon?.trim().slice(0, 4) || s.icon,
-                    accentColor: patch.accentColor || s.accentColor,
-                  }
-                : s
+          if (ok) {
+            setJoinedServers((prev) =>
+              prev.map((s) =>
+                s.id === serverId
+                  ? {
+                      ...s,
+                      name: nextName,
+                      description:
+                        patch.description !== undefined ? patch.description.trim() : s.description,
+                      icon: nextIcon,
+                      picture: nextPicture,
+                      accentColor: patch.accentColor || s.accentColor,
+                    }
+                  : s
+              )
             )
-          )
-          if (ok) pushToast('success', 'NIP-29 group metadata updated')
-          else pushToast('warning', 'Relay rejected metadata edit', res.rejectedRelays[0]?.reason || 'Admin rights required')
+            pushToast('success', 'NIP-29 group metadata updated')
+          } else {
+            pushToast(
+              'warning',
+              'Relay rejected metadata edit',
+              res.rejectedRelays[0]?.reason || 'Admin rights required'
+            )
+          }
           return ok
         } catch {
           return false
@@ -2908,6 +2955,70 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       return false
     },
     [mutateVirtualServer, pool, identityManager, pushToast]
+  )
+
+  const uploadServerIcon = useCallback(
+    async (
+      serverId: string,
+      blob: Blob
+    ): Promise<{ ok: boolean; pictureUrl?: string; error?: string }> => {
+      const target = joinedServersRef.current.find((s) => s.id === serverId)
+      if (!target) {
+        return { ok: false, error: 'Group not found.' }
+      }
+
+      const master = identityManager.getMasterKeyMaterial()
+      const masterPk = master.pubkey.toLowerCase()
+      if (target.kind === 'virtual') {
+        if (!target.founderPubkey || target.founderPubkey.toLowerCase() !== masterPk) {
+          const error = 'Only the group founder can change the group icon.'
+          pushToast('warning', 'Permission denied', error)
+          return { ok: false, error }
+        }
+      } else {
+        const isAllowed =
+          target.founderPubkey.toLowerCase() === masterPk ||
+          target.moderators.some((m) => m.toLowerCase() === masterPk) ||
+          Boolean(target.admins?.some((a) => a.pubkey.toLowerCase() === masterPk))
+        if (!isAllowed) {
+          const error = 'Only group admins or moderators can change the group icon.'
+          pushToast('warning', 'Permission denied', error)
+          return { ok: false, error }
+        }
+      }
+
+      if (!blob || blob.size <= 0) {
+        return { ok: false, error: 'Selected icon image is empty.' }
+      }
+      if (blob.size > 5 * 1024 * 1024) {
+        return { ok: false, error: 'Group icon must be under 5 MiB.' }
+      }
+
+      try {
+        const bytes = new Uint8Array(await blob.arrayBuffer())
+        const mime = cleanMimeType(blob.type || 'image/webp')
+        const servers = blossomServers.length > 0 ? blossomServers : [...DEFAULT_BLOSSOM_SERVERS]
+        const uploaded = await uploadBlobToBlossom({
+          bytes,
+          mime: mime.startsWith('image/') ? mime : 'image/webp',
+          servers,
+          signAuthEvent: (tmpl) => identityManager.signEventWithMaterial(tmpl, master),
+        })
+        if (!hasUploadedGroupPicture(uploaded.url)) {
+          return { ok: false, error: 'Blossom server returned an invalid icon URL.' }
+        }
+        const ok = await updateServerMetadata(serverId, { picture: uploaded.url })
+        if (!ok) {
+          return { ok: false, error: 'Uploaded icon but failed to update group metadata.' }
+        }
+        return { ok: true, pictureUrl: uploaded.url }
+      } catch (err) {
+        const error = err instanceof Error ? err.message : 'Failed to upload group icon.'
+        pushToast('error', 'Group icon upload failed', error)
+        return { ok: false, error }
+      }
+    },
+    [blossomServers, identityManager, pushToast, updateServerMetadata]
   )
 
   const addChannel = useCallback(
@@ -3320,6 +3431,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       deleteMessage,
       clearChannelCache,
       updateServerMetadata,
+      uploadServerIcon,
       addChannel,
       removeChannel,
       addModerator,
@@ -3369,6 +3481,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       deleteMessage,
       clearChannelCache,
       updateServerMetadata,
+      uploadServerIcon,
       addChannel,
       removeChannel,
       addModerator,

@@ -28,10 +28,20 @@ export interface ProfileAccountRecord {
   lastUsedAt: number // unix ms
 }
 
+export interface ProfileNotificationSummary {
+  unreadCount: number
+  lastNotifAt: number
+  lastSummary?: string
+  lastCheckedAt: number
+}
+
 export interface ProfileSwitcherEngine {
   profiles: ProfileAccountRecord[]
   activeProfileId: string
   switching: boolean
+  notificationsByProfile: Record<string, ProfileNotificationSummary>
+  otherProfilesUnreadCount: number
+  clearProfileNotifications: (pubkey: string) => void
   switchProfile: (targetPubkey: string) => Promise<void>
   createProfile: (opts?: { nickname?: string }) => Promise<ProfileAccountRecord | null>
   importProfile: (

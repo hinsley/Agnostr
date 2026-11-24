@@ -18,6 +18,10 @@ import {
 } from './types.ts'
 import { sendWebPushNotification, sha256Hex } from './webpush.ts'
 
+type ProfileAwarePushPayload = Omit<IncomingPushPayload, 'data'> & {
+  data?: NonNullable<IncomingPushPayload['data']> & { recipientPubkey?: string }
+}
+
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
@@ -373,7 +377,7 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ ok: false, error: 'No registered push devices for this pubkey.' }, 404)
   }
 
-  const payload: IncomingPushPayload = {
+  const payload: ProfileAwarePushPayload = {
     title: 'Agnostr Push Active',
     body: 'Background push notifications are connected on this device.',
     tag: 'agnostr-test-push',
@@ -381,6 +385,7 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
     data: {
       category: 'test',
       tag: 'agnostr-test-push',
+      recipientPubkey: auth.pubkey,
     },
   }
 
@@ -498,6 +503,7 @@ function isPokeAllowedByPreferences(
 
 function buildPokePayload(opts: {
   category: PokeCategory
+  recipientPubkey: string
   senderPubkey: string
   senderName?: string
   preview?: string
@@ -507,9 +513,18 @@ function buildPokePayload(opts: {
   channelId?: string
   geohash?: string
   showPreviews: boolean
-}): IncomingPushPayload {
-  const { category, senderPubkey, callId, mediaType, serverId, channelId, geohash, showPreviews } =
-    opts
+}): ProfileAwarePushPayload {
+  const {
+    category,
+    recipientPubkey,
+    senderPubkey,
+    callId,
+    mediaType,
+    serverId,
+    channelId,
+    geohash,
+    showPreviews,
+  } = opts
   const safeSender = showPreviews && opts.senderName ? opts.senderName.trim().slice(0, 48) : ''
   const safePreview = showPreviews && opts.preview ? opts.preview.trim().replace(/\s+/g, ' ').slice(0, 120) : ''
 
@@ -522,6 +537,7 @@ function buildPokePayload(opts: {
         category: 'dm-call',
         callId,
         peerPubkey: senderPubkey,
+        recipientPubkey,
       },
     }
   }
@@ -538,6 +554,7 @@ function buildPokePayload(opts: {
         callId,
         mediaType: mediaType ?? 'audio',
         peerPubkey: senderPubkey,
+        recipientPubkey,
         callerNickname: safeSender || undefined,
       },
     }
@@ -556,6 +573,7 @@ function buildPokePayload(opts: {
         serverId,
         channelId,
         peerPubkey: senderPubkey,
+        recipientPubkey,
         callerNickname: safeSender || undefined,
       },
     }
@@ -575,6 +593,7 @@ function buildPokePayload(opts: {
         mediaType: mediaType ?? 'audio',
         geohash,
         peerPubkey: senderPubkey,
+        recipientPubkey,
         callerNickname: safeSender || undefined,
       },
     }
@@ -588,6 +607,7 @@ function buildPokePayload(opts: {
       data: {
         category: 'agmail',
         peerPubkey: senderPubkey,
+        recipientPubkey,
       },
     }
   }
@@ -600,6 +620,7 @@ function buildPokePayload(opts: {
       data: {
         category: 'agmail',
         peerPubkey: senderPubkey,
+        recipientPubkey,
       },
     }
   }
@@ -614,6 +635,7 @@ function buildPokePayload(opts: {
         serverId,
         channelId,
         peerPubkey: senderPubkey,
+        recipientPubkey,
       },
     }
   }
@@ -631,6 +653,7 @@ function buildPokePayload(opts: {
         category: 'geo-message',
         geohash,
         peerPubkey: senderPubkey,
+        recipientPubkey,
       },
     }
   }
@@ -643,6 +666,7 @@ function buildPokePayload(opts: {
     data: {
       category: 'dm',
       peerPubkey: senderPubkey,
+      recipientPubkey,
     },
   }
 }
@@ -776,6 +800,7 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
 
       const payload = buildPokePayload({
         category,
+        recipientPubkey: resolvedMasterPk,
         senderPubkey: auth.pubkey,
         senderName,
         preview,

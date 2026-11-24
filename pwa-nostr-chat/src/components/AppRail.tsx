@@ -21,6 +21,7 @@ import {
 import type { AgnostrEngine } from '../types/protocol'
 import type { ServerSummary } from '../types/servers'
 import type { PwaState } from '../hooks/usePwa'
+import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import type { SoundCue } from '../utils/sound'
 import type { ListTab } from './ConversationList'
 import type { ServerHubTab } from './ServerHubModal'
@@ -66,13 +67,6 @@ function formatBadgeCount(count: number): string {
   return count > 99 ? '99+' : String(count)
 }
 
-function getServerMonogram(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean)
-  if (words.length === 0) return 'SV'
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
-  return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase()
-}
-
 function computeReorderToIndex(
   fromIndex: number,
   targetIndex: number,
@@ -108,6 +102,15 @@ export const AppRail: React.FC<AppRailProps> = ({
 }) => {
   const { openContextMenu } = useContextMenu()
   const [tooltip, setTooltip] = useState<RailTooltipState | null>(null)
+  const [failedIconUrls, setFailedIconUrls] = useState<Set<string>>(() => new Set())
+  const markIconFailed = useCallback((url: string) => {
+    setFailedIconUrls((prev) => {
+      if (prev.has(url)) return prev
+      const next = new Set(prev)
+      next.add(url)
+      return next
+    })
+  }, [])
   const [dragServerIndex, setDragServerIndex] = useState<number | null>(null)
   const [dropServerTarget, setDropServerTarget] = useState<{
     index: number
@@ -333,11 +336,11 @@ export const AppRail: React.FC<AppRailProps> = ({
             hideTooltip()
             onToggleSuiteLauncher?.()
           }}
-          onMouseEnter={(e) => showTooltip(e.currentTarget, 'Agnostr Suite', 'Alt+0')}
+          onMouseEnter={(e) => showTooltip(e.currentTarget, 'Agnostr Suite')}
           onMouseLeave={hideTooltip}
-          onFocus={(e) => showTooltip(e.currentTarget, 'Agnostr Suite', 'Alt+0')}
+          onFocus={(e) => showTooltip(e.currentTarget, 'Agnostr Suite')}
           onBlur={hideTooltip}
-          aria-label="Agnostr Suite (Alt+0)"
+          aria-label="Agnostr Suite"
           aria-haspopup="dialog"
           aria-expanded={suiteLauncherOpen}
         >
@@ -358,19 +361,11 @@ export const AppRail: React.FC<AppRailProps> = ({
               onSelectWorkspace('agora')
             }}
             onMouseEnter={(e) =>
-              showTooltip(
-                e.currentTarget,
-                'Agora',
-                agoraUnread > 0 ? `${agoraUnread} new · Alt+1` : 'Alt+1'
-              )
+              showTooltip(e.currentTarget, 'Agora', agoraUnread > 0 ? `${agoraUnread} new` : undefined)
             }
             onMouseLeave={hideTooltip}
             onFocus={(e) =>
-              showTooltip(
-                e.currentTarget,
-                'Agora',
-                agoraUnread > 0 ? `${agoraUnread} new · Alt+1` : 'Alt+1'
-              )
+              showTooltip(e.currentTarget, 'Agora', agoraUnread > 0 ? `${agoraUnread} new` : undefined)
             }
             onBlur={hideTooltip}
             aria-label={agoraUnread > 0 ? `Agora (${agoraUnread} unread)` : 'Agora'}
@@ -395,9 +390,9 @@ export const AppRail: React.FC<AppRailProps> = ({
               if (workspace !== 'chat') onSelectWorkspace('chat')
               onSelectChatTab('bitchat')
             }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Bitchat', 'Alt+2')}
+            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Bitchat')}
             onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'Bitchat', 'Alt+2')}
+            onFocus={(e) => showTooltip(e.currentTarget, 'Bitchat')}
             onBlur={hideTooltip}
             aria-label="Bitchat"
             aria-current={isBitchatActive ? 'page' : undefined}
@@ -428,19 +423,11 @@ export const AppRail: React.FC<AppRailProps> = ({
               onSelectChatTab('dms')
             }}
             onMouseEnter={(e) =>
-              showTooltip(
-                e.currentTarget,
-                'People',
-                dmUnread > 0 ? `${dmUnread} unread · Alt+3` : 'Alt+3'
-              )
+              showTooltip(e.currentTarget, 'People', dmUnread > 0 ? `${dmUnread} unread` : undefined)
             }
             onMouseLeave={hideTooltip}
             onFocus={(e) =>
-              showTooltip(
-                e.currentTarget,
-                'People',
-                dmUnread > 0 ? `${dmUnread} unread · Alt+3` : 'Alt+3'
-              )
+              showTooltip(e.currentTarget, 'People', dmUnread > 0 ? `${dmUnread} unread` : undefined)
             }
             onBlur={hideTooltip}
             aria-label={dmUnread > 0 ? `People (${dmUnread} unread)` : 'People'}
@@ -468,7 +455,7 @@ export const AppRail: React.FC<AppRailProps> = ({
               showTooltip(
                 e.currentTarget,
                 'Agmail',
-                mailUnread > 0 ? `${mailUnread} unread · Alt+5` : 'Alt+5'
+                mailUnread > 0 ? `${mailUnread} unread` : undefined
               )
             }
             onMouseLeave={hideTooltip}
@@ -476,7 +463,7 @@ export const AppRail: React.FC<AppRailProps> = ({
               showTooltip(
                 e.currentTarget,
                 'Agmail',
-                mailUnread > 0 ? `${mailUnread} unread · Alt+5` : 'Alt+5'
+                mailUnread > 0 ? `${mailUnread} unread` : undefined
               )
             }
             onBlur={hideTooltip}
@@ -492,7 +479,7 @@ export const AppRail: React.FC<AppRailProps> = ({
           </button>
         </div>
 
-        {/* 6. Agwallet */}
+        {/* 5. Agwallet */}
         <div className="ag-rail-slot" role="listitem">
           <button
             type="button"
@@ -505,7 +492,7 @@ export const AppRail: React.FC<AppRailProps> = ({
               showTooltip(
                 e.currentTarget,
                 'Agwallet',
-                walletSats > 0 ? `${walletSats.toLocaleString()} sats · Alt+6` : 'Alt+6'
+                walletSats > 0 ? `${walletSats.toLocaleString()} sats` : undefined
               )
             }
             onMouseLeave={hideTooltip}
@@ -513,7 +500,7 @@ export const AppRail: React.FC<AppRailProps> = ({
               showTooltip(
                 e.currentTarget,
                 'Agwallet',
-                walletSats > 0 ? `${walletSats.toLocaleString()} sats · Alt+6` : 'Alt+6'
+                walletSats > 0 ? `${walletSats.toLocaleString()} sats` : undefined
               )
             }
             onBlur={hideTooltip}
@@ -820,7 +807,7 @@ export const AppRail: React.FC<AppRailProps> = ({
                 aria-current={active ? 'page' : undefined}
               >
                 <span className="ag-rail-indicator" aria-hidden="true" />
-                {server.picture && /^https?:\/\//i.test(server.picture) ? (
+                {hasUploadedGroupPicture(server.picture) && !failedIconUrls.has(server.picture!) ? (
                   <img
                     src={server.picture}
                     alt=""
@@ -828,14 +815,11 @@ export const AppRail: React.FC<AppRailProps> = ({
                     referrerPolicy="no-referrer"
                     draggable={false}
                     className="ag-rail-srv-img"
+                    onError={() => markIconFailed(server.picture!)}
                   />
-                ) : server.icon?.trim() ? (
-                  <span className="ag-rail-srv-emoji" aria-hidden="true">
-                    {server.icon}
-                  </span>
                 ) : (
-                  <span className="ag-rail-srv-mono mono" aria-hidden="true">
-                    {getServerMonogram(server.name)}
+                  <span className="ag-rail-srv-mono mono ag-group-specifier" aria-hidden="true">
+                    {getGroupSpecifier(server.name, server.icon)}
                   </span>
                 )}
 
