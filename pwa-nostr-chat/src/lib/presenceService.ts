@@ -1,7 +1,7 @@
 import type { ChannelPresenceSummary, PeerInfo } from '../types/protocol.ts'
 import { getPrecisionInfo, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe, formatDisplayHandle } from './identity.ts'
-import { isTopicChannel } from './radioChannel.ts'
+import { isTopicChannel } from './bitchatChannel.ts'
 
 export const ONLINE_WINDOW_SEC = 5 * 60 // 5 minutes per docs/GeohashPresenceSpec.md
 export const PRESENCE_MIN_INTERVAL_MS = 40_000
@@ -84,7 +84,7 @@ export class PresenceTracker {
     } else {
       channelMap.set(pk, {
         pubkey: pk,
-        nickname: cleanNick || this.globalNicknames.get(pk) || `anon${pk.slice(-4)}`,
+        nickname: cleanNick || this.globalNicknames.get(pk) || `agnon${pk.slice(-4)}`,
         lastSeenAt: opts.seenAtSec,
         isTeleported: Boolean(opts.isTeleported),
         isMeshBridge: Boolean(opts.isMeshBridge),
@@ -189,7 +189,7 @@ export class PresenceTracker {
         }
       }
     }
-    const nick = this.globalNicknames.get(pk) || latest?.nickname || `anon${pk.slice(-4)}`
+    const nick = this.globalNicknames.get(pk) || latest?.nickname || `agnon${pk.slice(-4)}`
     const isAgnostr = Boolean(latest?.isAgnostrClient || this.agnostrPeers.has(pk))
     const clientName =
       latest?.clientName || this.globalClients.get(pk) || (isAgnostr ? 'agnostr' : undefined)

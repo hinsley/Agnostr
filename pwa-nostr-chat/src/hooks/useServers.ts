@@ -40,7 +40,7 @@ import {
   verifyEventCached,
 } from '../lib/bitchatProtocol.ts'
 import { CORE_DM_RELAYS, normalizeRelayUrl } from '../lib/geoRelays.ts'
-import { formatRadioChannelHash } from '../lib/radioChannel.ts'
+import { formatBitchatChannelHash } from '../lib/bitchatChannel.ts'
 import {
   decodePubkeyInput,
   encodeNpubSafe,
@@ -546,7 +546,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     setPendingInvite(null)
     try {
       if ((window.location.hash || '').toLowerCase().startsWith('#invite=')) {
-        window.history.replaceState(window.history.state, '', formatRadioChannelHash(activeGeohash))
+        window.history.replaceState(window.history.state, '', formatBitchatChannelHash(activeGeohash))
       }
     } catch {
       // Ignore
@@ -1309,7 +1309,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         patch?.nickname ||
         existing?.nickname ||
         presenceTracker.getNickname(pk) ||
-        (ownPubkeys.has(pk) ? identityManager.getNickname() : `anon${pk.slice(-4)}`)
+        (ownPubkeys.has(pk) ? identityManager.getNickname() : `agnon${pk.slice(-4)}`)
       const roles = Array.from(new Set([...(existing?.roles ?? []), ...(patch?.roles ?? [])]))
       memberMap.set(pk, {
         pubkey: pk,

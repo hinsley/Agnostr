@@ -107,7 +107,7 @@ export interface UseDeviceSyncOptions {
   peerNotes: Record<string, string>
   dmThreads: DmThread[]
   activeGeohash: string
-  activeRadioMessages: GeoMessage[]
+  activeBitchatMessages: GeoMessage[]
   activeServerMessages: ServerMessage[]
   initialHealCheckpoint?: boolean
   onApplyServers: (servers: ServerSummary[]) => void
@@ -125,7 +125,7 @@ export interface UseDeviceSyncOptions {
     peerMeta?: { peerNickname?: string; protocol?: DmProtocol }
   ) => number
   onMergeServerMessages: (serverId: string, channelId: string, messages: ServerMessage[]) => number
-  onMergeRadioMessages: (channelKey: string, messages: GeoMessage[]) => number
+  onMergeBitchatMessages: (channelKey: string, messages: GeoMessage[]) => number
 }
 
 interface PendingAmailTransfer {
@@ -172,7 +172,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     peerNotes,
     dmThreads,
     activeGeohash,
-    activeRadioMessages,
+    activeBitchatMessages,
     activeServerMessages,
     initialHealCheckpoint = false,
     onApplyServers,
@@ -186,7 +186,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyDmPeerNames,
     onMergeDmMessages,
     onMergeServerMessages,
-    onMergeRadioMessages,
+    onMergeBitchatMessages,
   } = options
 
   const persistedInitial = useMemo(() => loadDeviceSyncState(), [])
@@ -284,7 +284,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   })
   const dmThreadsRef = useRef<DmThread[]>(dmThreads)
   const activeGeohashRef = useRef<string>(activeGeohash)
-  const activeRadioMessagesRef = useRef<GeoMessage[]>(activeRadioMessages)
+  const activeBitchatMessagesRef = useRef<GeoMessage[]>(activeBitchatMessages)
   const activeServerMessagesRef = useRef<ServerMessage[]>(activeServerMessages)
 
   const callbacksRef = useRef({
@@ -299,7 +299,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyDmPeerNames,
     onMergeDmMessages,
     onMergeServerMessages,
-    onMergeRadioMessages,
+    onMergeBitchatMessages,
   })
 
   useLayoutEffect(() => {
@@ -349,9 +349,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   useLayoutEffect(() => {
     dmThreadsRef.current = dmThreads
     activeGeohashRef.current = activeGeohash
-    activeRadioMessagesRef.current = activeRadioMessages
+    activeBitchatMessagesRef.current = activeBitchatMessages
     activeServerMessagesRef.current = activeServerMessages
-  }, [dmThreads, activeGeohash, activeRadioMessages, activeServerMessages])
+  }, [dmThreads, activeGeohash, activeBitchatMessages, activeServerMessages])
 
   useLayoutEffect(() => {
     callbacksRef.current = {
@@ -366,7 +366,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       onApplyDmPeerNames,
       onMergeDmMessages,
       onMergeServerMessages,
-      onMergeRadioMessages,
+      onMergeBitchatMessages,
     }
   }, [
     onApplyServers,
@@ -380,7 +380,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyDmPeerNames,
     onMergeDmMessages,
     onMergeServerMessages,
-    onMergeRadioMessages,
+    onMergeBitchatMessages,
   ])
 
   const persistLocalJournal = useCallback(() => {
@@ -443,7 +443,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     []
   )
 
-  /** Collects current local messages per scope (DM, Server channels, Pinned/Active Radio) */
+  /** Collects current local messages per scope (DM, Server channels, Pinned/Active Bitchat) */
   const collectLocalMessageBuckets = useCallback(() => {
     const blocked = new Set(snapshotRef.current.blockedPubkeys.map((p) => p.toLowerCase()))
     const cleared = snapshotRef.current.dmClearedAt
@@ -494,15 +494,15 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       if (serverMap.size >= 30) break
     }
 
-    const radioMap = new Map<string, GeoMessage[]>()
-    const radioKeys = new Set<string>([
+    const bitchatMap = new Map<string, GeoMessage[]>()
+    const bitchatKeys = new Set<string>([
       activeGeohashRef.current,
       ...snapshotRef.current.pinnedChannels.map((p) => p.geohash),
     ])
-    for (const gh of Array.from(radioKeys).slice(0, 16)) {
+    for (const gh of Array.from(bitchatKeys).slice(0, 16)) {
       const source =
-        gh === activeGeohashRef.current && activeRadioMessagesRef.current.length > 0
-          ? activeRadioMessagesRef.current
+        gh === activeGeohashRef.current && activeBitchatMessagesRef.current.length > 0
+          ? activeBitchatMessagesRef.current
           : loadChannelMessages(gh)
       const clean = source.filter(
         (m) =>
@@ -513,11 +513,11 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           !blocked.has(m.pubkey.toLowerCase())
       )
       if (clean.length > 0) {
-        radioMap.set(gh, clean.slice(-150))
+        bitchatMap.set(gh, clean.slice(-150))
       }
     }
 
-    return { dmMap, serverMap, radioMap }
+    return { dmMap, serverMap, bitchatMap }
   }, [])
 
   const getAmailExportInfo = useCallback(async (): Promise<{
@@ -576,7 +576,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   }, [])
 
   const computeLocalMsgDigests = useCallback(async (): Promise<DeviceSyncMsgDigests> => {
-    const { dmMap, serverMap, radioMap } = collectLocalMessageBuckets()
+    const { dmMap, serverMap, bitchatMap } = collectLocalMessageBuckets()
     const dm: Record<string, DeviceSyncScopeDigest> = {}
     for (const [pk, entry] of dmMap.entries()) {
       dm[pk] = computeScopeDigest(entry.messages)
@@ -585,9 +585,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     for (const [k, msgs] of serverMap.entries()) {
       server[k] = computeScopeDigest(msgs)
     }
-    const radio: Record<string, DeviceSyncScopeDigest> = {}
-    for (const [gh, msgs] of radioMap.entries()) {
-      radio[gh] = computeScopeDigest(msgs)
+    const bitchat: Record<string, DeviceSyncScopeDigest> = {}
+    for (const [gh, msgs] of bitchatMap.entries()) {
+      bitchat[gh] = computeScopeDigest(msgs)
     }
     const [amailInfo, walletInfo] = await Promise.all([
       getAmailExportInfo(),
@@ -596,7 +596,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     return {
       dm,
       server,
-      radio,
+      bitchat,
       amail: amailInfo ? { updatedAt: amailInfo.updatedAt, hash: amailInfo.hash } : null,
       wallet: walletInfo
         ? {
@@ -610,7 +610,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   }, [collectLocalMessageBuckets, getAmailExportInfo, getWalletExportInfo])
 
   const buildRecentMessagesTail = useCallback((): SyncedRecentMessagesTail => {
-    const { dmMap, serverMap, radioMap } = collectLocalMessageBuckets()
+    const { dmMap, serverMap, bitchatMap } = collectLocalMessageBuckets()
     const dm: NonNullable<SyncedRecentMessagesTail['dm']> = {}
     const dmEntries = Array.from(dmMap.entries())
       .sort((a, b) => {
@@ -639,19 +639,19 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       server[k] = msgs.slice(-12)
     }
 
-    const radio: Record<string, GeoMessage[]> = {}
-    const radioEntries = Array.from(radioMap.entries())
+    const bitchat: Record<string, GeoMessage[]> = {}
+    const bitchatEntries = Array.from(bitchatMap.entries())
       .sort((a, b) => {
         const aTs = a[1][a[1].length - 1]?.createdAt ?? 0
         const bTs = b[1][b[1].length - 1]?.createdAt ?? 0
         return bTs - aTs
       })
       .slice(0, 6)
-    for (const [gh, msgs] of radioEntries) {
-      radio[gh] = msgs.slice(-10)
+    for (const [gh, msgs] of bitchatEntries) {
+      bitchat[gh] = msgs.slice(-10)
     }
 
-    return { dm, server, radio }
+    return { dm, server, bitchat }
   }, [collectLocalMessageBuckets])
 
   const publishEphemeralPacket = useCallback(
@@ -844,15 +844,15 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           }
         }
       }
-      if (tail.radio) {
-        for (const [gh, msgs] of Object.entries(tail.radio)) {
+      if (tail.bitchat) {
+        for (const [gh, msgs] of Object.entries(tail.bitchat)) {
           if (gh && Array.isArray(msgs) && msgs.length > 0) {
             const clean = msgs.filter(
               (m) => !isStuckMediaPlaceholder(m) && !isEphemeralPendingMessage(m)
             )
             if (clean.length < msgs.length) sawRemotePollution = true
             if (clean.length > 0) {
-              added += callbacksRef.current.onMergeRadioMessages(gh, clean)
+              added += callbacksRef.current.onMergeBitchatMessages(gh, clean)
             }
           }
         }
@@ -961,7 +961,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       const lastReq = lastReqSentToPeerRef.current.get(peerDeviceId) ?? 0
       if (!bypassCooldown && now - lastReq < SIBLING_REQ_COOLDOWN_MS) return
 
-      const { dmMap, serverMap, radioMap } = collectLocalMessageBuckets()
+      const { dmMap, serverMap, bitchatMap } = collectLocalMessageBuckets()
       const localDigests = await computeLocalMsgDigests()
       const blocked = new Set(snapshotRef.current.blockedPubkeys.map((p) => p.toLowerCase()))
       const scopes: DeviceSyncScopeRequest[] = []
@@ -996,13 +996,13 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         }
       }
 
-      for (const [gh, remoteDigest] of Object.entries(remoteDigests.radio)) {
+      for (const [gh, remoteDigest] of Object.entries(remoteDigests.bitchat)) {
         if (scopes.length >= 44) break
         if (!remoteDigest || remoteDigest.count <= 0) continue
-        const localDigest = localDigests.radio[gh]
+        const localDigest = localDigests.bitchat[gh]
         if (!localDigest || localDigest.hash !== remoteDigest.hash) {
-          const knownIds = (radioMap.get(gh) ?? []).map((m) => m.id).slice(-200)
-          scopes.push({ kind: 'radio', key: gh, knownIds })
+          const knownIds = (bitchatMap.get(gh) ?? []).map((m) => m.id).slice(-200)
+          scopes.push({ kind: 'bitchat', key: gh, knownIds })
         }
       }
 
@@ -1080,7 +1080,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
 
       if (packet.type === 'sync-msg-req') {
-        const { dmMap, serverMap, radioMap } = collectLocalMessageBuckets()
+        const { dmMap, serverMap, bitchatMap } = collectLocalMessageBuckets()
         for (const req of packet.scopes.slice(0, 32)) {
           const known = new Set(req.knownIds)
           if (req.kind === 'dm') {
@@ -1119,15 +1119,15 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
             for (const chunk of chunks) {
               await publishEphemeralPacket(chunk, false)
             }
-          } else if (req.kind === 'radio') {
-            const msgs = radioMap.get(req.key)
+          } else if (req.kind === 'bitchat') {
+            const msgs = bitchatMap.get(req.key)
             if (!msgs) continue
             const missing = msgs.filter((m) => !known.has(m.id))
             if (missing.length === 0) continue
             const chunks = buildMessageChunkPackets({
               deviceId: deviceIdRef.current,
               targetDeviceId: packet.deviceId,
-              scopeKind: 'radio',
+              scopeKind: 'bitchat',
               scopeKey: req.key,
               messages: missing,
             })
@@ -1195,8 +1195,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
               cleanChunk as ServerMessage[]
             )
           }
-        } else if (packet.scopeKind === 'radio') {
-          added = callbacksRef.current.onMergeRadioMessages(
+        } else if (packet.scopeKind === 'bitchat') {
+          added = callbacksRef.current.onMergeBitchatMessages(
             packet.scopeKey,
             cleanChunk as GeoMessage[]
           )
@@ -1395,7 +1395,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     sendStateToPeer,
   ])
 
-  // If a DM thread arrived from relays with `anonXXXX` after the CRDT checkpoint already hydrated a real name, upgrade it immediately
+  // If a DM thread arrived from relays with `agnonXXXX` / `anonXXXX` after the CRDT checkpoint already hydrated a real name, upgrade it immediately
   useEffect(() => {
     if (isApplyingRemoteRef.current) return
     const syncedNames = extractActiveDmPeerNames(crdtRef.current)
@@ -1431,10 +1431,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       dmCount += t.messages.length
       if (t.lastMessageAt > dmLatest) dmLatest = t.lastMessageAt
     }
-    const radioTail = activeRadioMessages[activeRadioMessages.length - 1]?.id ?? ''
+    const bitchatTail = activeBitchatMessages[activeBitchatMessages.length - 1]?.id ?? ''
     const serverTail = activeServerMessages[activeServerMessages.length - 1]?.id ?? ''
-    return `${dmCount}:${dmLatest}:${activeRadioMessages.length}:${radioTail}:${activeServerMessages.length}:${serverTail}`
-  }, [dmThreads, activeRadioMessages, activeServerMessages])
+    return `${dmCount}:${dmLatest}:${activeBitchatMessages.length}:${bitchatTail}:${activeServerMessages.length}:${serverTail}`
+  }, [dmThreads, activeBitchatMessages, activeServerMessages])
 
   const prevMsgSigRef = useRef<string>(msgActivitySignature)
   useEffect(() => {

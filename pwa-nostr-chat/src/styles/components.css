@@ -391,8 +391,8 @@ img.ag-avatar-agnostr,
   gap: 10px;
 }
 
-/* Unified Radio Quick-Tune Row (Geohash, city, or topic + GPS + Map) */
-.ag-radio-quickbar {
+/* Unified Bitchat Quick-Tune Row (Geohash, city, or topic + GPS + Map) */
+.ag-bitchat-quickbar {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -637,7 +637,7 @@ img.ag-avatar-agnostr,
   background-color: var(--dm-soft);
 }
 
-/* Geo Radio row wrapper allowing valid sibling Pin button without nested <button> */
+/* Bitchat row wrapper allowing valid sibling Pin button without nested <button> */
 .ag-chat-row-wrap {
   position: relative;
   display: flex;
@@ -736,7 +736,7 @@ img.ag-avatar-agnostr,
   color: var(--status-danger);
 }
 
-/* Pinned Radio Channels Drag-and-Drop Reordering (Desktop HTML5 DnD + Mobile Touch Grip) */
+/* Pinned Bitchat Channels Drag-and-Drop Reordering (Desktop HTML5 DnD + Mobile Touch Grip) */
 .ag-pinned-list {
   display: flex;
   flex-direction: column;
@@ -927,7 +927,7 @@ img.ag-avatar-agnostr,
   height: 15px;
 }
 
-.ag-chat-row-avatar.radio {
+.ag-chat-row-avatar.bitchat {
   background-color: var(--accent-soft);
   color: var(--accent);
 }
@@ -1884,7 +1884,7 @@ img.ag-avatar-agnostr,
   overflow: hidden;
 }
 
-.ag-header-avatar.radio {
+.ag-header-avatar.bitchat {
   background-color: var(--accent-soft);
   color: var(--accent);
 }
@@ -2035,7 +2035,7 @@ img.ag-avatar-agnostr,
   font-weight: 600;
 }
 
-/* Live Active Geo Radio Group Call Banner */
+/* Live Active Bitchat Group Call Banner */
 .ag-geo-call-banner {
   flex: 0 0 auto;
   display: flex;
@@ -2274,7 +2274,7 @@ img.ag-avatar-agnostr,
   box-shadow: var(--shadow-sm);
 }
 
-.ag-empty-radio-icon {
+.ag-empty-bitchat-icon {
   width: 52px;
   height: 52px;
   border-radius: 14px;

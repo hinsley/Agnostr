@@ -36,12 +36,12 @@ import type { GeoRelayEntry } from './geoRelays.ts'
 import { DEFAULT_GEOHASH, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe } from './identity.ts'
 import {
-  formatRadioChannelLabel,
+  formatBitchatChannelLabel,
   getTopicSlug,
   isTopicChannel,
-  isValidRadioChannelKey,
-  normalizeRadioChannelKey,
-} from './radioChannel.ts'
+  isValidBitchatChannelKey,
+  normalizeBitchatChannelKey,
+} from './bitchatChannel.ts'
 import {
   DEFAULT_AUTO_TRANSCRIBE,
   DEFAULT_TRANSCRIPTION_MODEL_ID,
@@ -187,13 +187,13 @@ export function saveNickname(nickname: string): void {
 
 export function loadActiveGeohash(): string {
   const saved = safeGet(KEYS.activeGeohash)
-  const normalized = normalizeRadioChannelKey(saved)
+  const normalized = normalizeBitchatChannelKey(saved)
   if (normalized) return normalized
   return DEFAULT_GEOHASH
 }
 
 export function saveActiveGeohash(geohash: string): void {
-  const normalized = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+  const normalized = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
   safeSet(KEYS.activeGeohash, normalized)
 }
 
@@ -201,9 +201,9 @@ export function loadPinnedChannels(): PinnedChannel[] {
   const parsed = safeJsonParse<PinnedChannel[]>(safeGet(KEYS.pinnedChannels), [])
   if (!Array.isArray(parsed)) return []
   return parsed
-    .filter((p) => p && typeof p.geohash === 'string' && isValidRadioChannelKey(p.geohash))
+    .filter((p) => p && typeof p.geohash === 'string' && isValidBitchatChannelKey(p.geohash))
     .map((p) => ({
-      geohash: normalizeRadioChannelKey(p.geohash) ?? normalizeGeohash(p.geohash),
+      geohash: normalizeBitchatChannelKey(p.geohash) ?? normalizeGeohash(p.geohash),
       label: typeof p.label === 'string' ? p.label : undefined,
       pinnedAt: typeof p.pinnedAt === 'number' ? p.pinnedAt : Date.now(),
       unreadCount: 0,
@@ -229,7 +229,7 @@ export function loadRecentChannels(): string[] {
   const out: string[] = []
   for (const g of parsed) {
     if (typeof g !== 'string') continue
-    const normalized = normalizeRadioChannelKey(g)
+    const normalized = normalizeBitchatChannelKey(g)
     if (!normalized || seen.has(normalized)) continue
     seen.add(normalized)
     out.push(normalized)
@@ -696,7 +696,7 @@ export function isEphemeralPendingMessage(msg: {
 }): boolean {
   if (
     typeof msg.id === 'string' &&
-    (msg.id.startsWith('pending-radio-') || msg.id.startsWith('pending-srv-'))
+    (msg.id.startsWith('pending-bitchat-') || msg.id.startsWith('pending-srv-'))
   ) {
     return true
   }
@@ -806,7 +806,7 @@ export function saveLocalSecret(secret: string): void {
 }
 
 export function loadChannelMessages(geohash: string): GeoMessage[] {
-  const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+  const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
   const parsed = safeJsonParse<GeoMessage[]>(safeGet(KEYS.msgChannel(gh)), [])
   if (!Array.isArray(parsed)) return []
   const clean: GeoMessage[] = []
@@ -818,7 +818,7 @@ export function loadChannelMessages(geohash: string): GeoMessage[] {
       continue
     }
     if (!m.isSystem) {
-      const msgKey = normalizeRadioChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
+      const msgKey = normalizeBitchatChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
       if (msgKey !== gh) {
         needsRewrite = true
         continue
@@ -833,12 +833,12 @@ export function loadChannelMessages(geohash: string): GeoMessage[] {
 }
 
 export function saveChannelMessages(geohash: string, messages: GeoMessage[]): void {
-  const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+  const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
   const trimmed = messages
     .filter((m) => {
       if (m.isSystem) return false
       if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) return false
-      const msgKey = normalizeRadioChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
+      const msgKey = normalizeBitchatChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
       return msgKey === gh
     })
     .slice(-MAX_MESSAGES_PER_CHANNEL)
@@ -854,7 +854,7 @@ export function saveChannelMessages(geohash: string, messages: GeoMessage[]): vo
 }
 
 export function clearChannelMessagesStorage(geohash: string): void {
-  const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+  const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
   safeRemove(KEYS.msgChannel(gh))
 }
 
@@ -929,7 +929,7 @@ export function saveDmThreads(threads: DmThread[]): void {
 }
 
 /**
- * Cold-boot sweep across EVERY persisted Radio, Server, and DM message bucket in
+ * Cold-boot sweep across EVERY persisted Bitchat, Server, and DM message bucket in
  * localStorage (including unopened rooms/servers/threads) so legacy stuck
  * media placeholders and orphaned `pending-*` / `deliveryStatus: 'sending'`
  * zombies are eradicated immediately.
@@ -944,11 +944,11 @@ export function scrubAllPersistedStuckPlaceholders(): number {
       if (key) allKeys.push(key)
     }
 
-    const radioPrefix = `${PREFIX}msgs:`
+    const bitchatPrefix = `${PREFIX}msgs:`
     const serverPrefix = `${PREFIX}smsgs:`
 
     for (const key of allKeys) {
-      if (key.startsWith(radioPrefix) || key.startsWith(serverPrefix)) {
+      if (key.startsWith(bitchatPrefix) || key.startsWith(serverPrefix)) {
         const parsed = safeJsonParse<Array<Record<string, unknown>>>(safeGet(key), [])
         if (!Array.isArray(parsed) || parsed.length === 0) continue
         let removedInBucket = 0
@@ -1190,7 +1190,7 @@ const MAX_PERSISTED_SYNCED_DM_PEER_NAMES = 60
 
 function isGenericAnonNickname(nick: string | null | undefined): boolean {
   const clean = (nick ?? '').trim()
-  return !clean || /^anon[0-9a-f]{4}$/i.test(clean)
+  return !clean || /^a(?:gn|n)on(?:[0-9a-f]{4})?$/i.test(clean)
 }
 
 function sanitizeDmPeerNamesMap(raw: unknown): Record<string, SyncedDmPeerNameRecord> {
@@ -1404,10 +1404,10 @@ export function formatTranscriptExport(
   channelKey?: string
 ): { filename: string; content: string; mimeType: string } {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-  const resolvedKey = channelKey ? (normalizeRadioChannelKey(channelKey) ?? cell.geohash) : cell.geohash
+  const resolvedKey = channelKey ? (normalizeBitchatChannelKey(channelKey) ?? cell.geohash) : cell.geohash
   const isTopic = isTopicChannel(resolvedKey)
   const topicSlug = getTopicSlug(resolvedKey)
-  const displayChannel = formatRadioChannelLabel(resolvedKey)
+  const displayChannel = formatBitchatChannelLabel(resolvedKey)
   const fileSlug = isTopic && topicSlug ? `topic-${topicSlug}` : cell.geohash
 
   if (format === 'json') {
@@ -1454,7 +1454,7 @@ export function formatTranscriptExport(
     '',
     `- **Exported**: ${new Date().toISOString()}`,
     ...(isTopic
-      ? [`- **Scope**: Named Topic Radio (global)`]
+      ? [`- **Scope**: Named Topic Bitchat (global)`]
       : [
           `- **Scope**: ${cell.label} (${cell.approxSizeLabel})${cell.nearestCity ? ` · ${cell.nearestCity}` : ''}`,
           `- **Coordinates**: ${cell.center.lat.toFixed(4)}, ${cell.center.lon.toFixed(4)}`,

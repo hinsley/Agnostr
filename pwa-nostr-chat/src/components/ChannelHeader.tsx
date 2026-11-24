@@ -9,16 +9,16 @@ import {
   Map as MapIcon,
   PanelLeft,
   Phone,
-  Radio,
   Search,
   ShieldCheck,
   Users,
   Video,
+  Waves,
   Zap,
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol'
 import type { ZapTarget } from '../types/wallet'
-import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel'
+import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel'
 import { identiconDataUrl } from '../utils/identicon'
 
 function getServerMonogram(name: string): string {
@@ -108,8 +108,8 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   const isServerCallFull =
     isServer && !inThisServerCall && serverCallCount >= engine.calls.maxParticipants
   const activeGeoKey = engine.activeGeohash.toLowerCase()
-  const isTopicRadio = !isDm && !isServer && isTopicChannel(engine.activeGeohash)
-  const radioLabel = formatRadioChannelLabel(engine.activeGeohash)
+  const isTopicBitchat = !isDm && !isServer && isTopicChannel(engine.activeGeohash)
+  const bitchatLabel = formatBitchatChannelLabel(engine.activeGeohash)
   const geoCallCount = !isDm && !isServer ? engine.calls.getGeoCallCount(activeGeoKey) : 0
   const inThisGeoCall = Boolean(
     !isDm &&
@@ -171,7 +171,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     void engine.calls.joinGeoCall(engine.activeGeohash, media)
   }
 
-  const onlineSubtitle = isTopicRadio
+  const onlineSubtitle = isTopicBitchat
     ? 'Topic'
     : engine.presence.isUncertainCount
       ? 'Local area'
@@ -286,20 +286,20 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
             ) : (
               <>
                 <div
-                  className={`ag-header-avatar ${isTopicRadio ? 'topic' : 'radio'}`}
+                  className={`ag-header-avatar ${isTopicBitchat ? 'topic' : 'bitchat'}`}
                   aria-hidden="true"
                 >
-                  {isTopicRadio ? <Hash size={18} /> : <Radio size={18} />}
+                  {isTopicBitchat ? <Hash size={18} /> : <Waves size={18} />}
                 </div>
                 <div className="ag-header-text">
                   <div className="ag-header-title-row">
                     <span className="ag-header-title truncate">
-                      <span className="mono">{radioLabel}</span>
-                      {!isTopicRadio && engine.cell.nearestCity && (
+                      <span className="mono">{bitchatLabel}</span>
+                      {!isTopicBitchat && engine.cell.nearestCity && (
                         <span className="ag-header-city"> · {engine.cell.nearestCity}</span>
                       )}
                     </span>
-                    {isTopicRadio && (
+                    {isTopicBitchat && (
                       <span className="ag-header-topic-pill ag-hide-xs">Topic</span>
                     )}
                   </div>
@@ -509,19 +509,19 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 disabled={isGeoCallFull}
                 title={
                   inThisGeoCall
-                    ? `Focus active ${radioLabel} call`
+                    ? `Focus active ${bitchatLabel} call`
                     : isGeoCallFull
-                      ? `${isTopicRadio ? 'Topic Radio' : 'Geo Radio'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                      ? `${isTopicBitchat ? 'Topic Bitchat' : 'Geo Bitchat'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
                       : geoCallCount > 0
-                        ? `Join ${radioLabel} Voice Call (${geoCallCount}/${engine.calls.maxParticipants})`
-                        : `Start Voice Call in ${radioLabel}`
+                        ? `Join ${bitchatLabel} Voice Call (${geoCallCount}/${engine.calls.maxParticipants})`
+                        : `Start Voice Call in ${bitchatLabel}`
                 }
                 aria-label={
                   inThisGeoCall
                     ? 'Focus active voice call'
                     : geoCallCount > 0
                       ? `Join voice call (${geoCallCount} of ${engine.calls.maxParticipants})`
-                      : `Start voice call in ${radioLabel}`
+                      : `Start voice call in ${bitchatLabel}`
                 }
               >
                 <Phone size={17} />
@@ -539,17 +539,17 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 disabled={isGeoCallFull}
                 title={
                   inThisGeoCall
-                    ? `Focus active ${radioLabel} call`
+                    ? `Focus active ${bitchatLabel} call`
                     : isGeoCallFull
-                      ? `${isTopicRadio ? 'Topic Radio' : 'Geo Radio'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                      ? `${isTopicBitchat ? 'Topic Bitchat' : 'Geo Bitchat'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
                       : geoCallCount > 0
-                        ? `Join ${radioLabel} Video Call (${geoCallCount}/${engine.calls.maxParticipants})`
-                        : `Start Video Call in ${radioLabel}`
+                        ? `Join ${bitchatLabel} Video Call (${geoCallCount}/${engine.calls.maxParticipants})`
+                        : `Start Video Call in ${bitchatLabel}`
                 }
                 aria-label={
                   inThisGeoCall
                     ? 'Focus active video call'
-                    : `Start video call in ${radioLabel}`
+                    : `Start video call in ${bitchatLabel}`
                 }
               >
                 <Video size={18} />

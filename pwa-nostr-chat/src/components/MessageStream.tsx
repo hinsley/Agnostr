@@ -12,10 +12,10 @@ import {
   Map as MapIcon,
   PanelRightClose,
   PanelRightOpen,
-  Radio,
   Server,
   ShieldCheck,
   UserPlus,
+  Waves,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, GeoMessage, PeerInfo } from '../types/protocol'
@@ -33,7 +33,7 @@ import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { LightboxImagePayload } from './ImageLightboxModal'
 import { MessageItem } from './MessageItem'
 import { doesContentMentionUser } from '../lib/bitchatProtocol'
-import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel'
+import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel'
 import { isStuckMediaPlaceholder } from '../lib/storage'
 import { identiconDataUrl, formatHandle } from '../utils/identicon'
 
@@ -765,8 +765,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       const name = nameRaw.trim()
       if (!pk || !name) return
       const existing = map.get(pk)
-      const isGeneric = /^anon[0-9a-f]{0,4}$/i.test(name)
-      const existingIsGeneric = !existing || /^anon[0-9a-f]{0,4}$/i.test(existing)
+      const isGeneric = /^a(?:gn|n)on[0-9a-f]{0,4}$/i.test(name)
+      const existingIsGeneric = !existing || /^a(?:gn|n)on[0-9a-f]{0,4}$/i.test(existing)
       if (!existing || !isGeneric || existingIsGeneric) {
         map.set(pk, name)
       }
@@ -791,7 +791,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const resolveReactorName = useCallback(
     (pubkey: string): string => {
       const pk = pubkey.trim().toLowerCase()
-      if (!pk) return 'anon'
+      if (!pk) return 'agnon'
       if (
         pk === engine.identity.activePubkey.toLowerCase() ||
         pk === engine.identity.masterPubkey.toLowerCase()
@@ -802,7 +802,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       if (mapped) return mapped
       const lookedUp = engine.getPeerByPubkey(pk)?.nickname?.trim()
       if (lookedUp) return lookedUp
-      return `anon${pk.slice(-4)}`
+      return `agnon${pk.slice(-4)}`
     },
     [engine, reactorNameMap]
   )
@@ -1410,23 +1410,23 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                 </div>
               </div>
             ) : (
-              /* Serene Geohash or Named Topic Radio Empty State */
+              /* Serene Geohash or Named Topic Bitchat Empty State */
               (() => {
                 const activeIsTopic = isTopicChannel(engine.activeGeohash)
-                const activeRadioLabel = formatRadioChannelLabel(engine.activeGeohash)
+                const activeBitchatLabel = formatBitchatChannelLabel(engine.activeGeohash)
                 const hottestIsTopic = hottestPulse ? isTopicChannel(hottestPulse.geohash) : false
                 const hottestLabel = hottestPulse
-                  ? formatRadioChannelLabel(hottestPulse.geohash)
+                  ? formatBitchatChannelLabel(hottestPulse.geohash)
                   : ''
                 return (
               <div className="ag-empty-stage">
-                <div className="ag-empty-radio-icon" aria-hidden="true">
-                  {activeIsTopic ? <Hash size={26} /> : <Radio size={26} />}
+                <div className="ag-empty-bitchat-icon" aria-hidden="true">
+                  {activeIsTopic ? <Hash size={26} /> : <Waves size={26} />}
                 </div>
 
                 <div className="ag-empty-copy">
                   <h2 className="ag-empty-title">
-                    <span className="mono">{activeRadioLabel}</span>
+                    <span className="mono">{activeBitchatLabel}</span>
                     {!activeIsTopic && engine.cell.nearestCity ? ` · ${engine.cell.nearestCity}` : ''}
                   </h2>
                   <p className="ag-empty-sub">
@@ -1453,7 +1453,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       {hottestIsTopic ? (
                         <Hash size={15} style={{ color: activeIsTopic ? 'currentColor' : 'var(--accent)' }} />
                       ) : (
-                        <Radio size={15} style={{ color: activeIsTopic ? 'currentColor' : 'var(--accent)' }} />
+                        <Waves size={15} style={{ color: activeIsTopic ? 'currentColor' : 'var(--accent)' }} />
                       )}
                       <span>
                         Join {hottestLabel}

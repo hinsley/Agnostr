@@ -17,7 +17,6 @@ import {
   Maximize2,
   MessageCircle,
   Phone,
-  Radio,
   RefreshCw,
   ShieldCheck,
   ShieldOff,
@@ -25,6 +24,7 @@ import {
   Trash2,
   User,
   Video,
+  Waves,
   Zap,
 } from 'lucide-react'
 import type { GeoMessage, ImageAttachment, VoiceMemoAttachment } from '../types/protocol'
@@ -270,7 +270,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
         const pk = rawPk.trim().toLowerCase()
         if (!pk || seen.has(pk)) continue
         seen.add(pk)
-        const name = resolveReactorName ? resolveReactorName(pk) : `anon${pk.slice(-4)}`
+        const name = resolveReactorName ? resolveReactorName(pk) : `agnon${pk.slice(-4)}`
         if (name === 'You') {
           hasYou = true
         } else {
@@ -802,11 +802,11 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                   title={
                     message.bridgeClient
                       ? `Bridged via ${message.bridgeClient}`
-                      : 'Bridged from radio mesh'
+                      : 'Bridged from Bitchat mesh'
                   }
                   aria-label="Mesh bridge"
                 >
-                  <Radio size={12} />
+                  <Waves size={12} />
                 </span>
               )}
 

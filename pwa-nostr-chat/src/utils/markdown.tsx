@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { getCachedHighlightedCode, highlightCodeToHtml } from '../lib/codeHighlight'
 import { getCachedMathSvg, hasMathSyntax, renderMathToSvg } from '../lib/mathjax'
-import { makeTopicChannelKey, normalizeTopicSlug } from '../lib/radioChannel'
+import { makeTopicChannelKey, normalizeTopicSlug } from '../lib/bitchatChannel'
 
 export interface MarkdownCallbacks {
   onTuneGeohash?: (geohash: string) => void

@@ -151,7 +151,7 @@
 }
 
 /* Workspace Active States */
-.ag-rail-radio.active,
+.ag-rail-bitchat.active,
 .ag-rail-mail.active,
 .ag-rail-wallet.active {
   border-radius: 11px;

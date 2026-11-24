@@ -1,13 +1,13 @@
 import React from 'react'
-import { Mail, MessageCircle, Radio, Server, Wallet } from 'lucide-react'
+import { Mail, MessageCircle, Server, Wallet, Waves } from 'lucide-react'
 import type { ActiveWorkspace } from './AppRail'
 import type { ListTab } from './ConversationList'
 
 export interface MobileTabBarProps {
   workspace: ActiveWorkspace
   activeTab: ListTab
-  radioUnread?: number
-  radioMentions?: number
+  bitchatUnread?: number
+  bitchatMentions?: number
   dmUnread: number
   serverUnread: number
   serverMentions?: number
@@ -24,8 +24,8 @@ function formatBadgeCount(count: number): string {
 export const MobileTabBar: React.FC<MobileTabBarProps> = ({
   workspace,
   activeTab,
-  radioUnread = 0,
-  radioMentions = 0,
+  bitchatUnread = 0,
+  bitchatMentions = 0,
   dmUnread,
   serverUnread,
   serverMentions = 0,
@@ -34,7 +34,7 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
   onSelectMail,
   onSelectWallet,
 }) => {
-  const isRadioActive = workspace === 'chat' && activeTab === 'radio'
+  const isBitchatActive = workspace === 'chat' && activeTab === 'bitchat'
   const isServersActive = workspace === 'chat' && activeTab === 'servers'
   const isDmsActive = workspace === 'chat' && activeTab === 'dms'
   const isMailActive = workspace === 'mail'
@@ -44,29 +44,29 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
     <nav className="ag-mobile-tabbar" aria-label="Primary navigation">
       <button
         type="button"
-        className={`ag-mtab-btn ${isRadioActive ? 'active' : ''}`}
-        onClick={() => onSelectTab('radio')}
-        aria-current={isRadioActive ? 'page' : undefined}
+        className={`ag-mtab-btn ${isBitchatActive ? 'active' : ''}`}
+        onClick={() => onSelectTab('bitchat')}
+        aria-current={isBitchatActive ? 'page' : undefined}
       >
         <span className="ag-mtab-icon-wrap">
-          <Radio size={20} strokeWidth={isRadioActive ? 2.15 : 1.75} />
-          {radioMentions > 0 ? (
+          <Waves size={20} strokeWidth={isBitchatActive ? 2.15 : 1.75} />
+          {bitchatMentions > 0 ? (
             <span
               className="ag-mtab-badge ping tabular"
-              aria-label={`${radioMentions} radio pings`}
+              aria-label={`${bitchatMentions} Bitchat pings`}
             >
-              {formatBadgeCount(radioMentions)}
+              {formatBadgeCount(bitchatMentions)}
             </span>
-          ) : radioUnread > 0 ? (
+          ) : bitchatUnread > 0 ? (
             <span
               className="ag-mtab-badge unread tabular"
-              aria-label={`${radioUnread} unread radio messages`}
+              aria-label={`${bitchatUnread} unread Bitchat messages`}
             >
-              {formatBadgeCount(radioUnread)}
+              {formatBadgeCount(bitchatUnread)}
             </span>
           ) : null}
         </span>
-        <span className="ag-mtab-label">Radio</span>
+        <span className="ag-mtab-label">Bitchat</span>
       </button>
 
       <button

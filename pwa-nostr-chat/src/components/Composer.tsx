@@ -28,7 +28,7 @@ import {
   isVoiceRecordingSupported,
   revokeVoicePreviewUrl,
 } from '../lib/voiceRecorder'
-import { formatRadioChannelLabel } from '../lib/radioChannel'
+import { formatBitchatChannelLabel } from '../lib/bitchatChannel'
 import { KeyedFifoQueue } from '../lib/sendQueue'
 import { useBackHandler } from '../hooks/useBackNavigation'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon'
@@ -689,7 +689,7 @@ export const Composer: React.FC<ComposerProps> = ({
             }
           }
 
-          // Guard Radio/Server sends against landing in a different room if the user switched rooms mid-translation
+          // Guard Bitchat/Group sends against landing in a different room if the user switched rooms mid-translation
           if (!submitIsDm && activeTargetKeyRef.current !== submitTargetKey) {
             pushToast(
               'warning',
@@ -1008,7 +1008,7 @@ export const Composer: React.FC<ComposerProps> = ({
         ? `Message ${dmThread.peerNickname}…`
         : isServer && activeChannel
           ? `Message #${activeChannel.name}…`
-          : `Message ${formatRadioChannelLabel(engine.activeGeohash)}…`
+          : `Message ${formatBitchatChannelLabel(engine.activeGeohash)}…`
 
   const hasContentToSend = draft.trim().length > 0 || pendingImage !== null
   const hasTopBanner = Boolean(activeReply)
@@ -1089,7 +1089,7 @@ export const Composer: React.FC<ComposerProps> = ({
               <span>
                 {isServer && activeServer
                   ? activeServer.name
-                  : formatRadioChannelLabel(engine.activeGeohash)}
+                  : formatBitchatChannelLabel(engine.activeGeohash)}
               </span>
               <span>Tab or Enter</span>
             </div>

@@ -85,7 +85,7 @@ export interface SyncedBlockedRecord {
   removedAt: number
 }
 
-/** LWW-Register for ordered Pinned Radio Channels */
+/** LWW-Register for ordered Pinned Bitchat Channels */
 export interface SyncedPinnedState {
   updatedAt: number
   items: PinnedChannel[]
@@ -133,7 +133,7 @@ export interface SyncedRecentMessagesTail {
     }
   >
   server?: Record<string, ServerMessage[]>
-  radio?: Record<string, GeoMessage[]>
+  bitchat?: Record<string, GeoMessage[]>
 }
 
 /** Full conflict-free timestamped CRDT state exchanged between same-key devices */
@@ -153,7 +153,7 @@ export interface DeviceSyncCrdtState {
   recentMessages?: SyncedRecentMessagesTail
 }
 
-export type DeviceSyncMessageScopeKind = 'dm' | 'server' | 'radio'
+export type DeviceSyncMessageScopeKind = 'dm' | 'server' | 'bitchat'
 
 export interface DeviceSyncScopeDigest {
   count: number
@@ -164,7 +164,7 @@ export interface DeviceSyncScopeDigest {
 export interface DeviceSyncMsgDigests {
   dm: Record<string, DeviceSyncScopeDigest>
   server: Record<string, DeviceSyncScopeDigest>
-  radio: Record<string, DeviceSyncScopeDigest>
+  bitchat: Record<string, DeviceSyncScopeDigest>
   amail?: { updatedAt: number; hash: string } | null
   wallet?: { initialized: boolean; fingerprint: string; updatedAt: number; hash: string } | null
 }

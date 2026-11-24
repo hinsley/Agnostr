@@ -1,6 +1,6 @@
 import type { RelayRole } from '../types/protocol.ts'
 import { decodeCenter, haversineKm } from './geohash.ts'
-import { isTopicChannel } from './radioChannel.ts'
+import { isTopicChannel } from './bitchatChannel.ts'
 
 export interface GeoRelayEntry {
   url: string

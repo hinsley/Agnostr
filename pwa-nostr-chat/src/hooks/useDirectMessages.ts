@@ -52,7 +52,7 @@ export function pickBestPeerNickname(
       return clean
     }
   }
-  return `anon${pubkey.toLowerCase().slice(-4)}`
+  return `agnon${pubkey.toLowerCase().slice(-4)}`
 }
 
 export function getDmOrderKey(msg: Pick<DmMessage, 'orderMs' | 'createdAt'>): number {
@@ -519,7 +519,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       }
 
       const nick =
-        existingThread?.peerNickname || presenceTracker.getNickname(pk) || `anon${pk.slice(-4)}`
+        existingThread?.peerNickname || presenceTracker.getNickname(pk) || `agnon${pk.slice(-4)}`
       const handle = formatDisplayHandle(nick, pk)
 
       // Append optimistic message synchronously BEFORE entering FIFO queue so rapid sends appear in exact 1 -> 2 -> 3 order
@@ -683,7 +683,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             const nick =
               currentThread?.peerNickname ||
               presenceTracker.getNickname(pk) ||
-              `anon${pk.slice(-4)}`
+              `agnon${pk.slice(-4)}`
             const handle = formatDisplayHandle(nick, pk)
 
             inserted = true
@@ -849,7 +849,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             const nick =
               currentThread?.peerNickname ||
               presenceTracker.getNickname(pk) ||
-              `anon${pk.slice(-4)}`
+              `agnon${pk.slice(-4)}`
             const handle = formatDisplayHandle(nick, pk)
 
             inserted = true

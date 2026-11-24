@@ -14,10 +14,10 @@ import type { ActiveView, DmThread, ToastLevel } from '../types/protocol.ts'
 import type { ServerMessage, ServerSummary } from '../types/servers.ts'
 import { doesContentMentionUser } from '../lib/bitchatProtocol.ts'
 import {
-  formatRadioChannelHash,
-  formatRadioChannelLabel,
+  formatBitchatChannelHash,
+  formatBitchatChannelLabel,
   isTopicChannel,
-} from '../lib/radioChannel.ts'
+} from '../lib/bitchatChannel.ts'
 import {
   closeCallNotificationsViaSw,
   getBrowserNotificationPermission,
@@ -205,7 +205,7 @@ export function useNotifications(
       const parsed = parseNotifyHash(window.location.hash || '')
       if (parsed) {
         try {
-          window.history.replaceState(window.history.state, '', formatRadioChannelHash(activeGeohash))
+          window.history.replaceState(window.history.state, '', formatBitchatChannelHash(activeGeohash))
         } catch {
           // Ignore
         }
@@ -410,7 +410,7 @@ export function useNotifications(
       if (parsed) {
         setPendingAction(parsed)
         try {
-          window.history.replaceState(window.history.state, '', formatRadioChannelHash(activeGeohash))
+          window.history.replaceState(window.history.state, '', formatBitchatChannelHash(activeGeohash))
         } catch {
           // Ignore
         }
@@ -791,7 +791,7 @@ export function useNotifications(
     rememberNotified,
   ])
 
-  // 5b. Live Geo Radio Group Call Joins across active & pinned Geo Radio rooms
+  // 5b. Live Bitchat Group Call Joins across active & pinned Bitchat rooms
   useEffect(() => {
     const nextKeys = new Set<string>()
     const cfg = settingsRef.current
@@ -830,17 +830,17 @@ export function useNotifications(
         }
 
         if (canSendOsNotification()) {
-          const channelLabel = formatRadioChannelLabel(gh)
+          const channelLabel = formatBitchatChannelLabel(gh)
           const isTopic = isTopicChannel(gh)
           void showOsNotification({
             title: cfg.showPreviews
-              ? `${channelLabel} · ${isTopic ? 'Topic Radio Call' : 'Geo Radio Call'}`
+              ? `${channelLabel} · ${isTopic ? 'Topic Bitchat Call' : 'Bitchat Call'}`
               : isTopic
-                ? 'Topic Radio Call Active'
-                : 'Geo Radio Call Active',
+                ? 'Topic Bitchat Call Active'
+                : 'Bitchat Call Active',
             body: cfg.showPreviews
               ? `${member.displayHandle} started a ${member.hasVideo ? 'video' : 'voice'} call`
-              : 'A group call started in one of your Radio channels',
+              : 'A group call started in one of your Bitchat channels',
             tag: `agnostr-geocall-${gh}`,
             requireInteraction: true,
             vibrate: cfg.vibrationEnabled ? [180, 90, 180] : undefined,
@@ -868,7 +868,7 @@ export function useNotifications(
     rememberNotified,
   ])
 
-  // 6. Live Geo Radio Messages & /drop Location Notes (invoked directly from live relay callbacks in useAgnostrEngine)
+  // 6. Live Bitchat Messages & /drop Location Notes (invoked directly from live relay callbacks in useAgnostrEngine)
   const notifyGeoMessage = useCallback(
     (input: NotifyGeoMessageInput) => {
       if (input.senderPubkey) {
@@ -914,7 +914,7 @@ export function useNotifications(
             ? 'Sent a voice memo'
             : truncatePreview(input.content)
 
-        const channelLabel = formatRadioChannelLabel(input.geohash)
+        const channelLabel = formatBitchatChannelLabel(input.geohash)
         const isTopic = isTopicChannel(input.geohash)
         const title = cfg.showPreviews
           ? input.repliedToMe
@@ -925,16 +925,16 @@ export function useNotifications(
           : isDirectPing
             ? 'New Direct Ping'
             : isTopic
-              ? 'Topic Radio Activity'
-              : 'Geo Radio Activity'
+              ? 'Topic Bitchat Activity'
+              : 'Bitchat Activity'
 
         const body = cfg.showPreviews
           ? isDirectPing
             ? preview
             : `${input.senderHandle}: ${preview}`
           : isTopic
-            ? 'New message in Topic Radio'
-            : 'New message in Geo Radio'
+            ? 'New message in Topic Bitchat'
+            : 'New message in Bitchat'
 
         void showOsNotification({
           title,
@@ -1271,7 +1271,7 @@ export function useNotifications(
 
     const ok = await showOsNotification({
       title: 'Agnostr Notifications Ready',
-      body: 'Live alerts for DMs, calls, groups, and Geo Radio are active.',
+      body: 'Live alerts for DMs, calls, groups, and Bitchat are active.',
       tag: 'agnostr-test',
       vibrate: settingsRef.current.vibrationEnabled ? [140, 80, 140] : undefined,
       data: { category: 'test' },

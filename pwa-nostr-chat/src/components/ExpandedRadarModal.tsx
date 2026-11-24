@@ -10,9 +10,9 @@ import {
   Minus,
   Navigation,
   Plus,
-  Radio,
   Search,
   ShieldAlert,
+  Waves,
   X,
   ZoomIn,
   ZoomOut,
@@ -28,7 +28,7 @@ import {
   isValidGeohash,
   resolveGeohashOrCity,
 } from '../lib/geohash.ts'
-import { isTopicChannel } from '../lib/radioChannel.ts'
+import { isTopicChannel } from '../lib/bitchatChannel.ts'
 import {
   TacticalGeohashMap,
   type PrecisionSelection,
@@ -415,7 +415,7 @@ export function ExpandedRadarModal({
           <div className="ag-radar-pulse-popover" role="region" aria-label="Live Global Pulse rooms">
             <div className="ag-radar-pulse-pop-head">
               <span className="ag-panel-card-title">
-                <Radio size={12} />
+                <Waves size={12} />
                 <span>LIVE GLOBAL PULSE</span>
               </span>
               <button
@@ -557,7 +557,7 @@ export function ExpandedRadarModal({
               </span>
               {matchingPulse && (
                 <span className="ag-badge ag-badge-ok">
-                  <Radio size={9} />
+                  <Waves size={9} />
                   <span>
                     {matchingPulse.peerCount}{' '}
                     {matchingPulse.peerCount === 1 ? 'peer' : 'peers'}
@@ -581,7 +581,7 @@ export function ExpandedRadarModal({
             <div className="ag-radar-inspect-snippet">
               <MessageSquare size={12} className="ag-radar-hud-accent" aria-hidden="true" />
               <span className="ag-radar-inspect-snippet-sender">
-                {matchingPulse?.lastSender?.trim().replace(/^@+/, '') || 'anon'}:
+                {matchingPulse?.lastSender?.trim().replace(/^@+/, '') || 'agnon'}:
               </span>
               <span className="ag-radar-inspect-snippet-text truncate">{matchingPulseSnippet}</span>
             </div>
@@ -622,7 +622,7 @@ export function ExpandedRadarModal({
               className="ag-btn ag-btn-primary ag-radar-tune-cta"
               onClick={() => handleTuneAndClose(inspectedCell.geohash)}
             >
-              <Radio size={14} />
+              <Waves size={14} />
               <span>
                 {isAlreadyActive ? `Stay in #${inspectedCell.geohash}` : `Tune #${inspectedCell.geohash}`}
               </span>

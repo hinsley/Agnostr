@@ -13,7 +13,7 @@ import {
   getZoomForPrecision,
   isValidGeohash,
 } from '../lib/geohash.ts'
-import { isTopicChannel } from '../lib/radioChannel.ts'
+import { isTopicChannel } from '../lib/bitchatChannel.ts'
 
 export type PrecisionSelection = 'auto' | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
 
@@ -152,7 +152,7 @@ function formatBubbleSnippet(preview: string): string {
 
 function formatBubbleSender(sender: string): string {
   const cleaned = sender.replace(/^@+/, '').replace(/\s+/g, ' ').trim()
-  if (!cleaned) return 'anon'
+  if (!cleaned) return 'agnon'
   if (cleaned.length <= 11) return cleaned
   return `${cleaned.slice(0, 10).trimEnd()}…`
 }

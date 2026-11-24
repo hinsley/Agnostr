@@ -6,9 +6,9 @@ import { normalizeGeohash } from './geohash.ts'
 import { bytesToHex, type SigningKeyMaterial } from './identity.ts'
 import {
   getTopicSlug,
-  isValidRadioChannelKey,
-  normalizeRadioChannelKey,
-} from './radioChannel.ts'
+  isValidBitchatChannelKey,
+  normalizeBitchatChannelKey,
+} from './bitchatChannel.ts'
 
 /** Ephemeral Nostr event kind for WebRTC call signaling (live-verified on 5 relays) */
 export const KIND_CALL_SIGNAL = 25050
@@ -16,10 +16,10 @@ export const KIND_CALL_SIGNAL = 25050
 /** Shared `#t` tag for NIP-44 encrypted direct call signaling events */
 export const DM_CALL_SIGNAL_TAG = 'agnostr-call-v1'
 
-/** Isolated `#t` tag prefix for Geo Radio group call presence (keeps legacy kind:20000 #g clients clean) */
+/** Isolated `#t` tag prefix for Bitchat group call presence (keeps legacy kind:20000 #g clients clean) */
 export const GEO_CALL_TAG_PREFIX = 'agnostr-call-geo-'
 
-/** Isolated `#t` tag prefix for Named Topic Radio (`kind: 23333`) group call presence */
+/** Isolated `#t` tag prefix for Named Topic Bitchat (`kind: 23333`) group call presence */
 export const TOPIC_CALL_TAG_PREFIX = 'agnostr-call-topic-'
 
 /** Prefix for AES-256-GCM encrypted signaling payloads inside E2EE Private Servers */
@@ -70,7 +70,7 @@ export interface DirectCallSignalPayload {
   callId: string
   /** Present when direct NIP-44 signaling carries WebRTC SDP/ICE for a public/NIP-29 server room */
   serverId?: string
-  /** Present when direct NIP-44 signaling carries WebRTC SDP/ICE for a Geo Radio group call */
+  /** Present when direct NIP-44 signaling carries WebRTC SDP/ICE for a Bitchat group call */
   geohash?: string
   roomId?: string
   media?: CallMediaType
@@ -363,8 +363,8 @@ export function validateDirectSignalPayload(
   if (!raw.action || !VALID_DIRECT_ACTIONS.has(raw.action)) return null
   if (typeof raw.callId !== 'string' || !raw.callId.trim()) return null
   const normalizedGeo =
-    typeof raw.geohash === 'string' && isValidRadioChannelKey(raw.geohash)
-      ? normalizeRadioChannelKey(raw.geohash) ?? undefined
+    typeof raw.geohash === 'string' && isValidBitchatChannelKey(raw.geohash)
+      ? normalizeBitchatChannelKey(raw.geohash) ?? undefined
       : undefined
   return {
     v: 1,
@@ -421,8 +421,8 @@ export function validateGeoSignalPayload(
 ): GeoCallSignalPayload | null {
   if (!raw || raw.v !== 1) return null
   if (!raw.action || !VALID_ROOM_ACTIONS.has(raw.action)) return null
-  if (typeof raw.geohash !== 'string' || !isValidRadioChannelKey(raw.geohash)) return null
-  const gh = normalizeRadioChannelKey(raw.geohash)
+  if (typeof raw.geohash !== 'string' || !isValidBitchatChannelKey(raw.geohash)) return null
+  const gh = normalizeBitchatChannelKey(raw.geohash)
   if (!gh) return null
   const roomId =
     typeof raw.roomId === 'string' && raw.roomId.trim()
@@ -537,7 +537,7 @@ export async function parseRoomCallSignalEvent(
 }
 
 /**
- * Builds an unsigned kind:25050 event template for a Geo Radio room presence/state signal.
+ * Builds an unsigned kind:25050 event template for a Bitchat room presence/state signal.
  * Uses an isolated `['t', 'agnostr-call-geo-<geohash>']` tag (never `#g`) so legacy
  * Bitchat kind:20000 clients never see call signaling.
  */
@@ -555,7 +555,7 @@ export function buildGeoCallSignalTemplate(opts: {
 }
 
 /**
- * Parses and validates an incoming kind:25050 Geo Radio room presence/state signal event.
+ * Parses and validates an incoming kind:25050 Bitchat room presence/state signal event.
  */
 export function parseGeoCallSignalEvent(
   event: NostrEvent,
@@ -564,7 +564,7 @@ export function parseGeoCallSignalEvent(
   if (event.kind !== KIND_CALL_SIGNAL) return null
   const nowSec = Math.floor(Date.now() / 1000)
   if (Math.abs(nowSec - event.created_at) > MAX_SIGNAL_AGE_SEC) return null
-  const expected = normalizeRadioChannelKey(expectedGeohash) ?? normalizeGeohash(expectedGeohash)
+  const expected = normalizeBitchatChannelKey(expectedGeohash) ?? normalizeGeohash(expectedGeohash)
   try {
     const parsed = JSON.parse(event.content) as Partial<GeoCallSignalPayload>
     const validated = validateGeoSignalPayload(parsed)

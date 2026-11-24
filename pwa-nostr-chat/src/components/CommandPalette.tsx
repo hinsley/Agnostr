@@ -27,7 +27,6 @@ import {
   PhoneOff,
   Plus,
   QrCode,
-  Radio,
   RefreshCw,
   RotateCw,
   ScanLine,
@@ -42,6 +41,7 @@ import {
   Video,
   Volume2,
   Wallet,
+  Waves,
   Wifi,
   Zap,
 } from 'lucide-react'
@@ -49,12 +49,12 @@ import type { AgnostrEngine, ThemeId } from '../types/protocol'
 import type { WalletInitialIntent } from '../types/wallet'
 import type { PwaState } from '../hooks/usePwa'
 import {
-  formatRadioChannelLabel,
+  formatBitchatChannelLabel,
   isTopicChannel,
   makeTopicChannelKey,
   normalizeTopicSlug,
   POPULAR_TOPIC_CHANNELS,
-} from '../lib/radioChannel'
+} from '../lib/bitchatChannel'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
 import { formatHandle } from '../utils/identicon'
 import type { QrShareTarget } from './QrShareModal'
@@ -200,7 +200,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       })
     }
 
-    // Direct jump to Geohash or Named Topic Radio channel (`kind: 23333`)
+    // Direct jump to Geohash or Named Topic Bitchat channel (`kind: 23333`)
     if (q.length >= 1 && !parsedShare) {
       const explicitTopic = /^#?topic:/i.test(q)
       const topicSlug = normalizeTopicSlug(q)
@@ -211,8 +211,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           id: `direct-topic-${topicSlug}`,
           group: 'Jump to Room',
           title: `Open #${topicSlug}`,
-          subtitle: `Join Topic Radio #${topicSlug}`,
-          keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} radio`,
+          subtitle: `Join Topic Bitchat #${topicSlug}`,
+          keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} bitchat`,
           badge: 'TOPIC',
           icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
           run: () => {
@@ -228,9 +228,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             group: 'Jump to Room',
             title: `Open #${cleanHash}`,
             subtitle: `Join geohash room #${cleanHash}`,
-            keywords: `${q} ${cleanHash} #${cleanHash} geohash radio`,
+            keywords: `${q} ${cleanHash} #${cleanHash} geohash bitchat`,
             badge: 'GEO',
-            icon: <Radio size={15} />,
+            icon: <Waves size={15} />,
             run: () => {
               onTuneChannel(cleanHash)
               onClose()
@@ -241,9 +241,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             list.push({
               id: `direct-topic-${topicSlug}`,
               group: 'Jump to Room',
-              title: `Open #${topicSlug} (Topic Radio)`,
+              title: `Open #${topicSlug} (Topic Bitchat)`,
               subtitle: `Join topic channel #${topicSlug}`,
-              keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} topic`,
+              keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} topic bitchat`,
               badge: 'TOPIC',
               icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
               run: () => {
@@ -257,8 +257,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             id: `direct-topic-${topicSlug}`,
             group: 'Jump to Room',
             title: `Open #${topicSlug}`,
-            subtitle: `Join Topic Radio #${topicSlug}`,
-            keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} topic radio`,
+            subtitle: `Join Topic Bitchat #${topicSlug}`,
+            keywords: `${q} topic:${topicSlug} #${topicSlug} ${topicSlug} topic bitchat`,
             badge: 'TOPIC',
             icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
             run: () => {
@@ -309,7 +309,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       if (seenPeople.has(pk) || pk === selfMaster || pk === selfActive) continue
       seenPeople.add(pk)
       const livePeer = engine.getPeerByPubkey(entry.pubkey)
-      const nick = entry.label?.trim() || livePeer?.nickname || 'anon'
+      const nick = entry.label?.trim() || livePeer?.nickname || 'agnon'
       const handle = formatHandle(nick, entry.pubkey)
       const peerNote = engine.peerNotes[pk] ?? ''
       list.push({
@@ -361,13 +361,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       }
     }
 
-    // Active Rooms (Geohash + Named Topic Radio)
+    // Active Rooms (Geohash + Named Topic Bitchat)
     const activePulseKeys = new Set<string>()
     for (const room of engine.pulseRooms.slice(0, 8)) {
       const keyLower = room.geohash.toLowerCase()
       activePulseKeys.add(keyLower)
       const isTopic = isTopicChannel(room.geohash)
-      const displayLabel = formatRadioChannelLabel(room.geohash)
+      const displayLabel = formatBitchatChannelLabel(room.geohash)
       const previewHidden = Boolean(
         room.lastSenderPubkey &&
           (engine.isPeerBlocked(room.lastSenderPubkey) ||
@@ -379,12 +379,12 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         group: 'Active Rooms',
         title: `${displayLabel}${!isTopic && room.nearestCity ? ` · ${room.nearestCity}` : ''}`,
         subtitle: `${room.peerCount} ${room.peerCount === 1 ? 'person' : 'people'}${safePreview ? ` · ${safePreview}` : isTopic ? ' · Topic' : ''}`,
-        keywords: `active live room radio ${isTopic ? 'topic' : 'geo'} ${room.geohash} ${displayLabel} ${room.nearestCity ?? ''}`,
+        keywords: `active live room bitchat ${isTopic ? 'topic' : 'geo'} ${room.geohash} ${displayLabel} ${room.nearestCity ?? ''}`,
         badge: isTopic ? 'TOPIC' : 'LIVE',
         icon: isTopic ? (
           <Hash size={15} style={{ color: 'var(--accent)' }} />
         ) : (
-          <Radio size={15} style={{ color: 'var(--accent)' }} />
+          <Waves size={15} style={{ color: 'var(--accent)' }} />
         ),
         run: () => {
           onTuneChannel(room.geohash)
@@ -402,7 +402,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         group: 'Topic Channels',
         title: topic.label,
         subtitle: topic.description,
-        keywords: `topic radio named channel ${topic.slug} ${topic.label} ${topic.description}`,
+        keywords: `topic bitchat named channel ${topic.slug} ${topic.label} ${topic.description}`,
         badge: 'TOPIC',
         icon: <Hash size={15} style={{ color: 'var(--accent)' }} />,
         run: () => {
@@ -543,8 +543,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     } else if (engine.activeView.type === 'channel') {
       const gh = engine.activeGeohash
       const isTopic = isTopicChannel(gh)
-      const radioLabel = formatRadioChannelLabel(gh)
-      const radioKindLabel = isTopic ? 'Topic Radio' : 'Geo Radio'
+      const bitchatLabel = formatBitchatChannelLabel(gh)
+      const bitchatKindLabel = isTopic ? 'Topic Bitchat' : 'Geo Bitchat'
       const count = engine.calls.getGeoCallCount(gh)
       const isFull = count >= engine.calls.maxParticipants
       list.push(
@@ -552,11 +552,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           id: 'act-call-join-geo-voice',
           group: 'Actions',
           title:
-            count > 0 ? `Join ${radioKindLabel} Voice Call` : `Start ${radioKindLabel} Voice Call`,
+            count > 0
+              ? `Join ${bitchatKindLabel} Voice Call`
+              : `Start ${bitchatKindLabel} Voice Call`,
           subtitle: isFull
-            ? `${radioLabel} call is full (${count}/${engine.calls.maxParticipants})`
-            : `${radioLabel} · P2P group audio (${count}/${engine.calls.maxParticipants})`,
-          keywords: `start join geo topic radio voice call audio ${radioLabel} ${gh} webrtc p2p talk`,
+            ? `${bitchatLabel} call is full (${count}/${engine.calls.maxParticipants})`
+            : `${bitchatLabel} · P2P group audio (${count}/${engine.calls.maxParticipants})`,
+          keywords: `start join geo topic bitchat voice call audio ${bitchatLabel} ${gh} webrtc p2p talk`,
           badge: `${count}/${engine.calls.maxParticipants}`,
           icon: <Phone size={15} />,
           run: () => {
@@ -564,7 +566,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             if (isFull) {
               engine.pushToast(
                 'warning',
-                `${radioKindLabel} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                `${bitchatKindLabel} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
               )
               return
             }
@@ -575,11 +577,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           id: 'act-call-join-geo-video',
           group: 'Actions',
           title:
-            count > 0 ? `Join ${radioKindLabel} Video Call` : `Start ${radioKindLabel} Video Call`,
+            count > 0
+              ? `Join ${bitchatKindLabel} Video Call`
+              : `Start ${bitchatKindLabel} Video Call`,
           subtitle: isFull
-            ? `${radioLabel} call is full (${count}/${engine.calls.maxParticipants})`
-            : `${radioLabel} · P2P group video (${count}/${engine.calls.maxParticipants})`,
-          keywords: `start join geo topic radio video call camera ${radioLabel} ${gh} webrtc p2p`,
+            ? `${bitchatLabel} call is full (${count}/${engine.calls.maxParticipants})`
+            : `${bitchatLabel} · P2P group video (${count}/${engine.calls.maxParticipants})`,
+          keywords: `start join geo topic bitchat video call camera ${bitchatLabel} ${gh} webrtc p2p`,
           badge: `${count}/${engine.calls.maxParticipants}`,
           icon: <Video size={15} />,
           run: () => {
@@ -587,7 +591,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             if (isFull) {
               engine.pushToast(
                 'warning',
-                `${radioKindLabel} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                `${bitchatKindLabel} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
               )
               return
             }
@@ -964,7 +968,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         title: 'Notification Settings',
         subtitle:
           engine.notifications.permission === 'granted' && engine.notifications.settings.enabled
-            ? 'Push alerts ON · DMs, DM call ringing, groups & Geo Radio'
+            ? 'Push alerts ON · DMs, DM call ringing, groups & Geo Bitchat'
             : 'Configure push alerts, DM call ringing & optional Web Push bridge',
         keywords: 'notifications settings push alerts ringtone call ringing vapid bridge bell',
         badge:
@@ -1042,7 +1046,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         group: 'Actions',
         title: 'Rotate Identity',
         subtitle: 'Generate a fresh anonymous keypair right now',
-        keywords: 'rotate identity fresh new key anon',
+        keywords: 'rotate identity fresh new key agnon',
         icon: <RotateCw size={15} />,
         run: () => {
           engine.rotateIdentity()

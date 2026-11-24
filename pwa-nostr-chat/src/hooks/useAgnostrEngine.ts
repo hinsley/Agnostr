@@ -13,7 +13,7 @@ import type {
   PendingTrustRequest,
   PinnedChannel,
   PreparedImage,
-  RadioChannelPreview,
+  BitchatChannelPreview,
   RecordedVoiceMemo,
   RelayTelemetry,
   SignMode,
@@ -36,7 +36,7 @@ import {
   buildGeohashChatTemplate,
   AGNOSTR_CLIENT_TAG,
   buildLocationNoteTemplate,
-  buildNamedRadioChatTemplate,
+  buildNamedBitchatChatTemplate,
   buildPresenceTemplate,
   buildReactionTemplate,
   clearProtocolCaches,
@@ -52,12 +52,12 @@ import {
   KIND_GEOHASH_CHAT,
   KIND_GEOHASH_PRESENCE,
   KIND_LOCATION_NOTE,
-  KIND_NAMED_RADIO_CHAT,
+  KIND_NAMED_BITCHAT_CHAT,
   mineNip13NonceTag,
   parseClientTag,
   parseGeohashChatEvent,
   parseLocationNoteEvent,
-  parseNamedRadioChatEvent,
+  parseNamedBitchatChatEvent,
   parseReactionEvent,
   verifyEventCached,
   type ParsedReaction,
@@ -94,16 +94,16 @@ import {
   PresenceTracker,
 } from '../lib/presenceService.ts'
 import {
-  formatRadioChannelHash,
+  formatBitchatChannelHash,
   getTopicSlug,
   isTopicChannel,
-  isValidRadioChannelKey,
+  isValidBitchatChannelKey,
   makeTopicChannelKey,
-  normalizeRadioChannelKey,
+  normalizeBitchatChannelKey,
   parseQuickTuneInput,
-  parseRadioChannelHash,
+  parseBitchatChannelHash,
   TOPIC_CHANNEL_PREFIX,
-} from '../lib/radioChannel.ts'
+} from '../lib/bitchatChannel.ts'
 import { RelayPool } from '../lib/relayPool.ts'
 import {
   KeyedFifoQueue,
@@ -158,7 +158,7 @@ import { useCashuWallet } from './useCashuWallet.ts'
 import { useContentFilter } from './useContentFilter.ts'
 import { useDeviceSync } from './useDeviceSync.ts'
 import { useDirectMessages } from './useDirectMessages.ts'
-import { formatRadioPreviewText, useGlobalPulse } from './useGlobalPulse.ts'
+import { formatBitchatPreviewText, useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
 import {
   useNotifications,
@@ -185,14 +185,14 @@ function extractLatestVisiblePreview(
   trusted: Set<string>,
   own: Set<string>,
   strict: boolean
-): RadioChannelPreview | null {
+): BitchatChannelPreview | null {
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const m = items[i]
     if (!m || m.isSystem) continue
     const pk = (m.pubkey || '').toLowerCase()
     if (!pk || blocked.has(pk)) continue
     if (strict && !m.isOwn && !own.has(pk) && !trusted.has(pk)) continue
-    const preview = formatRadioPreviewText({
+    const preview = formatBitchatPreviewText({
       content: m.content,
       hasImage: Boolean(m.imageAttachment),
       hasVoice: Boolean(m.voiceMemo),
@@ -206,7 +206,7 @@ function extractLatestVisiblePreview(
     return {
       id: m.id,
       preview,
-      sender: (m.nickname || m.displayHandle || `anon${pk.slice(-4)}`).trim(),
+      sender: (m.nickname || m.displayHandle || `agnon${pk.slice(-4)}`).trim(),
       senderPubkey: pk,
       createdAt,
       updatedAtMs: Math.min(createdAt * 1000, nowMs),
@@ -272,7 +272,7 @@ function backfillReplyReferences(list: GeoMessage[]): GeoMessage[] {
 
 function readInitialGeohash(): string {
   if (typeof window !== 'undefined') {
-    const parsed = parseRadioChannelHash(window.location.hash || '')
+    const parsed = parseBitchatChannelHash(window.location.hash || '')
     if (parsed) return parsed
   }
   return loadActiveGeohash()
@@ -387,8 +387,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
       const lowerHash = rawHash.toLowerCase()
       if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=') || lowerHash.startsWith('dm=')) return
-      const currentKey = parseRadioChannelHash(window.location.hash || '')
-      const targetHash = formatRadioChannelHash(activeGeohash)
+      const currentKey = parseBitchatChannelHash(window.location.hash || '')
+      const targetHash = formatBitchatChannelHash(activeGeohash)
       if (currentKey !== activeGeohash || window.location.hash !== targetHash) {
         window.history.replaceState(window.history.state, '', targetHash)
       }
@@ -402,7 +402,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       const rawHash = (window.location.hash || '').replace(/^#/, '').trim()
       const lowerHash = rawHash.toLowerCase()
       if (lowerHash.startsWith('invite=') || lowerHash.startsWith('notify=') || lowerHash.startsWith('dm=')) return
-      const parsed = parseRadioChannelHash(window.location.hash || '')
+      const parsed = parseBitchatChannelHash(window.location.hash || '')
       if (parsed) {
         activeGeohashRef.current = parsed
         setActiveGeohash(parsed)
@@ -528,7 +528,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     const pk = pubkey.toLowerCase()
     if (!trustedSetRef.current.has(pk)) return
     const clean = rawNickname?.trim().slice(0, 48)
-    if (!clean || /^anon[0-9a-f]{4}$/i.test(clean)) return
+    if (!clean || isAutoAnonNickname(clean)) return
     setTrustedPubkeys((prev) => {
       const idx = prev.findIndex((t) => t.pubkey === pk)
       if (idx === -1) return prev
@@ -572,10 +572,10 @@ export function useAgnostrEngine(): AgnostrEngine {
   const relaySelectionRef = useRef(relaySelection)
   const activeServerRelaysRef = useRef<string[]>([])
   const zapsIngestEventTagsRef = useRef<(pubkey: string, tags: string[][]) => void>(() => {})
-  const radioSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
+  const bitchatSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
   const inFlightSendCountRef = useRef<number>(0)
   const inFlightMediaCountRef = useRef<number>(0)
-  const optimisticRadioSeqRef = useRef<number>(0)
+  const optimisticBitchatSeqRef = useRef<number>(0)
   const replyingToRef = useRef<GeoMessage | null>(replyingTo)
 
   const adjustInFlightSend = useCallback((delta: number) => {
@@ -666,9 +666,9 @@ export function useAgnostrEngine(): AgnostrEngine {
     }
   )
 
-  // Authoritative per-channel latest visible radio message previews (geo + topic)
-  const [channelPreviews, setChannelPreviews] = useState<Record<string, RadioChannelPreview>>(() => {
-    const initial: Record<string, RadioChannelPreview> = {}
+  // Authoritative per-channel latest visible Bitchat message previews (geo + topic)
+  const [channelPreviews, setChannelPreviews] = useState<Record<string, BitchatChannelPreview>>(() => {
+    const initial: Record<string, BitchatChannelPreview> = {}
     const keys = Array.from(
       new Set([
         activeGeohash.toLowerCase(),
@@ -716,10 +716,10 @@ export function useAgnostrEngine(): AgnostrEngine {
       const nowMs = Date.now()
       const nowSec = Math.floor(nowMs / 1000)
       const createdAt = Math.min(Math.floor(entry.createdAt || nowSec), nowSec)
-      const nextItem: RadioChannelPreview = {
+      const nextItem: BitchatChannelPreview = {
         id: entry.id,
         preview: cleanPreview,
-        sender: entry.sender.trim() || `anon${pk.slice(-4)}`,
+        sender: entry.sender.trim() || `agnon${pk.slice(-4)}`,
         senderPubkey: pk,
         createdAt,
         updatedAtMs: Math.min(createdAt * 1000, nowMs),
@@ -777,7 +777,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     }
     setChannelPreviews((prev) => {
       let changed = false
-      const next: Record<string, RadioChannelPreview> = { ...prev }
+      const next: Record<string, BitchatChannelPreview> = { ...prev }
 
       for (const [ghKey, entry] of Object.entries(next)) {
         const pk = entry.senderPubkey.toLowerCase()
@@ -879,7 +879,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const incrementGeoUnread = useCallback(
     (rawGh: string, isDirectPing: boolean, meta?: { id: string; pubkey: string }) => {
-      const gh = normalizeRadioChannelKey(rawGh) ?? normalizeGeohash(rawGh)
+      const gh = normalizeBitchatChannelKey(rawGh) ?? normalizeGeohash(rawGh)
       if (!gh) return
       const pk = meta?.pubkey.toLowerCase() ?? ''
       if (pk) {
@@ -887,7 +887,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         if (strictWhitelistRef.current && !trustedSetRef.current.has(pk)) return
       }
 
-      const itemId = meta?.id ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const itemId = meta?.id ?? `agnon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       const list = geoUnreadItemsRef.current[gh] ?? []
       if (list.some((item) => item.id === itemId)) return
       list.push({ id: itemId, pubkey: pk, isDirectPing })
@@ -902,7 +902,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const clearGeoUnread = useCallback(
     (rawGh: string) => {
-      const gh = normalizeRadioChannelKey(rawGh) ?? normalizeGeohash(rawGh)
+      const gh = normalizeBitchatChannelKey(rawGh) ?? normalizeGeohash(rawGh)
       if (!gh) return
       delete geoUnreadItemsRef.current[gh]
       recomputeGeoUnreads()
@@ -910,7 +910,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     [recomputeGeoUnreads]
   )
 
-  // Immediately recompute all radio unread & mention counts when mute/block or whitelist changes
+  // Immediately recompute all Bitchat unread & mention counts when mute/block or whitelist changes
   useEffect(() => {
     recomputeGeoUnreads()
   }, [blockedSet, trustedSet, ownPubkeys, settings.strictWhitelistMode, recomputeGeoUnreads])
@@ -928,7 +928,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       updater: (prevItems: GeoMessage[]) => GeoMessage[] | null,
       opts?: { persist?: boolean; allowBackgroundPersist?: boolean }
     ) => {
-      const targetKey = normalizeRadioChannelKey(rawChannelKey) ?? normalizeGeohash(rawChannelKey)
+      const targetKey = normalizeBitchatChannelKey(rawChannelKey) ?? normalizeGeohash(rawChannelKey)
       if (!targetKey) return
       const shouldPersist = opts?.persist !== false
       const allowBg = opts?.allowBackgroundPersist === true
@@ -936,7 +936,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       const keepForTarget = (list: GeoMessage[]): GeoMessage[] =>
         list.filter((m) => {
           if (m.isSystem) return true
-          const mk = normalizeRadioChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
+          const mk = normalizeBitchatChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
           return mk === targetKey
         })
 
@@ -1030,7 +1030,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     refreshPeers,
   ])
 
-  // Active radio channel subscription (geohash: kind 20000/20001/20007; topic: kind 23333/20007 #d)
+  // Active Bitchat channel subscription (geohash: kind 20000/20001/20007; topic: kind 23333/20007 #d)
   useEffect(() => {
     let cancelled = false
     const myGen = ++activeChannelGenRef.current
@@ -1080,13 +1080,13 @@ export function useAgnostrEngine(): AgnostrEngine {
     const subSeq = ++subSeqRef.current
     const subId =
       isTopic && topicSlug
-        ? `agnostr-radio-t-${subSeq}`
-        : `agnostr-radio-g-${subSeq}`
+        ? `agnostr-bitchat-t-${subSeq}`
+        : `agnostr-bitchat-g-${subSeq}`
     const filters =
       isTopic && topicSlug
         ? [
             {
-              kinds: [KIND_NAMED_RADIO_CHAT],
+              kinds: [KIND_NAMED_BITCHAT_CHAT],
               '#d': [topicSlug],
               limit: 80,
             },
@@ -1198,9 +1198,9 @@ export function useAgnostrEngine(): AgnostrEngine {
             return
           }
 
-          // Radio public message (kind 20000 for geohash, kind 23333 for named topic)
+          // Bitchat public message (kind 20000 for geohash, kind 23333 for named topic)
           const isExpectedChatKind = isTopic
-            ? ev.kind === KIND_NAMED_RADIO_CHAT
+            ? ev.kind === KIND_NAMED_BITCHAT_CHAT
             : ev.kind === KIND_GEOHASH_CHAT
           if (isExpectedChatKind) {
             const findParent = (id: string) =>
@@ -1208,7 +1208,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                 ? messagesRef.current.find((m) => m.id === id)
                 : undefined
             const parsed = isTopic
-              ? parseNamedRadioChatEvent(ev, gh, ownPubkeysRef.current, findParent)
+              ? parseNamedBitchatChatEvent(ev, gh, ownPubkeysRef.current, findParent)
               : parseGeohashChatEvent(ev, gh, ownPubkeysRef.current, findParent)
             if (!parsed || parsed.geohash !== gh) {
               if (!isTopic && !parsed) {
@@ -1318,11 +1318,11 @@ export function useAgnostrEngine(): AgnostrEngine {
 
               return sortChannelMessagesWithPending(
                 [...backfilledPrev, hydrated],
-                'pending-radio-'
+                'pending-bitchat-'
               ).slice(-350)
             })
 
-            const parsedPreview = formatRadioPreviewText({
+            const parsedPreview = formatBitchatPreviewText({
               content: parsed.content,
               hasImage: Boolean(parsed.imageAttachment),
               hasVoice: Boolean(parsed.voiceMemo),
@@ -1331,7 +1331,7 @@ export function useAgnostrEngine(): AgnostrEngine {
             })
             if (parsedPreview) {
               const previewSender =
-                parsed.nickname || parsed.displayHandle || `anon${pk.slice(-4)}`
+                parsed.nickname || parsed.displayHandle || `agnon${pk.slice(-4)}`
               upsertChannelPreview(
                 gh,
                 {
@@ -1568,7 +1568,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     }
     if (watchedTopicSlugs.length > 0) {
       filters.push({
-        kinds: [KIND_NAMED_RADIO_CHAT],
+        kinds: [KIND_NAMED_BITCHAT_CHAT],
         '#d': watchedTopicSlugs,
         since: backfillSince,
         limit: 40,
@@ -1595,7 +1595,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         },
         onEvent: (ev) => {
           if (cancelled) return
-          if (ev.kind !== KIND_GEOHASH_CHAT && ev.kind !== KIND_NAMED_RADIO_CHAT) return
+          if (ev.kind !== KIND_GEOHASH_CHAT && ev.kind !== KIND_NAMED_BITCHAT_CHAT) return
           if (pinnedSeenIds.has(ev.id)) return
           if (!verifyEventCached(ev)) return
           if (cancelled) return
@@ -1609,7 +1609,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (blockedSetRef.current.has(pk)) return
 
           let gh: string | null = null
-          if (ev.kind === KIND_NAMED_RADIO_CHAT) {
+          if (ev.kind === KIND_NAMED_BITCHAT_CHAT) {
             const slug = extractTopicChannelTag(ev.tags)
             gh = slug ? `${TOPIC_CHANNEL_PREFIX}${slug}` : null
           } else {
@@ -1617,7 +1617,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
           if (!gh || !watchedSet.has(gh)) return
 
-          const previewText = formatRadioPreviewText({
+          const previewText = formatBitchatPreviewText({
             content: ev.content,
             tags: ev.tags,
           })
@@ -1634,7 +1634,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
 
           const rawNick = getTagValue(ev.tags, 'n')
-          const previewSender = rawNick?.trim() || `anon${pk.slice(-4)}`
+          const previewSender = rawNick?.trim() || `agnon${pk.slice(-4)}`
 
           // Always keep pinned room activity previews up to date (including media-only
           // events and own same-key messages sent from another device)
@@ -2078,16 +2078,16 @@ export function useAgnostrEngine(): AgnostrEngine {
     [identityManager]
   )
 
-  const handleMergeSyncedRadioMessages = useCallback(
+  const handleMergeSyncedBitchatMessages = useCallback(
     (channelKey: string, incoming: GeoMessage[]): number => {
-      const gh = normalizeRadioChannelKey(channelKey)
+      const gh = normalizeBitchatChannelKey(channelKey)
       if (!gh || incoming.length === 0) return 0
 
       const validIncoming: GeoMessage[] = []
       for (const raw of incoming) {
         if (!raw || raw.isSystem || typeof raw.id !== 'string' || !raw.id) continue
         if (isStuckMediaPlaceholder(raw) || isEphemeralPendingMessage(raw)) continue
-        const msgKey = normalizeRadioChannelKey(raw.geohash)
+        const msgKey = normalizeBitchatChannelKey(raw.geohash)
         if (msgKey !== gh) continue
         const pk = (raw.pubkey || '').toLowerCase()
         if (!/^[0-9a-f]{64}$/.test(pk)) continue
@@ -2110,12 +2110,12 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (toAdd.length === 0) return null
           addedCount = toAdd.length
           return backfillReplyReferences(
-            sortChannelMessagesWithPending([...prev, ...toAdd], 'pending-radio-')
+            sortChannelMessagesWithPending([...prev, ...toAdd], 'pending-bitchat-')
           )
         },
         { persist: true, allowBackgroundPersist: true }
       )
-      const sortedSynced = sortChannelMessagesWithPending(validIncoming, 'pending-radio-')
+      const sortedSynced = sortChannelMessagesWithPending(validIncoming, 'pending-bitchat-')
       const latestSynced = extractLatestVisiblePreview(
         sortedSynced,
         blockedSetRef.current,
@@ -2204,7 +2204,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     peerNotes,
     dmThreads,
     activeGeohash,
-    activeRadioMessages: messages,
+    activeBitchatMessages: messages,
     activeServerMessages: serversEngine.messages,
     initialHealCheckpoint: (bootScrubbedCountRef.current ?? 0) > 0,
     onApplyServers: applySyncedJoinedServers,
@@ -2218,7 +2218,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     onApplyDmPeerNames: handleApplySyncedDmPeerNames,
     onMergeDmMessages: mergeSyncedDmMessages,
     onMergeServerMessages: mergeSyncedServerMessages,
-    onMergeRadioMessages: handleMergeSyncedRadioMessages,
+    onMergeBitchatMessages: handleMergeSyncedBitchatMessages,
   })
 
   useLayoutEffect(() => {
@@ -2313,7 +2313,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const markChannelRead = useCallback((geohash?: string) => {
     const raw = geohash ?? activeGeohash
-    const target = normalizeRadioChannelKey(raw) ?? normalizeGeohash(raw)
+    const target = normalizeBitchatChannelKey(raw) ?? normalizeGeohash(raw)
     setUnreadDividerId(null)
     clearGeoUnread(target)
   }, [activeGeohash, clearGeoUnread])
@@ -2331,8 +2331,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     clearGeoUnread(channelKey)
   }, [clearGeoUnread])
 
-  const tuneRadioChannel = useCallback((channelKeyOrInput: string): boolean => {
-    const direct = normalizeRadioChannelKey(channelKeyOrInput)
+  const tuneBitchatChannel = useCallback((channelKeyOrInput: string): boolean => {
+    const direct = normalizeBitchatChannelKey(channelKeyOrInput)
     if (direct) {
       applyTunedChannel(direct)
       return true
@@ -2341,7 +2341,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     if (!resolved) {
       pushToast(
         'warning',
-        'Invalid radio channel',
+        'Invalid Bitchat channel',
         `"${channelKeyOrInput}" is not a valid geohash, city, or topic name.`
       )
       return false
@@ -2365,8 +2365,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   }, [applyTunedChannel, pushToast])
 
   const tuneGeohash = useCallback((geohashOrCity: string): boolean => {
-    return tuneRadioChannel(geohashOrCity)
-  }, [tuneRadioChannel])
+    return tuneBitchatChannel(geohashOrCity)
+  }, [tuneBitchatChannel])
 
   const locateMe = useCallback(async (): Promise<string | null> => {
     const gh = await rawLocateMe()
@@ -2381,7 +2381,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const isChannelPinned = useCallback(
     (geohash: string) => {
-      const key = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+      const key = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
       return pinnedChannels.some((p) => p.geohash === key)
     },
     [pinnedChannels]
@@ -2389,7 +2389,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const togglePinChannel = useCallback(
     (geohash: string, label?: string) => {
-      const gh = normalizeRadioChannelKey(geohash)
+      const gh = normalizeBitchatChannelKey(geohash)
       if (!gh) return
       setPinnedChannels((prev) => {
         const exists = prev.some((p) => p.geohash === gh)
@@ -2441,7 +2441,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     [ensureThread]
   )
 
-  // Publish public radio message (kind 20000 geohash or kind 23333 topic + optional NIP-13 PoW)
+  // Publish public Bitchat message (kind 20000 geohash or kind 23333 topic + optional NIP-13 PoW)
   const sendPublicContent = useCallback(
     async (
       rawText: string,
@@ -2473,7 +2473,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         }
       }
 
-      const tempId = `pending-radio-${Date.now()}-${++optimisticRadioSeqRef.current}`
+      const tempId = `pending-bitchat-${Date.now()}-${++optimisticBitchatSeqRef.current}`
       const nowSec = Math.floor(Date.now() / 1000)
       const activePk = activeKey.pubkey.toLowerCase()
       const optimisticBase: GeoMessage = {
@@ -2514,7 +2514,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         },
         { allowBackgroundPersist: true }
       )
-      const optimisticPreview = formatRadioPreviewText({ content })
+      const optimisticPreview = formatBitchatPreviewText({ content })
       if (optimisticPreview) {
         upsertChannelPreview(
           gh,
@@ -2540,14 +2540,14 @@ export function useAgnostrEngine(): AgnostrEngine {
 
       adjustInFlightSend(1)
       try {
-        return await radioSendQueueRef.current.enqueue(
-          `radio:${gh}`,
+        return await bitchatSendQueueRef.current.enqueue(
+          `bitchat:${gh}`,
           async () => {
             if (identityManager.getWipeGeneration() !== wipeGen) return false
             let activeMsgId = tempId
             try {
               const template = isTopic
-                ? buildNamedRadioChatTemplate({
+                ? buildNamedBitchatChatTemplate({
                     content,
                     topic: gh,
                     nickname: nick,
@@ -2590,20 +2590,20 @@ export function useAgnostrEngine(): AgnostrEngine {
                   ? messagesRef.current.find((m) => m.id === id)
                   : undefined
               const parsed = isTopic
-                ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+                ? parseNamedBitchatChatEvent(signed, gh, ownPubkeysRef.current, findParent)
                 : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
 
               if (parsed) {
                 parsed.deliveryStatus = 'sending'
                 parsed.isOwn = true
                 // Atomically promote tempId -> signed.id into confirmed messages BEFORE publishing,
-                // keeping any remaining queued pending-radio-* placeholders pinned at the tail.
+                // keeping any remaining queued pending-bitchat-* placeholders pinned at the tail.
                 updateChannelMessages(
                   gh,
-                  (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-radio-'),
+                  (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-bitchat-'),
                   { allowBackgroundPersist: true }
                 )
-                const signedPreview = formatRadioPreviewText({
+                const signedPreview = formatBitchatPreviewText({
                   content: parsed.content,
                   hasImage: Boolean(parsed.imageAttachment),
                   hasVoice: Boolean(parsed.voiceMemo),
@@ -2757,7 +2757,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       const cleanEmoji = emoji.trim()
       if (!cleanEmoji) return
 
-      const gh = normalizeRadioChannelKey(message.geohash) ?? activeGeohashRef.current
+      const gh = normalizeBitchatChannelKey(message.geohash) ?? activeGeohashRef.current
       const targets = Array.from(new Set([...relaySelection.dmRelays, ...relaySelection.channelRelays]))
       const template = buildReactionTemplate({
         geohash: gh,
@@ -3035,7 +3035,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       }
       const pickRealName = (raw?: string | null): string | undefined => {
         const clean = raw?.trim().slice(0, 48)
-        return clean && !/^anon[0-9a-f]{4}$/i.test(clean) ? clean : undefined
+        return clean && !isAutoAnonNickname(clean) ? clean : undefined
       }
       const dmNick = dmThreads.find((t) => t.peerPubkey === pk)?.peerNickname
       const serverNick = serversEngine.members.find((m) => m.pubkey === pk)?.nickname
@@ -3099,7 +3099,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     const updates = new Map<string, string>()
     const pickReal = (raw?: string | null): string | null => {
       const clean = raw?.trim().slice(0, 48)
-      return clean && !/^anon[0-9a-f]{4}$/i.test(clean) ? clean : null
+      return clean && !isAutoAnonNickname(clean) ? clean : null
     }
     for (const entry of trustedPubkeys) {
       const currentReal = pickReal(entry.label)
@@ -3125,7 +3125,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     })
   }, [trustedPubkeys, dmThreads, serversEngine.members, presenceTracker])
 
-  // Upgrade active DM threads still showing generic `anonXXXX` from already-in-memory sources (zero extra storage)
+  // Upgrade active DM threads still showing generic `agnonXXXX` / `anonXXXX` from already-in-memory sources (zero extra storage)
   useEffect(() => {
     if (dmThreads.length === 0) return
     const resolved: Record<string, string> = {}
@@ -3159,7 +3159,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     applySyncedDmPeerNames,
   ])
 
-  // Lightweight, zero-extra-storage, once-per-session `kind: 0` fallback ONLY for active DM threads still showing `anonXXXX`
+  // Lightweight, zero-extra-storage, once-per-session `kind: 0` fallback ONLY for active DM threads still showing `agnonXXXX` / `anonXXXX`
   const queriedDmProfilePksRef = useRef<Set<string>>(new Set())
   const dmProfileLookupUnsubsRef = useRef<Set<() => void>>(new Set())
   const dmProfileUnmountedRef = useRef(false)
@@ -3458,8 +3458,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       adjustInFlightSend(1)
       beginMediaSend()
       try {
-        return await radioSendQueueRef.current.enqueue(
-          `radio:${gh}`,
+        return await bitchatSendQueueRef.current.enqueue(
+          `bitchat:${gh}`,
           async () => {
             if (identityManager.getWipeGeneration() !== wipeGen) {
               revokeVoicePreviewUrl(recorded)
@@ -3499,7 +3499,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               setVoiceSendPhase('signing')
               const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
               const template = isTopic
-                ? buildNamedRadioChatTemplate({
+                ? buildNamedBitchatChatTemplate({
                     content,
                     topic: gh,
                     nickname: nick,
@@ -3541,7 +3541,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                   ? messagesRef.current.find((m) => m.id === id)
                   : undefined
               const parsed = isTopic
-                ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+                ? parseNamedBitchatChatEvent(signed, gh, ownPubkeysRef.current, findParent)
                 : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
               if (parsed) {
                 parsed.deliveryStatus = 'sending'
@@ -3552,12 +3552,12 @@ export function useAgnostrEngine(): AgnostrEngine {
                     if (prev.some((m) => m.id === parsed.id)) return null
                     return sortChannelMessagesWithPending(
                       [...prev, parsed],
-                      'pending-radio-'
+                      'pending-bitchat-'
                     ).slice(-350)
                   },
                   { allowBackgroundPersist: true }
                 )
-                const signedVoicePreview = formatRadioPreviewText({
+                const signedVoicePreview = formatBitchatPreviewText({
                   content: parsed.content,
                   hasVoice: true,
                   mediaUrl: parsed.voiceMemo?.url ?? upload.url,
@@ -3751,7 +3751,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       hashes.add(callsEngine.activeCall.geohash)
     }
     for (const gh of hashes) {
-      if (isValidRadioChannelKey(gh)) {
+      if (isValidBitchatChannelKey(gh)) {
         set.add(identityManager.getDerivedGeohashKeyMaterial(gh).pubkey.toLowerCase())
       }
     }
@@ -3765,7 +3765,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     const seen = new Set<string>()
     const hashes = new Set<string>([activeGeohash, ...pinnedGeohashList])
     for (const gh of hashes) {
-      if (!isValidRadioChannelKey(gh)) continue
+      if (!isValidBitchatChannelKey(gh)) continue
       const derivedPk = identityManager.getDerivedGeohashKeyMaterial(gh).pubkey.toLowerCase()
       if (
         derivedPk === masterPk ||
@@ -3939,8 +3939,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       adjustInFlightSend(1)
       beginMediaSend()
       try {
-        return await radioSendQueueRef.current.enqueue(
-          `radio:${gh}`,
+        return await bitchatSendQueueRef.current.enqueue(
+          `bitchat:${gh}`,
           async () => {
             if (identityManager.getWipeGeneration() !== wipeGen) {
               revokeImagePreviewUrl(image)
@@ -3973,7 +3973,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               setVoiceSendPhase('signing')
               const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
               const template = isTopic
-                ? buildNamedRadioChatTemplate({
+                ? buildNamedBitchatChatTemplate({
                     content,
                     topic: gh,
                     nickname: nick,
@@ -4015,7 +4015,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                   ? messagesRef.current.find((m) => m.id === id)
                   : undefined
               const parsed = isTopic
-                ? parseNamedRadioChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+                ? parseNamedBitchatChatEvent(signed, gh, ownPubkeysRef.current, findParent)
                 : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
               if (parsed) {
                 parsed.deliveryStatus = 'sending'
@@ -4026,12 +4026,12 @@ export function useAgnostrEngine(): AgnostrEngine {
                     if (prev.some((m) => m.id === parsed.id)) return null
                     return sortChannelMessagesWithPending(
                       [...prev, parsed],
-                      'pending-radio-'
+                      'pending-bitchat-'
                     ).slice(-350)
                   },
                   { allowBackgroundPersist: true }
                 )
-                const signedImagePreview = formatRadioPreviewText({
+                const signedImagePreview = formatBitchatPreviewText({
                   content: parsed.content,
                   hasImage: true,
                   mediaUrl: parsed.imageAttachment?.url ?? upload.url,
@@ -4325,7 +4325,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     blockedSetRef.current = new Set()
     resetAllNotifications()
     resetAllTranscription()
-    radioSendQueueRef.current.clearAll()
+    bitchatSendQueueRef.current.clearAll()
     inFlightSendCountRef.current = 0
     inFlightMediaCountRef.current = 0
     setSending(false)
@@ -4573,7 +4573,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     recordRoomMessage,
   ])
 
-  // Watch visible public Radio & Server message event IDs for live NIP-57 (kind: 9735) zap receipts
+  // Watch visible public Bitchat & Server message event IDs for live NIP-57 (kind: 9735) zap receipts
   const watchZapEventIds = zapsEngine.watchEventIds
   useEffect(() => {
     const source =
@@ -4661,7 +4661,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     sendDirectMessage,
 
     tuneGeohash,
-    tuneRadioChannel,
+    tuneBitchatChannel,
     tuneTopicChannel,
     locateMe,
     sendInput,

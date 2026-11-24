@@ -201,7 +201,7 @@ async function showSwNotificationSafe(
   }
 }
 
-// 3. Web Push reception (DM calls, DMs, Server messages/calls, Geo Radio, call cancel)
+// 3. Web Push reception (DM calls, DMs, Group messages/calls, Bitchat, call cancel)
 swSelf.addEventListener('push', (event) => {
   const handlePush = async () => {
     let payload: IncomingPushPayload = {}
@@ -306,7 +306,7 @@ swSelf.addEventListener('push', (event) => {
         data.tag ||
         (data.geohash ? `agnostr-geocall-${data.geohash}` : 'agnostr-geocall')
       const options: ExtendedNotificationOptions = {
-        body: payload.body || 'A group call started in a Geo Radio channel',
+        body: payload.body || 'A group call started in a Bitchat channel',
         icon: APP_ICON,
         badge: APP_ICON,
         tag,
@@ -319,7 +319,7 @@ swSelf.addEventListener('push', (event) => {
         ],
         data: { ...data, tag },
       }
-      await showSwNotificationSafe(payload.title || 'Geo Radio Call Active', options)
+      await showSwNotificationSafe(payload.title || 'Bitchat Call Active', options)
       return
     }
 

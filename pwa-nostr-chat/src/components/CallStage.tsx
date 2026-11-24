@@ -34,7 +34,6 @@ import {
   PhoneOff,
   Pin,
   PinOff,
-  Radio,
   ShieldAlert,
   ShieldCheck,
   Smartphone,
@@ -45,6 +44,7 @@ import {
   Video,
   VideoOff,
   Volume2,
+  Waves,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
@@ -56,7 +56,7 @@ import {
   getRecordingQualitySpec,
 } from '../lib/callRecorder.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
-import { formatRadioChannelLabel, isTopicChannel } from '../lib/radioChannel.ts'
+import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { identiconDataUrl, pubkeyToColor } from '../utils/identicon.ts'
@@ -1163,7 +1163,7 @@ export function CallStage({
   const isGeoCall = activeCall.mode === 'geo'
   const isTopicCall = isGeoCall && isTopicChannel(activeCall.geohash ?? '')
   const isGroupCall = activeCall.mode === 'server' || isGeoCall
-  const geoTag = activeCall.geohash ? formatRadioChannelLabel(activeCall.geohash) : null
+  const geoTag = activeCall.geohash ? formatBitchatChannelLabel(activeCall.geohash) : null
 
   const handleReturnToCall = () => {
     onPlaySound?.('click')
@@ -1206,11 +1206,11 @@ export function CallStage({
                 title={`Return to ${geoTag ?? activeCall.title}`}
               >
                 <span className="ag-badge ag-badge-accent mono">
-                  {isTopicCall ? <Hash size={9} /> : <Radio size={9} />}
+                  {isTopicCall ? <Hash size={9} /> : <Waves size={9} />}
                   <span>{geoTag ?? activeCall.title}</span>
                 </span>
                 <span className="ag-badge ag-badge-muted ag-hide-xs">
-                  {isTopicCall ? 'Topic Radio · P2P' : 'Public Radio · P2P'}
+                  {isTopicCall ? 'Topic Bitchat · P2P' : 'Public Bitchat · P2P'}
                 </span>
               </button>
             ) : (
@@ -1248,7 +1248,7 @@ export function CallStage({
             )}
             {activeSpeaker && (
               <span className="ag-call-float-speaker truncate ag-hide-xs">
-                <Radio size={10} />
+                <Waves size={10} />
                 <span>{activeSpeaker.displayHandle}</span>
               </span>
             )}
@@ -1630,14 +1630,14 @@ export function CallStage({
           {isGeoCall ? (
             <>
               <span className="ag-badge ag-badge-accent mono">
-                {isTopicCall ? <Hash size={10} /> : <Radio size={10} />}
+                {isTopicCall ? <Hash size={10} /> : <Waves size={10} />}
                 <span>{geoTag ?? activeCall.title}</span>
               </span>
               <span className="ag-call-title truncate ag-hide-xs">
-                {isTopicCall ? 'Topic Radio' : 'Geo Radio'}
+                {isTopicCall ? 'Topic Bitchat' : 'Bitchat'}
               </span>
               <span className="ag-badge ag-badge-muted ag-hide-xs">
-                {isTopicCall ? 'Topic Radio · P2P' : 'Public Radio · P2P'}
+                {isTopicCall ? 'Topic Bitchat · P2P' : 'Public Bitchat · P2P'}
               </span>
             </>
           ) : (
@@ -1964,7 +1964,7 @@ export function CallStage({
                   {!hasDefaultOutputEntry && (
                     <button
                       type="button"
-                      role="menuitemradio"
+                      role="menuitemcheckbox"
                       aria-checked={calls.selectedAudioOutputId === ''}
                       className={`ag-call-audio-opt ${
                         calls.selectedAudioOutputId === '' ? 'selected' : ''
@@ -1994,7 +1994,7 @@ export function CallStage({
                       <button
                         key={dev.deviceId || `out-${idx}`}
                         type="button"
-                        role="menuitemradio"
+                        role="menuitemcheckbox"
                         aria-checked={selected}
                         className={`ag-call-audio-opt ${selected ? 'selected' : ''}`}
                         onClick={() => {
@@ -2060,7 +2060,7 @@ export function CallStage({
                       <button
                         key={dev.deviceId || `in-${idx}`}
                         type="button"
-                        role="menuitemradio"
+                        role="menuitemcheckbox"
                         aria-checked={selected}
                         disabled={switchingAudioInput}
                         className={`ag-call-audio-opt ${selected ? 'selected' : ''}`}
@@ -2255,14 +2255,14 @@ export function CallStage({
           onClick={handleLeave}
           aria-label={
             isGeoCall
-              ? 'Leave radio call'
+              ? 'Leave Bitchat call'
               : activeCall.mode === 'server'
                 ? 'Leave voice lounge'
                 : 'Hang up call'
           }
           title={
             isGeoCall
-              ? 'Leave radio call'
+              ? 'Leave Bitchat call'
               : activeCall.mode === 'server'
                 ? 'Leave voice lounge'
                 : 'Hang up call'

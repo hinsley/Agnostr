@@ -27,10 +27,10 @@ import { useMobileViewport } from './hooks/useMobileViewport'
 import { usePwa } from './hooks/usePwa'
 import { doesContentMentionUser } from './lib/bitchatProtocol'
 import {
-  formatRadioChannelLabel,
+  formatBitchatChannelLabel,
   parseQuickTuneInput,
-  parseRadioChannelHash,
-} from './lib/radioChannel'
+  parseBitchatChannelHash,
+} from './lib/bitchatChannel'
 import {
   clearLocationDmHash,
   extractPendingDmFromLocation,
@@ -39,7 +39,7 @@ import {
 import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
 import type { ServerMessage, ServerSummary } from './types/servers'
 import type { WalletInitialIntent, ZapTarget } from './types/wallet'
-import { radioAudio, type SoundCue } from './utils/sound'
+import { bitchatAudio, type SoundCue } from './utils/sound'
 import { identiconDataUrl, shortPubkey } from './utils/identicon'
 import AppRail, { type ActiveWorkspace } from './components/AppRail'
 import ConversationList, { type ListTab } from './components/ConversationList'
@@ -101,7 +101,7 @@ export function App() {
   const engine = useAgnostrEngine()
 
   const [workspace, setWorkspace] = useState<ActiveWorkspace>('chat')
-  const [listTab, setListTab] = useState<ListTab>('radio')
+  const [listTab, setListTab] = useState<ListTab>('bitchat')
   const [selectedServerId, setSelectedServerId] = useState<string | null>(
     () => engine.servers.activeServer?.id ?? engine.servers.joinedServers[0]?.id ?? null
   )
@@ -267,7 +267,7 @@ export function App() {
   const activeChannel = engine.servers.activeChannel
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
 
-  // Total unread count across DMs, Servers, Geo Radio rooms, and Amail for PWA App Badge
+  // Total unread count across DMs, Servers, Bitchat rooms, and Amail for PWA App Badge
   const totalUnreadBadge = useMemo(() => {
     return (
       engine.totalDmUnread +
@@ -326,7 +326,7 @@ export function App() {
     setRoomInfoOpen(false)
     if (activeCall.mode === 'geo' && activeCall.geohash) {
       engine.tuneGeohash(activeCall.geohash)
-      setListTab('radio')
+      setListTab('bitchat')
       setMobileScreen('chat')
     } else if (activeCall.mode === 'server' && activeCall.serverId) {
       engine.servers.selectServer(activeCall.serverId)
@@ -387,7 +387,7 @@ export function App() {
           payload.geohash
         ) {
           engine.tuneGeohash(payload.geohash)
-          setListTab('radio')
+          setListTab('bitchat')
           setMobileScreen('chat')
         } else if (payload.category === 'test') {
           setSettingsState({ open: true, tab: 'notifications' })
@@ -400,7 +400,7 @@ export function App() {
       return
     }
 
-    // Handle Geo Radio call notification Accept / Decline actions immediately
+    // Handle Bitchat call notification Accept / Decline actions immediately
     if (payload.category === 'geo-call' && payload.geohash) {
       if (action === 'answer' || action === 'answer-audio') {
         const media = action === 'answer-audio' ? 'audio' : (payload.mediaType ?? 'audio')
@@ -421,7 +421,7 @@ export function App() {
 
     if (callMatches && incomingCall) {
       if (action === 'decline') {
-        radioAudio.play('call-leave')
+        bitchatAudio.play('call-leave')
         engine.calls.declineIncomingCall()
       } else if (action === 'answer-audio') {
         void engine.calls.acceptIncomingCall('audio')
@@ -450,9 +450,9 @@ export function App() {
     const prev = prevActiveCallIdRef.current
     prevActiveCallIdRef.current = activeCallId
     if (!prev && activeCallId) {
-      radioAudio.play('call-join')
+      bitchatAudio.play('call-join')
     } else if (prev && !activeCallId) {
-      radioAudio.play('call-leave')
+      bitchatAudio.play('call-leave')
       setCallExpanded(false)
     }
   }, [activeCallId])
@@ -470,9 +470,9 @@ export function App() {
     prevRecRef.current = { callId: activeCallId, count: recordingCount }
     if (!activeCallId || prev.callId !== activeCallId) return
     if (recordingCount > prev.count) {
-      radioAudio.play('rec-start')
+      bitchatAudio.play('rec-start')
     } else if (recordingCount < prev.count) {
-      radioAudio.play('rec-stop')
+      bitchatAudio.play('rec-stop')
     }
   }, [activeCallId, recordingCount])
 
@@ -501,7 +501,7 @@ export function App() {
 
   // Sync audio synthesizer enabled state
   useEffect(() => {
-    radioAudio.setEnabled(engine.settings.soundEnabled)
+    bitchatAudio.setEnabled(engine.settings.soundEnabled)
   }, [engine.settings.soundEnabled])
 
   // Sync dynamic document title with active workspace, channel, DM, or Server channel
@@ -522,7 +522,7 @@ export function App() {
     ) {
       document.title = `${unreadPrefix}#${engine.servers.activeChannel.name} · ${engine.servers.activeServer.name} · Agnostr`
     } else {
-      document.title = `${unreadPrefix}${formatRadioChannelLabel(engine.activeGeohash)} · Agnostr`
+      document.title = `${unreadPrefix}${formatBitchatChannelLabel(engine.activeGeohash)} · Agnostr`
     }
   }, [
     workspace,
@@ -559,7 +559,7 @@ export function App() {
         engine.identity.nickname,
         engine.identity.activePubkey
       )
-      radioAudio.play(mentionsUs ? 'mention' : 'receive')
+      bitchatAudio.play(mentionsUs ? 'mention' : 'receive')
     }
   }, [engine.messages, engine.activeGeohash, engine.identity.nickname, engine.identity.activePubkey])
 
@@ -588,7 +588,7 @@ export function App() {
         engine.identity.nickname,
         engine.identity.masterPubkey
       )
-      radioAudio.play(mentionsUs ? 'mention' : 'receive')
+      bitchatAudio.play(mentionsUs ? 'mention' : 'receive')
     }
   }, [
     engine.servers.messages,
@@ -601,7 +601,7 @@ export function App() {
   const prevDmUnreadRef = useRef(engine.totalDmUnread)
   useEffect(() => {
     if (engine.totalDmUnread > prevDmUnreadRef.current) {
-      radioAudio.play('dm')
+      bitchatAudio.play('dm')
     }
     prevDmUnreadRef.current = engine.totalDmUnread
   }, [engine.totalDmUnread])
@@ -800,7 +800,7 @@ export function App() {
   ])
 
   const playSound = useCallback((cue: SoundCue) => {
-    radioAudio.play(cue)
+    bitchatAudio.play(cue)
   }, [])
 
   const closeAmail = useCallback(() => {
@@ -840,7 +840,7 @@ export function App() {
       setWorkspace('chat')
       setListTab(tab)
       setSidebarCollapsed(false)
-      if (tab === 'radio' && engine.activeView.type !== 'channel') {
+      if (tab === 'bitchat' && engine.activeView.type !== 'channel') {
         engine.tuneGeohash(engine.activeGeohash)
       }
     },
@@ -850,7 +850,7 @@ export function App() {
   const handleSelectServer = useCallback(
     (serverId: string) => {
       engine.servers.selectServer(serverId)
-      radioAudio.play('tune')
+      bitchatAudio.play('tune')
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setMobileUserListOpen(false)
@@ -906,7 +906,7 @@ export function App() {
   }, [])
 
   const handleToggleUserList = useCallback(() => {
-    radioAudio.play('click')
+    bitchatAudio.play('click')
     if (isMobileViewport) {
       setMobileUserListOpen((open) => {
         if (!open) {
@@ -977,7 +977,7 @@ export function App() {
   const handleMobileBack = useCallback(() => {
     if (engine.activeView.type === 'dm') setListTab('dms')
     else if (engine.activeView.type === 'server') setListTab('servers')
-    else setListTab('radio')
+    else setListTab('bitchat')
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setMobileScreen('list')
@@ -996,12 +996,12 @@ export function App() {
   }, [])
 
   const handleMobileSelectMail = useCallback(() => {
-    radioAudio.play('click')
+    bitchatAudio.play('click')
     handleOpenAmail('inbox')
   }, [handleOpenAmail])
 
   const handleMobileSelectWallet = useCallback(() => {
-    radioAudio.play('click')
+    bitchatAudio.play('click')
     setZapTarget(null)
     setInspectedPeer(null)
     setAmailState({ section: 'inbox', composeTo: null })
@@ -1198,7 +1198,7 @@ export function App() {
         ? 'dms'
         : isServer
           ? 'servers'
-          : 'radio'
+          : 'bitchat'
       : listTab
 
   const handleTuneChannel = useCallback(
@@ -1206,11 +1206,11 @@ export function App() {
       const resolved = parseQuickTuneInput(channelInput, 'geo')
       const ok = engine.tuneGeohash(resolved?.key ?? channelInput)
       if (ok) {
-        radioAudio.play('tune')
+        bitchatAudio.play('tune')
         setWorkspace('chat')
         setAmailState({ section: 'inbox', composeTo: null })
         setWalletIntent(undefined)
-        setListTab('radio')
+        setListTab('bitchat')
         setMobileScreen('chat')
         setMobileUserListOpen(false)
         setRoomInfoOpen(false)
@@ -1224,7 +1224,7 @@ export function App() {
   const handleSelectServerChannel = useCallback(
     (serverId: string, channelId: string) => {
       engine.servers.selectChannel(serverId, channelId)
-      radioAudio.play('tune')
+      bitchatAudio.play('tune')
       setWorkspace('chat')
       setSelectedServerId(serverId)
       setAmailState({ section: 'inbox', composeTo: null })
@@ -1296,7 +1296,7 @@ export function App() {
     if (isServer && activeServer && activeChannel) {
       return `${activeServer.name} · #${activeChannel.name}`
     }
-    return formatRadioChannelLabel(engine.activeGeohash)
+    return formatBitchatChannelLabel(engine.activeGeohash)
   }, [isDm, engine.activeDmThread, isServer, activeServer, activeChannel, engine.activeGeohash])
 
   const handleSendCashuToChat = useCallback(
@@ -1319,7 +1319,7 @@ export function App() {
         ok = await engine.sendInput(body)
       }
       if (ok) {
-        radioAudio.play(isDm || isServerE2ee ? 'dm' : 'send')
+        bitchatAudio.play(isDm || isServerE2ee ? 'dm' : 'send')
         setWalletIntent(undefined)
         setWorkspace('chat')
         setMobileScreen('chat')
@@ -1368,7 +1368,7 @@ export function App() {
             section: 'compose',
             composeTo: { pubkey: target.pubkey, nickname: target.nickname },
           })
-          radioAudio.play('tune')
+          bitchatAudio.play('tune')
           engine.pushToast(
             'success',
             `Ready to Agmail ${target.nickname || `${target.npub.slice(0, 12)}…`}`
@@ -1385,7 +1385,7 @@ export function App() {
         setRoomInfoOpen(false)
         setInspectedPeer(null)
         engine.openDmThread(target.pubkey, target.nickname)
-        radioAudio.play('tune')
+        bitchatAudio.play('tune')
         setListTab('dms')
         setMobileScreen('chat')
         engine.pushToast(
@@ -1414,7 +1414,7 @@ export function App() {
       setRoomInfoOpen(false)
       void engine.servers.joinFromInvite(parsed).then((joined) => {
         if (joined) {
-          radioAudio.play('tune')
+          bitchatAudio.play('tune')
           handleJoinedServer(joined)
         }
       })
@@ -1442,8 +1442,8 @@ export function App() {
 
   // Navigate mobile shell cleanly to chat when a `#topic=<slug>` deep link is clicked in-app
   useEffect(() => {
-    const onRadioHash = () => {
-      const key = parseRadioChannelHash(window.location.hash)
+    const onBitchatHash = () => {
+      const key = parseBitchatChannelHash(window.location.hash)
       if (!key) return
       setWorkspace('chat')
       setAmailState({ section: 'inbox', composeTo: null })
@@ -1452,11 +1452,11 @@ export function App() {
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setMobileUserListOpen(false)
       setRoomInfoOpen(false)
-      setListTab('radio')
+      setListTab('bitchat')
       setMobileScreen('chat')
     }
-    window.addEventListener('hashchange', onRadioHash)
-    return () => window.removeEventListener('hashchange', onRadioHash)
+    window.addEventListener('hashchange', onBitchatHash)
+    return () => window.removeEventListener('hashchange', onBitchatHash)
   }, [])
 
   const handleLeftServer = useCallback(() => {
@@ -1465,13 +1465,13 @@ export function App() {
     setRoomInfoOpen(false)
     setWorkspace('chat')
     engine.tuneGeohash(engine.activeGeohash)
-    setListTab('radio')
+    setListTab('bitchat')
   }, [engine])
 
   const handleOpenDm = useCallback(
     (pubkey: string, nickname?: string) => {
       engine.openDmThread(pubkey, nickname)
-      radioAudio.play('click')
+      bitchatAudio.play('click')
       setWorkspace('chat')
       setAmailState({ section: 'inbox', composeTo: null })
       setWalletIntent(undefined)
@@ -1512,7 +1512,7 @@ export function App() {
       engine.activeView.type === 'dm' &&
       engine.activeView.peerPubkey.toLowerCase() === targetPk
     setPendingDeleteDm(null)
-    radioAudio.play('click')
+    bitchatAudio.play('click')
     engine.closeDmThread(pubkey)
     if (wasActiveDm) {
       setMobileUserListOpen(false)
@@ -1535,7 +1535,7 @@ export function App() {
   const handleSavePeerNote = useCallback(() => {
     if (!noteEditorPeer) return
     engine.setPeerNote(noteEditorPeer.pubkey, noteDraft)
-    radioAudio.play('click')
+    bitchatAudio.play('click')
     setNoteEditorPeer(null)
   }, [noteEditorPeer, noteDraft, engine])
 
@@ -1543,7 +1543,7 @@ export function App() {
     if (!noteEditorPeer) return
     engine.setPeerNote(noteEditorPeer.pubkey, '')
     setNoteDraft('')
-    radioAudio.play('click')
+    bitchatAudio.play('click')
     setNoteEditorPeer(null)
   }, [noteEditorPeer, engine])
 
@@ -1638,15 +1638,15 @@ export function App() {
     setRadarExpanded(true)
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
-    radioAudio.play('click')
+    bitchatAudio.play('click')
   }, [])
 
   const handleOpenInstall = useCallback(() => {
-    radioAudio.play('click')
+    bitchatAudio.play('click')
     if (pwa.canPromptInstall) {
       void pwa.promptInstall().then((outcome) => {
         if (outcome === 'accepted') {
-          radioAudio.play('tune')
+          bitchatAudio.play('tune')
           pushToast('success', 'Agnostr installed', 'Launch anytime from your home screen or dock.')
         } else if (outcome === 'unavailable') {
           setInstallModalOpen(true)
@@ -1660,18 +1660,18 @@ export function App() {
   const handleToggleSound = useCallback(() => {
     const next = !engine.settings.soundEnabled
     engine.updateSettings({ soundEnabled: next })
-    radioAudio.setEnabled(next)
+    bitchatAudio.setEnabled(next)
     if (next) {
-      radioAudio.play('tune', true)
+      bitchatAudio.play('tune', true)
     }
   }, [engine])
 
   const handleLocateMe = useCallback(async () => {
     const found = await engine.locateMe()
     if (found) {
-      radioAudio.play('tune')
+      bitchatAudio.play('tune')
       setWorkspace('chat')
-      setListTab('radio')
+      setListTab('bitchat')
       setMobileScreen('chat')
     }
   }, [engine])
@@ -1686,7 +1686,7 @@ export function App() {
 
   const handleReact = useCallback(
     (msg: GeoMessage, emoji: string) => {
-      radioAudio.play('click')
+      bitchatAudio.play('click')
       void engine.sendReaction(msg, emoji)
     },
     [engine]
@@ -1702,7 +1702,7 @@ export function App() {
 
   const handleReactServer = useCallback(
     (msg: ServerMessage, emoji: string) => {
-      radioAudio.play('click')
+      bitchatAudio.play('click')
       void engine.servers.sendReaction(msg, emoji)
     },
     [engine.servers]
@@ -2004,7 +2004,7 @@ export function App() {
                 </Suspense>
               )}
 
-              {/* Live Geo Radio Group Call Join Banner (shown when peers are in this room's call) */}
+              {/* Live Bitchat Group Call Join Banner (shown when peers are in this room's call) */}
               {showGeoCallJoinBanner && (
                 <div className="ag-geo-call-banner" role="region" aria-label="Active room call">
                   <div className="ag-geo-call-banner-left">
@@ -2031,7 +2031,7 @@ export function App() {
                       title={
                         isActiveGeoCallFull
                           ? `Call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
-                          : `Join ${formatRadioChannelLabel(engine.activeGeohash)} voice call`
+                          : `Join ${formatBitchatChannelLabel(engine.activeGeohash)} voice call`
                       }
                     >
                       <Phone size={13} />
@@ -2042,8 +2042,8 @@ export function App() {
                         type="button"
                         className="ag-geo-call-join-btn"
                         onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'video')}
-                        title={`Join ${formatRadioChannelLabel(engine.activeGeohash)} video call`}
-                        aria-label={`Join ${formatRadioChannelLabel(engine.activeGeohash)} video call`}
+                        title={`Join ${formatBitchatChannelLabel(engine.activeGeohash)} video call`}
+                        aria-label={`Join ${formatBitchatChannelLabel(engine.activeGeohash)} video call`}
                       >
                         <Video size={13} />
                         <span>Video</span>
@@ -2101,7 +2101,7 @@ export function App() {
               <Composer
                 engine={engine}
                 externalDraftToken={externalDraftToken}
-                onSent={(isEncrypted) => radioAudio.play(isEncrypted ? 'dm' : 'send')}
+                onSent={(isEncrypted) => bitchatAudio.play(isEncrypted ? 'dm' : 'send')}
               />
             </main>
 
@@ -2216,8 +2216,8 @@ export function App() {
       <MobileTabBar
         workspace={workspace}
         activeTab={mobileNavActiveTab}
-        radioUnread={engine.totalGeoUnread}
-        radioMentions={engine.totalGeoMentions}
+        bitchatUnread={engine.totalGeoUnread}
+        bitchatMentions={engine.totalGeoMentions}
         dmUnread={engine.totalDmUnread}
         serverUnread={engine.servers.totalServerUnread}
         serverMentions={engine.servers.totalServerMentions}
@@ -2406,7 +2406,7 @@ export function App() {
             void engine.calls.acceptIncomingCall('video')
           }}
           onDecline={() => {
-            radioAudio.play('call-leave')
+            bitchatAudio.play('call-leave')
             engine.calls.declineIncomingCall()
           }}
         />

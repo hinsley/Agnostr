@@ -1,6 +1,6 @@
 export const MAX_CALL_PARTICIPANTS = 6
 export const DEFAULT_SERVER_VOICE_ROOM_ID = 'lounge'
-export const DEFAULT_GEO_VOICE_ROOM_ID = 'radio'
+export const DEFAULT_GEO_VOICE_ROOM_ID = 'bitchat'
 
 export type CallMode = 'dm' | 'server' | 'geo'
 
@@ -125,7 +125,7 @@ export interface CallEngine {
   isOutgoingDmRinging: boolean
   /** Map of serverId -> active participants in that server's Voice & Video Lounge */
   serverCallRosters: Record<string, RoomCallPresence[]>
-  /** Map of normalized geohash -> active participants in that Geo Radio channel's group call */
+  /** Map of normalized geohash -> active participants in that Bitchat channel's group call */
   geoCallRosters: Record<string, GeoCallPresence[]>
   maxParticipants: number
   recordingQuality: RecordingQualityPreset

@@ -29,7 +29,6 @@ import {
   PhoneCall,
   Plus,
   QrCode,
-  Radio,
   RefreshCw,
   RotateCcw,
   Server,
@@ -42,6 +41,7 @@ import {
   Volume2,
   VolumeX,
   Wallet,
+  Waves,
   X,
   Zap,
 } from 'lucide-react'
@@ -68,7 +68,7 @@ import {
 import { DEFAULT_TRANSCRIPTION_MODEL_ID } from '../lib/transcriptionModels.ts'
 import { DEFAULT_PUSH_BRIDGE_URL, DEFAULT_VAPID_PUBLIC_KEY } from '../lib/storage.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
-import { radioAudio, type SoundCue } from '../utils/sound.ts'
+import { bitchatAudio, type SoundCue } from '../utils/sound.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 import type { QrShareTarget } from './QrShareModal.tsx'
 
@@ -1017,7 +1017,7 @@ export function SettingsModal({
             className="ag-input"
             value={nickDraft}
             onChange={(e) => setNickDraft(e.target.value)}
-            placeholder="anon"
+            placeholder="agnon"
           />
           <button
             type="submit"
@@ -1756,15 +1756,14 @@ export function SettingsModal({
               </div>
               <div
                 className="ag-segmented ag-set-notif-seg"
-                role="radiogroup"
+                role="group"
                 aria-label="Group message notifications"
               >
                 {NOTIF_FILTER_MODES.map((mode) => (
                   <button
                     key={mode.id}
                     type="button"
-                    role="radio"
-                    aria-checked={ns.serverMessages === mode.id}
+                    aria-pressed={ns.serverMessages === mode.id}
                     className={ns.serverMessages === mode.id ? 'active' : ''}
                     onClick={() => {
                       notif.updateSettings({ serverMessages: mode.id })
@@ -1781,7 +1780,7 @@ export function SettingsModal({
               <div className="ag-set-notif-row-copy">
                 <span className="ag-set-notif-row-title">Room &amp; Group Calls</span>
                 <span className="ag-set-notif-row-desc">
-                  Alert when peers start a group call in a Group channel or Geo Radio room
+                  Alert when peers start a group call in a Group channel or Bitchat room
                 </span>
               </div>
               <input
@@ -1797,22 +1796,21 @@ export function SettingsModal({
 
             <div className="ag-set-notif-seg-row">
               <div className="ag-set-notif-row-copy">
-                <span className="ag-set-notif-row-title">Geo Radio</span>
+                <span className="ag-set-notif-row-title">Bitchat</span>
                 <span className="ag-set-notif-row-desc">
-                  Messages in your tuned radio channel (default: Pings only)
+                  Messages in your tuned Bitchat channel (default: Pings only)
                 </span>
               </div>
               <div
                 className="ag-segmented ag-set-notif-seg"
-                role="radiogroup"
-                aria-label="Geo radio notifications"
+                role="group"
+                aria-label="Bitchat notifications"
               >
                 {NOTIF_FILTER_MODES.map((mode) => (
                   <button
                     key={mode.id}
                     type="button"
-                    role="radio"
-                    aria-checked={ns.geoMessages === mode.id}
+                    aria-pressed={ns.geoMessages === mode.id}
                     className={ns.geoMessages === mode.id ? 'active' : ''}
                     onClick={() => {
                       notif.updateSettings({ geoMessages: mode.id })
@@ -2133,7 +2131,7 @@ export function SettingsModal({
       <label className="ag-set-toggle-card">
         <div className="ag-set-toggle-copy">
           <span className="ag-set-toggle-title">
-            <Radio size={16} />
+            <Waves size={16} />
             <span>Broadcast Agnostr client</span>
           </span>
           <span className="ag-set-toggle-desc">
@@ -2596,16 +2594,15 @@ export function SettingsModal({
               </div>
               <div
                 className="ag-segmented"
-                role="radiogroup"
+                role="group"
                 aria-label="Incoming images and media filter scope"
               >
                 {MEDIA_SCOPE_OPTIONS.map((opt) => (
                   <button
                     key={opt.id}
                     type="button"
-                    role="radio"
                     disabled={!cfs.enabled}
-                    aria-checked={cfs.mediaScope === opt.id}
+                    aria-pressed={cfs.mediaScope === opt.id}
                     className={cfs.mediaScope === opt.id ? 'active' : ''}
                     onClick={() => {
                       onPlaySound?.('click')
@@ -2629,16 +2626,15 @@ export function SettingsModal({
               </div>
               <div
                 className="ag-segmented"
-                role="radiogroup"
+                role="group"
                 aria-label="Call video feed screening mode"
               >
                 {CALL_VIDEO_MODE_OPTIONS.map((opt) => (
                   <button
                     key={opt.id}
                     type="button"
-                    role="radio"
                     disabled={!cfs.enabled}
-                    aria-checked={cfs.callVideoMode === opt.id}
+                    aria-pressed={cfs.callVideoMode === opt.id}
                     className={cfs.callVideoMode === opt.id ? 'active' : ''}
                     onClick={() => {
                       cf.updateSettings({ callVideoMode: opt.id })
@@ -2925,7 +2921,7 @@ export function SettingsModal({
           </div>
           <div
             className="ag-segmented"
-            role="radiogroup"
+            role="group"
             aria-label="Translation model"
             style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}
           >
@@ -2936,9 +2932,8 @@ export function SettingsModal({
                 <button
                   key={key}
                   type="button"
-                  role="radio"
                   disabled={isDownloading}
-                  aria-checked={active}
+                  aria-pressed={active}
                   className={active ? 'active' : ''}
                   style={{ minWidth: 0, lineHeight: 1.25, textAlign: 'center' }}
                   onClick={() => {
@@ -3122,15 +3117,14 @@ export function SettingsModal({
     <div className="ag-set-pane-stack">
       <div className="ag-set-group">
         <span className="ag-set-label">Theme</span>
-        <div className="ag-set-theme-grid" role="radiogroup" aria-label="Choose color theme">
+        <div className="ag-set-theme-grid" role="group" aria-label="Choose color theme">
           {THEME_CARDS.map((t) => {
             const active = settings.theme === t.id
             return (
               <button
                 key={t.id}
                 type="button"
-                role="radio"
-                aria-checked={active}
+                aria-pressed={active}
                 className={`ag-set-theme-card ${active ? 'active' : ''}`}
                 onClick={() => {
                   engine.setTheme(t.id)
@@ -3179,9 +3173,9 @@ export function SettingsModal({
           onChange={() => {
             const next = !settings.soundEnabled
             engine.updateSettings({ soundEnabled: next })
-            radioAudio.setEnabled(next)
+            bitchatAudio.setEnabled(next)
             if (next) {
-              radioAudio.play('tune', true)
+              bitchatAudio.play('tune', true)
             }
           }}
         />
@@ -3224,7 +3218,7 @@ export function SettingsModal({
 
           <div
             className="ag-segmented ag-rec-quality-seg"
-            role="radiogroup"
+            role="group"
             aria-label="Call recording quality preset"
           >
             {RECORDING_QUALITY_PRESETS.map((preset) => {
@@ -3233,8 +3227,7 @@ export function SettingsModal({
                 <button
                   key={preset.id}
                   type="button"
-                  role="radio"
-                  aria-checked={active}
+                  aria-pressed={active}
                   className={active ? 'active' : ''}
                   onClick={() => {
                     engine.calls.setRecordingQuality(preset.id)
@@ -3287,7 +3280,7 @@ export function SettingsModal({
 
           <div
             className="ag-set-model-list"
-            role="radiogroup"
+            role="group"
             aria-label="Local speech transcription model"
           >
             {transcription.models.map((model) => {
@@ -3301,8 +3294,7 @@ export function SettingsModal({
                 >
                   <button
                     type="button"
-                    role="radio"
-                    aria-checked={selected}
+                    aria-pressed={selected}
                     className="ag-set-model-main"
                     onClick={() => {
                       transcription.setActiveModelId(model.id)
@@ -3310,7 +3302,7 @@ export function SettingsModal({
                       onPlaySound?.('click')
                     }}
                   >
-                    <span className={`ag-set-model-radio ${selected ? 'checked' : ''}`}>
+                    <span className={`ag-set-model-choice ${selected ? 'checked' : ''}`}>
                       {selected && <Check size={11} />}
                     </span>
                     <span className="ag-set-model-copy">

@@ -37,7 +37,6 @@ import {
   PenSquare,
   Plus,
   QrCode,
-  Radio,
   RefreshCw,
   Reply,
   ReplyAll,
@@ -49,6 +48,7 @@ import {
   Trash2,
   UserPlus,
   Users,
+  Waves,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol.ts'
@@ -443,7 +443,7 @@ function renderStatusIcon(status: AmailDeliveryStatus) {
     case 'relayed':
       return (
         <span className="ag-amail-receipt relayed" aria-label="Relayed">
-          <Radio size={12} />
+          <Waves size={12} />
         </span>
       )
     case 'expired':
@@ -2980,13 +2980,12 @@ export function AmailView({
 
           <div className="ag-amail-ttl-group">
             <span className="ag-amail-ttl-label">Expires</span>
-            <div className="ag-amail-seg" role="radiogroup" aria-label="Message lifetime">
+            <div className="ag-amail-seg" role="group" aria-label="Message lifetime">
               {TTL_OPTIONS.map((opt) => (
                 <button
                   key={opt.sec}
                   type="button"
-                  role="radio"
-                  aria-checked={composeTtlSec === opt.sec}
+                  aria-pressed={composeTtlSec === opt.sec}
                   className={composeTtlSec === opt.sec ? 'active' : ''}
                   onClick={() => setComposeTtlSec(opt.sec)}
                 >
@@ -3262,13 +3261,12 @@ export function AmailView({
 
           <div className="ag-amail-setting-row stack">
             <span className="ag-amail-setting-title">Vault limit</span>
-            <div className="ag-amail-seg wide" role="radiogroup" aria-label="Max relay vault size">
+            <div className="ag-amail-seg wide" role="group" aria-label="Max relay vault size">
               {VAULT_SIZE_OPTIONS.map((opt) => (
                 <button
                   key={opt.bytes}
                   type="button"
-                  role="radio"
-                  aria-checked={st.maxVaultBytes === opt.bytes}
+                  aria-pressed={st.maxVaultBytes === opt.bytes}
                   className={st.maxVaultBytes === opt.bytes ? 'active' : ''}
                   onClick={() => {
                     onPlaySound?.('click')
@@ -3283,13 +3281,12 @@ export function AmailView({
 
           <div className="ag-amail-setting-row stack">
             <span className="ag-amail-setting-title">Max hops</span>
-            <div className="ag-amail-seg wide" role="radiogroup" aria-label="Max relay hops">
+            <div className="ag-amail-seg wide" role="group" aria-label="Max relay hops">
               {MAX_HOPS_OPTIONS.map((h) => (
                 <button
                   key={h}
                   type="button"
-                  role="radio"
-                  aria-checked={st.maxHops === h}
+                  aria-pressed={st.maxHops === h}
                   className={st.maxHops === h ? 'active' : ''}
                   onClick={() => {
                     onPlaySound?.('click')

@@ -298,7 +298,7 @@ export function UserListPane({
       return [{ id: 'in-chat', label: 'In This Chat', items }]
     }
 
-    // Radio channel (`activeView.type === 'channel'`)
+    // Bitchat channel (`activeView.type === 'channel'`)
     const online: NormalizedUserItem[] = []
     const offline: NormalizedUserItem[] = []
 

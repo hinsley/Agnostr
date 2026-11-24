@@ -53,11 +53,11 @@ import {
   type SigningKeyMaterial,
 } from '../lib/identity.ts'
 import {
-  formatRadioChannelLabel,
+  formatBitchatChannelLabel,
   isTopicChannel,
-  isValidRadioChannelKey,
-  normalizeRadioChannelKey,
-} from '../lib/radioChannel.ts'
+  isValidBitchatChannelKey,
+  normalizeBitchatChannelKey,
+} from '../lib/bitchatChannel.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 import {
   loadRecordingQuality,
@@ -311,7 +311,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         })
       }
     } else if (current.mode === 'geo' && current.geohash) {
-      const gh = normalizeRadioChannelKey(current.geohash) ?? normalizeGeohash(current.geohash)
+      const gh = normalizeBitchatChannelKey(current.geohash) ?? normalizeGeohash(current.geohash)
       const roster = geoRostersRef.current[gh] ?? []
       for (const peer of roster) {
         if (now - peer.lastSeenAt >= ROOM_PEER_TTL_MS) continue
@@ -528,7 +528,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   }, [])
 
   const upsertGeoRosterMember = useCallback((entry: GeoCallPresence) => {
-    const gh = normalizeRadioChannelKey(entry.geohash) ?? normalizeGeohash(entry.geohash)
+    const gh = normalizeBitchatChannelKey(entry.geohash) ?? normalizeGeohash(entry.geohash)
     if (!gh) return
     const normalized: GeoCallPresence = { ...entry, geohash: gh }
     setGeoCallRosters((prev) => {
@@ -548,7 +548,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
   }, [])
 
   const removeGeoRosterMember = useCallback((geohash: string, pubkey: string) => {
-    const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+    const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
     const pk = pubkey.toLowerCase()
     if (!gh) return
     setGeoCallRosters((prev) => {
@@ -623,7 +623,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             })
           }
         } else if (current.mode === 'geo' && current.geohash) {
-          const gh = normalizeRadioChannelKey(current.geohash) ?? normalizeGeohash(current.geohash)
+          const gh = normalizeBitchatChannelKey(current.geohash) ?? normalizeGeohash(current.geohash)
           const geoMaterial =
             geoMaterialToUse ?? identityManager.getDerivedGeohashKeyMaterial(gh)
           const selfGeoPk = geoMaterial.pubkey.toLowerCase()
@@ -642,7 +642,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
           )
         }
       } else if (current?.mode === 'geo' && current.geohash) {
-        const gh = normalizeRadioChannelKey(current.geohash) ?? normalizeGeohash(current.geohash)
+        const gh = normalizeBitchatChannelKey(current.geohash) ?? normalizeGeohash(current.geohash)
         const selfGeoPk = (
           geoMaterialToUse ?? identityManager.getDerivedGeohashKeyMaterial(gh)
         ).pubkey.toLowerCase()
@@ -1125,7 +1125,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       }
 
       meshRef.current = mesh
-      const resolvedNick = nicknameHint?.trim() || getPeerNicknameRef.current(pk) || `anon${pk.slice(-4)}`
+      const resolvedNick = nicknameHint?.trim() || getPeerNicknameRef.current(pk) || `agnon${pk.slice(-4)}`
       const displayHandle = formatDisplayHandle(resolvedNick, pk)
 
       const session: ActiveCallSession = {
@@ -1510,7 +1510,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     ]
   )
 
-  // Dedicated NIP-44 kind:25050 subscription for the active Geo Radio call's derived geohash pubkey.
+  // Dedicated NIP-44 kind:25050 subscription for the active Bitchat call's derived geohash pubkey.
   // Opened synchronously inside joinGeoCall BEFORE room-join so TCP FIFO delivers REQ before EVENT
   // and keeps the derived geohash pubkey completely isolated from the masterPubkey DM subscription.
   const openGeoDirectSubscription = useCallback(
@@ -1522,7 +1522,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       const currentPool = poolRef.current
       if (!currentPool) return
 
-      const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+      const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
       const selfGeoPk = geoMaterial.pubkey.toLowerCase()
       const subId = `call-geo-direct:${gh}:${selfGeoPk.slice(0, 8)}`
       const since = Math.floor(Date.now() / 1000) - 15
@@ -1611,16 +1611,16 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     [canConnectGroupPeer, notifyRemoteRecordingChange]
   )
 
-  // Join a Radio Group Voice/Video Call (geohash or kind:23333 topic; hard cap: 6 participants; ALWAYS signed with HMAC-derived per-channel identity)
+  // Join a Bitchat Group Voice/Video Call (geohash or kind:23333 topic; hard cap: 6 participants; ALWAYS signed with HMAC-derived per-channel identity)
   const joinGeoCall = useCallback(
     async (rawGeohash: string, media: CallMediaType): Promise<boolean> => {
-      if (!isValidRadioChannelKey(rawGeohash)) {
-        pushToastRef.current('warning', 'Invalid Radio channel', 'Tune to a valid geohash or topic channel first.')
+      if (!isValidBitchatChannelKey(rawGeohash)) {
+        pushToastRef.current('warning', 'Invalid Bitchat channel', 'Tune to a valid geohash or topic channel first.')
         return false
       }
-      const gh = normalizeRadioChannelKey(rawGeohash)
+      const gh = normalizeBitchatChannelKey(rawGeohash)
       if (!gh) return false
-      const channelLabel = formatRadioChannelLabel(gh)
+      const channelLabel = formatBitchatChannelLabel(gh)
       const isTopic = isTopicChannel(gh)
 
       if (
@@ -1639,7 +1639,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       if (currentRoster.length >= MAX_CALL_PARTICIPANTS) {
         pushToastRef.current(
           'warning',
-          `${channelLabel} radio call is full (${MAX_CALL_PARTICIPANTS}/${MAX_CALL_PARTICIPANTS})`,
+          `${channelLabel} Bitchat call is full (${MAX_CALL_PARTICIPANTS}/${MAX_CALL_PARTICIPANTS})`,
           'P2P group calls are capped at 6 participants for low-latency stability.'
         )
         return false
@@ -1665,7 +1665,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         mesh.dispose()
         pushToastRef.current(
           'error',
-          'Unable to join radio call',
+          'Unable to join Bitchat call',
           err instanceof Error ? err.message : 'Microphone access is required.'
         )
         return false
@@ -1683,7 +1683,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         status: 'active',
         mediaType: mesh.getLocalCameraOn() ? 'video' : 'audio',
         encrypted: true,
-        title: isTopic ? `${channelLabel} · Topic Radio` : `${channelLabel} · Geo Radio`,
+        title: isTopic ? `${channelLabel} · Topic Bitchat` : `${channelLabel} · Bitchat`,
         geohash: gh,
         roomId,
         startedAt: now,
@@ -1923,7 +1923,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 return
               }
 
-              const nick = payload.nickname?.trim() || getPeerNicknameRef.current(sender) || `anon${sender.slice(-4)}`
+              const nick = payload.nickname?.trim() || getPeerNicknameRef.current(sender) || `agnon${sender.slice(-4)}`
               const offer: IncomingCallOffer = {
                 callId: payload.callId,
                 callerPubkey: sender,
@@ -2183,7 +2183,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               if (Date.now() - event.created_at * 1000 > ROOM_PEER_TTL_MS) return
               lastPresenceTsByRoomPeerRef.current.set(roomPeerKey, eventTs)
 
-              const nick = payload.nickname?.trim() || getPeerNicknameRef.current(sender) || `anon${sender.slice(-4)}`
+              const nick = payload.nickname?.trim() || getPeerNicknameRef.current(sender) || `agnon${sender.slice(-4)}`
               upsertRosterMember({
                 serverId: srv.id,
                 roomId,
@@ -2253,7 +2253,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 payload.nickname?.trim() ||
                 existing?.nickname ||
                 getPeerNicknameRef.current(sender) ||
-                `anon${sender.slice(-4)}`
+                `agnon${sender.slice(-4)}`
               upsertRosterMember({
                 serverId: srv.id,
                 roomId,
@@ -2318,18 +2318,18 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pool, serverRoomTagsKey, callSignalingRelays, identityManager, publishRoomSignal, removeRosterMember, upsertRosterMember])
 
-  // Passive Radio call presence subscription (active geohash/topic + pinned rooms + any active radio call).
+  // Passive Bitchat call presence subscription (active geohash/topic + pinned rooms + any active Bitchat call).
   // Zero RTCPeerConnections or STUN/ICE traffic until user explicitly clicks Join.
   const activeGeoCallHash = activeCall?.mode === 'geo' ? activeCall.geohash ?? '' : ''
   const watchedGeoCallKey = useMemo(() => {
     const set = new Set<string>()
-    const activeKey = normalizeRadioChannelKey(activeGeohash)
+    const activeKey = normalizeBitchatChannelKey(activeGeohash)
     if (activeKey) set.add(activeKey)
     for (const gh of pinnedGeohashes) {
-      const k = normalizeRadioChannelKey(gh)
+      const k = normalizeBitchatChannelKey(gh)
       if (k) set.add(k)
     }
-    const callKey = normalizeRadioChannelKey(activeGeoCallHash)
+    const callKey = normalizeBitchatChannelKey(activeGeoCallHash)
     if (callKey) set.add(callKey)
     return Array.from(set).sort().join('|')
   }, [activeGeohash, pinnedGeohashes, activeGeoCallHash])
@@ -2435,7 +2435,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             const nick =
               payload.nickname?.trim() ||
               getPeerNicknameRef.current(sender) ||
-              `anon${sender.slice(-4)}`
+              `agnon${sender.slice(-4)}`
             upsertGeoRosterMember({
               geohash: gh,
               roomId,
@@ -2511,7 +2511,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               payload.nickname?.trim() ||
               existing?.nickname ||
               getPeerNicknameRef.current(sender) ||
-              `anon${sender.slice(-4)}`
+              `agnon${sender.slice(-4)}`
             upsertGeoRosterMember({
               geohash: gh,
               roomId,
@@ -2559,7 +2559,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     upsertGeoRosterMember,
   ])
 
-  // Live Dynamic Trust / Untrust Reactivity inside Server & Geo Radio group calls:
+  // Live Dynamic Trust / Untrust Reactivity inside Server & Bitchat group calls:
   // - Untrusted -> immediately disconnect WebRTC, drop MediaStream, revert to shielded tile.
   // - Newly Trusted -> immediately connect WebRTC & re-emit room-join so both sides connect live without rejoining!
   useEffect(() => {
@@ -2627,7 +2627,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
         }
       }
     } else if (active.mode === 'geo' && active.geohash) {
-      const gh = normalizeRadioChannelKey(active.geohash) ?? normalizeGeohash(active.geohash)
+      const gh = normalizeBitchatChannelKey(active.geohash) ?? normalizeGeohash(active.geohash)
       const roomId = active.roomId ?? getGeoCallRoomId(gh)
       const selfGeoPk = activeGeoMaterialRef.current?.pubkey.toLowerCase() ?? ''
       const roster = geoRostersRef.current[gh] ?? []
@@ -2685,7 +2685,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
     syncActiveCallFromMesh,
   ])
 
-  // Expire stale room presence entries after 30s (Servers + Geo Radio)
+  // Expire stale room presence entries after 30s (Servers + Bitchat)
   useEffect(() => {
     const timer = window.setInterval(() => {
       const now = Date.now()
@@ -3118,7 +3118,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
   const getGeoCallPresence = useCallback(
     (geohash: string): GeoCallPresence[] => {
-      const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+      const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
       return gh ? (geoCallRosters[gh] ?? []) : []
     },
     [geoCallRosters]
@@ -3126,7 +3126,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
 
   const getGeoCallCount = useCallback(
     (geohash: string): number => {
-      const gh = normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash)
+      const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
       return gh ? (geoCallRosters[gh]?.length ?? 0) : 0
     },
     [geoCallRosters]

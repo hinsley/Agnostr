@@ -24,15 +24,14 @@ function isTextInputFocused(): boolean {
   if (tag === 'TEXTAREA') return true
   if (tag === 'INPUT') {
     const type = ((el as HTMLInputElement).type || 'text').toLowerCase()
-    return ![
-      'button',
-      'checkbox',
-      'radio',
-      'range',
-      'submit',
-      'reset',
-      'file',
-      'color',
+    return [
+      'text',
+      'search',
+      'url',
+      'tel',
+      'email',
+      'password',
+      'number',
     ].includes(type)
   }
   return Boolean(el.isContentEditable)

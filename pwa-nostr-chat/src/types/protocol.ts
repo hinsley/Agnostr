@@ -266,7 +266,7 @@ export interface PulseRoom {
   nearestCity: string | null
 }
 
-export interface RadioChannelPreview {
+export interface BitchatChannelPreview {
   id: string
   preview: string
   sender: string
@@ -349,7 +349,7 @@ export interface AppSettings {
   presenceEnabled: boolean
   perGeohashIdentity: boolean
   showBridgeBadges: boolean
-  /** When true, appends NIP-89 ["client", "agnostr"] tag to Geo Radio messages & presence */
+  /** When true, appends NIP-89 ["client", "agnostr"] tag to Bitchat messages & presence */
   broadcastClientTag: boolean
   /** When true (default), voice memos from untrusted non-blocked peers can play and transcribe; blocked peers are always denied */
   allowUntrustedVoiceMemos: boolean
@@ -417,7 +417,7 @@ export interface AgnostrEngine {
 
   // Discovery, pins & per-geohash unread/direct-ping counters
   pulseRooms: PulseRoom[]
-  channelPreviews: Record<string, RadioChannelPreview>
+  channelPreviews: Record<string, BitchatChannelPreview>
   pinnedChannels: PinnedChannel[]
   recentChannels: string[]
   unreadCounts: Record<string, number>
@@ -443,7 +443,7 @@ export interface AgnostrEngine {
 
   // Channel & messaging actions
   tuneGeohash: (geohashOrCity: string) => boolean
-  tuneRadioChannel: (channelKeyOrInput: string) => boolean
+  tuneBitchatChannel: (channelKeyOrInput: string) => boolean
   tuneTopicChannel: (slug: string) => boolean
   locateMe: () => Promise<string | null>
   sendInput: (

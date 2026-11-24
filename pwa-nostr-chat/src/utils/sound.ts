@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Zero-Asset Web Audio API Tactical Radio / Sonar SFX Synthesizer
+   Zero-Asset Web Audio API Tactical Bitchat / Sonar SFX Synthesizer
    Generates crisp, subtle, low-volume tactile feedback without external files.
    ========================================================================== */
 
@@ -17,7 +17,7 @@ export type SoundCue =
   | 'rec-start'
   | 'rec-stop'
 
-class RadioAudioEngine {
+class BitchatAudioEngine {
   private ctx: AudioContext | null = null
   private enabled = true
   private lastPlayed = new Map<SoundCue, number>()
@@ -204,4 +204,4 @@ class RadioAudioEngine {
   }
 }
 
-export const radioAudio = new RadioAudioEngine()
+export const bitchatAudio = new BitchatAudioEngine()

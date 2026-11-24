@@ -16,7 +16,6 @@ import {
   PhoneOff,
   Plus,
   QrCode,
-  Radio,
   Server,
   Settings,
   ShieldCheck,
@@ -24,6 +23,7 @@ import {
   User,
   Users,
   Video,
+  Waves,
   X,
   Zap,
 } from 'lucide-react'
@@ -37,10 +37,10 @@ import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 import { formatClientDisplayName } from '../lib/bitchatProtocol.ts'
 import { encodeGeohash } from '../lib/geohash.ts'
 import {
-  buildRadioChannelShareUrl,
-  formatRadioChannelLabel,
+  buildBitchatChannelShareUrl,
+  formatBitchatChannelLabel,
   isTopicChannel,
-} from '../lib/radioChannel.ts'
+} from '../lib/bitchatChannel.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 
@@ -393,10 +393,10 @@ export function RoomInfoSheet({
 
   const renderGeoBody = () => {
     const isTopic = isTopicChannel(activeGeohash)
-    const channelLabel = formatRadioChannelLabel(activeGeohash)
+    const channelLabel = formatBitchatChannelLabel(activeGeohash)
     const cityLabel = isTopic ? null : cell.nearestCity || cell.label
     const subtitle = isTopic
-      ? 'Topic Radio'
+      ? 'Topic Bitchat'
       : presence.isUncertainCount
         ? 'High-precision room'
         : `${presence.onlineCount} online`
@@ -421,7 +421,7 @@ export function RoomInfoSheet({
         {/* Hero */}
         <div className="ag-sheet-hero">
           <div className="ag-sheet-emblem accent">
-            {isTopic ? <Hash size={26} /> : <Radio size={26} />}
+            {isTopic ? <Hash size={26} /> : <Waves size={26} />}
           </div>
           <h2 className="ag-sheet-hero-title">
             <span className="mono">{channelLabel}</span>
@@ -452,7 +452,7 @@ export function RoomInfoSheet({
             onClick={() =>
               void copyText(
                 'room-link',
-                buildRadioChannelShareUrl(activeGeohash),
+                buildBitchatChannelShareUrl(activeGeohash),
                 `Copied ${channelLabel} link`,
               )
             }
@@ -462,12 +462,12 @@ export function RoomInfoSheet({
           </button>
         </div>
 
-        {/* Radio Group Call */}
+        {/* Bitchat Group Call */}
         <section className="ag-sheet-section">
           <div className="ag-sheet-section-head">
             <span className="ag-sheet-section-title">
-              {isTopic ? <Hash size={13} /> : <Radio size={13} />}
-              <span>{isTopic ? 'Topic Radio Group Call' : 'Radio Group Call'}</span>
+              {isTopic ? <Hash size={13} /> : <Waves size={13} />}
+              <span>{isTopic ? 'Topic Bitchat Group Call' : 'Bitchat Group Call'}</span>
             </span>
             <span className="ag-sheet-section-meta mono">
               {geoCallCount > 0
@@ -478,7 +478,7 @@ export function RoomInfoSheet({
 
           <div className={`ag-sheet-call-card ${isInThisGeoCall ? 'in-call' : ''}`}>
             {geoCallRoster.length > 0 && (
-              <div className="ag-sheet-call-roster" role="list" aria-label="Peers in radio call">
+              <div className="ag-sheet-call-roster" role="list" aria-label="Peers in Bitchat call">
                 {geoCallRoster.map((p) => (
                   <span key={p.pubkey} role="listitem" className="ag-sheet-call-pill">
                     <img
@@ -510,7 +510,7 @@ export function RoomInfoSheet({
                 }}
               >
                 <PhoneOff size={15} />
-                <span>Leave Radio Call</span>
+                <span>Leave Bitchat Call</span>
               </button>
             ) : isGeoCallFull ? (
               <p className="ag-sheet-call-note">

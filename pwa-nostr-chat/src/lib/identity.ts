@@ -52,7 +52,7 @@ export function generateRandomNickname(): string {
   const n = Math.floor(Math.random() * 10000)
     .toString()
     .padStart(4, '0')
-  return `anon${n}`
+  return `agnon${n}`
 }
 
 export function formatShortPubkey(pubkey: string): string {
@@ -62,7 +62,7 @@ export function formatShortPubkey(pubkey: string): string {
 
 export function formatDisplayHandle(nickname: string | null | undefined, pubkey: string): string {
   const cleanNick = (nickname ?? '').trim()
-  const base = cleanNick || `anon${pubkey.slice(-4)}`
+  const base = cleanNick || `agnon${pubkey.slice(-4)}`
   const suffix = pubkey.slice(-4).toLowerCase()
   return `@${base}#${suffix}`
 }
@@ -263,8 +263,8 @@ export class IdentityManager {
 
   /**
    * Always returns the deterministic HMAC-SHA256 derived identity for a geohash
-   * (independent of `perGeohashIdentity` / `signMode`), guaranteeing public Geo
-   * Radio call signaling NEVER exposes the user's primary DM `npub`.
+   * (independent of `perGeohashIdentity` / `signMode`), guaranteeing public Bitchat
+   * call signaling NEVER exposes the user's primary DM `npub`.
    */
   getDerivedGeohashKeyMaterial(geohash: string): SigningKeyMaterial {
     const gh = normalizeGeohash(geohash)

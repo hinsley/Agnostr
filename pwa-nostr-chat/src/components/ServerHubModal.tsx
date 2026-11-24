@@ -396,11 +396,10 @@ export function ServerHubModal({
           {tab === 'create' && (
             <form className="ag-srv-form" onSubmit={(e) => void handleCreateSubmit(e)}>
               {/* Mode Selector */}
-              <div className="ag-srv-mode-grid" role="radiogroup" aria-label="Group type">
+              <div className="ag-srv-mode-grid" role="group" aria-label="Group type">
                 <button
                   type="button"
-                  role="radio"
-                  aria-checked={createMode === 'virtual-e2ee'}
+                  aria-pressed={createMode === 'virtual-e2ee'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-e2ee' ? 'active e2ee' : ''}`}
                   title="Encrypted invite-only group"
                   onClick={() => {
@@ -420,8 +419,7 @@ export function ServerHubModal({
 
                 <button
                   type="button"
-                  role="radio"
-                  aria-checked={createMode === 'virtual-public'}
+                  aria-pressed={createMode === 'virtual-public'}
                   className={`ag-srv-mode-card ${createMode === 'virtual-public' ? 'active' : ''}`}
                   title="Open public group"
                   onClick={() => {
@@ -441,8 +439,7 @@ export function ServerHubModal({
 
                 <button
                   type="button"
-                  role="radio"
-                  aria-checked={createMode === 'nip29'}
+                  aria-pressed={createMode === 'nip29'}
                   className={`ag-srv-mode-card ${createMode === 'nip29' ? 'active nip29' : ''}`}
                   title="Relay-hosted moderated group"
                   onClick={() => {
@@ -477,7 +474,7 @@ export function ServerHubModal({
                         ? 'Field Ops Cell'
                         : createMode === 'nip29'
                           ? 'Mesh Builders'
-                          : 'Bay Area Radio'
+                          : 'Bay Area Bitchat'
                     }
                     value={nameDraft}
                     onChange={(e) => {

@@ -38,7 +38,7 @@ import type { ServerMessage, ServerSummary } from '../types/servers.ts'
 import { verifyEventCached } from './bitchatProtocol.ts'
 import { normalizeGeohash } from './geohash.ts'
 import { bytesToHex, encodeNpubSafe, type SigningKeyMaterial } from './identity.ts'
-import { isValidRadioChannelKey, normalizeRadioChannelKey } from './radioChannel.ts'
+import { isValidBitchatChannelKey, normalizeBitchatChannelKey } from './bitchatChannel.ts'
 
 /** Ephemeral Nostr kind for live silent sibling-device sync */
 export const KIND_DEVICE_SYNC_EPHEMERAL = 25055
@@ -74,7 +74,7 @@ export function utf8ByteLength(str: string): number {
 
 export function isAutoAnonNickname(nick: string | null | undefined): boolean {
   const clean = (nick ?? '').trim()
-  return !clean || /^anon[0-9a-f]{4}$/i.test(clean)
+  return !clean || /^a(?:gn|n)on(?:[0-9a-f]{4})?$/i.test(clean)
 }
 
 /** Concise human-friendly device label (e.g. "Chrome · macOS", "PWA · iPhone") */
@@ -321,10 +321,10 @@ export function reconcileLocalSnapshotIntoCrdt(
     }
   }
 
-  // 4. Pinned Radio Channels (LWW ordered list)
+  // 4. Pinned Bitchat Channels (LWW ordered list)
   let nextPinned = prev.pinned
   const cleanPinned: PinnedChannel[] = snapshot.pinnedChannels.map((c) => ({
-    geohash: normalizeRadioChannelKey(c.geohash) ?? normalizeGeohash(c.geohash),
+    geohash: normalizeBitchatChannelKey(c.geohash) ?? normalizeGeohash(c.geohash),
     label: c.label,
     pinnedAt: c.pinnedAt,
     unreadCount: 0,
@@ -675,7 +675,7 @@ export function mergeCrdtStates(
     }
   }
 
-  // 4. Merge Pinned Radio Channels (LWW ordered list)
+  // 4. Merge Pinned Bitchat Channels (LWW ordered list)
   let mergedPinned = local.pinned
   if (
     remote.pinned.updatedAt > local.pinned.updatedAt ||
@@ -686,7 +686,7 @@ export function mergeCrdtStates(
     mergedPinned = {
       updatedAt: remote.pinned.updatedAt,
       items: remote.pinned.items.map((c) => ({
-        geohash: normalizeRadioChannelKey(c.geohash) ?? normalizeGeohash(c.geohash),
+        geohash: normalizeBitchatChannelKey(c.geohash) ?? normalizeGeohash(c.geohash),
         label: c.label,
         pinnedAt: c.pinnedAt,
         unreadCount: 0,
@@ -1068,10 +1068,10 @@ export function fitCheckpointStateWithinBudget(
         trimmedTail.server[k] = msgs.slice(-8)
       }
     }
-    if (recentMessages.radio) {
-      trimmedTail.radio = {}
-      for (const [k, msgs] of Object.entries(recentMessages.radio).slice(0, 6)) {
-        trimmedTail.radio[k] = msgs.slice(-8)
+    if (recentMessages.bitchat) {
+      trimmedTail.bitchat = {}
+      for (const [k, msgs] of Object.entries(recentMessages.bitchat).slice(0, 6)) {
+        trimmedTail.bitchat[k] = msgs.slice(-8)
       }
     }
     candidate = {
@@ -1463,10 +1463,10 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     if (Array.isArray(raw.pinned.items)) {
       const seen = new Set<string>()
       for (const item of raw.pinned.items) {
-        if (!isRecord(item) || typeof item.geohash !== 'string' || !isValidRadioChannelKey(item.geohash)) {
+        if (!isRecord(item) || typeof item.geohash !== 'string' || !isValidBitchatChannelKey(item.geohash)) {
           continue
         }
-        const key = normalizeRadioChannelKey(item.geohash) ?? normalizeGeohash(item.geohash)
+        const key = normalizeBitchatChannelKey(item.geohash) ?? normalizeGeohash(item.geohash)
         if (seen.has(key)) continue
         seen.add(key)
         pinnedItems.push({
@@ -1639,7 +1639,7 @@ export async function parseDeviceSyncEphemeralEvent(
         msgDigests: {
           dm: isRecord(digests.dm) ? digests.dm : {},
           server: isRecord(digests.server) ? digests.server : {},
-          radio: isRecord(digests.radio) ? digests.radio : {},
+          bitchat: isRecord(digests.bitchat) ? digests.bitchat : {},
           amail:
             isRecord(digests.amail) && typeof digests.amail.hash === 'string'
               ? {
@@ -1688,7 +1688,7 @@ export async function parseDeviceSyncEphemeralEvent(
       const scopes: DeviceSyncScopeRequest[] = []
       for (const s of parsed.scopes) {
         if (!isRecord(s) || typeof s.key !== 'string' || !Array.isArray(s.knownIds)) continue
-        if (s.kind !== 'dm' && s.kind !== 'server' && s.kind !== 'radio') continue
+        if (s.kind !== 'dm' && s.kind !== 'server' && s.kind !== 'bitchat') continue
         scopes.push({
           kind: s.kind,
           key: s.key,
@@ -1712,7 +1712,7 @@ export async function parseDeviceSyncEphemeralEvent(
       if (
         typeof parsed.targetDeviceId !== 'string' ||
         typeof parsed.scopeKey !== 'string' ||
-        (parsed.scopeKind !== 'dm' && parsed.scopeKind !== 'server' && parsed.scopeKind !== 'radio') ||
+        (parsed.scopeKind !== 'dm' && parsed.scopeKind !== 'server' && parsed.scopeKind !== 'bitchat') ||
         !Array.isArray(parsed.messages)
       ) {
         return null

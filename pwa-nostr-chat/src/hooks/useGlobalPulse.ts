@@ -6,12 +6,12 @@ import {
   getTagValue,
   KIND_GEOHASH_CHAT,
   KIND_GEOHASH_PRESENCE,
-  KIND_NAMED_RADIO_CHAT,
+  KIND_NAMED_BITCHAT_CHAT,
   verifyEventCached,
 } from '../lib/bitchatProtocol.ts'
 import { decodeCenter, findNearestCityLabel } from '../lib/geohash.ts'
 import { PULSE_RELAYS } from '../lib/geoRelays.ts'
-import { TOPIC_CHANNEL_PREFIX } from '../lib/radioChannel.ts'
+import { TOPIC_CHANNEL_PREFIX } from '../lib/bitchatChannel.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 
 const PULSE_WINDOW_MS = 15 * 60 * 1000
@@ -22,7 +22,7 @@ const FLUSH_DEBOUNCE_MS = 150
 const IMAGE_URL_EXT_RE = /\.(?:webp|jpe?g|png|gif|avif|bmp)(?:[?#].*)?$/i
 const AUDIO_URL_EXT_RE = /\.(?:webm|weba|m4a|mp4|ogg|opus|mp3|wav)(?:[?#].*)?$/i
 
-export interface FormatRadioPreviewOptions {
+export interface FormatBitchatPreviewOptions {
   content?: string | null
   hasImage?: boolean
   hasVoice?: boolean
@@ -30,7 +30,7 @@ export interface FormatRadioPreviewOptions {
   tags?: readonly (readonly string[])[]
 }
 
-export function formatRadioPreviewText(opts: FormatRadioPreviewOptions): string {
+export function formatBitchatPreviewText(opts: FormatBitchatPreviewOptions): string {
   let hasImage = Boolean(opts.hasImage)
   let hasVoice = Boolean(opts.hasVoice)
   const urlsToStrip: string[] = []
@@ -503,7 +503,7 @@ export function useGlobalPulse(
         id: input.id,
         replaceId: input.replaceId,
         pubkey: pk,
-        sender: input.sender.trim() || `anon${pk.slice(-4)}`,
+        sender: input.sender.trim() || `agnon${pk.slice(-4)}`,
         preview,
         createdAtSec,
         tsMs,
@@ -539,7 +539,7 @@ export function useGlobalPulse(
       `agnostr-global-pulse-${++pulseSubSeq}`,
       PULSE_RELAYS,
       [
-        { kinds: [KIND_GEOHASH_CHAT, KIND_NAMED_RADIO_CHAT], since, limit: 150 },
+        { kinds: [KIND_GEOHASH_CHAT, KIND_NAMED_BITCHAT_CHAT], since, limit: 150 },
         { kinds: [KIND_GEOHASH_PRESENCE], since, limit: 80 },
       ],
       {
@@ -548,7 +548,7 @@ export function useGlobalPulse(
           if (
             ev.kind !== KIND_GEOHASH_CHAT &&
             ev.kind !== KIND_GEOHASH_PRESENCE &&
-            ev.kind !== KIND_NAMED_RADIO_CHAT
+            ev.kind !== KIND_NAMED_BITCHAT_CHAT
           ) {
             return
           }
@@ -557,7 +557,7 @@ export function useGlobalPulse(
           const pk = ev.pubkey.toLowerCase()
           if (blockedSetRef.current.has(pk)) return
 
-          const isTopic = ev.kind === KIND_NAMED_RADIO_CHAT
+          const isTopic = ev.kind === KIND_NAMED_BITCHAT_CHAT
           let roomKey: string | null = null
           if (isTopic) {
             const slug = extractTopicChannelTag(ev.tags)
@@ -583,13 +583,13 @@ export function useGlobalPulse(
             room.lastActivityAt = evMs
           }
 
-          if (ev.kind === KIND_GEOHASH_CHAT || ev.kind === KIND_NAMED_RADIO_CHAT) {
-            const preview = formatRadioPreviewText({
+          if (ev.kind === KIND_GEOHASH_CHAT || ev.kind === KIND_NAMED_BITCHAT_CHAT) {
+            const preview = formatBitchatPreviewText({
               content: ev.content,
               tags: ev.tags,
             })
             if (preview) {
-              const sender = getTagValue(ev.tags, 'n')?.trim() || `anon${pk.slice(-4)}`
+              const sender = getTagValue(ev.tags, 'n')?.trim() || `agnon${pk.slice(-4)}`
               upsertRoomMessage(room, {
                 id: ev.id,
                 pubkey: pk,

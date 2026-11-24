@@ -434,7 +434,7 @@ export async function parseVirtualChatEvent(
     }
   }
 
-  const finalNick = nickname || `anon${pubkey.slice(-4)}`
+  const finalNick = nickname || `agnon${pubkey.slice(-4)}`
   return {
     id: event.id,
     serverId: server.id,

@@ -26,7 +26,6 @@ import {
   PinOff,
   Plus,
   QrCode,
-  Radio,
   ScanLine,
   Search,
   Settings,
@@ -39,6 +38,7 @@ import {
   Users,
   Video,
   Volume2,
+  Waves,
   X,
   Zap,
 } from 'lucide-react'
@@ -46,7 +46,7 @@ import type { AgnostrEngine, DmThread, PeerInfo, PulseRoom } from '../types/prot
 import type { ServerChannel, ServerSummary } from '../types/servers'
 import type { WalletInitialIntent, ZapTarget } from '../types/wallet'
 import type { PwaState } from '../hooks/usePwa'
-import { formatRadioPreviewText } from '../hooks/useGlobalPulse'
+import { formatBitchatPreviewText } from '../hooks/useGlobalPulse'
 import type { SoundCue } from '../utils/sound'
 import type { QrShareTarget } from './QrShareModal'
 import type { ServerHubTab } from './ServerHubModal'
@@ -55,15 +55,15 @@ import type { SettingsTab } from './SettingsModal'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu'
 import { encodeNpubSafe } from '../lib/identity'
 import {
-  buildRadioChannelShareUrl,
-  formatRadioChannelLabel,
+  buildBitchatChannelShareUrl,
+  formatBitchatChannelLabel,
   isTopicChannel,
   parseQuickTuneInput,
-} from '../lib/radioChannel'
+} from '../lib/bitchatChannel'
 import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../lib/shareLinks'
 import { formatHandle, identiconDataUrl, pubkeyToColor } from '../utils/identicon'
 
-export type ListTab = 'radio' | 'dms' | 'servers'
+export type ListTab = 'bitchat' | 'dms' | 'servers'
 
 function formatBadgeCount(count: number): string {
   return count > 99 ? '99+' : String(count)
@@ -245,7 +245,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     label?: string
   ) => {
     const isTopic = isTopicChannel(channelKey)
-    const displayLabel = formatRadioChannelLabel(channelKey)
+    const displayLabel = formatBitchatChannelLabel(channelKey)
     const pinned = engine.isChannelPinned(channelKey)
     const pinIndex = engine.pinnedChannels.findIndex(
       (p) => p.geohash.toLowerCase() === channelKey.toLowerCase()
@@ -256,7 +256,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       activeCall?.mode === 'geo' &&
       (activeCall.geohash ?? '').toLowerCase() === channelKey.toLowerCase()
     const isFull = !inThisGeoCall && callCount >= engine.calls.maxParticipants
-    const roomUrl = buildRadioChannelShareUrl(channelKey)
+    const roomUrl = buildBitchatChannelShareUrl(channelKey)
     const items: ContextMenuItem[] = [
       {
         id: `room-pin-${channelKey}`,
@@ -298,7 +298,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       {
         id: `room-tune-${channelKey}`,
         label: `Tune to ${displayLabel}`,
-        icon: isTopic ? <Hash size={15} /> : <Radio size={15} />,
+        icon: isTopic ? <Hash size={15} /> : <Waves size={15} />,
         dividerBefore: true,
         onSelect: () => onTuneChannel(channelKey),
       },
@@ -860,7 +860,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     if (!m || m.isSystem) continue
     if (engine.isPeerBlocked(m.pubkey)) continue
     if (!m.isOwn && isPulsePreviewHidden(m.pubkey)) continue
-    const preview = formatRadioPreviewText({
+    const preview = formatBitchatPreviewText({
       content: m.content,
       hasImage: Boolean(m.imageAttachment),
       hasVoice: Boolean(m.voiceMemo),
@@ -879,7 +879,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     break
   }
 
-  const resolveRadioPreview = (
+  const resolveBitchatPreview = (
     ghKey: string,
     livePulse?: PulseRoom
   ): { preview: string; activityMs: number | null } => {
@@ -1288,15 +1288,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       className={`ag-conv-pane ${collapsed ? 'collapsed' : ''} ${isMobileServersSplit ? 'is-mobile-servers' : ''}`}
       aria-label="Conversations"
     >
-      {/* Top 52px Contextual Header (Radio & People views; Servers renders its own aligned 52px header) */}
+      {/* Top 52px Contextual Header (Bitchat & People views; Groups renders its own aligned 52px header) */}
       {activeTab !== 'servers' && (
         <div className="ag-conv-header">
           <span className="ag-conv-section-title">
-            {activeTab === 'radio' ? 'Radio' : 'People'}
+            {activeTab === 'bitchat' ? 'Bitchat' : 'People'}
           </span>
 
           <div className="ag-conv-header-actions">
-            {activeTab === 'radio' && (
+            {activeTab === 'bitchat' && (
               <>
                 <button
                   type="button"
@@ -1363,7 +1363,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
       )}
 
-      {/* Main Content Area: Discord Servers (Desktop or Mobile 2-Col Split) OR Scrollable Radio/People */}
+      {/* Main Content Area: Groups (Desktop or Mobile 2-Col Split) OR Scrollable Bitchat/People */}
       {activeTab === 'servers' ? (
         isMobileServersSplit ? (
           <div className="ag-srv-mobile-split">
@@ -1460,10 +1460,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         )
       ) : (
         <div className="ag-conv-scroll">
-          {/* ================= RADIO TAB ================= */}
-          {activeTab === 'radio' && (
+          {/* ================= BITCHAT TAB ================= */}
+          {activeTab === 'bitchat' && (
             <div className="ag-conv-section-stack">
-              <div className="ag-radio-quickbar">
+              <div className="ag-bitchat-quickbar">
                 <form className="ag-jump-form" onSubmit={handleQuickTune}>
                   <span className="ag-jump-hash">#</span>
                   <input
@@ -1487,7 +1487,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               const gh = engine.activeGeohash
               const ghKey = gh.toLowerCase()
               const isTopic = isTopicChannel(gh)
-              const displayLabel = formatRadioChannelLabel(gh)
+              const displayLabel = formatBitchatChannelLabel(gh)
               const active = isChannelActive(gh)
               const unread = engine.unreadCounts[ghKey] ?? 0
               const mentions = engine.mentionCounts[ghKey] ?? 0
@@ -1497,13 +1497,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 activeCall?.mode === 'geo' &&
                 (activeCall.geohash ?? '').toLowerCase() === ghKey
               const livePulse = pulseByHash.get(ghKey)
-              const resolved = resolveRadioPreview(ghKey, livePulse)
+              const resolved = resolveBitchatPreview(ghKey, livePulse)
               const currentSubtitle = resolved.preview
                 ? resolved.preview
                 : isTopic
                   ? 'Topic'
                   : engine.presence.isUncertainCount
-                    ? 'Radio room'
+                    ? 'Bitchat room'
                     : `${engine.presence.onlineCount} online`
               return (
               <section className="ag-conv-group" aria-label="Current room">
@@ -1519,8 +1519,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     className="ag-chat-row"
                     onClick={() => onTuneChannel(gh)}
                   >
-                    <div className={`ag-chat-row-avatar ${isTopic ? 'topic' : 'radio'}`}>
-                      {isTopic ? <Hash size={17} /> : <Radio size={18} />}
+                    <div className={`ag-chat-row-avatar ${isTopic ? 'topic' : 'bitchat'}`}>
+                      {isTopic ? <Hash size={17} /> : <Waves size={18} />}
                     </div>
                     <div className="ag-chat-row-body">
                       <div className="ag-chat-row-top">
@@ -1577,7 +1577,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 {engine.pinnedChannels.map((pin, idx) => {
                   const ghKey = pin.geohash.toLowerCase()
                   const isTopic = isTopicChannel(pin.geohash)
-                  const displayLabel = formatRadioChannelLabel(pin.geohash)
+                  const displayLabel = formatBitchatChannelLabel(pin.geohash)
                   const active = isChannelActive(pin.geohash)
                   const livePulse = pulseByHash.get(ghKey)
                   const unread = Math.max(pin.unreadCount, engine.unreadCounts[ghKey] ?? 0)
@@ -1602,7 +1602,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     dropPinTarget.position === 'after' &&
                     dragPinIndex !== null &&
                     dragPinIndex !== idx
-                  const resolved = resolveRadioPreview(ghKey, livePulse)
+                  const resolved = resolveBitchatPreview(ghKey, livePulse)
                   const subtitle = resolved.preview
                     ? resolved.preview
                     : livePulse && livePulse.peerCount > 0
@@ -1860,7 +1860,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 liveRooms.map((room) => {
                   const ghKey = room.geohash.toLowerCase()
                   const isTopic = isTopicChannel(room.geohash)
-                  const displayLabel = formatRadioChannelLabel(room.geohash)
+                  const displayLabel = formatBitchatChannelLabel(room.geohash)
                   const active = isChannelActive(room.geohash)
                   const unread = engine.unreadCounts[ghKey] ?? 0
                   const mentions = engine.mentionCounts[ghKey] ?? 0
@@ -1869,7 +1869,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   const inCall =
                     activeCall?.mode === 'geo' &&
                     (activeCall.geohash ?? '').toLowerCase() === ghKey
-                  const resolved = resolveRadioPreview(ghKey, room)
+                  const resolved = resolveBitchatPreview(ghKey, room)
                   const subtitle = resolved.preview
                     ? resolved.preview
                     : room.peerCount > 0
@@ -1892,8 +1892,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                         className="ag-chat-row"
                         onClick={() => onTuneChannel(room.geohash)}
                       >
-                        <div className={`ag-chat-row-avatar ${isTopic ? 'topic' : 'radio'}`}>
-                          {isTopic ? <Hash size={17} /> : <Radio size={18} />}
+                        <div className={`ag-chat-row-avatar ${isTopic ? 'topic' : 'bitchat'}`}>
+                          {isTopic ? <Hash size={17} /> : <Waves size={18} />}
                         </div>
                         <div className="ag-chat-row-body">
                           <div className="ag-chat-row-top">
@@ -1995,11 +1995,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               )
               const rawLabel = entry.label?.trim()
               const bestName =
-                (rawLabel && !/^anon[0-9a-f]{0,4}$/i.test(rawLabel) ? rawLabel : null) ??
+                (rawLabel && !/^a(?:gn|n)on[0-9a-f]{0,4}$/i.test(rawLabel) ? rawLabel : null) ??
                 livePeer?.nickname ??
                 srvMember?.nickname ??
                 rawLabel ??
-                'anon'
+                'agnon'
               const handle = formatHandle(bestName, entry.pubkey)
               return {
                 entry,

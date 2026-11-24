@@ -1,6 +1,6 @@
 import type { PeerInfo, SlashCommandDef, ThemeId, TrustedPeerEntry } from '../types/protocol.ts'
 import { decodePubkeyInput } from './identity.ts'
-import { formatRadioChannelLabel, isTopicChannel } from './radioChannel.ts'
+import { formatBitchatChannelLabel, isTopicChannel } from './bitchatChannel.ts'
 
 export const SLASH_COMMANDS: SlashCommandDef[] = [
   {
@@ -21,7 +21,7 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     name: 'topic',
     aliases: ['t', 'chan'],
     usage: '/topic <name>',
-    description: 'Join a global topic radio channel (e.g. /topic bitcoin, /topic nostr)',
+    description: 'Join a global topic Bitchat channel (e.g. /topic bitcoin, /topic nostr)',
     category: 'nav',
   },
   {
@@ -181,8 +181,8 @@ function resolvePeer(query: string, peers: PeerInfo[]): PeerInfo | null {
     return {
       pubkey: directPk,
       npub: clean.startsWith('npub1') ? clean : directPk,
-      nickname: `anon${directPk.slice(-4)}`,
-      displayHandle: `@anon${directPk.slice(-4)}#${directPk.slice(-4)}`,
+      nickname: `agnon${directPk.slice(-4)}`,
+      displayHandle: `@agnon${directPk.slice(-4)}#${directPk.slice(-4)}`,
       lastSeenAt: 0,
       isOnline: false,
       isSelf: false,
@@ -301,7 +301,7 @@ export async function executeSlashCommand(
     case 't':
     case 'chan': {
       if (!args) {
-        ctx.addSystemMessage('Usage: /topic <name> — join a global topic radio channel (e.g. /topic bitcoin)')
+        ctx.addSystemMessage('Usage: /topic <name> — join a global topic Bitchat channel (e.g. /topic bitcoin)')
         return true
       }
       const ok = ctx.tuneTopicChannel(args)
@@ -315,7 +315,7 @@ export async function executeSlashCommand(
 
     case 'w':
     case 'who': {
-      const channelLabel = formatRadioChannelLabel(ctx.activeGeohash)
+      const channelLabel = formatBitchatChannelLabel(ctx.activeGeohash)
       const online = ctx.peers.filter((p) => p.isOnline && !p.isBlocked)
       if (online.length === 0) {
         ctx.addSystemMessage(`No active peers detected in ${channelLabel} yet.`)
@@ -339,7 +339,7 @@ export async function executeSlashCommand(
       const peer = resolvePeer(targetToken, ctx.peers)
       if (!peer) {
         ctx.addSystemMessage(
-          `Peer "${targetToken}" not found in ${formatRadioChannelLabel(ctx.activeGeohash)} (or pass a full npub/hex).`
+          `Peer "${targetToken}" not found in ${formatBitchatChannelLabel(ctx.activeGeohash)} (or pass a full npub/hex).`
         )
         return true
       }
@@ -392,7 +392,7 @@ export async function executeSlashCommand(
       }
       const ok = await ctx.postLocationNote(args)
       if (ok) {
-        ctx.addSystemMessage(`📍 Dead-drop note pinned to ${formatRadioChannelLabel(ctx.activeGeohash)} (expires in 24h).`)
+        ctx.addSystemMessage(`📍 Dead-drop note pinned to ${formatBitchatChannelLabel(ctx.activeGeohash)} (expires in 24h).`)
       }
       return true
     }
@@ -406,7 +406,7 @@ export async function executeSlashCommand(
       }
       ctx.refreshLocationNotes()
       ctx.addSystemMessage(
-        `Scanning relays for 24h dead-drop notes in ${formatRadioChannelLabel(ctx.activeGeohash)}… Check the Notes tab.`
+        `Scanning relays for 24h dead-drop notes in ${formatBitchatChannelLabel(ctx.activeGeohash)}… Check the Notes tab.`
       )
       return true
     }
@@ -466,7 +466,10 @@ export async function executeSlashCommand(
         ctx.addSystemMessage(`Could not resolve "${args}" to a peer handle, npub, or 64-char hex pubkey.`)
         return true
       }
-      const label = peer && peer.nickname !== `anon${directPk.slice(-4)}` ? peer.displayHandle : undefined
+      const label =
+        peer && !/^a(?:gn|n)on(?:[0-9a-f]{4})?$/i.test(peer.nickname.trim())
+          ? peer.displayHandle
+          : undefined
       const ok = ctx.trustPubkey(directPk, label)
       if (ok) {
         ctx.addSystemMessage(

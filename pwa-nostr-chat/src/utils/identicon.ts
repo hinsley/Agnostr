@@ -23,7 +23,7 @@ function fnv1a(input: string): number {
  * Deterministic perceptual hue (0–359) for a pubkey.
  */
 export function pubkeyToHue(pubkey: string): number {
-  const clean = (pubkey || 'anon').toLowerCase()
+  const clean = (pubkey || 'agnon').toLowerCase()
   const h = fnv1a(clean)
   return h % 360
 }
@@ -101,7 +101,7 @@ export function getIdenticonData(pubkey: string): IdenticonData {
  * inside `<img>` tags across message rows, peer rosters, and modals.
  */
 export function identiconDataUrl(pubkey: string): string {
-  const key = (pubkey || 'anon').toLowerCase()
+  const key = (pubkey || 'agnon').toLowerCase()
   const cached = dataUrlCache.get(key)
   if (cached) {
     // Refresh LRU recency on hit
@@ -166,6 +166,6 @@ export function formatHandle(nickname: string | undefined, pubkey: string): {
   full: string
 } {
   const suffix = (pubkey || '0000').slice(-4).toLowerCase()
-  const base = (nickname && nickname.trim()) || `anon${suffix}`
+  const base = (nickname && nickname.trim()) || `agnon${suffix}`
   return { base, suffix, full: `@${base}#${suffix}` }
 }

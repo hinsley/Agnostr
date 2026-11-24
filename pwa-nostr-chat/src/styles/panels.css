@@ -3749,7 +3749,7 @@
   text-align: left;
 }
 
-.ag-set-model-radio {
+.ag-set-model-choice {
   width: 18px;
   height: 18px;
   border-radius: var(--radius-full);
@@ -3764,7 +3764,7 @@
     border-color var(--dur-fast) ease;
 }
 
-.ag-set-model-radio.checked {
+.ag-set-model-choice.checked {
   background-color: var(--accent);
   border-color: var(--accent);
 }
@@ -5196,13 +5196,31 @@
     min-height: 44px;
   }
 
-  .ag-modal-backdrop input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  .ag-modal-backdrop input[type='text'],
+  .ag-modal-backdrop input[type='search'],
+  .ag-modal-backdrop input[type='url'],
+  .ag-modal-backdrop input[type='email'],
+  .ag-modal-backdrop input[type='password'],
+  .ag-modal-backdrop input[type='number'],
+  .ag-modal-backdrop input:not([type]),
   .ag-modal-backdrop textarea,
   .ag-modal-backdrop select,
-  .ag-sheet-backdrop input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  .ag-sheet-backdrop input[type='text'],
+  .ag-sheet-backdrop input[type='search'],
+  .ag-sheet-backdrop input[type='url'],
+  .ag-sheet-backdrop input[type='email'],
+  .ag-sheet-backdrop input[type='password'],
+  .ag-sheet-backdrop input[type='number'],
+  .ag-sheet-backdrop input:not([type]),
   .ag-sheet-backdrop textarea,
   .ag-sheet-backdrop select,
-  .ag-inspector input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  .ag-inspector input[type='text'],
+  .ag-inspector input[type='search'],
+  .ag-inspector input[type='url'],
+  .ag-inspector input[type='email'],
+  .ag-inspector input[type='password'],
+  .ag-inspector input[type='number'],
+  .ag-inspector input:not([type]),
   .ag-inspector textarea,
   .ag-inspector select {
     font-size: 16px;

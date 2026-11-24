@@ -565,7 +565,7 @@ function buildPokePayload(opts: {
     return {
       title: safeSender
         ? `${safeSender} started a call${geohash ? ` in #${geohash}` : ''}`
-        : 'Radio Call Active',
+        : 'Bitchat Call Active',
       body: safePreview || 'Tap to join the call.',
       tag: geohash ? `agnostr-geocall-${geohash}` : 'agnostr-geocall',
       callId,
@@ -624,7 +624,7 @@ function buildPokePayload(opts: {
         ? geohash
           ? `${safeSender} in #${geohash}`
           : safeSender
-        : 'New Radio Message',
+        : 'New Bitchat Message',
       body: safePreview || 'New message on Agnostr.',
       tag: geohash ? `agnostr-geo-${geohash}` : 'agnostr-geo',
       data: {
@@ -739,7 +739,7 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
     let key = subKeyForPubkey(resolvedMasterPk)
     let record = (await env.PUSH_KV.get(key, 'json')) as StoredUserRecord | null
 
-    // Resolve derived Radio alias pubkeys (`alias:<derivedPk> -> masterPubkey`)
+    // Resolve derived Bitchat alias pubkeys (`alias:<derivedPk> -> masterPubkey`)
     if (!record || !Array.isArray(record.devices) || record.devices.length === 0) {
       const mappedMaster = await env.PUSH_KV.get(aliasKeyForPubkey(recipientPk))
       if (isHex64(mappedMaster)) {

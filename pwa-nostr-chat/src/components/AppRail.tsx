@@ -9,9 +9,9 @@ import {
   Map as MapIcon,
   MessageCircle,
   Plus,
-  Radio,
   Settings,
   Wallet,
+  Waves,
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol'
 import type { ServerSummary } from '../types/servers'
@@ -116,13 +116,13 @@ export const AppRail: React.FC<AppRailProps> = ({
     engine.servers.joinedServers[0]?.id ||
     null
 
-  const isRadioActive = workspace === 'chat' && listTab === 'radio'
+  const isBitchatActive = workspace === 'chat' && listTab === 'bitchat'
   const isPeopleActive = workspace === 'chat' && listTab === 'dms'
   const isMailActive = workspace === 'mail'
   const isWalletActive = workspace === 'wallet'
 
-  const radioMentions = engine.totalGeoMentions
-  const radioUnread = engine.totalGeoUnread
+  const bitchatMentions = engine.totalGeoMentions
+  const bitchatUnread = engine.totalGeoUnread
   const dmUnread = engine.totalDmUnread
   const mailUnread = engine.amail.unreadInboxCount
   const walletSats = engine.wallet.totalBalanceSats
@@ -178,32 +178,32 @@ export const AppRail: React.FC<AppRailProps> = ({
     <nav className="ag-app-rail ag-desktop-only" aria-label="Workspace and groups">
       {/* Primary First-Class Workspaces */}
       <div className="ag-rail-group">
-        {/* Radio */}
+        {/* Bitchat */}
         <div className="ag-rail-slot">
           <button
             type="button"
-            className={`ag-rail-tile ag-rail-radio ${isRadioActive ? 'active' : ''} ${radioUnread > 0 || radioMentions > 0 ? 'has-unread' : ''}`}
+            className={`ag-rail-tile ag-rail-bitchat ${isBitchatActive ? 'active' : ''} ${bitchatUnread > 0 || bitchatMentions > 0 ? 'has-unread' : ''}`}
             onClick={() => {
               onPlaySound?.('click')
               if (workspace !== 'chat') onSelectWorkspace('chat')
-              onSelectChatTab('radio')
+              onSelectChatTab('bitchat')
             }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Radio')}
+            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Bitchat')}
             onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'Radio')}
+            onFocus={(e) => showTooltip(e.currentTarget, 'Bitchat')}
             onBlur={hideTooltip}
-            aria-label="Radio"
-            aria-current={isRadioActive ? 'page' : undefined}
+            aria-label="Bitchat"
+            aria-current={isBitchatActive ? 'page' : undefined}
           >
             <span className="ag-rail-indicator" aria-hidden="true" />
-            <Radio size={19} strokeWidth={isRadioActive ? 2.15 : 1.85} />
-            {radioMentions > 0 ? (
+            <Waves size={19} strokeWidth={isBitchatActive ? 2.15 : 1.85} />
+            {bitchatMentions > 0 ? (
               <span className="ag-rail-badge ping tabular">
-                {formatBadgeCount(radioMentions)}
+                {formatBadgeCount(bitchatMentions)}
               </span>
-            ) : radioUnread > 0 ? (
+            ) : bitchatUnread > 0 ? (
               <span className="ag-rail-badge unread tabular">
-                {formatBadgeCount(radioUnread)}
+                {formatBadgeCount(bitchatUnread)}
               </span>
             ) : null}
           </button>

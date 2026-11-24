@@ -12,11 +12,11 @@ export interface PopularTopicChannel {
 }
 
 export const POPULAR_TOPIC_CHANNELS: readonly PopularTopicChannel[] = [
-  { slug: 'general', label: '#general', description: 'Open global radio' },
+  { slug: 'general', label: '#general', description: 'Open global Bitchat' },
   { slug: 'nostr', label: '#nostr', description: 'Nostr protocol & clients' },
   { slug: 'bitcoin', label: '#bitcoin', description: 'Bitcoin & Lightning' },
-  { slug: 'agnostr', label: '#agnostr', description: 'Agnostr radio lounge' },
-  { slug: 'mesh', label: '#mesh', description: 'Off-grid & mesh radio' },
+  { slug: 'agnostr', label: '#agnostr', description: 'Agnostr Bitchat lounge' },
+  { slug: 'mesh', label: '#mesh', description: 'Off-grid & mesh Bitchat' },
   { slug: 'dev', label: '#dev', description: 'Builders & code' },
 ]
 
@@ -71,15 +71,15 @@ export function isTopicChannel(key: string | null | undefined): boolean {
 /**
  * Returns true if `raw` is either a valid base32 geohash or a valid `'topic:<slug>'` key.
  */
-export function isValidRadioChannelKey(raw: string | null | undefined): boolean {
+export function isValidBitchatChannelKey(raw: string | null | undefined): boolean {
   if (typeof raw !== 'string') return false
   return isTopicChannel(raw) || isValidGeohash(raw)
 }
 
 /**
- * Canonicalizes a radio channel key (either `'topic:<slug>'` or lowercase base32 geohash).
+ * Canonicalizes a Bitchat channel key (either `'topic:<slug>'` or lowercase base32 geohash).
  */
-export function normalizeRadioChannelKey(raw: string | null | undefined): string | null {
+export function normalizeBitchatChannelKey(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null
   const slug = getTopicSlug(raw)
   if (slug) return `${TOPIC_CHANNEL_PREFIX}${slug}`
@@ -90,7 +90,7 @@ export function normalizeRadioChannelKey(raw: string | null | undefined): string
 /**
  * Formats a channel key for display: `'topic:bitcoin'` -> `'#bitcoin'`, `'9q8y'` -> `'#9q8y'`.
  */
-export function formatRadioChannelLabel(key: string): string {
+export function formatBitchatChannelLabel(key: string): string {
   const slug = getTopicSlug(key)
   if (slug) return `#${slug}`
   const gh = normalizeGeohash(key)
@@ -98,21 +98,21 @@ export function formatRadioChannelLabel(key: string): string {
 }
 
 /**
- * Formats a canonical URL hash fragment for a radio channel key:
+ * Formats a canonical URL hash fragment for a Bitchat channel key:
  * - topic channel: `#topic=<slug>`
  * - geohash channel: `#<geohash>`
  */
-export function formatRadioChannelHash(key: string): string {
+export function formatBitchatChannelHash(key: string): string {
   const slug = getTopicSlug(key)
   if (slug) return `#topic=${encodeURIComponent(slug)}`
   return `#${normalizeGeohash(key)}`
 }
 
 /**
- * Parses a URL hash fragment into a canonical radio channel key (`'topic:<slug>'` or geohash),
+ * Parses a URL hash fragment into a canonical Bitchat channel key (`'topic:<slug>'` or geohash),
  * or returns null if the hash belongs to another deep link (e.g. `#dm=`, `#notify=`, `#invite=`).
  */
-export function parseRadioChannelHash(rawHash: string): string | null {
+export function parseBitchatChannelHash(rawHash: string): string | null {
   const trimmed = rawHash.trim().replace(/^#/, '')
   if (!trimmed) return null
 
@@ -138,10 +138,10 @@ export function parseRadioChannelHash(rawHash: string): string | null {
 }
 
 /**
- * Builds a shareable URL for a radio channel key (`#topic=<slug>` or `#<geohash>`).
+ * Builds a shareable URL for a Bitchat channel key (`#topic=<slug>` or `#<geohash>`).
  */
-export function buildRadioChannelShareUrl(key: string): string {
-  const hash = formatRadioChannelHash(key)
+export function buildBitchatChannelShareUrl(key: string): string {
+  const hash = formatBitchatChannelHash(key)
   if (typeof window === 'undefined') return hash
   return `${window.location.origin}${window.location.pathname}${hash}`
 }

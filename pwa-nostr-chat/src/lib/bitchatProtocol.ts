@@ -13,10 +13,10 @@ import { isOffMainThreadWorkerSupported, mineNip13OffMainThread } from './offMai
 import {
   getTopicSlug,
   isTopicChannel,
-  normalizeRadioChannelKey,
+  normalizeBitchatChannelKey,
   normalizeTopicSlug,
   TOPIC_CHANNEL_PREFIX,
-} from './radioChannel.ts'
+} from './bitchatChannel.ts'
 
 export const KIND_LOCATION_NOTE = 1
 export const KIND_SEAL = 13
@@ -25,7 +25,7 @@ export const KIND_GIFT_WRAP = 1059
 export const KIND_GEOHASH_CHAT = 20000
 export const KIND_GEOHASH_PRESENCE = 20001
 export const KIND_EPHEMERAL_REACTION = 20007
-export const KIND_NAMED_RADIO_CHAT = 23333
+export const KIND_NAMED_BITCHAT_CHAT = 23333
 
 export const DEFAULT_POW_TARGET_BITS = 8
 const MAX_INBOUND_TAGS = 64
@@ -584,7 +584,7 @@ export function buildGeohashChatTemplate(opts: {
   }
 }
 
-export function buildNamedRadioChatTemplate(opts: {
+export function buildNamedBitchatChatTemplate(opts: {
   content: string
   topic: string
   nickname: string
@@ -612,7 +612,7 @@ export function buildNamedRadioChatTemplate(opts: {
     if (/^[0-9a-f]{64}$/i.test(opts.replyTo.pubkey)) {
       tags.push(['p', opts.replyTo.pubkey.toLowerCase()])
     }
-    tags.push(['k', String(KIND_NAMED_RADIO_CHAT)])
+    tags.push(['k', String(KIND_NAMED_BITCHAT_CHAT)])
   }
   if (opts.voiceMemo) {
     tags.push(buildImetaTag(opts.voiceMemo))
@@ -621,7 +621,7 @@ export function buildNamedRadioChatTemplate(opts: {
     tags.push(buildImageImetaTag(opts.imageAttachment))
   }
   return {
-    kind: KIND_NAMED_RADIO_CHAT,
+    kind: KIND_NAMED_BITCHAT_CHAT,
     created_at: Math.floor(Date.now() / 1000),
     tags,
     content: opts.content,
@@ -657,7 +657,7 @@ export function buildReactionTemplate(opts: {
         ['d', topicSlug],
         ['e', opts.targetEventId],
         ['p', opts.targetPubkey.toLowerCase()],
-        ['k', String(KIND_NAMED_RADIO_CHAT)],
+        ['k', String(KIND_NAMED_BITCHAT_CHAT)],
       ]
     : [
         ['g', normalizeGeohash(opts.geohash)],
@@ -713,7 +713,7 @@ export function parseGeohashChatEvent(
 
   const pubkey = event.pubkey.toLowerCase()
   const rawNick = getTagValue(event.tags, 'n')?.trim() ?? ''
-  const nickname = rawNick || `anon${pubkey.slice(-4)}`
+  const nickname = rawNick || `agnon${pubkey.slice(-4)}`
   const displayHandle = formatDisplayHandle(nickname, pubkey)
 
   const isTeleported = hasTagPair(event.tags, 't', 'teleport')
@@ -724,7 +724,7 @@ export function parseGeohashChatEvent(
     Boolean(proxyTag && proxyTag.some((v) => v.toLowerCase().includes('mesh'))) ||
     Boolean(clientTag && clientTag.toLowerCase().includes('mesh')) ||
     nickname.toLowerCase().endsWith('.mesh') ||
-    nickname.toLowerCase() === 'radio-bridge'
+    nickname.toLowerCase() === 'mesh-bridge'
 
   let replyTo: ReplyReference | undefined
   const eTag = event.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16)
@@ -767,13 +767,13 @@ export function parseGeohashChatEvent(
   }
 }
 
-export function parseNamedRadioChatEvent(
+export function parseNamedBitchatChatEvent(
   event: NostrEvent,
   expectedChannelKey: string,
   ownPubkeys: Set<string>,
   findMessageById?: (id: string) => GeoMessage | undefined
 ): GeoMessage | null {
-  if (event.kind !== KIND_NAMED_RADIO_CHAT) return null
+  if (event.kind !== KIND_NAMED_BITCHAT_CHAT) return null
   const slug = extractTopicChannelTag(event.tags)
   const expectedSlug = getTopicSlug(expectedChannelKey) ?? normalizeTopicSlug(expectedChannelKey)
   if (!slug || !expectedSlug || slug !== expectedSlug) return null
@@ -784,7 +784,7 @@ export function parseNamedRadioChatEvent(
   const channelKey = `${TOPIC_CHANNEL_PREFIX}${slug}`
   const pubkey = event.pubkey.toLowerCase()
   const rawNick = getTagValue(event.tags, 'n')?.trim() ?? ''
-  const nickname = rawNick || `anon${pubkey.slice(-4)}`
+  const nickname = rawNick || `agnon${pubkey.slice(-4)}`
   const displayHandle = formatDisplayHandle(nickname, pubkey)
 
   const clientTag = parseClientTag(event.tags)
@@ -794,7 +794,7 @@ export function parseNamedRadioChatEvent(
     Boolean(proxyTag && proxyTag.some((v) => v.toLowerCase().includes('mesh'))) ||
     Boolean(clientTag && clientTag.toLowerCase().includes('mesh')) ||
     nickname.toLowerCase().endsWith('.mesh') ||
-    nickname.toLowerCase() === 'radio-bridge'
+    nickname.toLowerCase() === 'mesh-bridge'
 
   let replyTo: ReplyReference | undefined
   const eTag = event.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16)
@@ -893,7 +893,7 @@ export function parseLocationNoteEvent(
   if (!Number.isFinite(expiresAt) || expiresAt <= nowSec) return null
 
   const pubkey = event.pubkey.toLowerCase()
-  const nickname = getTagValue(event.tags, 'n')?.trim() || `anon${pubkey.slice(-4)}`
+  const nickname = getTagValue(event.tags, 'n')?.trim() || `agnon${pubkey.slice(-4)}`
 
   return {
     id: event.id,
@@ -913,7 +913,7 @@ export function createSystemMessage(geohash: string, content: string): GeoMessag
   crypto.getRandomValues(randomBytes)
   return {
     id: `sys-${Date.now()}-${bytesToHex(randomBytes)}`,
-    geohash: normalizeRadioChannelKey(geohash) ?? normalizeGeohash(geohash),
+    geohash: normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash),
     pubkey: 'system',
     nickname: 'system',
     displayHandle: 'system',
