@@ -414,6 +414,8 @@ export async function registerWithPushBridge(
     serverIds: params.serverIds.slice(0, 20),
     preferences: {
       dms: params.settings.dms,
+      agmail: params.settings.agmail,
+      agmailCcBcc: params.settings.agmailCcBcc,
       directPings: params.settings.directPings,
       dmCallRinging: params.settings.dmCallRinging,
       serverMessages: params.settings.serverMessages,

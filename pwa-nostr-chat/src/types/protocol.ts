@@ -351,7 +351,9 @@ export interface AppSettings {
   showBridgeBadges: boolean
   /** When true, appends NIP-89 ["client", "agnostr"] tag to Geo Radio messages & presence */
   broadcastClientTag: boolean
-  /** When true, hides text messages from unwhitelisted pubkeys too (media/voice is ALWAYS whitelist-gated) */
+  /** When true (default), voice memos from untrusted non-blocked peers can play and transcribe; blocked peers are always denied */
+  allowUntrustedVoiceMemos: boolean
+  /** When true, hides text and voice memos from untrusted pubkeys too (images & calls always require trust; voice memos are allowed by default unless restricted or strictWhitelistMode is on) */
   strictWhitelistMode: boolean
 }
 
@@ -469,6 +471,8 @@ export interface AgnostrEngine {
   isTrusted: (pubkey: string) => boolean
   /** True only if pubkey is explicitly stored in trustedPubkeys */
   isExplicitlyTrusted: (pubkey: string) => boolean
+  /** True if voice memos from pubkey can load & transcribe (allowed for non-blocked peers by default unless restricted or strictWhitelistMode is on) */
+  canLoadVoiceMemo: (pubkey: string) => boolean
   trustPubkey: (pubkeyOrNpub: string, label?: string) => boolean
   pendingTrustRequest: PendingTrustRequest | null
   confirmPendingTrust: () => void
@@ -480,6 +484,7 @@ export interface AgnostrEngine {
   setPeerNote: (pubkey: string, note: string) => void
   strictWhitelistMode: boolean
   setStrictWhitelistMode: (enabled: boolean) => void
+  setAllowUntrustedVoiceMemos: (enabled: boolean) => void
   /** Count of text messages in active channel currently hidden by strictWhitelistMode */
   hiddenByWhitelistCount: number
 
@@ -490,7 +495,7 @@ export interface AgnostrEngine {
   resetBlossomServers: () => void
   voiceSendPhase: VoiceSendPhase
   sendVoiceMemo: (recorded: RecordedVoiceMemo, caption?: string) => Promise<boolean>
-  /** STRICT trusted-peers-gated fetch: refuses untrusted senders with zero network requests */
+  /** Policy-gated fetch: allows non-blocked senders by default (or trusted-only when restricted), refusing denied senders with zero network requests */
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
   sendImageAttachment: (image: PreparedImage, caption?: string) => Promise<boolean>
   /** STRICT trusted-peers-gated fetch: refuses untrusted senders with zero network requests */

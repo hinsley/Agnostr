@@ -81,6 +81,14 @@ export interface NotifyLocationNoteInput {
   content: string
 }
 
+export interface NotifyAmailInput {
+  id: string
+  senderPubkey: string
+  senderName: string
+  subject: string
+  recipientRole: 'to' | 'cc' | 'bcc'
+}
+
 export interface UseNotificationsParams {
   activeView: ActiveView
   activeGeohash: string
@@ -114,6 +122,7 @@ export interface UseNotificationsResult {
   notifications: NotificationEngine
   notifyGeoMessage: (input: NotifyGeoMessageInput) => void
   notifyLocationNote: (input: NotifyLocationNoteInput) => void
+  notifyAmail: (input: NotifyAmailInput) => boolean
   resetAllNotifications: () => void
 }
 
@@ -957,7 +966,7 @@ export function useNotifications(
         }
       }
       const cfg = settingsRef.current
-      if (cfg.geoMessages === 'off') return
+      if (cfg.geoMessages !== 'all') return
       if (!rememberNotified(`note:${input.id}`)) return
 
       const view = activeViewRef.current
@@ -989,6 +998,62 @@ export function useNotifications(
           onDirectClick: handleDirectNotificationClick,
         })
       }
+    },
+    [canSendOsNotification, handleDirectNotificationClick, rememberNotified]
+  )
+
+  const notifyAmail = useCallback(
+    (input: NotifyAmailInput): boolean => {
+      const pk = input.senderPubkey.toLowerCase()
+      if (blockedSetRef.current.has(pk)) return false
+      if (
+        strictWhitelistRef.current &&
+        !ownPubkeysRef.current.has(pk) &&
+        !trustedSetRef.current.has(pk)
+      ) {
+        return false
+      }
+
+      const cfg = settingsRef.current
+      const allowed = input.recipientRole === 'to' ? cfg.agmail : cfg.agmailCcBcc
+      if (!allowed) return false
+      if (!rememberNotified(`amail:${input.id}`)) return false
+
+      if (cfg.soundEnabled) {
+        soundEngine.playNotificationChime('dm', {
+          vibrate: cfg.vibrationEnabled,
+        })
+      }
+
+      if (canSendOsNotification()) {
+        const title = cfg.showPreviews
+          ? input.recipientRole === 'cc'
+            ? `New Agmail (CC) from ${input.senderName}`
+            : input.recipientRole === 'bcc'
+              ? `New Agmail (BCC) from ${input.senderName}`
+              : `New Agmail from ${input.senderName}`
+          : input.recipientRole === 'to'
+            ? 'New Agmail'
+            : 'New Agmail (CC/BCC)'
+
+        const body = cfg.showPreviews
+          ? truncatePreview(input.subject || 'New encrypted Agmail')
+          : 'Open Agnostr to read your encrypted message.'
+
+        void showOsNotification({
+          title,
+          body,
+          tag: `agnostr-mail-${input.id.slice(0, 12)}`,
+          vibrate: cfg.vibrationEnabled ? [140, 80, 140] : undefined,
+          data: {
+            category: 'agmail',
+            peerPubkey: input.senderPubkey,
+          },
+          onDirectClick: handleDirectNotificationClick,
+        })
+      }
+
+      return true
     },
     [canSendOsNotification, handleDirectNotificationClick, rememberNotified]
   )
@@ -1383,6 +1448,8 @@ export function useNotifications(
       pk: masterPubkey.toLowerCase(),
       aliases: normalizedAliasPubkeys,
       dms: settings.dms,
+      agmail: settings.agmail,
+      agmailCcBcc: settings.agmailCcBcc,
       directPings: settings.directPings,
       dmCallRinging: settings.dmCallRinging,
       serverMessages: settings.serverMessages,
@@ -1399,6 +1466,8 @@ export function useNotifications(
     normalizedAliasPubkeys,
     pinnedGeohashes,
     relayUrls,
+    settings.agmail,
+    settings.agmailCcBcc,
     settings.directPings,
     settings.dmCallRinging,
     settings.dms,
@@ -1625,6 +1694,7 @@ export function useNotifications(
     notifications,
     notifyGeoMessage,
     notifyLocationNote,
+    notifyAmail,
     resetAllNotifications,
   }
 }

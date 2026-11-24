@@ -28,6 +28,7 @@ export interface VoiceMemoPlayerProps {
   senderNickname: string
   senderDisplayHandle: string
   isTrusted: boolean
+  isAllowed?: boolean
   isDmMode?: boolean
   autoTranscribe?: boolean
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
@@ -824,9 +825,11 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
 }
 
 export const VoiceMemoPlayer: React.FC<VoiceMemoPlayerProps> = React.memo((props) => {
-  // CRITICAL SAFETY GATE: Untrusted senders ALWAYS render an inert card with zero <audio>,
-  // zero fetches, and zero transcription hooks.
-  if (!props.isTrusted) {
+  const voiceAllowed = props.isAllowed ?? props.isTrusted
+  // SAFETY GATE: Voice memos are allowed for non-blocked peers by default; when restricted
+  // (e.g. allowUntrustedVoiceMemos is off or Trusted Peers Only is enabled), render an inert
+  // shielded card with zero <audio>, zero fetches, and zero transcription hooks.
+  if (!voiceAllowed) {
     return (
       <ShieldedVoiceCard
         memo={props.memo}

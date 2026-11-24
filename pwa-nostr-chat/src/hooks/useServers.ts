@@ -1371,17 +1371,52 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     (serverId: string, channelId?: string) => {
       const target = joinedServersRef.current.find((s) => s.id === serverId)
       if (!target) return
-      const nextChan =
-        channelId && target.channels.some((c) => c.id === channelId)
-          ? channelId
-          : target.lastActiveChannelId || target.channels[0]?.id || target.groupId || 'general'
+
+      let nextChan: string
+      if (channelId && target.channels.some((c) => c.id === channelId)) {
+        nextChan = channelId
+      } else if (
+        target.lastActiveChannelId &&
+        target.channels.some((c) => c.id === target.lastActiveChannelId)
+      ) {
+        nextChan = target.lastActiveChannelId
+      } else if (target.channels.length > 0) {
+        // Pick the channel with the highest unread count or latest message activity
+        let bestChannelId = target.channels[0].id
+        let bestUnread = -1
+        let bestMentions = -1
+        let bestLatestTs = -1
+        for (const ch of target.channels) {
+          const unread = ch.unreadCount ?? 0
+          const mentions = ch.mentionCount ?? 0
+          const msgs = loadServerChannelMessages(serverId, ch.id)
+          const latestTs = msgs.length > 0 ? (msgs[msgs.length - 1]?.createdAt ?? 0) : 0
+          const isBetter =
+            unread > bestUnread ||
+            (unread === bestUnread && mentions > bestMentions) ||
+            (unread === bestUnread && mentions === bestMentions && latestTs > bestLatestTs)
+          if (isBetter) {
+            bestChannelId = ch.id
+            bestUnread = unread
+            bestMentions = mentions
+            bestLatestTs = latestTs
+          }
+        }
+        nextChan = bestChannelId
+      } else {
+        nextChan = target.groupId || 'general'
+      }
 
       activeServerChanKeyRef.current = makeServerChanKey(serverId, nextChan)
       serverUnreadItemsRef.current.delete(makeServerChanKey(serverId, nextChan))
 
-      setJoinedServers((prev) =>
-        prev.map((s) => {
+      setJoinedServers((prev) => {
+        let shouldPersist = false
+        const next = prev.map((s) => {
           if (s.id !== serverId) return s
+          if (s.lastActiveChannelId !== nextChan) {
+            shouldPersist = true
+          }
           const nextChannels = s.channels.map((c) =>
             c.id === nextChan ? { ...c, unreadCount: 0, mentionCount: 0 } : c
           )
@@ -1393,7 +1428,12 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             mentionCount: nextChannels.reduce((acc, c) => acc + (c.mentionCount ?? 0), 0),
           }
         })
-      )
+        if (shouldPersist) {
+          joinedServersRef.current = next
+          saveJoinedServers(next)
+        }
+        return next
+      })
       setActiveView({ type: 'server', serverId, channelId: nextChan })
     },
     [setActiveView]
@@ -2034,7 +2074,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         )
 
         if (ok) {
-          const pokeSet = new Set<string>()
+          const pingPokeSet = new Set<string>()
+          const broadcastPokeSet = new Set<string>()
           const isValidRecipient = (raw?: string | null): string | null => {
             if (!raw) return null
             const pk = raw.trim().toLowerCase()
@@ -2043,13 +2084,13 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             return pk
           }
 
-          // 1. Replied-to author pubkey (highest priority)
+          // 1. Replied-to author pubkey (ping / mention)
           if (replyTarget && !replyTarget.isSystem) {
             const rpk = isValidRecipient(replyTarget.pubkey)
-            if (rpk) pokeSet.add(rpk)
+            if (rpk) pingPokeSet.add(rpk)
           }
 
-          // 2. Mentioned group members resolved from roster
+          // 2. Mentioned group members resolved from roster (ping / mention)
           const roster =
             membersRef.current.serverId === server.id ? membersRef.current.members : []
           const contentMentions = extractMentions(body)
@@ -2059,30 +2100,28 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               const mpk = isValidRecipient(member.pubkey)
               if (!mpk) continue
               if (doesContentMentionUser(body, contentMentions, member.nickname, mpk)) {
-                pokeSet.add(mpk)
+                pingPokeSet.add(mpk)
               }
             }
           }
 
-          // 3. Up to 10 other known group members (excluding self & banned)
-          let extraAdded = 0
-          const addExtraMember = (raw?: string | null) => {
-            if (extraAdded >= 10) return
+          // 3. Up to 10 other known non-self, non-banned group members NOT already pinged
+          const addBroadcastMember = (raw?: string | null) => {
+            if (broadcastPokeSet.size >= 10) return
             const pk = isValidRecipient(raw)
-            if (!pk || pokeSet.has(pk)) return
-            pokeSet.add(pk)
-            extraAdded += 1
+            if (!pk || pingPokeSet.has(pk) || broadcastPokeSet.has(pk)) return
+            broadcastPokeSet.add(pk)
           }
           for (const member of roster) {
             if (member.isSelf || member.isBanned) continue
-            addExtraMember(member.pubkey)
+            addBroadcastMember(member.pubkey)
           }
-          addExtraMember(server.founderPubkey)
-          for (const modPk of server.moderators) addExtraMember(modPk)
-          for (const admin of server.admins ?? []) addExtraMember(admin.pubkey)
-          for (const mPk of server.members ?? []) addExtraMember(mPk)
+          addBroadcastMember(server.founderPubkey)
+          for (const modPk of server.moderators) addBroadcastMember(modPk)
+          for (const admin of server.admins ?? []) addBroadcastMember(admin.pubkey)
+          for (const mPk of server.members ?? []) addBroadcastMember(mPk)
 
-          if (pokeSet.size > 0) {
+          if (pingPokeSet.size > 0 || broadcastPokeSet.size > 0) {
             let cleanPreview: string | undefined
             if (!server.encrypted) {
               let stripped = body.trim()
@@ -2100,15 +2139,30 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 cleanPreview = 'Photo'
               }
             }
-            onNotifyPushPokeRef.current?.({
-              recipientPubkeys: Array.from(pokeSet),
-              category: 'server-message',
-              eventId: signed.id,
-              serverId: server.id,
-              channelId: chanId,
-              senderName: nick,
-              preview: cleanPreview,
-            })
+            if (pingPokeSet.size > 0) {
+              onNotifyPushPokeRef.current?.({
+                recipientPubkeys: Array.from(pingPokeSet),
+                category: 'server-message',
+                isMention: true,
+                eventId: signed.id,
+                serverId: server.id,
+                channelId: chanId,
+                senderName: nick,
+                preview: cleanPreview,
+              })
+            }
+            if (broadcastPokeSet.size > 0) {
+              onNotifyPushPokeRef.current?.({
+                recipientPubkeys: Array.from(broadcastPokeSet),
+                category: 'server-message',
+                isMention: false,
+                eventId: signed.id,
+                serverId: server.id,
+                channelId: chanId,
+                senderName: nick,
+                preview: cleanPreview,
+              })
+            }
           }
         } else {
           const reason =

@@ -348,44 +348,50 @@ export function App() {
     if (!pendingNotifAction) return
     const { action, payload, receivedAt } = pendingNotifAction
 
-    // Navigate to target room/DM/server once per pending notification action
+    // Navigate to target room/DM/server/Agmail once per pending notification action
     if (navigatedNotifTsRef.current !== receivedAt) {
       navigatedNotifTsRef.current = receivedAt
-      setWorkspace('chat')
-      setAmailState({ section: 'inbox', composeTo: null })
       setWalletIntent(undefined)
       setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       setCmdkOpen(false)
       setRadarExpanded(false)
 
-      if ((payload.category === 'dm' || payload.category === 'dm-call') && payload.peerPubkey) {
-        engine.openDmThread(payload.peerPubkey, payload.callerNickname)
-        setListTab('dms')
-        setMobileScreen('chat')
-      } else if (
-        (payload.category === 'server-message' || payload.category === 'server-call') &&
-        payload.serverId
-      ) {
-        if (payload.channelId) {
-          engine.servers.selectChannel(payload.serverId, payload.channelId)
-        } else {
-          engine.servers.selectServer(payload.serverId)
+      if (payload.category === 'agmail') {
+        setWorkspace('mail')
+        setAmailState({ section: 'inbox', composeTo: null })
+      } else {
+        setWorkspace('chat')
+        setAmailState({ section: 'inbox', composeTo: null })
+
+        if ((payload.category === 'dm' || payload.category === 'dm-call') && payload.peerPubkey) {
+          engine.openDmThread(payload.peerPubkey, payload.callerNickname)
+          setListTab('dms')
+          setMobileScreen('chat')
+        } else if (
+          (payload.category === 'server-message' || payload.category === 'server-call') &&
+          payload.serverId
+        ) {
+          if (payload.channelId) {
+            engine.servers.selectChannel(payload.serverId, payload.channelId)
+          } else {
+            engine.servers.selectServer(payload.serverId)
+          }
+          setSelectedServerId(payload.serverId)
+          setListTab('servers')
+          setMobileScreen('chat')
+        } else if (
+          (payload.category === 'geo-message' ||
+            payload.category === 'location-note' ||
+            payload.category === 'geo-call') &&
+          payload.geohash
+        ) {
+          engine.tuneGeohash(payload.geohash)
+          setListTab('radio')
+          setMobileScreen('chat')
+        } else if (payload.category === 'test') {
+          setSettingsState({ open: true, tab: 'notifications' })
         }
-        setSelectedServerId(payload.serverId)
-        setListTab('servers')
-        setMobileScreen('chat')
-      } else if (
-        (payload.category === 'geo-message' ||
-          payload.category === 'location-note' ||
-          payload.category === 'geo-call') &&
-        payload.geohash
-      ) {
-        engine.tuneGeohash(payload.geohash)
-        setListTab('radio')
-        setMobileScreen('chat')
-      } else if (payload.category === 'test') {
-        setSettingsState({ open: true, tab: 'notifications' })
       }
     }
 
@@ -843,21 +849,23 @@ export function App() {
 
   const handleSelectServer = useCallback(
     (serverId: string) => {
+      engine.servers.selectServer(serverId)
+      radioAudio.play('tune')
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       setZapTarget(null)
       setInspectedPeer(null)
+      setAmailState({ section: 'inbox', composeTo: null })
+      setWalletIntent(undefined)
       setSelectedServerId(serverId)
       setListTab('servers')
       setWorkspace('chat')
       setSidebarCollapsed(false)
-      if (!isMobileViewport) {
-        engine.servers.selectServer(serverId)
-      }
+      setMobileScreen('chat')
     },
-    [engine.servers, isMobileViewport]
+    [engine.servers]
   )
 
   const handleOpenAmail = useCallback((section: AmailInitialSection = 'inbox') => {

@@ -24,6 +24,7 @@ import {
   Link2,
   Loader2,
   Lock,
+  Mic,
   Palette,
   PhoneCall,
   Plus,
@@ -153,7 +154,7 @@ const SIGN_MODES: readonly { id: SignMode; label: string }[] = [
 
 const NOTIF_FILTER_MODES: readonly { id: NotificationFilterMode; label: string }[] = [
   { id: 'all', label: 'All' },
-  { id: 'mentions', label: 'Mentions' },
+  { id: 'mentions', label: 'Pings' },
   { id: 'off', label: 'Off' },
 ]
 
@@ -1674,6 +1675,42 @@ export function SettingsModal({
 
             <label className="ag-set-notif-row">
               <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Agmail (Direct)</span>
+                <span className="ag-set-notif-row-desc">
+                  Encrypted Agmails sent directly to you (To)
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.agmail}
+                onChange={() => {
+                  notif.updateSettings({ agmail: !ns.agmail })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Agmail (CC / BCC)</span>
+                <span className="ag-set-notif-row-desc">
+                  Encrypted Agmails where you are CC&apos;d or BCC&apos;d
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.agmailCcBcc}
+                onChange={() => {
+                  notif.updateSettings({ agmailCcBcc: !ns.agmailCcBcc })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
                 <span className="ag-set-notif-row-title">
                   Direct pings (@mentions &amp; replies)
                 </span>
@@ -1714,7 +1751,7 @@ export function SettingsModal({
               <div className="ag-set-notif-row-copy">
                 <span className="ag-set-notif-row-title">Group Messages</span>
                 <span className="ag-set-notif-row-desc">
-                  Messages across your joined groups and channels
+                  Messages across your joined groups (default: Pings only)
                 </span>
               </div>
               <div
@@ -1762,7 +1799,7 @@ export function SettingsModal({
               <div className="ag-set-notif-row-copy">
                 <span className="ag-set-notif-row-title">Geo Radio</span>
                 <span className="ag-set-notif-row-desc">
-                  Messages in your tuned geohash radio channel
+                  Messages in your tuned radio channel (default: Pings only)
                 </span>
               </div>
               <div
@@ -2057,7 +2094,7 @@ export function SettingsModal({
             <span>Trusted Peers Only (Text)</span>
           </span>
           <span className="ag-set-toggle-desc">
-            Hide text from untrusted senders. Media and calls always require trust.
+            Hide text and voice memos from untrusted senders. Images and calls always require trust.
           </span>
         </div>
         <input
@@ -2066,6 +2103,28 @@ export function SettingsModal({
           checked={strictWhitelistMode}
           onChange={() => {
             engine.setStrictWhitelistMode(!strictWhitelistMode)
+            onPlaySound?.('click')
+          }}
+        />
+      </label>
+
+      <label className={`ag-set-toggle-card ${strictWhitelistMode ? 'ag-set-dimmed' : ''}`}>
+        <div className="ag-set-toggle-copy">
+          <span className="ag-set-toggle-title">
+            <Mic size={16} />
+            <span>Voice Memos from Untrusted Peers</span>
+          </span>
+          <span className="ag-set-toggle-desc">
+            Play and transcribe voice memos from anyone who isn&apos;t blocked. Turn off to require Trusted Peers.
+          </span>
+        </div>
+        <input
+          type="checkbox"
+          className="ag-switch"
+          checked={engine.settings.allowUntrustedVoiceMemos && !strictWhitelistMode}
+          disabled={strictWhitelistMode}
+          onChange={() => {
+            engine.setAllowUntrustedVoiceMemos(!engine.settings.allowUntrustedVoiceMemos)
             onPlaySound?.('click')
           }}
         />
@@ -3212,7 +3271,7 @@ export function SettingsModal({
                 <span>Automatic transcription</span>
               </span>
               <span className="ag-set-toggle-desc">
-                Auto-transcribe trusted voice memos and turn on live call captions (CC).
+                Auto-transcribe allowed voice memos and turn on live call captions (CC).
               </span>
             </div>
             <input

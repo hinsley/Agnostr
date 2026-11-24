@@ -212,7 +212,7 @@ export function PeerInspectorModal({
                 {isTrustedPeer && (
                   <span
                     className="ag-badge ag-badge-ok"
-                    title="Trusted peer — voice memos & media unlocked, text visible in Trusted-Only mode"
+                    title="Trusted peer — images & calls unlocked, text and voice memos visible in Trusted-Only mode"
                   >
                     <ShieldCheck size={9} />
                     <span>TRUSTED</span>

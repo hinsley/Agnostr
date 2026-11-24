@@ -161,6 +161,7 @@ import { formatRadioPreviewText, useGlobalPulse } from './useGlobalPulse.ts'
 import { useLocation } from './useLocation.ts'
 import {
   useNotifications,
+  type NotifyAmailInput,
   type NotifyGeoMessageInput,
   type NotifyLocationNoteInput,
 } from './useNotifications.ts'
@@ -558,10 +559,12 @@ export function useAgnostrEngine(): AgnostrEngine {
   const blockedSetRef = useRef<Set<string>>(blockedSet)
   const trustedSetRef = useRef<Set<string>>(trustedSet)
   const strictWhitelistRef = useRef<boolean>(settings.strictWhitelistMode)
+  const allowUntrustedVoiceMemosRef = useRef<boolean>(settings.allowUntrustedVoiceMemos)
   const ownPubkeysRef = useRef<Set<string>>(ownPubkeys)
   const activeViewRef = useRef<ActiveView>(activeView)
   const notifyGeoMessageRef = useRef<(input: NotifyGeoMessageInput) => void>(() => {})
   const notifyLocationNoteRef = useRef<(input: NotifyLocationNoteInput) => void>(() => {})
+  const notifyAmailRef = useRef<(input: NotifyAmailInput) => boolean>(() => true)
   const seedMemoTranscriptRef = useRef<
     (memoKey: string, text: string, modelLabel?: string) => void
   >(() => {})
@@ -630,6 +633,10 @@ export function useAgnostrEngine(): AgnostrEngine {
   useLayoutEffect(() => {
     strictWhitelistRef.current = settings.strictWhitelistMode
   }, [settings.strictWhitelistMode])
+
+  useLayoutEffect(() => {
+    allowUntrustedVoiceMemosRef.current = settings.allowUntrustedVoiceMemos
+  }, [settings.allowUntrustedVoiceMemos])
 
   useLayoutEffect(() => {
     ownPubkeysRef.current = ownPubkeys
@@ -1955,6 +1962,10 @@ export function useAgnostrEngine(): AgnostrEngine {
   const handleAmailLocalChange = useCallback(() => {
     notifyAmailChangedRef.current()
   }, [])
+  const handleIncomingAmail = useCallback(
+    (input: NotifyAmailInput) => notifyAmailRef.current(input),
+    []
+  )
 
   const amailEngine = useAmail({
     relayPool: pool,
@@ -1965,6 +1976,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     blockedPubkeys,
     turnConfig: callsEngine.turnConfig,
     onLocalChange: handleAmailLocalChange,
+    onIncomingMail: handleIncomingAmail,
     onNotifyPushPoke: handlePushPoke,
     pushToast,
   })
@@ -2663,6 +2675,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                   handlePushPoke({
                     recipientPubkeys: Array.from(pokeSet),
                     category: 'geo-message',
+                    isMention: true,
                     eventId: signed.id,
                     geohash: gh,
                     senderName: nick,
@@ -2935,6 +2948,24 @@ export function useAgnostrEngine(): AgnostrEngine {
     [ownPubkeys, trustedSet]
   )
 
+  const canLoadVoiceMemo = useCallback(
+    (pubkey: string): boolean => {
+      const pk = pubkey.trim().toLowerCase()
+      if (!pk) return false
+      if (ownPubkeys.has(pk)) return true
+      if (blockedSet.has(pk)) return false
+      if (trustedSet.has(pk)) return true
+      return settings.allowUntrustedVoiceMemos && !settings.strictWhitelistMode
+    },
+    [
+      ownPubkeys,
+      blockedSet,
+      trustedSet,
+      settings.allowUntrustedVoiceMemos,
+      settings.strictWhitelistMode,
+    ]
+  )
+
   const commitTrustPubkey = useCallback(
     (pk: string, cleanLabel?: string) => {
       // Synchronously update trustedSetRef before next render / child useEffect mounts
@@ -2974,7 +3005,9 @@ export function useAgnostrEngine(): AgnostrEngine {
       pushToast(
         'success',
         `Trusted ${cleanLabel ?? `#${pk.slice(-6)}`}`,
-        'Media, voice memos, and P2P calls from this peer are now unlocked.'
+        allowUntrustedVoiceMemosRef.current && !strictWhitelistRef.current
+          ? 'Images and P2P calls from this peer are now unlocked.'
+          : 'Images, voice memos, and P2P calls from this peer are now unlocked.'
       )
     },
     [pushToast]
@@ -3090,23 +3123,39 @@ export function useAgnostrEngine(): AgnostrEngine {
         nextTrusted.delete(pk)
         trustedSetRef.current = nextTrusted
       }
-      voiceCacheRef.current?.revokeForSender(pk)
+      if (!allowUntrustedVoiceMemosRef.current || strictWhitelistRef.current) {
+        voiceCacheRef.current?.revokeForSender(pk)
+      }
       setTrustedPubkeys((prev) => {
         const next = prev.filter((t) => t.pubkey !== pk)
         saveTrustedPubkeys(next)
         return next
       })
-      pushToast('info', 'Removed from Trusted Peers', `Media from #${pk.slice(-6)} is now shielded again.`)
+      pushToast(
+        'info',
+        'Removed from Trusted Peers',
+        allowUntrustedVoiceMemosRef.current && !strictWhitelistRef.current
+          ? `Images and calls from #${pk.slice(-6)} now require trust.`
+          : `Images, voice memos, and calls from #${pk.slice(-6)} are now shielded again.`
+      )
     },
     [pushToast]
   )
 
   const clearTrustedPubkeys = useCallback(() => {
     trustedSetRef.current = new Set()
-    voiceCacheRef.current?.revokeAll()
+    if (!allowUntrustedVoiceMemosRef.current || strictWhitelistRef.current) {
+      voiceCacheRef.current?.revokeAll()
+    }
     setTrustedPubkeys([])
     saveTrustedPubkeys([])
-    pushToast('info', 'Trusted Peers cleared', 'All external voice memos & media are shielded.')
+    pushToast(
+      'info',
+      'Trusted Peers cleared',
+      allowUntrustedVoiceMemosRef.current && !strictWhitelistRef.current
+        ? 'External images and calls now require trust.'
+        : 'All external images, voice memos, and calls are shielded.'
+    )
   }, [pushToast])
 
   // Blossom media server management
@@ -3478,13 +3527,19 @@ export function useAgnostrEngine(): AgnostrEngine {
     ]
   )
 
-  // STRICT engine-level Trusted Peers guard: zero network requests for untrusted senders
+  // Engine-level voice memo authorization guard: blocked peers always denied;
+  // untrusted non-blocked peers allowed by default unless disabled or strictWhitelistMode is on
   const fetchVoiceMemoBlob = useCallback(
     async (memo: VoiceMemoAttachment, senderPubkey: string): Promise<string> => {
-      const pk = senderPubkey.toLowerCase()
+      const pk = senderPubkey.trim().toLowerCase()
       const assertAuthorized = () => {
-        if (!ownPubkeysRef.current.has(pk) && !trustedSetRef.current.has(pk)) {
-          throw new Error('Blocked: trust this sender before loading voice memos or media.')
+        if (ownPubkeysRef.current.has(pk)) return
+        if (blockedSetRef.current.has(pk)) {
+          throw new Error('Blocked: voice memos from blocked peers cannot be loaded.')
+        }
+        if (trustedSetRef.current.has(pk)) return
+        if (!allowUntrustedVoiceMemosRef.current || strictWhitelistRef.current) {
+          throw new Error('Blocked: trust this sender before loading voice memos.')
         }
       }
       // Enforce immediately before touching cache or network
@@ -3585,6 +3640,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     notifications: notificationsEngine,
     notifyGeoMessage,
     notifyLocationNote,
+    notifyAmail,
     resetAllNotifications,
   } = useNotifications({
     activeView,
@@ -3632,6 +3688,10 @@ export function useAgnostrEngine(): AgnostrEngine {
   useLayoutEffect(() => {
     notifyLocationNoteRef.current = notifyLocationNote
   }, [notifyLocationNote])
+
+  useLayoutEffect(() => {
+    notifyAmailRef.current = notifyAmail
+  }, [notifyAmail])
 
   const sendImageAttachment = useCallback(
     async (image: PreparedImage, caption?: string): Promise<boolean> => {
@@ -4073,13 +4133,37 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const setStrictWhitelistMode = useCallback(
     (enabled: boolean) => {
+      strictWhitelistRef.current = enabled
       updateSettings({ strictWhitelistMode: enabled })
+      if (enabled) {
+        voiceCacheRef.current?.revokeAll()
+      }
       pushToast(
         'info',
         enabled ? 'Trusted Peers Only ON' : 'Trusted Peers Only OFF',
         enabled
-          ? 'Hiding text and media from untrusted peers.'
-          : 'Public text visible; voice memos & media still require trusting the sender.'
+          ? 'Hiding text and voice memos from untrusted peers.'
+          : allowUntrustedVoiceMemosRef.current
+            ? 'Public text and voice memos visible; images & calls still require trust.'
+            : 'Public text visible; images, voice memos & calls still require trusting the sender.'
+      )
+    },
+    [updateSettings, pushToast]
+  )
+
+  const setAllowUntrustedVoiceMemos = useCallback(
+    (enabled: boolean) => {
+      allowUntrustedVoiceMemosRef.current = enabled
+      updateSettings({ allowUntrustedVoiceMemos: enabled })
+      if (!enabled) {
+        voiceCacheRef.current?.revokeAll()
+      }
+      pushToast(
+        'info',
+        enabled ? 'Untrusted voice memos enabled' : 'Voice memos now require Trusted Peers',
+        enabled
+          ? 'Voice memos from non-blocked peers can play and transcribe.'
+          : 'Untrusted voice memos are now shielded until you trust the sender.'
       )
     },
     [updateSettings, pushToast]
@@ -4434,6 +4518,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     trustedPubkeys,
     isTrusted,
     isExplicitlyTrusted,
+    canLoadVoiceMemo,
     trustPubkey,
     pendingTrustRequest,
     confirmPendingTrust,
@@ -4444,6 +4529,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     setPeerNote,
     strictWhitelistMode: settings.strictWhitelistMode,
     setStrictWhitelistMode,
+    setAllowUntrustedVoiceMemos,
     hiddenByWhitelistCount,
 
     blossomServers,

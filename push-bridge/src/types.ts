@@ -14,13 +14,17 @@ export interface WebPushSubscriptionJSON {
   }
 }
 
+export type PushFilterMode = 'all' | 'mentions' | 'off'
+
 export interface StoredPushPreferences {
   dms: boolean
+  agmail: boolean
+  agmailCcBcc: boolean
   directPings: boolean
   dmCallRinging: boolean
-  serverMessages: boolean
+  serverMessages: PushFilterMode
   serverCalls: boolean
-  geoMessages: boolean
+  geoMessages: PushFilterMode
   showPreviews: boolean
 }
 
@@ -51,7 +55,7 @@ export type PushCategory =
   | 'agmail'
   | 'test'
 
-export type PokeCategory = PushCategory | 'call-cancel'
+export type PokeCategory = PushCategory | 'agmail-cc' | 'call-cancel'
 
 export interface IncomingPushPayload {
   title?: string
@@ -77,11 +81,13 @@ export interface IncomingPushPayload {
 
 export const DEFAULT_PUSH_PREFERENCES: StoredPushPreferences = {
   dms: true,
+  agmail: true,
+  agmailCcBcc: true,
   directPings: true,
   dmCallRinging: true,
-  serverMessages: true,
+  serverMessages: 'mentions',
   serverCalls: true,
-  geoMessages: false,
+  geoMessages: 'mentions',
   showPreviews: true,
 }
 

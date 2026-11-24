@@ -96,6 +96,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showBridgeBadges: true,
   broadcastClientTag: true,
   strictWhitelistMode: false,
+  allowUntrustedVoiceMemos: true,
 }
 
 function safeGet(key: string): string | null {
@@ -163,6 +164,10 @@ export function loadSettings(): AppSettings {
       typeof parsed.strictWhitelistMode === 'boolean'
         ? parsed.strictWhitelistMode
         : DEFAULT_SETTINGS.strictWhitelistMode,
+    allowUntrustedVoiceMemos:
+      typeof parsed.allowUntrustedVoiceMemos === 'boolean'
+        ? parsed.allowUntrustedVoiceMemos
+        : DEFAULT_SETTINGS.allowUntrustedVoiceMemos,
   }
 }
 
@@ -411,21 +416,25 @@ export const DEFAULT_PUSH_BRIDGE_URL =
   'https://agnostr-push.carterhinsley.workers.dev'
 export const DEFAULT_VAPID_PUBLIC_KEY =
   'BE9QkU-IRUe-sR41iijQzlEVp9XISMeBLcCyH5dEyaUtlNkxzUNtfnra_5ALcTxHuRDIdbPerGC06VjSgOjtjHE'
+export const NOTIFICATION_PREFS_VERSION = 2
 
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   enabled: false,
   dms: true,
+  agmail: true,
+  agmailCcBcc: true,
   directPings: true,
   dmCallRinging: true,
-  serverMessages: 'all',
+  serverMessages: 'mentions',
   serverCalls: true,
-  geoMessages: 'all',
+  geoMessages: 'mentions',
   soundEnabled: true,
   ringtoneEnabled: true,
   vibrationEnabled: true,
   showPreviews: true,
   pushBridgeUrl: DEFAULT_PUSH_BRIDGE_URL,
   vapidPublicKey: DEFAULT_VAPID_PUBLIC_KEY,
+  prefsVersion: NOTIFICATION_PREFS_VERSION,
 }
 
 function parseFilterMode(
@@ -457,6 +466,30 @@ export function loadNotificationSettings(): NotificationSettings {
       ? DEFAULT_VAPID_PUBLIC_KEY
       : '')
 
+  // Migrate untouched pre-v2 defaults (both serverMessages & geoMessages === 'all') to 'mentions' (Pings only).
+  // Once saved with prefsVersion: 2, any explicit 'all' choice persists faithfully.
+  const storedVersion =
+    typeof parsed.prefsVersion === 'number' && Number.isFinite(parsed.prefsVersion)
+      ? parsed.prefsVersion
+      : 0
+  const migrateUntouchedAllDefault =
+    storedVersion < NOTIFICATION_PREFS_VERSION &&
+    parsed.serverMessages === 'all' &&
+    parsed.geoMessages === 'all'
+
+  const serverMessages: NotificationFilterMode = migrateUntouchedAllDefault
+    ? 'mentions'
+    : parseFilterMode(
+        parsed.serverMessages,
+        DEFAULT_NOTIFICATION_SETTINGS.serverMessages
+      )
+  const geoMessages: NotificationFilterMode = migrateUntouchedAllDefault
+    ? 'mentions'
+    : parseFilterMode(
+        parsed.geoMessages,
+        DEFAULT_NOTIFICATION_SETTINGS.geoMessages
+      )
+
   return {
     enabled:
       typeof parsed.enabled === 'boolean'
@@ -466,6 +499,14 @@ export function loadNotificationSettings(): NotificationSettings {
       typeof parsed.dms === 'boolean'
         ? parsed.dms
         : DEFAULT_NOTIFICATION_SETTINGS.dms,
+    agmail:
+      typeof parsed.agmail === 'boolean'
+        ? parsed.agmail
+        : DEFAULT_NOTIFICATION_SETTINGS.agmail,
+    agmailCcBcc:
+      typeof parsed.agmailCcBcc === 'boolean'
+        ? parsed.agmailCcBcc
+        : DEFAULT_NOTIFICATION_SETTINGS.agmailCcBcc,
     directPings:
       typeof parsed.directPings === 'boolean'
         ? parsed.directPings
@@ -474,18 +515,12 @@ export function loadNotificationSettings(): NotificationSettings {
       typeof parsed.dmCallRinging === 'boolean'
         ? parsed.dmCallRinging
         : DEFAULT_NOTIFICATION_SETTINGS.dmCallRinging,
-    serverMessages: parseFilterMode(
-      parsed.serverMessages,
-      DEFAULT_NOTIFICATION_SETTINGS.serverMessages
-    ),
+    serverMessages,
     serverCalls:
       typeof parsed.serverCalls === 'boolean'
         ? parsed.serverCalls
         : DEFAULT_NOTIFICATION_SETTINGS.serverCalls,
-    geoMessages: parseFilterMode(
-      parsed.geoMessages,
-      DEFAULT_NOTIFICATION_SETTINGS.geoMessages
-    ),
+    geoMessages,
     soundEnabled:
       typeof parsed.soundEnabled === 'boolean'
         ? parsed.soundEnabled
@@ -504,11 +539,18 @@ export function loadNotificationSettings(): NotificationSettings {
         : DEFAULT_NOTIFICATION_SETTINGS.showPreviews,
     pushBridgeUrl: resolvedBridgeUrl,
     vapidPublicKey: resolvedVapidKey,
+    prefsVersion: NOTIFICATION_PREFS_VERSION,
   }
 }
 
 export function saveNotificationSettings(settings: NotificationSettings): void {
-  safeSet(KEYS.notifications, JSON.stringify(settings))
+  safeSet(
+    KEYS.notifications,
+    JSON.stringify({
+      ...settings,
+      prefsVersion: NOTIFICATION_PREFS_VERSION,
+    })
+  )
 }
 
 export function saveTranscriptionConfig(config: PersistedTranscriptionConfig): void {

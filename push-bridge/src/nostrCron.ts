@@ -154,7 +154,7 @@ function buildPayloadForEvent(
       : ''
 
   if (ev.kind === 1059) {
-    if (!prefs.dms) return null
+    if (!prefs.dms && prefs.agmail === false && prefs.agmailCcBcc === false) return null
     return {
       title: 'New encrypted message',
       body: 'Open Agnostr to read your private message.',
@@ -181,7 +181,9 @@ function buildPayloadForEvent(
   }
 
   if (ev.kind === 9) {
-    if (!prefs.serverMessages && !prefs.directPings) return null
+    const srvMode = prefs.serverMessages as string | boolean | undefined
+    const srvOff = srvMode === 'off' || srvMode === false
+    if (!prefs.directPings && srvOff) return null
     const serverId = getTagValue(ev.tags, 'h') || undefined
     return {
       title: showPreviews && senderNick ? `${senderNick} in Group` : 'New Group Message',
@@ -196,7 +198,9 @@ function buildPayloadForEvent(
   }
 
   if (ev.kind === 20000 || ev.kind === 1) {
-    if (!prefs.directPings && !prefs.geoMessages) return null
+    const geoMode = prefs.geoMessages as string | boolean | undefined
+    const geoOff = geoMode === 'off' || geoMode === false
+    if (!prefs.directPings && geoOff) return null
     const geohash = getTagValue(ev.tags, 'g') || undefined
     const title =
       showPreviews && senderNick

@@ -34,6 +34,7 @@ export interface PushPokePayload {
     | 'geo-message'
     | 'geo-call'
     | 'agmail'
+    | 'agmail-cc'
     | 'call-cancel'
   eventId?: string
   callId?: string
@@ -43,11 +44,14 @@ export interface PushPokePayload {
   geohash?: string
   senderName?: string
   preview?: string
+  isMention?: boolean
 }
 
 export interface NotificationSettings {
   enabled: boolean
   dms: boolean
+  agmail: boolean
+  agmailCcBcc: boolean
   directPings: boolean
   dmCallRinging: boolean
   serverMessages: NotificationFilterMode
@@ -59,6 +63,7 @@ export interface NotificationSettings {
   showPreviews: boolean
   pushBridgeUrl: string
   vapidPublicKey: string
+  prefsVersion?: number
 }
 
 export interface NotificationPayloadData {

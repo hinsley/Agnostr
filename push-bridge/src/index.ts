@@ -10,6 +10,7 @@ import {
   type Env,
   type IncomingPushPayload,
   type PokeCategory,
+  type PushFilterMode,
   type StoredDeviceSubscription,
   type StoredPushPreferences,
   type StoredUserRecord,
@@ -76,19 +77,44 @@ function parseFilterOrBool(raw: unknown, fallback: boolean): boolean {
   return fallback
 }
 
+function parseFilterMode(raw: unknown, fallback: PushFilterMode): PushFilterMode {
+  if (typeof raw === 'string') {
+    const clean = raw.trim().toLowerCase()
+    if (clean === 'all') return 'all'
+    if (clean === 'mentions' || clean === 'pings') return 'mentions'
+    if (clean === 'off' || clean === 'false' || clean === 'none') return 'off'
+  }
+  if (raw === true) return 'mentions'
+  if (raw === false) return 'off'
+  return fallback
+}
+
 function normalizePreferences(raw: unknown): StoredPushPreferences {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_PUSH_PREFERENCES }
   const obj = raw as Record<string, unknown>
+  const dms = parseFilterOrBool(obj.dms, DEFAULT_PUSH_PREFERENCES.dms)
+  const agmail =
+    obj.agmail !== undefined
+      ? parseFilterOrBool(obj.agmail, DEFAULT_PUSH_PREFERENCES.agmail)
+      : obj.dms !== undefined
+        ? dms
+        : DEFAULT_PUSH_PREFERENCES.agmail
+  const agmailCcBcc =
+    obj.agmailCcBcc !== undefined
+      ? parseFilterOrBool(obj.agmailCcBcc, DEFAULT_PUSH_PREFERENCES.agmailCcBcc)
+      : agmail
   return {
-    dms: parseFilterOrBool(obj.dms, DEFAULT_PUSH_PREFERENCES.dms),
+    dms,
+    agmail,
+    agmailCcBcc,
     directPings: parseFilterOrBool(obj.directPings, DEFAULT_PUSH_PREFERENCES.directPings),
     dmCallRinging: parseFilterOrBool(obj.dmCallRinging, DEFAULT_PUSH_PREFERENCES.dmCallRinging),
-    serverMessages: parseFilterOrBool(
+    serverMessages: parseFilterMode(
       obj.serverMessages,
       DEFAULT_PUSH_PREFERENCES.serverMessages
     ),
     serverCalls: parseFilterOrBool(obj.serverCalls, DEFAULT_PUSH_PREFERENCES.serverCalls),
-    geoMessages: parseFilterOrBool(obj.geoMessages, DEFAULT_PUSH_PREFERENCES.geoMessages),
+    geoMessages: parseFilterMode(obj.geoMessages, DEFAULT_PUSH_PREFERENCES.geoMessages),
     showPreviews: parseFilterOrBool(obj.showPreviews, DEFAULT_PUSH_PREFERENCES.showPreviews),
   }
 }
@@ -416,6 +442,7 @@ interface PokeRequestBody {
   geohash?: unknown
   senderName?: unknown
   preview?: unknown
+  isMention?: unknown
 }
 
 const VALID_POKE_CATEGORIES = new Set<PokeCategory>([
@@ -426,28 +453,44 @@ const VALID_POKE_CATEGORIES = new Set<PokeCategory>([
   'geo-message',
   'geo-call',
   'agmail',
+  'agmail-cc',
   'call-cancel',
 ])
 
 function isPokeAllowedByPreferences(
   category: PokeCategory,
-  prefs: StoredPushPreferences
+  rawPrefs: StoredPushPreferences,
+  isMention?: boolean
 ): boolean {
+  const prefs = normalizePreferences(rawPrefs)
   switch (category) {
     case 'dm':
-    case 'agmail':
       return prefs.dms
+    case 'agmail':
+      return prefs.agmail
+    case 'agmail-cc':
+      return prefs.agmailCcBcc
     case 'dm-call':
     case 'call-cancel':
       return prefs.dmCallRinging
     case 'server-message':
-      return prefs.serverMessages || prefs.directPings
+      if (isMention === false) return prefs.serverMessages === 'all'
+      return (
+        prefs.directPings ||
+        prefs.serverMessages === 'all' ||
+        prefs.serverMessages === 'mentions'
+      )
     case 'server-call':
       return prefs.serverCalls
     case 'geo-message':
-      return prefs.geoMessages || prefs.directPings
+      if (isMention === false) return prefs.geoMessages === 'all'
+      return (
+        prefs.directPings ||
+        prefs.geoMessages === 'all' ||
+        prefs.geoMessages === 'mentions'
+      )
     case 'geo-call':
-      return prefs.serverCalls || prefs.dmCallRinging || prefs.geoMessages
+      return prefs.serverCalls || prefs.dmCallRinging || prefs.geoMessages !== 'off'
     case 'test':
       return true
   }
@@ -549,6 +592,18 @@ function buildPokePayload(opts: {
     }
   }
 
+  if (category === 'agmail-cc') {
+    return {
+      title: safeSender ? `New Agmail (CC/BCC) from ${safeSender}` : 'New Agmail (CC/BCC)',
+      body: safePreview || "You were CC'd or BCC'd on a new encrypted Agmail.",
+      tag: `agnostr-mail-cc-${senderPubkey.slice(0, 12)}`,
+      data: {
+        category: 'agmail',
+        peerPubkey: senderPubkey,
+      },
+    }
+  }
+
   if (category === 'server-message') {
     return {
       title: safeSender ? `${safeSender}` : 'New Group Message',
@@ -641,9 +696,10 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
     )
   ).slice(0, 10)
 
+  const isAgmailCategory = category === 'agmail' || category === 'agmail-cc'
   // Block self-poke spam (allow self-mail in Agmail only)
   const filteredRecipients = recipients.filter(
-    (pk) => category === 'agmail' || pk !== auth.pubkey
+    (pk) => isAgmailCategory || pk !== auth.pubkey
   )
 
   if (filteredRecipients.length === 0) {
@@ -665,6 +721,7 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
   const geohash = typeof body.geohash === 'string' ? body.geohash.trim().slice(0, 32) : undefined
   const senderName = typeof body.senderName === 'string' ? body.senderName.trim().slice(0, 48) : undefined
   const preview = typeof body.preview === 'string' ? body.preview.trim().slice(0, 140) : undefined
+  const isMention = typeof body.isMention === 'boolean' ? body.isMention : undefined
 
   const isCall = category === 'dm-call' || category === 'server-call' || category === 'geo-call' || category === 'call-cancel'
   const ttlSeconds = isCall ? 60 : 86_400
@@ -687,7 +744,7 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
       const mappedMaster = await env.PUSH_KV.get(aliasKeyForPubkey(recipientPk))
       if (isHex64(mappedMaster)) {
         resolvedMasterPk = mappedMaster.toLowerCase()
-        if (category !== 'agmail' && resolvedMasterPk === auth.pubkey) {
+        if (!isAgmailCategory && resolvedMasterPk === auth.pubkey) {
           skipped += 1
           continue
         }
@@ -711,7 +768,7 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
     let pruned = false
 
     for (const dev of record.devices) {
-      if (!isPokeAllowedByPreferences(category, dev.preferences)) {
+      if (!isPokeAllowedByPreferences(category, dev.preferences, isMention)) {
         skipped += 1
         surviving.push(dev)
         continue

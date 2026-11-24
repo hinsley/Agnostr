@@ -49,6 +49,13 @@ export interface UseAmailOptions {
   blockedPubkeys: string[]
   turnConfig?: TurnServerConfig | null
   onLocalChange?: () => void
+  onIncomingMail?: (input: {
+    id: string
+    senderPubkey: string
+    senderName: string
+    subject: string
+    recipientRole: 'to' | 'cc' | 'bcc'
+  }) => boolean | void
   onNotifyPushPoke?: (payload: PushPokePayload) => void
   pushToast?: (level: ToastLevel, title: string, detail?: string) => void
 }
@@ -173,6 +180,9 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
   const onLocalChangeRef = useRef(options.onLocalChange)
   onLocalChangeRef.current = options.onLocalChange
+
+  const onIncomingMailRef = useRef(options.onIncomingMail)
+  onIncomingMailRef.current = options.onIncomingMail
 
   const onNotifyPushPokeRef = useRef(options.onNotifyPushPoke)
   onNotifyPushPokeRef.current = options.onNotifyPushPoke
@@ -393,6 +403,11 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         const inTo = (inner.to ?? []).some((r) => r.pubkey === myPk)
         const inCc = (inner.cc ?? []).some((r) => r.pubkey === myPk)
         const isBccRecipient = hasRecipientHeaders && !inTo && !inCc
+        const recipientRole: 'to' | 'cc' | 'bcc' = isBccRecipient
+          ? 'bcc'
+          : !inTo && inCc
+            ? 'cc'
+            : 'to'
         const primaryTo = toRecipients?.[0]
 
         const incoming: AmailMessage = {
@@ -440,7 +455,22 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
         refreshFromStorage()
         onLocalChangeRef.current?.()
-        pushToastRef.current?.('info', `New Agmail from ${fromName}`, incoming.subject)
+        const shouldToast = onIncomingMailRef.current?.({
+          id: incoming.id,
+          senderPubkey: senderPk,
+          senderName: fromName,
+          subject: incoming.subject,
+          recipientRole,
+        })
+        if (shouldToast !== false) {
+          pushToastRef.current?.(
+            'info',
+            recipientRole === 'to'
+              ? `New Agmail from ${fromName}`
+              : `New Agmail (${recipientRole.toUpperCase()}) from ${fromName}`,
+            incoming.subject
+          )
+        }
         return
       }
 
@@ -787,14 +817,35 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           if (relayed > maxRelayed) maxRelayed = relayed
         }
 
-        // Fire blind 0ms push wake for remote recipients (zero plaintext / zero subject)
-        if (remoteRecipients.length > 0) {
+        // Fire blind 0ms push wake for remote recipients (zero plaintext / zero subject;
+        // direct To vs CC vs isolated per-recipient BCC pokes so BCC peers cannot be correlated)
+        const toPks = groups.to.filter((r) => r.pubkey !== myPk).map((r) => r.pubkey)
+        if (toPks.length > 0) {
           onNotifyPushPokeRef.current?.({
-            recipientPubkeys: remoteRecipients.map((r) => r.pubkey),
+            recipientPubkeys: toPks,
             category: 'agmail',
             eventId: mailId,
+            senderName: activeNicknameRef.current,
           })
         }
+        const ccPks = groups.cc.filter((r) => r.pubkey !== myPk).map((r) => r.pubkey)
+        if (ccPks.length > 0) {
+          onNotifyPushPokeRef.current?.({
+            recipientPubkeys: ccPks,
+            category: 'agmail-cc',
+            eventId: `${mailId}:cc`,
+            senderName: activeNicknameRef.current,
+          })
+        }
+        const bccRemote = groups.bcc.filter((r) => r.pubkey !== myPk)
+        bccRemote.forEach((r, idx) => {
+          onNotifyPushPokeRef.current?.({
+            recipientPubkeys: [r.pubkey],
+            category: 'agmail-cc',
+            eventId: `${mailId}:bcc:${idx}`,
+            senderName: activeNicknameRef.current,
+          })
+        })
 
         if (maxRelayed > 0) {
           const updated: AmailMessage = {

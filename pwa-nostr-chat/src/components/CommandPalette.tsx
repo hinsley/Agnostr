@@ -723,7 +723,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         group: 'Actions',
         title: 'Toggle Automatic Transcription',
         subtitle: engine.transcription.autoTranscribe
-          ? `On — auto-transcribing trusted voice memos & call captions (${engine.transcription.activeModel.label})`
+          ? `On — auto-transcribing allowed voice memos & call captions (${engine.transcription.activeModel.label})`
           : 'Off — click Transcribe or CC manually when needed',
         keywords: 'auto automatic transcription captions voice memo moonshine parakeet speech toggle',
         badge: engine.transcription.autoTranscribe ? 'ON' : 'OFF',
@@ -738,8 +738,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         group: 'Actions',
         title: 'Toggle Trusted Peers Only',
         subtitle: engine.strictWhitelistMode
-          ? 'On — hiding text from untrusted peers'
-          : 'Off — showing all text (media & calls always require Trust)',
+          ? 'On — hiding text & voice memos from untrusted peers'
+          : 'Off — showing public text & voice memos (images & calls always require Trust)',
         keywords: 'trust trusted peers only strict whitelist safety filter',
         badge: engine.strictWhitelistMode ? 'ON' : 'OFF',
         icon: <Shield size={15} />,

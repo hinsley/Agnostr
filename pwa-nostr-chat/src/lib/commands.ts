@@ -91,7 +91,7 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     name: 'trust',
     aliases: ['allow'],
     usage: '/trust <@handle | npub | hex>',
-    description: 'Trust a peer to unlock their voice memos & media',
+    description: 'Trust a peer to unlock their images & calls (and voice memos if restricted)',
     category: 'peer',
   },
   {
@@ -470,7 +470,7 @@ export async function executeSlashCommand(
       const ok = ctx.trustPubkey(directPk, label)
       if (ok) {
         ctx.addSystemMessage(
-          `Trusted ${label ?? `#${directPk.slice(-6)}`} — voice memos & media from this pubkey are now enabled.`
+          `Trusted ${label ?? `#${directPk.slice(-6)}`} — images, calls, and restricted voice memos from this pubkey are now enabled.`
         )
       }
       return true
@@ -506,7 +506,7 @@ export async function executeSlashCommand(
     case 'whitelist': {
       if (ctx.trustedPubkeys.length === 0) {
         ctx.addSystemMessage(
-          `No Trusted Peers yet (Trusted Peers Only: ${ctx.strictWhitelistMode ? 'ON' : 'OFF'}). Use /trust <@handle|npub> to unlock voice memos & media from a peer.`
+          `No Trusted Peers yet (Trusted Peers Only: ${ctx.strictWhitelistMode ? 'ON' : 'OFF'}). Use /trust <@handle|npub> to unlock images & calls from a peer (voice memos work for non-blocked peers by default unless restricted in Privacy settings).`
         )
       } else {
         const list = ctx.trustedPubkeys
@@ -535,8 +535,8 @@ export async function executeSlashCommand(
       ctx.setStrictWhitelistMode(next)
       ctx.addSystemMessage(
         next
-          ? 'Trusted Peers Only ENABLED — hiding text & media from untrusted peers.'
-          : 'Trusted Peers Only DISABLED — public text visible; voice memos & media still require trusting the sender.'
+          ? 'Trusted Peers Only ENABLED — hiding text, voice memos & media from untrusted peers.'
+          : 'Trusted Peers Only DISABLED — public text & voice memos visible for non-blocked peers (unless restricted in Privacy settings); images & calls still require trusting the sender.'
       )
       return true
     }

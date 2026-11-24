@@ -107,6 +107,7 @@ export interface MessageItemProps {
   isEncryptedContext?: boolean
   isSenderTrusted: boolean
   isSenderExplicitlyTrusted: boolean
+  canLoadVoiceMemo?: boolean
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
   fetchImageAttachmentBlob: (image: ImageAttachment, senderPubkey: string) => Promise<string>
   autoTranscribe?: boolean
@@ -172,6 +173,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     isEncryptedContext = false,
     isSenderTrusted,
     isSenderExplicitlyTrusted,
+    canLoadVoiceMemo,
     fetchVoiceMemoBlob,
     fetchImageAttachmentBlob,
     autoTranscribe,
@@ -535,6 +537,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       }
 
       // Voice memo transcript actions
+      const allowVoiceMemo = canLoadVoiceMemo ?? isSenderTrusted
       if (message.voiceMemo) {
         const voiceMemoKey = message.voiceMemo.sha256 || message.voiceMemo.url || message.id
         if (memoTranscript?.status === 'done' && memoTranscript.text) {
@@ -549,7 +552,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             },
           })
         } else if (
-          isSenderTrusted &&
+          allowVoiceMemo &&
           onTranscribeMemo &&
           memoTranscript?.status !== 'loading'
         ) {
@@ -966,6 +969,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 senderNickname={handle.base}
                 senderDisplayHandle={handle.full}
                 isTrusted={isSenderTrusted}
+                isAllowed={canLoadVoiceMemo ?? isSenderTrusted}
                 isDmMode={isEncryptedContext}
                 autoTranscribe={autoTranscribe}
                 fetchVoiceMemoBlob={fetchVoiceMemoBlob}
