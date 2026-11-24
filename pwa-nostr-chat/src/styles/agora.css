@@ -1,0 +1,2054 @@
+/* ==========================================================================
+   Agora — Native Nostr Public Square & Social Feed Workspace
+   Theme-adaptive across Carbon (phosphor), Indigo (obsidian), Stone (amber), Light (daylight)
+   3-column desktop (>=1180px), 2-column tablet (868-1179px), crisp single-column mobile (<=867px)
+   0px horizontal overflow; visual-viewport & safe-area aware.
+   ========================================================================== */
+
+.ag-agora-workspace {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.ag-agora-shell {
+  width: 100%;
+  max-width: 1260px;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 236px minmax(0, 660px) minmax(260px, 316px);
+  justify-content: center;
+}
+
+/* --------------------------------------------------------------------------
+   Left Agora Sidebar (Desktop >= 868px)
+   -------------------------------------------------------------------------- */
+.ag-agora-left {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0.9rem 0.75rem 0.85rem;
+  gap: 0.75rem;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.ag-agora-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.25rem 0.5rem 0.35rem;
+  min-width: 0;
+}
+
+.ag-agora-brand-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ag-agora-brand-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ag-agora-brand-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.ag-agora-brand-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.25;
+}
+
+.ag-agora-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+}
+
+.ag-agora-nav-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.56rem 0.72rem;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background-color: transparent;
+  text-align: left;
+  min-width: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-nav-item:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-agora-nav-item.active {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ag-agora-nav-item svg {
+  flex-shrink: 0;
+}
+
+.ag-agora-nav-badge {
+  margin-left: auto;
+  min-width: 20px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  font-size: 10.5px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ag-agora-compose-cta {
+  width: 100%;
+  height: 40px;
+  padding: 0 0.9rem;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  font-size: 13.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  box-shadow: var(--shadow-sm);
+  transition:
+    background-color var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
+}
+
+.ag-agora-compose-cta:hover {
+  background-color: var(--accent-hover);
+}
+
+.ag-agora-compose-cta:active {
+  transform: scale(0.985);
+}
+
+.ag-agora-identity-card {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.55rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.ag-agora-identity-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  text-align: left;
+  padding: 0.1rem;
+  border-radius: var(--radius-sm);
+}
+
+.ag-agora-identity-main:hover .ag-agora-identity-name {
+  color: var(--accent);
+}
+
+.ag-agora-identity-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ag-agora-identity-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.25;
+  transition: color var(--dur-fast) ease;
+}
+
+.ag-agora-identity-npub {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  line-height: 1.25;
+}
+
+.ag-agora-identity-edit {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-identity-edit:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Center Main Stream (Independent Full-Height Scroll Container)
+   -------------------------------------------------------------------------- */
+.ag-agora-center {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  border-left: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--border-subtle);
+  background-color: var(--bg-canvas);
+  overflow: hidden;
+}
+
+.ag-agora-header {
+  flex-shrink: 0;
+  min-height: 52px;
+  padding: 0.45rem 0.9rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  background-color: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border-subtle);
+  z-index: 4;
+}
+
+.ag-agora-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-agora-header-titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ag-agora-header-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--text-primary);
+  line-height: 1.25;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.ag-agora-header-sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.2;
+}
+
+.ag-agora-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.16rem 0.5rem;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.ag-agora-filter-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-full);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-agora-filter-clear:hover {
+  background-color: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.ag-agora-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.ag-agora-icon-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  background-color: transparent;
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-icon-btn:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-agora-icon-btn.active {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ag-agora-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ag-agora-search-toggle-btn {
+  display: none;
+}
+
+.ag-agora-mobile-compose-btn {
+  display: none;
+}
+
+/* Mobile Horizontal Tab Strip (<= 867px only) */
+.ag-agora-mobile-tabs {
+  display: none;
+}
+
+/* Collapsible Search & Discovery Drawer (Tablet / Mobile < 1180px) */
+.ag-agora-inline-search-drawer {
+  flex-shrink: 0;
+  padding: 0.65rem 0.9rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.ag-agora-stream {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --------------------------------------------------------------------------
+   Avatars
+   -------------------------------------------------------------------------- */
+.ag-agora-avatar {
+  border-radius: var(--radius-full);
+  object-fit: cover;
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  display: block;
+}
+
+.ag-agora-avatar-xs {
+  width: 22px;
+  height: 22px;
+}
+
+.ag-agora-avatar-sm {
+  width: 34px;
+  height: 34px;
+}
+
+.ag-agora-avatar-md {
+  width: 40px;
+  height: 40px;
+}
+
+.ag-agora-avatar-lg {
+  width: 76px;
+  height: 76px;
+  border: 3px solid var(--bg-canvas);
+}
+
+/* --------------------------------------------------------------------------
+   Inline & Modal Composer
+   -------------------------------------------------------------------------- */
+.ag-agora-composer {
+  display: flex;
+  gap: 0.7rem;
+  padding: 0.85rem 0.95rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background-color: var(--bg-canvas);
+  min-width: 0;
+}
+
+.ag-agora-composer.in-modal {
+  border-bottom: none;
+  padding: 0.3rem 0 0;
+  background-color: transparent;
+}
+
+.ag-agora-composer-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.ag-agora-composer-reply-ctx {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.ag-agora-composer-reply-ctx strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ag-agora-composer-textarea {
+  width: 100%;
+  min-height: 60px;
+  max-height: 220px;
+  resize: none;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.48;
+  padding: 0.1rem 0;
+  outline: none;
+}
+
+.ag-agora-composer-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.ag-agora-cw-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.36rem 0.6rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--status-warn-soft);
+  border: 1px solid color-mix(in srgb, var(--status-warn) 34%, transparent);
+  color: var(--status-warn);
+}
+
+.ag-agora-cw-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.ag-agora-cw-input::placeholder {
+  color: var(--text-muted);
+}
+
+.ag-agora-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 0.45rem;
+}
+
+.ag-agora-upload-thumb {
+  position: relative;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-elevated);
+  aspect-ratio: 4 / 3;
+}
+
+.ag-agora-upload-thumb img,
+.ag-agora-upload-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-agora-upload-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-full);
+  background-color: rgba(0, 0, 0, 0.72);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ag-agora-upload-remove:hover {
+  background-color: var(--status-danger);
+}
+
+.ag-agora-composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ag-agora-composer-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.ag-agora-composer-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.ag-agora-char-count {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ag-agora-char-count.warn {
+  color: var(--status-warn);
+  font-weight: 600;
+}
+
+.ag-agora-post-btn {
+  height: 32px;
+  padding: 0 0.9rem;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-agora-post-btn:hover:not(:disabled) {
+  background-color: var(--accent-hover);
+}
+
+.ag-agora-post-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------------
+   Calm Pending-Notes Banner
+   -------------------------------------------------------------------------- */
+.ag-agora-pending-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background-color: color-mix(in srgb, var(--accent-soft) 50%, var(--bg-canvas));
+}
+
+.ag-agora-pending-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  padding: 0.34rem 0.85rem;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  font-size: 12.5px;
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-agora-pending-btn:hover {
+  background-color: var(--accent-hover);
+}
+
+/* --------------------------------------------------------------------------
+   Following Onboarding & Empty / Loading States
+   -------------------------------------------------------------------------- */
+.ag-agora-onboarding {
+  margin: 0.9rem;
+  padding: 1rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.ag-agora-onboarding-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.ag-agora-onboarding-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-agora-onboarding-sub {
+  margin: 0.2rem 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.ag-agora-onboarding-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.ag-agora-empty {
+  padding: 2.4rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 0.55rem;
+  color: var(--text-muted);
+}
+
+.ag-agora-empty-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ag-agora-empty-sub {
+  margin: 0;
+  max-width: 340px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+/* --------------------------------------------------------------------------
+   Rich Note Cards
+   -------------------------------------------------------------------------- */
+.ag-agora-card {
+  position: relative;
+  padding: 0.82rem 0.95rem 0.68rem;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-agora-card.is-clickable {
+  cursor: pointer;
+}
+
+.ag-agora-card.is-clickable:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-agora-card.is-focused {
+  background-color: color-mix(in srgb, var(--bg-surface) 60%, var(--bg-canvas));
+  padding-bottom: 0.85rem;
+}
+
+.ag-agora-card.is-ancestor {
+  border-bottom: none;
+  padding-bottom: 0.25rem;
+}
+
+.ag-agora-repost-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  padding-left: 2.3rem;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ag-agora-repost-bar button {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.ag-agora-repost-bar button:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
+.ag-agora-card-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.68rem;
+  min-width: 0;
+}
+
+.ag-agora-avatar-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
+  align-self: stretch;
+}
+
+.ag-agora-avatar-btn {
+  padding: 0;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.ag-agora-thread-line {
+  width: 2px;
+  flex: 1 1 auto;
+  min-height: 18px;
+  margin-top: 0.35rem;
+  border-radius: 2px;
+  background-color: var(--border-default);
+}
+
+.ag-agora-card-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+}
+
+.ag-agora-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.ag-agora-author-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.36rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+}
+
+.ag-agora-author-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.ag-agora-author-name:hover {
+  text-decoration: underline;
+}
+
+.ag-agora-nip05 {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.18rem;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.ag-agora-nip05 svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-agora-dot-sep {
+  color: var(--text-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.ag-agora-time {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ag-agora-card-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.ag-agora-follow-micro {
+  height: 24px;
+  padding: 0 0.58rem;
+  border-radius: var(--radius-full);
+  font-size: 11.5px;
+  font-weight: 600;
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-follow-micro:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ag-agora-follow-micro.following {
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+}
+
+/* Overflow & Repost Popover Menus */
+.ag-agora-menu-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 174px;
+  padding: 0.3rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-agora-menu-popover.align-left {
+  right: auto;
+  left: 0;
+}
+
+.ag-agora-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.44rem 0.58rem;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+  text-align: left;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-agora-menu-item:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-agora-menu-item.danger {
+  color: var(--status-danger);
+}
+
+.ag-agora-menu-item.danger:hover {
+  background-color: var(--status-danger-soft);
+}
+
+/* NIP-36 Content Warning Gate */
+.ag-agora-cw-gate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.62rem 0.78rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid color-mix(in srgb, var(--status-warn) 36%, var(--border-subtle));
+  flex-wrap: wrap;
+}
+
+.ag-agora-cw-gate-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.ag-agora-cw-gate-left svg {
+  color: var(--status-warn);
+  flex-shrink: 0;
+}
+
+.ag-agora-cw-btn {
+  padding: 0.25rem 0.62rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ag-agora-cw-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Note Body Typography & Safe Tokens */
+.ag-agora-body {
+  font-size: 14.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ag-agora-card.is-focused .ag-agora-body {
+  font-size: 16px;
+  line-height: 1.54;
+}
+
+.ag-agora-tag-link,
+.ag-agora-mention-link {
+  display: inline;
+  padding: 0;
+  font: inherit;
+  font-weight: 500;
+  color: var(--accent);
+  background: transparent;
+}
+
+.ag-agora-tag-link:hover,
+.ag-agora-mention-link:hover {
+  text-decoration: underline;
+}
+
+.ag-agora-ext-link {
+  color: var(--accent);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.ag-agora-ext-link:hover {
+  text-decoration: underline;
+}
+
+/* Embedded Quoted Note Card */
+.ag-agora-quote-card {
+  margin-top: 0.25rem;
+  padding: 0.62rem 0.75rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  gap: 0.34rem;
+  min-width: 0;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-agora-quote-card:hover {
+  border-color: var(--border-accent);
+  background-color: var(--bg-elevated);
+}
+
+.ag-agora-quote-head {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.ag-agora-quote-author {
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-agora-quote-body {
+  font-size: 13px;
+  line-height: 1.42;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.ag-agora-quote-thumb {
+  margin-top: 0.2rem;
+  max-height: 160px;
+  width: 100%;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  display: block;
+}
+
+/* Responsive Media Grid (1/2/3/4 items) */
+.ag-agora-media-grid {
+  margin-top: 0.28rem;
+  display: grid;
+  gap: 3px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-elevated);
+}
+
+.ag-agora-media-grid.count-1 {
+  grid-template-columns: 1fr;
+}
+
+.ag-agora-media-grid.count-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ag-agora-media-grid.count-3 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ag-agora-media-grid.count-3 > :first-child {
+  grid-row: span 2;
+}
+
+.ag-agora-media-grid.count-4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ag-agora-media-cell {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  background-color: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.ag-agora-media-grid.count-1 .ag-agora-media-cell img {
+  width: 100%;
+  max-height: 420px;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-agora-media-grid:not(.count-1) .ag-agora-media-cell {
+  aspect-ratio: 16 / 11;
+}
+
+.ag-agora-media-grid.count-3 > :first-child.ag-agora-media-cell {
+  aspect-ratio: auto;
+  height: 100%;
+}
+
+.ag-agora-media-grid:not(.count-1) .ag-agora-media-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-agora-media-video {
+  width: 100%;
+  max-height: 420px;
+  background-color: #000000;
+  display: block;
+}
+
+/* Focused Note Full Timestamp & Engagement Stats Row */
+.ag-agora-focused-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.45rem;
+}
+
+.ag-agora-focused-date {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.ag-agora-focused-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.ag-agora-focused-stats strong {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+/* Note Action Bar */
+.ag-agora-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem;
+  margin-top: 0.22rem;
+  max-width: 480px;
+}
+
+.ag-agora-action-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.ag-agora-act-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  height: 30px;
+  padding: 0 0.45rem;
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background-color: transparent;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-act-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-agora-act-btn.reply:hover {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ag-agora-act-btn.repost:hover,
+.ag-agora-act-btn.repost.is-reposted {
+  color: var(--status-ok);
+}
+
+.ag-agora-act-btn.repost:hover {
+  background-color: var(--status-ok-soft);
+}
+
+.ag-agora-act-btn.like:hover,
+.ag-agora-act-btn.like.is-liked {
+  color: #f43f5e;
+}
+
+.ag-agora-act-btn.like:hover {
+  background-color: rgba(244, 63, 94, 0.13);
+}
+
+.ag-agora-act-btn.zap:hover,
+.ag-agora-act-btn.zap.is-zapped {
+  color: var(--status-warn);
+}
+
+.ag-agora-act-btn.zap:hover {
+  background-color: var(--status-warn-soft);
+}
+
+.ag-agora-act-btn.bookmark:hover,
+.ag-agora-act-btn.bookmark.is-bookmarked {
+  color: var(--accent);
+}
+
+.ag-agora-act-btn.bookmark:hover {
+  background-color: var(--accent-soft);
+}
+
+/* --------------------------------------------------------------------------
+   Profile View
+   -------------------------------------------------------------------------- */
+.ag-agora-profile-banner {
+  position: relative;
+  width: 100%;
+  height: 146px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 26%, var(--bg-elevated)),
+    color-mix(in srgb, var(--accent-secondary) 20%, var(--bg-surface))
+  );
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.ag-agora-profile-banner img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-agora-profile-body {
+  padding: 0 1rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.ag-agora-profile-top-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-top: -38px;
+  position: relative;
+  z-index: 2;
+  flex-wrap: wrap;
+}
+
+.ag-agora-profile-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  padding-top: 42px;
+}
+
+.ag-agora-pill-btn {
+  height: 32px;
+  padding: 0 0.78rem;
+  border-radius: var(--radius-full);
+  font-size: 12.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-pill-btn:hover {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+
+.ag-agora-pill-btn.primary {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+.ag-agora-pill-btn.primary:hover {
+  background-color: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.ag-agora-pill-btn.following {
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  color: var(--accent);
+}
+
+.ag-agora-pill-btn.danger {
+  color: var(--status-danger);
+  border-color: color-mix(in srgb, var(--status-danger) 35%, transparent);
+}
+
+.ag-agora-profile-name-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+}
+
+.ag-agora-profile-name {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.ag-agora-profile-handles {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.ag-agora-npub-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.ag-agora-npub-copy:hover {
+  color: var(--accent);
+}
+
+.ag-agora-profile-bio {
+  font-size: 14px;
+  line-height: 1.48;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ag-agora-profile-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.ag-agora-profile-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.ag-agora-profile-meta-item svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-agora-profile-meta-item strong {
+  color: var(--text-primary);
+}
+
+.ag-agora-subtabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background-color: var(--bg-canvas);
+}
+
+.ag-agora-subtab {
+  position: relative;
+  height: 42px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-agora-subtab:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-agora-subtab.active {
+  color: var(--accent);
+}
+
+.ag-agora-subtab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 22%;
+  right: 22%;
+  height: 2.5px;
+  border-radius: 2px 2px 0 0;
+  background-color: var(--accent);
+}
+
+/* --------------------------------------------------------------------------
+   Notifications List
+   -------------------------------------------------------------------------- */
+.ag-agora-notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.68rem;
+  padding: 0.78rem 0.95rem;
+  border-bottom: 1px solid var(--border-subtle);
+  width: 100%;
+  text-align: left;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-agora-notif-row:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-agora-notif-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.ag-agora-notif-icon.reply,
+.ag-agora-notif-icon.mention {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ag-agora-notif-icon.like {
+  background-color: rgba(244, 63, 94, 0.14);
+  color: #f43f5e;
+}
+
+.ag-agora-notif-icon.repost {
+  background-color: var(--status-ok-soft);
+  color: var(--status-ok);
+}
+
+.ag-agora-notif-icon.zap {
+  background-color: var(--status-warn-soft);
+  color: var(--status-warn);
+}
+
+.ag-agora-notif-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.24rem;
+}
+
+.ag-agora-notif-top {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.ag-agora-notif-top strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.ag-agora-notif-sats {
+  padding: 0.08rem 0.42rem;
+  border-radius: var(--radius-full);
+  background-color: var(--status-warn-soft);
+  color: var(--status-warn);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ag-agora-notif-snippet {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------------------------
+   Search Profiles Strip & Pagination
+   -------------------------------------------------------------------------- */
+.ag-agora-search-profiles {
+  padding: 0.75rem 0.95rem;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ag-agora-section-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.ag-agora-load-more-wrap {
+  padding: 1rem 0.95rem 1.5rem;
+  display: flex;
+  justify-content: center;
+}
+
+.ag-agora-load-more-btn {
+  height: 36px;
+  padding: 0 1.2rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.ag-agora-load-more-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ag-agora-load-more-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------------
+   Right Discovery Rail (Desktop >= 1180px)
+   -------------------------------------------------------------------------- */
+.ag-agora-right {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0.8rem 0.85rem 1rem;
+  gap: 0.85rem;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.ag-agora-search-form {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  transition:
+    border-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
+}
+
+.ag-agora-search-form:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--accent-glow);
+}
+
+.ag-agora-search-icon {
+  position: absolute;
+  left: 0.78rem;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.ag-agora-search-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 2rem 0 2.15rem;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.ag-agora-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.ag-agora-search-clear {
+  position: absolute;
+  right: 0.45rem;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.ag-agora-search-clear:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-agora-disc-card {
+  padding: 0.8rem 0.85rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.ag-agora-disc-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.ag-agora-disc-title svg {
+  color: var(--accent);
+}
+
+.ag-agora-tag-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.ag-agora-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.24rem 0.58rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-tag-chip:hover,
+.ag-agora-tag-chip.active {
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  color: var(--accent);
+}
+
+.ag-agora-tag-chip-cnt {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.ag-agora-voice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.ag-agora-voice-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.ag-agora-voice-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.52rem;
+  text-align: left;
+}
+
+.ag-agora-voice-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ag-agora-voice-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.25;
+}
+
+.ag-agora-voice-bio {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+/* --------------------------------------------------------------------------
+   Modals (Compose / Reply / Quote & Edit Profile)
+   -------------------------------------------------------------------------- */
+.ag-agora-modal-backdrop {
+  position: fixed;
+  top: var(--ag-vvt, 0px);
+  left: 0;
+  right: 0;
+  bottom: auto;
+  height: var(--ag-vvh, 100dvh);
+  z-index: var(--z-modal);
+  padding: 1rem;
+  background-color: var(--bg-overlay);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overscroll-behavior: contain;
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-agora-modal {
+  width: min(560px, 100%);
+  max-height: calc(100% - 1rem);
+  border-radius: var(--radius-xl);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: ag-scale-in var(--dur-med) var(--ease-spring);
+}
+
+.ag-agora-modal-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-agora-modal-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-agora-modal-body {
+  padding: 0.85rem 1rem 1rem;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.ag-agora-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.ag-agora-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.ag-agora-input,
+.ag-agora-textarea {
+  width: 100%;
+  padding: 0.5rem 0.68rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color var(--dur-fast) ease;
+}
+
+.ag-agora-input:focus,
+.ag-agora-textarea:focus {
+  border-color: var(--accent);
+}
+
+.ag-agora-textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.ag-agora-input-with-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.ag-agora-input-with-btn .ag-agora-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ag-agora-modal-foot {
+  flex-shrink: 0;
+  padding: 0.72rem 1rem;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.ag-agora-spin {
+  animation: ag-agora-rotate 0.85s linear infinite;
+}
+
+@keyframes ag-agora-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Medium Desktop / Tablet (868px - 1179px): 2-Column Layout
+   -------------------------------------------------------------------------- */
+@media (max-width: 1179px) {
+  .ag-agora-shell {
+    grid-template-columns: 216px minmax(0, 1fr);
+    max-width: 960px;
+  }
+
+  .ag-agora-right {
+    display: none;
+  }
+
+  .ag-agora-search-toggle-btn {
+    display: inline-flex;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Mobile Layout (<= 867px): Crisp Single-Column Stream + Top Tab Strip
+   -------------------------------------------------------------------------- */
+@media (max-width: 867px) {
+  .ag-agora-shell {
+    display: flex;
+    flex-direction: column;
+    max-width: none;
+    width: 100%;
+    height: 100%;
+  }
+
+  .ag-agora-left {
+    display: none;
+  }
+
+  .ag-agora-center {
+    border-left: none;
+    border-right: none;
+    width: 100%;
+  }
+
+  .ag-agora-header {
+    padding: 0.4rem 0.72rem;
+    min-height: 48px;
+  }
+
+  .ag-agora-mobile-compose-btn {
+    display: inline-flex;
+  }
+
+  .ag-agora-mobile-tabs {
+    display: flex;
+    align-items: center;
+    gap: 0.16rem;
+    padding: 0.34rem 0.55rem;
+    border-bottom: 1px solid var(--border-subtle);
+    background-color: var(--bg-surface);
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    flex-shrink: 0;
+  }
+
+  .ag-agora-mobile-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .ag-agora-mobile-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    height: 31px;
+    padding: 0 0.62rem;
+    border-radius: var(--radius-full);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition:
+      background-color var(--dur-fast) ease,
+      color var(--dur-fast) ease;
+  }
+
+  .ag-agora-mobile-tab.active {
+    background-color: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  .ag-agora-mobile-tab-badge {
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: var(--radius-full);
+    background-color: var(--accent);
+    color: var(--text-inverse);
+    font-size: 9.5px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .ag-agora-composer {
+    padding: 0.72rem 0.78rem;
+    gap: 0.55rem;
+  }
+
+  .ag-agora-composer-textarea,
+  .ag-agora-search-input,
+  .ag-agora-input,
+  .ag-agora-textarea,
+  .ag-agora-cw-input {
+    font-size: 16px;
+  }
+
+  .ag-agora-card {
+    padding: 0.75rem 0.78rem 0.62rem;
+  }
+
+  .ag-agora-author-name {
+    max-width: 132px;
+  }
+
+  .ag-agora-nip05 {
+    max-width: 104px;
+  }
+
+  .ag-agora-profile-banner {
+    height: 118px;
+  }
+
+  .ag-agora-profile-body {
+    padding: 0 0.78rem 0.75rem;
+  }
+
+  .ag-agora-modal-backdrop {
+    padding: 0.55rem;
+    align-items: flex-end;
+  }
+
+  .ag-agora-modal {
+    border-radius: var(--radius-xl);
+    max-height: calc(100% - 0.5rem);
+  }
+}

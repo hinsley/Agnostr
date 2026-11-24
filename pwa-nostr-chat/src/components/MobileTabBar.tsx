@@ -1,20 +1,24 @@
 import React from 'react'
-import { Mail, MessageCircle, Server, Wallet, Waves } from 'lucide-react'
+import { Landmark, LayoutGrid, MessageCircle, Users, Waves } from 'lucide-react'
 import type { ActiveWorkspace } from './AppRail'
 import type { ListTab } from './ConversationList'
 
 export interface MobileTabBarProps {
   workspace: ActiveWorkspace
   activeTab: ListTab
+  agoraUnread?: number
   bitchatUnread?: number
   bitchatMentions?: number
   dmUnread: number
   serverUnread: number
   serverMentions?: number
   mailUnread?: number
+  suiteOpen?: boolean
+  mapActive?: boolean
+  settingsActive?: boolean
+  onSelectAgora: () => void
   onSelectTab: (tab: ListTab) => void
-  onSelectMail: () => void
-  onSelectWallet: () => void
+  onToggleSuite: () => void
 }
 
 function formatBadgeCount(count: number): string {
@@ -24,24 +28,53 @@ function formatBadgeCount(count: number): string {
 export const MobileTabBar: React.FC<MobileTabBarProps> = ({
   workspace,
   activeTab,
+  agoraUnread = 0,
   bitchatUnread = 0,
   bitchatMentions = 0,
   dmUnread,
   serverUnread,
   serverMentions = 0,
   mailUnread = 0,
+  suiteOpen = false,
+  mapActive = false,
+  settingsActive = false,
+  onSelectAgora,
   onSelectTab,
-  onSelectMail,
-  onSelectWallet,
+  onToggleSuite,
 }) => {
+  const isAgoraActive = workspace === 'agora'
   const isBitchatActive = workspace === 'chat' && activeTab === 'bitchat'
-  const isServersActive = workspace === 'chat' && activeTab === 'servers'
   const isDmsActive = workspace === 'chat' && activeTab === 'dms'
-  const isMailActive = workspace === 'mail'
-  const isWalletActive = workspace === 'wallet'
+  const isGroupsActive = workspace === 'chat' && activeTab === 'servers'
+  const isAppsActive = Boolean(
+    suiteOpen || workspace === 'mail' || workspace === 'wallet' || mapActive || settingsActive
+  )
 
   return (
     <nav className="ag-mobile-tabbar" aria-label="Primary navigation">
+      {/* 1. Agora */}
+      <button
+        type="button"
+        className={`ag-mtab-btn ${isAgoraActive ? 'active' : ''}`}
+        onClick={onSelectAgora}
+        aria-current={isAgoraActive ? 'page' : undefined}
+        aria-label={agoraUnread > 0 ? `Agora (${agoraUnread} unread)` : 'Agora'}
+      >
+        <span className="ag-mtab-icon-wrap">
+          <Landmark size={19} strokeWidth={isAgoraActive ? 2.15 : 1.75} />
+          {agoraUnread > 0 && (
+            <span
+              className="ag-mtab-badge ping tabular"
+              aria-label={`${agoraUnread} unread Agora notifications`}
+            >
+              {formatBadgeCount(agoraUnread)}
+            </span>
+          )}
+        </span>
+        <span className="ag-mtab-label">Agora</span>
+      </button>
+
+      {/* 2. Bitchat */}
       <button
         type="button"
         className={`ag-mtab-btn ${isBitchatActive ? 'active' : ''}`}
@@ -49,7 +82,7 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
         aria-current={isBitchatActive ? 'page' : undefined}
       >
         <span className="ag-mtab-icon-wrap">
-          <Waves size={20} strokeWidth={isBitchatActive ? 2.15 : 1.75} />
+          <Waves size={19} strokeWidth={isBitchatActive ? 2.15 : 1.75} />
           {bitchatMentions > 0 ? (
             <span
               className="ag-mtab-badge ping tabular"
@@ -69,14 +102,36 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
         <span className="ag-mtab-label">Bitchat</span>
       </button>
 
+      {/* 3. People */}
       <button
         type="button"
-        className={`ag-mtab-btn ${isServersActive ? 'active' : ''}`}
-        onClick={() => onSelectTab('servers')}
-        aria-current={isServersActive ? 'page' : undefined}
+        className={`ag-mtab-btn dm ${isDmsActive ? 'active' : ''}`}
+        onClick={() => onSelectTab('dms')}
+        aria-current={isDmsActive ? 'page' : undefined}
       >
         <span className="ag-mtab-icon-wrap">
-          <Server size={20} strokeWidth={isServersActive ? 2.15 : 1.75} />
+          <MessageCircle size={19} strokeWidth={isDmsActive ? 2.15 : 1.75} />
+          {dmUnread > 0 && (
+            <span
+              className="ag-mtab-badge ping tabular"
+              aria-label={`${dmUnread} unread messages`}
+            >
+              {formatBadgeCount(dmUnread)}
+            </span>
+          )}
+        </span>
+        <span className="ag-mtab-label">People</span>
+      </button>
+
+      {/* 4. Groups */}
+      <button
+        type="button"
+        className={`ag-mtab-btn ${isGroupsActive ? 'active' : ''}`}
+        onClick={() => onSelectTab('servers')}
+        aria-current={isGroupsActive ? 'page' : undefined}
+      >
+        <span className="ag-mtab-icon-wrap">
+          <Users size={19} strokeWidth={isGroupsActive ? 2.15 : 1.75} />
           {serverMentions > 0 ? (
             <span
               className="ag-mtab-badge ping tabular"
@@ -96,55 +151,27 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
         <span className="ag-mtab-label">Groups</span>
       </button>
 
+      {/* 5. Apps (Suite Launcher Sheet) */}
       <button
         type="button"
-        className={`ag-mtab-btn dm ${isDmsActive ? 'active' : ''}`}
-        onClick={() => onSelectTab('dms')}
-        aria-current={isDmsActive ? 'page' : undefined}
+        className={`ag-mtab-btn ${isAppsActive ? 'active' : ''}`}
+        onClick={onToggleSuite}
+        aria-haspopup="dialog"
+        aria-expanded={suiteOpen}
+        aria-label={mailUnread > 0 ? `Apps (${mailUnread} unread Agmail)` : 'Apps'}
       >
         <span className="ag-mtab-icon-wrap">
-          <MessageCircle size={20} strokeWidth={isDmsActive ? 2.15 : 1.75} />
-          {dmUnread > 0 && (
-            <span className="ag-mtab-badge ping tabular" aria-label={`${dmUnread} unread messages`}>
-              {formatBadgeCount(dmUnread)}
-            </span>
-          )}
-        </span>
-        <span className="ag-mtab-label">People</span>
-      </button>
-
-      <button
-        type="button"
-        className={`ag-mtab-btn ${isMailActive ? 'active' : ''}`}
-        onClick={onSelectMail}
-        aria-current={isMailActive ? 'page' : undefined}
-        aria-label={mailUnread > 0 ? `Mail (${mailUnread} unread)` : 'Mail'}
-      >
-        <span className="ag-mtab-icon-wrap">
-          <Mail size={20} strokeWidth={isMailActive ? 2.15 : 1.75} />
+          <LayoutGrid size={19} strokeWidth={isAppsActive ? 2.15 : 1.75} />
           {mailUnread > 0 && (
             <span
               className="ag-mtab-badge ping tabular"
-              aria-label={`${mailUnread} unread mail`}
+              aria-label={`${mailUnread} unread Agmail`}
             >
               {formatBadgeCount(mailUnread)}
             </span>
           )}
         </span>
-        <span className="ag-mtab-label">Mail</span>
-      </button>
-
-      <button
-        type="button"
-        className={`ag-mtab-btn ${isWalletActive ? 'active' : ''}`}
-        onClick={onSelectWallet}
-        aria-current={isWalletActive ? 'page' : undefined}
-        aria-label="Wallet"
-      >
-        <span className="ag-mtab-icon-wrap">
-          <Wallet size={20} strokeWidth={isWalletActive ? 2.15 : 1.75} />
-        </span>
-        <span className="ag-mtab-label">Wallet</span>
+        <span className="ag-mtab-label">Apps</span>
       </button>
     </nav>
   )

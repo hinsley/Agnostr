@@ -17,12 +17,11 @@ export const MAX_VOICE_BLOB_BYTES = MAX_MEDIA_BLOB_BYTES
 /**
  * Live-verified CORS-friendly BUD-02 Blossom servers.
  * First two accept audio/*, image/*, AND application/octet-stream (E2EE blobs);
- * the remaining two provide redundant public audio/* & image/* fallback.
+ * the third provides redundant public audio/* & image/* fallback.
  */
 export const DEFAULT_BLOSSOM_SERVERS: readonly string[] = [
   'https://blossom.yakihonne.com',
   'https://nostr.download',
-  'https://blossom.primal.net',
   'https://blossom.band',
 ]
 

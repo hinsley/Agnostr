@@ -86,9 +86,9 @@ const STARTUP_AUTOPUB_DELAY_MS = 5000
 const SESSION_AUTOPUB_KIND0_KEY = 'agnostr:v2:zap_autopub_kind0'
 const SESSION_AUTOPUB_10019_KEY = 'agnostr:v2:zap_autopub_10019'
 const FALLBACK_PROFILE_RELAYS = [
+  'wss://purplepag.es',
   'wss://relay.damus.io',
   'wss://nos.lol',
-  'wss://relay.primal.net',
 ]
 
 function readSessionFlag(key: string): string | null {

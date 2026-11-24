@@ -42,6 +42,7 @@ import type { WalletInitialIntent, ZapTarget } from './types/wallet'
 import { bitchatAudio, type SoundCue } from './utils/sound'
 import { identiconDataUrl, shortPubkey } from './utils/identicon'
 import AppRail, { type ActiveWorkspace } from './components/AppRail'
+import SuiteLauncher from './components/SuiteLauncher'
 import ConversationList, { type ListTab } from './components/ConversationList'
 import UserListPane from './components/UserListPane'
 import MobileTabBar from './components/MobileTabBar'
@@ -61,6 +62,7 @@ import type { QrShareTarget } from './components/QrShareModal'
 import type { AmailComposeTarget, AmailInitialSection } from './components/AmailView'
 
 // Aggressive React.lazy code-splitting: secondary workspaces & modals load on demand only
+const AgoraView = lazy(() => import('./components/AgoraView'))
 const AmailView = lazy(() => import('./components/AmailView'))
 const WalletModal = lazy(() => import('./components/WalletModal'))
 const SettingsModal = lazy(() => import('./components/SettingsModal'))
@@ -96,12 +98,21 @@ const ZERO_ARG_COMMANDS = new Set([
   '/strict',
 ])
 
+function isAgoraLocationHash(hash: string): boolean {
+  const raw = (hash || '').replace(/^#/, '').trim().toLowerCase()
+  return raw === 'agora' || raw.startsWith('agora/') || raw.startsWith('agora?')
+}
+
 export function App() {
   useMobileViewport()
   const engine = useAgnostrEngine()
 
-  const [workspace, setWorkspace] = useState<ActiveWorkspace>('chat')
+  const [workspace, setWorkspace] = useState<ActiveWorkspace>(() =>
+    typeof window !== 'undefined' && isAgoraLocationHash(window.location.hash) ? 'agora' : 'chat'
+  )
   const [listTab, setListTab] = useState<ListTab>('bitchat')
+  const [suiteLauncherOpen, setSuiteLauncherOpen] = useState(false)
+  const [agoraInitialCompose, setAgoraInitialCompose] = useState(false)
   const [selectedServerId, setSelectedServerId] = useState<string | null>(
     () => engine.servers.activeServer?.id ?? engine.servers.joinedServers[0]?.id ?? null
   )
@@ -267,19 +278,21 @@ export function App() {
   const activeChannel = engine.servers.activeChannel
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
 
-  // Total unread count across DMs, Servers, Bitchat rooms, and Amail for PWA App Badge
+  // Total unread count across DMs, Servers, Bitchat rooms, Agmail, and Agora for PWA App Badge
   const totalUnreadBadge = useMemo(() => {
     return (
       engine.totalDmUnread +
       engine.servers.totalServerUnread +
       engine.totalGeoUnread +
-      engine.amail.unreadInboxCount
+      engine.amail.unreadInboxCount +
+      engine.agora.unreadNotificationCount
     )
   }, [
     engine.totalDmUnread,
     engine.servers.totalServerUnread,
     engine.totalGeoUnread,
     engine.amail.unreadInboxCount,
+    engine.agora.unreadNotificationCount,
   ])
 
   const pwa = usePwa(totalUnreadBadge)
@@ -317,6 +330,7 @@ export function App() {
 
   const handleReturnToActiveCall = useCallback(() => {
     if (!activeCall) return
+    setSuiteLauncherOpen(false)
     setWorkspace('chat')
     setAmailState({ section: 'inbox', composeTo: null })
     setWalletIntent(undefined)
@@ -508,7 +522,13 @@ export function App() {
   useEffect(() => {
     const totalUnread = engine.totalDmUnread + engine.servers.totalServerUnread
     const unreadPrefix = totalUnread > 0 ? `(${totalUnread}) ` : ''
-    if (workspace === 'mail') {
+    if (workspace === 'agora') {
+      const agoraPrefix =
+        engine.agora.unreadNotificationCount > 0
+          ? `(${engine.agora.unreadNotificationCount}) `
+          : unreadPrefix
+      document.title = `${agoraPrefix}Agora — Agnostr`
+    } else if (workspace === 'mail') {
       const mailPrefix = engine.amail.unreadInboxCount > 0 ? `(${engine.amail.unreadInboxCount}) ` : unreadPrefix
       document.title = `${mailPrefix}Agmail · Agnostr`
     } else if (workspace === 'wallet') {
@@ -526,6 +546,7 @@ export function App() {
     }
   }, [
     workspace,
+    engine.agora.unreadNotificationCount,
     engine.amail.unreadInboxCount,
     engine.activeView,
     engine.activeGeohash,
@@ -615,6 +636,8 @@ export function App() {
       prevMasterPkRef.current !== engine.identity.masterPubkey
     ) {
       setWorkspace('chat')
+      setSuiteLauncherOpen(false)
+      setAgoraInitialCompose(false)
       setSelectedServerId(null)
       setServerSettingsState({ serverId: null, tab: 'overview' })
       setSettingsState({ open: false, tab: undefined })
@@ -751,6 +774,9 @@ export function App() {
         } else if (lightboxImage) {
           e.stopImmediatePropagation()
           setLightboxImage(null)
+        } else if (suiteLauncherOpen) {
+          e.stopImmediatePropagation()
+          setSuiteLauncherOpen(false)
         } else if (settingsState.open) {
           setSettingsState((prev) => ({ ...prev, open: false }))
         } else if (serverSettingsState.serverId) {
@@ -786,6 +812,7 @@ export function App() {
     qrShareTarget,
     cmdkOpen,
     lightboxImage,
+    suiteLauncherOpen,
     settingsState.open,
     serverSettingsState.serverId,
     serverHubState.open,
@@ -803,6 +830,11 @@ export function App() {
     bitchatAudio.play(cue)
   }, [])
 
+  const closeAgora = useCallback(() => {
+    setAgoraInitialCompose(false)
+    setWorkspace('chat')
+  }, [])
+
   const closeAmail = useCallback(() => {
     setAmailState({ section: 'inbox', composeTo: null })
     setWorkspace('chat')
@@ -813,14 +845,116 @@ export function App() {
     setWorkspace('chat')
   }, [])
 
-  const handleSelectWorkspace = useCallback((next: ActiveWorkspace) => {
+  const handleToggleSuiteLauncher = useCallback(() => {
+    setSuiteLauncherOpen((v) => !v)
+  }, [])
+
+  const handleOpenCommandPalette = useCallback(() => {
+    setSuiteLauncherOpen(false)
+    setCmdkOpen(true)
+  }, [])
+
+  const handleSelectAgora = useCallback((opts?: { compose?: boolean }) => {
+    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setZapTarget(null)
     setInspectedPeer(null)
-    if (next === 'mail') {
+    setWalletIntent(undefined)
+    setAmailState({ section: 'inbox', composeTo: null })
+    setWorkspace('agora')
+    if (opts?.compose) {
+      setAgoraInitialCompose(true)
+    }
+  }, [])
+
+  const handleSelectBitchat = useCallback(() => {
+    setSuiteLauncherOpen(false)
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
+    setRoomInfoOpen(false)
+    setZapTarget(null)
+    setInspectedPeer(null)
+    setWalletIntent(undefined)
+    setAmailState({ section: 'inbox', composeTo: null })
+    setWorkspace('chat')
+    setListTab('bitchat')
+    setSidebarCollapsed(false)
+    if (engine.activeView.type !== 'channel') {
+      engine.tuneGeohash(engine.activeGeohash)
+    }
+    if (isMobileViewport) {
+      setMobileScreen('list')
+    }
+  }, [engine, isMobileViewport])
+
+  const handleSelectPeople = useCallback(() => {
+    setSuiteLauncherOpen(false)
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
+    setRoomInfoOpen(false)
+    setZapTarget(null)
+    setInspectedPeer(null)
+    setWalletIntent(undefined)
+    setAmailState({ section: 'inbox', composeTo: null })
+    setWorkspace('chat')
+    setListTab('dms')
+    setSidebarCollapsed(false)
+    if (isMobileViewport) {
+      setMobileScreen('list')
+    }
+  }, [isMobileViewport])
+
+  const handleSelectGroups = useCallback(() => {
+    setSuiteLauncherOpen(false)
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
+    setRoomInfoOpen(false)
+    setZapTarget(null)
+    setInspectedPeer(null)
+    setWalletIntent(undefined)
+    setAmailState({ section: 'inbox', composeTo: null })
+    setWorkspace('chat')
+    setListTab('servers')
+    setSidebarCollapsed(false)
+    const joined = engine.servers.joinedServers
+    if (joined.length > 0) {
+      const preferredId =
+        (selectedServerId && joined.some((s) => s.id === selectedServerId)
+          ? selectedServerId
+          : null) ??
+        engine.servers.activeServer?.id ??
+        joined[0]?.id ??
+        null
+      if (preferredId) {
+        setSelectedServerId(preferredId)
+        if (engine.activeView.type !== 'server' || engine.activeView.serverId !== preferredId) {
+          engine.servers.selectServer(preferredId)
+        }
+      }
+    }
+    if (isMobileViewport) {
+      setMobileScreen('list')
+    }
+  }, [engine.servers, engine.activeView, selectedServerId, isMobileViewport])
+
+  const handleSelectWorkspace = useCallback((next: ActiveWorkspace) => {
+    setSuiteLauncherOpen(false)
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
+    setRoomInfoOpen(false)
+    setZapTarget(null)
+    setInspectedPeer(null)
+    if (next === 'agora') {
+      setWalletIntent(undefined)
+      setAmailState({ section: 'inbox', composeTo: null })
+    } else if (next === 'mail') {
       setWalletIntent(undefined)
       setAmailState((prev) => ({ section: prev.section || 'inbox', composeTo: null }))
     } else if (next === 'wallet') {
@@ -831,6 +965,11 @@ export function App() {
 
   const handleSelectChatTab = useCallback(
     (tab: ListTab) => {
+      if (tab === 'servers') {
+        handleSelectGroups()
+        return
+      }
+      setSuiteLauncherOpen(false)
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setMobileUserListOpen(false)
@@ -844,13 +983,14 @@ export function App() {
         engine.tuneGeohash(engine.activeGeohash)
       }
     },
-    [engine]
+    [engine, handleSelectGroups]
   )
 
   const handleSelectServer = useCallback(
     (serverId: string) => {
       engine.servers.selectServer(serverId)
       bitchatAudio.play('tune')
+      setSuiteLauncherOpen(false)
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setMobileUserListOpen(false)
@@ -869,6 +1009,7 @@ export function App() {
   )
 
   const handleOpenAmail = useCallback((section: AmailInitialSection = 'inbox') => {
+    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -881,6 +1022,7 @@ export function App() {
   }, [])
 
   const handleOpenAmailCompose = useCallback((pubkey: string, nickname?: string) => {
+    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -893,6 +1035,7 @@ export function App() {
   }, [])
 
   const handleOpenSettings = useCallback((tab?: SettingsTab) => {
+    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
@@ -943,6 +1086,7 @@ export function App() {
   const swipeDisabled =
     !isMobileViewport ||
     workspace !== 'chat' ||
+    suiteLauncherOpen ||
     Boolean(engine.pendingTrustRequest) ||
     Boolean(pendingDeleteDm) ||
     Boolean(noteEditorPeer) ||
@@ -984,6 +1128,8 @@ export function App() {
   }, [engine.activeView.type])
 
   const handleMobileSelectTab = useCallback((tab: ListTab) => {
+    bitchatAudio.play('click')
+    setSuiteLauncherOpen(false)
     setWorkspace('chat')
     setAmailState({ section: 'inbox', composeTo: null })
     setWalletIntent(undefined)
@@ -993,24 +1139,6 @@ export function App() {
     setRoomInfoOpen(false)
     setListTab(tab)
     setMobileScreen('list')
-  }, [])
-
-  const handleMobileSelectMail = useCallback(() => {
-    bitchatAudio.play('click')
-    handleOpenAmail('inbox')
-  }, [handleOpenAmail])
-
-  const handleMobileSelectWallet = useCallback(() => {
-    bitchatAudio.play('click')
-    setZapTarget(null)
-    setInspectedPeer(null)
-    setAmailState({ section: 'inbox', composeTo: null })
-    setRadarExpanded(false)
-    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
-    setMobileUserListOpen(false)
-    setRoomInfoOpen(false)
-    setWalletIntent({ tab: 'overview' })
-    setWorkspace('wallet')
   }, [])
 
   const { pushToast } = engine
@@ -1048,6 +1176,10 @@ export function App() {
       setCmdkOpen(false)
       return true
     }
+    if (suiteLauncherOpen) {
+      setSuiteLauncherOpen(false)
+      return true
+    }
     if (inspectedPeer) {
       setInspectedPeer(null)
       return true
@@ -1070,6 +1202,10 @@ export function App() {
     }
     if (settingsState.open) {
       setSettingsState((prev) => ({ ...prev, open: false }))
+      return true
+    }
+    if (workspace === 'agora') {
+      closeAgora()
       return true
     }
     if (workspace === 'wallet') {
@@ -1111,6 +1247,7 @@ export function App() {
     qrShareTarget,
     lightboxImage,
     cmdkOpen,
+    suiteLauncherOpen,
     inspectedPeer,
     serverSettingsState.serverId,
     serverHubState.open,
@@ -1119,6 +1256,7 @@ export function App() {
     radarExpanded,
     settingsState.open,
     workspace,
+    closeAgora,
     closeWallet,
     closeAmail,
     activeCall,
@@ -1171,6 +1309,7 @@ export function App() {
     qrScannerOpen ||
     Boolean(zapTarget) ||
     workspace !== 'chat' ||
+    suiteLauncherOpen ||
     Boolean(qrShareTarget) ||
     Boolean(lightboxImage) ||
     cmdkOpen ||
@@ -1207,6 +1346,7 @@ export function App() {
       const ok = engine.tuneGeohash(resolved?.key ?? channelInput)
       if (ok) {
         bitchatAudio.play('tune')
+        setSuiteLauncherOpen(false)
         setWorkspace('chat')
         setAmailState({ section: 'inbox', composeTo: null })
         setWalletIntent(undefined)
@@ -1267,6 +1407,7 @@ export function App() {
   }, [])
 
   const handleOpenWallet = useCallback((intent?: WalletInitialIntent) => {
+    setSuiteLauncherOpen(false)
     setZapTarget(null)
     setInspectedPeer(null)
     setAmailState({ section: 'inbox', composeTo: null })
@@ -1277,6 +1418,62 @@ export function App() {
     setWalletIntent(intent)
     setWorkspace('wallet')
   }, [])
+
+  // Global Agnostr Suite keyboard shortcuts (Alt+0..Alt+6 when not typing in an input)
+  useEffect(() => {
+    const onSuiteShortcut = (e: KeyboardEvent) => {
+      if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return
+      const target = e.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return
+      }
+      const digit = e.code.startsWith('Digit') ? e.code.slice(5) : e.key
+      if (digit === '0') {
+        e.preventDefault()
+        bitchatAudio.play('click')
+        setSuiteLauncherOpen((v) => !v)
+      } else if (digit === '1') {
+        e.preventDefault()
+        bitchatAudio.play('click')
+        handleSelectAgora()
+      } else if (digit === '2') {
+        e.preventDefault()
+        bitchatAudio.play('click')
+        handleSelectBitchat()
+      } else if (digit === '3') {
+        e.preventDefault()
+        bitchatAudio.play('click')
+        handleSelectPeople()
+      } else if (digit === '4') {
+        e.preventDefault()
+        bitchatAudio.play('click')
+        handleSelectGroups()
+      } else if (digit === '5') {
+        e.preventDefault()
+        bitchatAudio.play('click')
+        handleOpenAmail('inbox')
+      } else if (digit === '6') {
+        e.preventDefault()
+        bitchatAudio.play('click')
+        handleOpenWallet({ tab: 'overview' })
+      }
+    }
+    window.addEventListener('keydown', onSuiteShortcut)
+    return () => window.removeEventListener('keydown', onSuiteShortcut)
+  }, [
+    handleSelectAgora,
+    handleSelectBitchat,
+    handleSelectPeople,
+    handleSelectGroups,
+    handleOpenAmail,
+    handleOpenWallet,
+  ])
 
   const handleOpenZap = useCallback((target: ZapTarget) => {
     setZapTarget(target)
@@ -1443,8 +1640,13 @@ export function App() {
   // Navigate mobile shell cleanly to chat when a `#topic=<slug>` deep link is clicked in-app
   useEffect(() => {
     const onBitchatHash = () => {
+      if (isAgoraLocationHash(window.location.hash)) {
+        handleSelectAgora()
+        return
+      }
       const key = parseBitchatChannelHash(window.location.hash)
       if (!key) return
+      setSuiteLauncherOpen(false)
       setWorkspace('chat')
       setAmailState({ section: 'inbox', composeTo: null })
       setWalletIntent(undefined)
@@ -1457,7 +1659,7 @@ export function App() {
     }
     window.addEventListener('hashchange', onBitchatHash)
     return () => window.removeEventListener('hashchange', onBitchatHash)
-  }, [])
+  }, [handleSelectAgora])
 
   const handleLeftServer = useCallback(() => {
     setServerSettingsState({ serverId: null, tab: 'overview' })
@@ -1472,6 +1674,7 @@ export function App() {
     (pubkey: string, nickname?: string) => {
       engine.openDmThread(pubkey, nickname)
       bitchatAudio.play('click')
+      setSuiteLauncherOpen(false)
       setWorkspace('chat')
       setAmailState({ section: 'inbox', composeTo: null })
       setWalletIntent(undefined)
@@ -1634,6 +1837,7 @@ export function App() {
   )
 
   const handleExpandRadar = useCallback(() => {
+    setSuiteLauncherOpen(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setRadarExpanded(true)
     setMobileUserListOpen(false)
@@ -1791,6 +1995,41 @@ export function App() {
     [engine, isServer, activeServer, activeChannel]
   )
 
+  const engineZaps = engine.zaps
+  const engineWallet = engine.wallet
+  const engineAgora = engine.agora
+  const zapTargetEventId = zapTarget?.eventId
+  const zapModalZaps = useMemo(
+    () => ({
+      ...engineZaps,
+      sendNutzap: async (params: Parameters<typeof engineZaps.sendNutzap>[0]) => {
+        const res = await engineZaps.sendNutzap(params)
+        if (params.target.eventId) {
+          engineAgora.recordOptimisticZap(params.target.eventId, res.amountSats)
+        }
+        return res
+      },
+    }),
+    [engineZaps, engineAgora]
+  )
+
+  const zapModalWallet = useMemo(
+    () => ({
+      ...engineWallet,
+      payBolt11Invoice: async (
+        invoice: string,
+        opts?: Parameters<typeof engineWallet.payBolt11Invoice>[1]
+      ) => {
+        const res = await engineWallet.payBolt11Invoice(invoice, opts)
+        if (opts?.txType === 'zap_out' && zapTargetEventId) {
+          engineAgora.recordOptimisticZap(zapTargetEventId, res.amountSats)
+        }
+        return res
+      },
+    }),
+    [engineWallet, engineAgora, zapTargetEventId]
+  )
+
   const workspaceLoadingFallback = (
     <div className="ag-workspace-stage ag-workspace-loading" role="status" aria-live="polite">
       <Loader2 size={20} className="ag-spin" aria-hidden="true" />
@@ -1815,7 +2054,7 @@ export function App() {
           } as CSSProperties
         }
       >
-        {/* Far-Left Desktop Navigation & Discord Server Rail (60px, always visible >= 868px) */}
+        {/* Far-Left Desktop Agnostr Suite & Groups Rail (68px, always visible >= 868px) */}
         {!isMobileViewport && (
           <AppRail
             engine={engine}
@@ -1825,19 +2064,40 @@ export function App() {
             mapActive={radarExpanded}
             settingsActive={settingsState.open}
             pwa={pwa}
+            agoraUnread={engine.agora.unreadNotificationCount}
+            suiteLauncherOpen={suiteLauncherOpen}
+            onToggleSuiteLauncher={handleToggleSuiteLauncher}
             onSelectWorkspace={handleSelectWorkspace}
             onSelectChatTab={handleSelectChatTab}
+            onSelectGroups={handleSelectGroups}
             onSelectServer={handleSelectServer}
             onOpenServerHub={handleOpenServerHub}
             onOpenServerSettings={handleOpenServerSettings}
             onOpenMap={handleExpandRadar}
+            onOpenSearch={handleOpenCommandPalette}
             onOpenSettings={handleOpenSettings}
             onOpenInstall={handleOpenInstall}
             onPlaySound={playSound}
           />
         )}
 
-        {workspace === 'mail' ? (
+        {workspace === 'agora' ? (
+          <div className="ag-workspace-stage">
+            <Suspense fallback={workspaceLoadingFallback}>
+              <AgoraView
+                engine={engine}
+                isMobileViewport={isMobileViewport}
+                initialComposeOpen={agoraInitialCompose}
+                onConsumedInitialCompose={() => setAgoraInitialCompose(false)}
+                onOpenDm={handleOpenDm}
+                onOpenAmailCompose={handleOpenAmailCompose}
+                onOpenZap={handleOpenZap}
+                onOpenLightbox={setLightboxImage}
+                onPlaySound={playSound}
+              />
+            </Suspense>
+          </div>
+        ) : workspace === 'mail' ? (
           <div className="ag-workspace-stage">
             <Suspense fallback={workspaceLoadingFallback}>
               <AmailView
@@ -2137,7 +2397,7 @@ export function App() {
           </>
         )}
 
-        {/* Keep floating active call pill accessible when viewing Agmail or Agwallet */}
+        {/* Keep floating active call pill accessible when viewing Agora, Agmail, or Agwallet */}
         {workspace !== 'chat' && (activeCall || engine.transcription.endedCallTranscript) && (
           <Suspense fallback={null}>
             <CallStage
@@ -2216,15 +2476,54 @@ export function App() {
       <MobileTabBar
         workspace={workspace}
         activeTab={mobileNavActiveTab}
+        agoraUnread={engine.agora.unreadNotificationCount}
         bitchatUnread={engine.totalGeoUnread}
         bitchatMentions={engine.totalGeoMentions}
         dmUnread={engine.totalDmUnread}
         serverUnread={engine.servers.totalServerUnread}
         serverMentions={engine.servers.totalServerMentions}
         mailUnread={engine.amail.unreadInboxCount}
+        suiteOpen={suiteLauncherOpen}
+        mapActive={radarExpanded}
+        settingsActive={settingsState.open}
+        onSelectAgora={() => {
+          bitchatAudio.play('click')
+          handleSelectAgora()
+        }}
         onSelectTab={handleMobileSelectTab}
-        onSelectMail={handleMobileSelectMail}
-        onSelectWallet={handleMobileSelectWallet}
+        onToggleSuite={() => {
+          bitchatAudio.play('click')
+          handleToggleSuiteLauncher()
+        }}
+      />
+
+      {/* Unified Agnostr Suite Launcher (Desktop glass popover / Mobile glass bottom sheet) */}
+      <SuiteLauncher
+        open={suiteLauncherOpen}
+        variant={isMobileViewport ? 'sheet' : 'popover'}
+        workspace={workspace}
+        listTab={listTab}
+        mapActive={radarExpanded}
+        settingsActive={settingsState.open}
+        agoraUnread={engine.agora.unreadNotificationCount}
+        bitchatUnread={engine.totalGeoUnread}
+        bitchatMentions={engine.totalGeoMentions}
+        dmUnread={engine.totalDmUnread}
+        serverUnread={engine.servers.totalServerUnread}
+        serverMentions={engine.servers.totalServerMentions}
+        mailUnread={engine.amail.unreadInboxCount}
+        walletSats={engine.wallet.totalBalanceSats}
+        onClose={() => setSuiteLauncherOpen(false)}
+        onSelectAgora={() => handleSelectAgora()}
+        onSelectBitchat={handleSelectBitchat}
+        onSelectPeople={handleSelectPeople}
+        onSelectGroups={handleSelectGroups}
+        onSelectMail={() => handleOpenAmail('inbox')}
+        onSelectWallet={() => handleOpenWallet({ tab: 'overview' })}
+        onOpenMap={handleExpandRadar}
+        onOpenSearch={handleOpenCommandPalette}
+        onOpenSettings={() => handleOpenSettings()}
+        onPlaySound={playSound}
       />
 
       {/* Desktop Unified Calm Settings Modal (Lazy loaded on open) */}
@@ -2334,6 +2633,10 @@ export function App() {
             onLocateMe={() => void handleLocateMe()}
             onOpenRoomInfo={handleOpenRoomInfo}
             onOpenSettings={handleOpenSettings}
+            onOpenAgora={handleSelectAgora}
+            onSelectBitchat={handleSelectBitchat}
+            onSelectPeople={handleSelectPeople}
+            onSelectGroups={handleSelectGroups}
             onOpenAmail={handleOpenAmail}
             onOpenWallet={handleOpenWallet}
             onToggleSound={handleToggleSound}
@@ -2418,8 +2721,8 @@ export function App() {
           <ZapModal
             target={zapTarget}
             onClose={() => setZapTarget(null)}
-            wallet={engine.wallet}
-            zaps={engine.zaps}
+            wallet={zapModalWallet}
+            zaps={zapModalZaps}
             onOpenWallet={handleOpenWallet}
           />
         </Suspense>

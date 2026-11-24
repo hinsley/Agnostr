@@ -1,3 +1,4 @@
+import type { AgoraEngine } from './agora.ts'
 import type { AmailEngine } from './amail.ts'
 import type { CallEngine } from './calls.ts'
 import type { ContentFilterEngine } from './contentFilter.ts'
@@ -552,6 +553,9 @@ export interface AgnostrEngine {
 
   // Amail — E2EE Briar-inspired Store-and-Forward Meshnet Snailmail
   amail: AmailEngine
+
+  // Agora — Clean-room Nostr public social feed, threads, profiles, search & bookmarks
+  agora: AgoraEngine
 
   // Push notifications, live incoming DM call ringing & Web Push bridge
   notifications: NotificationEngine

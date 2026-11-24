@@ -4,34 +4,91 @@
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
-   Far-Left Unified App & Discord Server Rail (Desktop >= 868px)
+   Far-Left 68px Labeled Agnostr Suite Rail & Joined Groups Strip (Desktop >= 868px)
    -------------------------------------------------------------------------- */
 .ag-app-rail {
-  width: var(--rail-w, 60px);
-  flex: 0 0 var(--rail-w, 60px);
+  width: var(--rail-w, 68px);
+  flex: 0 0 var(--rail-w, 68px);
   height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: calc(10px + env(safe-area-inset-top, 0px)) 0 max(10px, env(safe-area-inset-bottom, 0px));
+  gap: 6px;
+  padding: calc(8px + env(safe-area-inset-top, 0px)) 0 max(8px, env(safe-area-inset-bottom, 0px));
   background-color: var(--bg-canvas);
   border-right: 1px solid var(--border-subtle);
   z-index: 22;
   user-select: none;
 }
 
+.ag-rail-brand-slot {
+  margin-bottom: 2px;
+}
+
+.ag-rail-brand {
+  position: relative;
+  width: 46px;
+  height: 34px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-rail-brand:hover {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+
+.ag-rail-brand.active {
+  background-color: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: var(--accent-glow);
+}
+
+.ag-rail-brand:active {
+  transform: scale(0.95);
+}
+
+.ag-rail-brand:focus-visible {
+  outline: none;
+  box-shadow: var(--accent-glow);
+}
+
+.ag-rail-brand-monogram {
+  font-size: 13.5px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.ag-rail-brand-grid {
+  opacity: 0.78;
+}
+
 .ag-rail-group {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 3px;
   width: 100%;
   flex-shrink: 0;
 }
 
 .ag-rail-divider {
-  width: 24px;
+  width: 28px;
   height: 1px;
   background-color: var(--border-subtle);
   flex-shrink: 0;
@@ -45,7 +102,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-width: none;
@@ -64,6 +121,52 @@
   justify-content: center;
   width: 100%;
   flex-shrink: 0;
+}
+
+/* Primary 6-App Labeled Rail Tiles */
+.ag-rail-app-tile {
+  position: relative;
+  width: 56px;
+  min-height: 44px;
+  padding: 5px 4px;
+  border-radius: 11px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  color: var(--text-secondary);
+  background-color: transparent;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-rail-app-tile:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+.ag-rail-app-tile:active {
+  transform: scale(0.96);
+}
+
+.ag-rail-app-tile:focus-visible {
+  outline: none;
+  box-shadow: var(--accent-glow);
+}
+
+.ag-rail-app-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.05;
+  letter-spacing: 0.01em;
+  max-width: 52px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ag-rail-tile {
@@ -87,7 +190,7 @@
 .ag-rail-tile.compact {
   width: 38px;
   height: 38px;
-  border-radius: 13px;
+  border-radius: 12px;
 }
 
 .ag-rail-tile:hover {
@@ -114,7 +217,7 @@
 /* Crisp 3px Left Edge Active / Unread / Hover Indicator Pill */
 .ag-rail-indicator {
   position: absolute;
-  left: calc((var(--rail-w, 60px) - 40px) / -2);
+  left: calc((var(--rail-w, 68px) - 40px) / -2);
   top: 50%;
   width: 3px;
   height: 0;
@@ -129,21 +232,28 @@
     background-color var(--dur-fast) ease;
 }
 
-.ag-rail-tile.compact .ag-rail-indicator {
-  left: -9px;
+.ag-rail-app-tile .ag-rail-indicator {
+  left: calc((var(--rail-w, 68px) - 56px) / -2);
 }
 
+.ag-rail-tile.compact .ag-rail-indicator {
+  left: calc((var(--rail-w, 68px) - 38px) / -2);
+}
+
+.ag-rail-app-tile.has-unread .ag-rail-indicator,
 .ag-rail-tile.has-unread .ag-rail-indicator {
   height: 8px;
   opacity: 0.9;
   background-color: var(--text-primary);
 }
 
+.ag-rail-app-tile:hover .ag-rail-indicator,
 .ag-rail-tile:hover .ag-rail-indicator {
   height: 14px;
   opacity: 0.85;
 }
 
+.ag-rail-app-tile.active .ag-rail-indicator,
 .ag-rail-tile.active .ag-rail-indicator {
   height: 22px;
   opacity: 1;
@@ -151,10 +261,11 @@
 }
 
 /* Workspace Active States */
+.ag-rail-agora.active,
 .ag-rail-bitchat.active,
+.ag-rail-groups.active,
 .ag-rail-mail.active,
 .ag-rail-wallet.active {
-  border-radius: 11px;
   color: var(--accent);
   background-color: var(--accent-soft);
 }
@@ -164,7 +275,6 @@
 }
 
 .ag-rail-people.active {
-  border-radius: 11px;
   color: var(--dm-accent);
   background-color: var(--dm-soft);
 }
@@ -174,7 +284,7 @@
   background-color: var(--dm-accent);
 }
 
-/* Discord-Style Joined Server Squircle */
+/* Joined Group Squircle */
 .ag-rail-srv {
   background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 14%, var(--bg-surface));
   color: var(--text-primary);
@@ -185,7 +295,7 @@
 }
 
 .ag-rail-srv.active {
-  border-radius: 11px;
+  border-radius: 10px;
   background-color: color-mix(in srgb, var(--srv-accent, var(--accent)) 24%, var(--bg-elevated));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--srv-accent, var(--accent)) 55%, transparent);
 }
@@ -204,17 +314,17 @@
 }
 
 .ag-rail-srv-emoji {
-  font-size: 18px;
+  font-size: 17px;
   line-height: 1;
 }
 
 .ag-rail-srv-mono {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0.03em;
 }
 
-/* Add / Join Server '+' Squircle */
+/* Add / Join Group '+' Squircle */
 .ag-rail-add {
   background-color: var(--bg-surface);
   color: var(--text-muted);
@@ -244,6 +354,11 @@
   pointer-events: none;
 }
 
+.ag-rail-app-tile .ag-rail-badge {
+  top: 1px;
+  right: 2px;
+}
+
 .ag-rail-badge.ping {
   background-color: var(--status-danger);
   color: #ffffff;
@@ -271,20 +386,20 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-ok) 30%, transparent);
 }
 
-/* Bottom Utility Stack (Map, Settings, Install) */
+/* Bottom Utility Stack (Map, Search, Settings, Install) */
 .ag-rail-bottom {
   flex-shrink: 0;
   width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .ag-rail-util {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -303,6 +418,370 @@
 .ag-rail-util.active {
   background-color: var(--accent-soft);
   color: var(--accent);
+}
+
+/* --------------------------------------------------------------------------
+   Glass Suite Launcher (Desktop Popover + Mobile Slide-Up Sheet)
+   -------------------------------------------------------------------------- */
+@keyframes ag-suite-pop-in {
+  from {
+    opacity: 0;
+    transform: translate3d(-6px, -4px, 0) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes ag-suite-sheet-up {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 18px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.ag-suite-backdrop {
+  position: fixed;
+  z-index: var(--z-popover, 60);
+}
+
+.ag-suite-backdrop.popover {
+  inset: 0;
+  background-color: transparent;
+}
+
+.ag-suite-backdrop.sheet {
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px));
+  background-color: var(--bg-overlay);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 12px 10px 10px;
+  animation: ag-fade-in 130ms ease;
+}
+
+.ag-suite-popover {
+  position: fixed;
+  top: 10px;
+  left: calc(var(--rail-w, 68px) + 10px);
+  width: 340px;
+  max-width: calc(100vw - var(--rail-w, 68px) - 20px);
+  max-height: calc(100dvh - 20px);
+  overflow-y: auto;
+  padding: 13px;
+  border-radius: 16px;
+  background-color: var(--bg-glass);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  animation: ag-suite-pop-in 140ms var(--ease-out);
+}
+
+.ag-suite-sheet {
+  width: 100%;
+  max-width: 440px;
+  margin: 0 auto;
+  max-height: calc(100dvh - var(--ag-mobile-tabbar-h, 56px) - 36px);
+  overflow-y: auto;
+  padding: 10px 13px 13px;
+  border-radius: 20px;
+  background-color: var(--bg-glass);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  animation: ag-suite-sheet-up 180ms var(--ease-out);
+}
+
+.ag-suite-sheet-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background-color: var(--border-strong);
+  margin: 0 auto 2px;
+  opacity: 0.72;
+}
+
+.ag-suite-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ag-suite-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ag-suite-crest {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ag-suite-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.ag-suite-close {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-suite-close:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ag-suite-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ag-suite-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 11px;
+  border-radius: 12px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  min-width: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-suite-card:hover {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+
+.ag-suite-card:active {
+  transform: scale(0.98);
+}
+
+.ag-suite-card:focus-visible {
+  outline: none;
+  box-shadow: var(--accent-glow);
+}
+
+.ag-suite-card.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-suite-card.dm.active {
+  background-color: var(--dm-soft);
+  border-color: color-mix(in srgb, var(--dm-accent) 45%, transparent);
+}
+
+.ag-suite-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+}
+
+.ag-suite-card-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-suite-card:hover .ag-suite-card-icon {
+  color: var(--text-primary);
+}
+
+.ag-suite-card.active .ag-suite-card-icon {
+  background-color: color-mix(in srgb, var(--accent) 18%, var(--bg-surface));
+  color: var(--accent);
+}
+
+.ag-suite-card.dm .ag-suite-card-icon {
+  color: var(--dm-accent);
+}
+
+.ag-suite-card.dm.active .ag-suite-card-icon {
+  background-color: color-mix(in srgb, var(--dm-accent) 20%, var(--bg-surface));
+  color: var(--dm-accent);
+}
+
+.ag-suite-card-kbd {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  opacity: 0.72;
+}
+
+.ag-suite-card-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ag-suite-card-badge.ping {
+  background-color: var(--status-danger);
+  color: #ffffff;
+}
+
+.ag-suite-card-badge.unread {
+  background-color: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.ag-suite-card-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5px;
+  min-width: 0;
+}
+
+.ag-suite-card-name {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.ag-suite-card.active .ag-suite-card-name {
+  color: var(--accent);
+}
+
+.ag-suite-card.dm.active .ag-suite-card-name {
+  color: var(--dm-accent);
+}
+
+.ag-suite-card-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.25;
+}
+
+.ag-suite-divider {
+  width: 100%;
+  height: 1px;
+  background-color: var(--border-subtle);
+}
+
+.ag-suite-footer {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.ag-suite-util-btn {
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 9px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-suite-util-btn:hover {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.ag-suite-util-btn.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+
+.ag-suite-util-kbd {
+  font-size: 9.5px;
+  color: var(--text-muted);
+  opacity: 0.78;
+}
+
+@media (max-width: 400px) {
+  .ag-suite-sheet {
+    padding: 10px 10px 12px;
+  }
+
+  .ag-suite-card {
+    padding: 9px 10px;
+  }
+
+  .ag-suite-util-btn {
+    padding: 0 5px;
+    font-size: 11px;
+    gap: 4px;
+  }
 }
 
 /* Unclipped Portal Hover Tooltip (Rendered on document.body) */

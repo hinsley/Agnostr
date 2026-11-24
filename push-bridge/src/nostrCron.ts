@@ -14,7 +14,7 @@ import { sendWebPushNotification } from './webpush.ts'
 const CRON_RELAYS = [
   'wss://relay.damus.io',
   'wss://nos.lol',
-  'wss://relay.primal.net',
+  'wss://offchain.pub',
 ] as const
 
 const CRON_KINDS = [1059, 1, 9, 20000, 9735, 9321]

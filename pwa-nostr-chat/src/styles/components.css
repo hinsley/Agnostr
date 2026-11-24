@@ -1773,6 +1773,7 @@ img.ag-avatar-agnostr,
     flex: 1 1 0;
     min-width: 0;
     min-height: 46px;
+    padding: 2px 2px;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1796,20 +1797,37 @@ img.ag-avatar-agnostr,
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 22px;
+    width: 44px;
+    height: 26px;
+    border-radius: var(--radius-full);
+    transition:
+      background-color var(--dur-fast) ease,
+      transform 110ms ease;
+  }
+
+  .ag-mtab-btn.active .ag-mtab-icon-wrap {
+    background-color: var(--accent-soft);
+  }
+
+  .ag-mtab-btn.dm.active .ag-mtab-icon-wrap {
+    background-color: var(--dm-soft);
+  }
+
+  .ag-mtab-btn:active .ag-mtab-icon-wrap {
+    transform: scale(0.94);
   }
 
   .ag-mtab-badge {
     position: absolute;
-    top: -4px;
-    right: -10px;
-    min-width: 17px;
-    height: 17px;
+    top: -3px;
+    right: 2px;
+    min-width: 16px;
+    height: 16px;
     padding: 0 4px;
     border-radius: var(--radius-full);
     background-color: var(--bg-active);
     color: var(--text-primary);
-    font-size: 10px;
+    font-size: 9.5px;
     font-weight: 700;
     line-height: 1;
     display: inline-flex;
@@ -1832,10 +1850,13 @@ img.ag-avatar-agnostr,
   }
 
   .ag-mtab-label {
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 600;
     line-height: 1.1;
     white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 

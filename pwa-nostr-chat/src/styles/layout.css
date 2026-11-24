@@ -1,13 +1,20 @@
 /* ==========================================================================
    Agnostr Architectural Desktop Shell & Visual-Viewport Locked Mobile Layout
-   Desktop (>= 868px): 60px AppRail | 256px Sidebar | 1fr Stage | 244px UserList
-   Mobile  (<  868px): Fixed visualViewport Shell + 5-Tab Bottom Bar + Swipe Drawers
+   Desktop (>= 868px): 68px Suite Rail | 256px Sidebar | 1fr Stage | 244px UserList
+   Mobile  (<  868px): Fixed visualViewport Shell + 5-Slot Dock + Glass Suite Sheet
    ========================================================================== */
 
 :root {
+  --rail-w: 68px;
   --ag-vvh: 100dvh;
   --ag-vvt: 0px;
   --ag-mobile-tabbar-h: 56px;
+}
+
+@media (min-width: 868px) and (max-width: 1140px) {
+  :root {
+    --rail-w: 64px;
+  }
 }
 
 html[data-keyboard-open='true'] {
@@ -121,7 +128,7 @@ body,
 }
 
 /* --------------------------------------------------------------------------
-   Embedded Full-Stage Workspace Container (Native Agmail & Agwallet)
+   Embedded Full-Stage Workspace Container (Native Agora, Agmail & Agwallet)
    -------------------------------------------------------------------------- */
 .ag-workspace-stage {
   flex: 1 1 auto;

@@ -3,13 +3,17 @@ import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Download,
+  Landmark,
+  LayoutGrid,
   Link2,
   LogOut,
   Mail,
   Map as MapIcon,
   MessageCircle,
   Plus,
+  Search,
   Settings,
+  Users,
   Wallet,
   Waves,
 } from 'lucide-react'
@@ -23,7 +27,7 @@ import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { SettingsTab } from './SettingsModal'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu'
 
-export type ActiveWorkspace = 'chat' | 'mail' | 'wallet'
+export type ActiveWorkspace = 'chat' | 'agora' | 'mail' | 'wallet'
 
 export interface AppRailProps {
   engine: AgnostrEngine
@@ -33,12 +37,17 @@ export interface AppRailProps {
   mapActive: boolean
   settingsActive: boolean
   pwa?: PwaState
+  agoraUnread?: number
+  suiteLauncherOpen?: boolean
+  onToggleSuiteLauncher?: () => void
   onSelectWorkspace: (workspace: ActiveWorkspace) => void
   onSelectChatTab: (tab: ListTab) => void
+  onSelectGroups?: () => void
   onSelectServer: (serverId: string) => void
   onOpenServerHub: (tab?: ServerHubTab) => void
   onOpenServerSettings: (serverId: string, tab?: ServerSettingsTab) => void
   onOpenMap: () => void
+  onOpenSearch?: () => void
   onOpenSettings: (tab?: SettingsTab) => void
   onOpenInstall?: () => void
   onPlaySound?: (cue: SoundCue) => void
@@ -70,12 +79,17 @@ export const AppRail: React.FC<AppRailProps> = ({
   mapActive,
   settingsActive,
   pwa,
+  agoraUnread = 0,
+  suiteLauncherOpen = false,
+  onToggleSuiteLauncher,
   onSelectWorkspace,
   onSelectChatTab,
+  onSelectGroups,
   onSelectServer,
   onOpenServerHub,
   onOpenServerSettings,
   onOpenMap,
+  onOpenSearch,
   onOpenSettings,
   onOpenInstall,
   onPlaySound,
@@ -116,8 +130,10 @@ export const AppRail: React.FC<AppRailProps> = ({
     engine.servers.joinedServers[0]?.id ||
     null
 
+  const isAgoraActive = workspace === 'agora'
   const isBitchatActive = workspace === 'chat' && listTab === 'bitchat'
   const isPeopleActive = workspace === 'chat' && listTab === 'dms'
+  const isGroupsActive = workspace === 'chat' && listTab === 'servers'
   const isMailActive = workspace === 'mail'
   const isWalletActive = workspace === 'wallet'
 
@@ -127,6 +143,13 @@ export const AppRail: React.FC<AppRailProps> = ({
   const mailUnread = engine.amail.unreadInboxCount
   const walletSats = engine.wallet.totalBalanceSats
   const activeCall = engine.calls.activeCall
+
+  let totalServerUnread = 0
+  let totalServerMentions = 0
+  for (const s of engine.servers.joinedServers) {
+    totalServerUnread += Math.max(s.unreadCount, engine.servers.getServerUnreadCount(s.id))
+    totalServerMentions += Math.max(s.mentionCount, engine.servers.getServerMentionCount(s.id))
+  }
 
   const openServerMenu = (e: React.MouseEvent, server: ServerSummary) => {
     hideTooltip()
@@ -175,28 +198,91 @@ export const AppRail: React.FC<AppRailProps> = ({
   }
 
   return (
-    <nav className="ag-app-rail ag-desktop-only" aria-label="Workspace and groups">
-      {/* Primary First-Class Workspaces */}
-      <div className="ag-rail-group">
-        {/* Bitchat */}
-        <div className="ag-rail-slot">
+    <nav className="ag-app-rail ag-desktop-only" aria-label="Agnostr Suite and groups">
+      {/* Top Brand Suite Launcher Crest */}
+      <div className="ag-rail-slot ag-rail-brand-slot">
+        <button
+          type="button"
+          className={`ag-rail-brand ${suiteLauncherOpen ? 'active' : ''}`}
+          onClick={() => {
+            onPlaySound?.('click')
+            hideTooltip()
+            onToggleSuiteLauncher?.()
+          }}
+          onMouseEnter={(e) => showTooltip(e.currentTarget, 'Agnostr Suite', 'Alt+0')}
+          onMouseLeave={hideTooltip}
+          onFocus={(e) => showTooltip(e.currentTarget, 'Agnostr Suite', 'Alt+0')}
+          onBlur={hideTooltip}
+          aria-label="Agnostr Suite (Alt+0)"
+          aria-haspopup="dialog"
+          aria-expanded={suiteLauncherOpen}
+        >
+          <span className="ag-rail-brand-monogram" aria-hidden="true">
+            A
+          </span>
+          <LayoutGrid size={11} strokeWidth={2.2} className="ag-rail-brand-grid" aria-hidden="true" />
+        </button>
+      </div>
+
+      {/* Consistent 6-App Primary Stack */}
+      <div className="ag-rail-group" role="list" aria-label="Agnostr apps">
+        {/* 1. Agora */}
+        <div className="ag-rail-slot" role="listitem">
           <button
             type="button"
-            className={`ag-rail-tile ag-rail-bitchat ${isBitchatActive ? 'active' : ''} ${bitchatUnread > 0 || bitchatMentions > 0 ? 'has-unread' : ''}`}
+            className={`ag-rail-app-tile ag-rail-agora ${isAgoraActive ? 'active' : ''} ${agoraUnread > 0 ? 'has-unread' : ''}`}
+            onClick={() => {
+              onPlaySound?.('click')
+              onSelectWorkspace('agora')
+            }}
+            onMouseEnter={(e) =>
+              showTooltip(
+                e.currentTarget,
+                'Agora',
+                agoraUnread > 0 ? `${agoraUnread} new · Alt+1` : 'Alt+1'
+              )
+            }
+            onMouseLeave={hideTooltip}
+            onFocus={(e) =>
+              showTooltip(
+                e.currentTarget,
+                'Agora',
+                agoraUnread > 0 ? `${agoraUnread} new · Alt+1` : 'Alt+1'
+              )
+            }
+            onBlur={hideTooltip}
+            aria-label={agoraUnread > 0 ? `Agora (${agoraUnread} unread)` : 'Agora'}
+            aria-current={isAgoraActive ? 'page' : undefined}
+          >
+            <span className="ag-rail-indicator" aria-hidden="true" />
+            <Landmark size={18} strokeWidth={isAgoraActive ? 2.15 : 1.8} />
+            <span className="ag-rail-app-label">Agora</span>
+            {agoraUnread > 0 && (
+              <span className="ag-rail-badge ping tabular">{formatBadgeCount(agoraUnread)}</span>
+            )}
+          </button>
+        </div>
+
+        {/* 2. Bitchat */}
+        <div className="ag-rail-slot" role="listitem">
+          <button
+            type="button"
+            className={`ag-rail-app-tile ag-rail-bitchat ${isBitchatActive ? 'active' : ''} ${bitchatUnread > 0 || bitchatMentions > 0 ? 'has-unread' : ''}`}
             onClick={() => {
               onPlaySound?.('click')
               if (workspace !== 'chat') onSelectWorkspace('chat')
               onSelectChatTab('bitchat')
             }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Bitchat')}
+            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Bitchat', 'Alt+2')}
             onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'Bitchat')}
+            onFocus={(e) => showTooltip(e.currentTarget, 'Bitchat', 'Alt+2')}
             onBlur={hideTooltip}
             aria-label="Bitchat"
             aria-current={isBitchatActive ? 'page' : undefined}
           >
             <span className="ag-rail-indicator" aria-hidden="true" />
-            <Waves size={19} strokeWidth={isBitchatActive ? 2.15 : 1.85} />
+            <Waves size={18} strokeWidth={isBitchatActive ? 2.15 : 1.8} />
+            <span className="ag-rail-app-label">Bitchat</span>
             {bitchatMentions > 0 ? (
               <span className="ag-rail-badge ping tabular">
                 {formatBadgeCount(bitchatMentions)}
@@ -209,36 +295,85 @@ export const AppRail: React.FC<AppRailProps> = ({
           </button>
         </div>
 
-        {/* People */}
-        <div className="ag-rail-slot">
+        {/* 3. People */}
+        <div className="ag-rail-slot" role="listitem">
           <button
             type="button"
-            className={`ag-rail-tile ag-rail-people ${isPeopleActive ? 'active' : ''} ${dmUnread > 0 ? 'has-unread' : ''}`}
+            className={`ag-rail-app-tile ag-rail-people ${isPeopleActive ? 'active' : ''} ${dmUnread > 0 ? 'has-unread' : ''}`}
             onClick={() => {
               onPlaySound?.('click')
               if (workspace !== 'chat') onSelectWorkspace('chat')
               onSelectChatTab('dms')
             }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'People')}
+            onMouseEnter={(e) =>
+              showTooltip(
+                e.currentTarget,
+                'People',
+                dmUnread > 0 ? `${dmUnread} unread · Alt+3` : 'Alt+3'
+              )
+            }
             onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'People')}
+            onFocus={(e) =>
+              showTooltip(
+                e.currentTarget,
+                'People',
+                dmUnread > 0 ? `${dmUnread} unread · Alt+3` : 'Alt+3'
+              )
+            }
             onBlur={hideTooltip}
-            aria-label="People"
+            aria-label={dmUnread > 0 ? `People (${dmUnread} unread)` : 'People'}
             aria-current={isPeopleActive ? 'page' : undefined}
           >
             <span className="ag-rail-indicator" aria-hidden="true" />
-            <MessageCircle size={19} strokeWidth={isPeopleActive ? 2.15 : 1.85} />
+            <MessageCircle size={18} strokeWidth={isPeopleActive ? 2.15 : 1.8} />
+            <span className="ag-rail-app-label">People</span>
             {dmUnread > 0 && (
               <span className="ag-rail-badge ping tabular">{formatBadgeCount(dmUnread)}</span>
             )}
           </button>
         </div>
 
-        {/* Agmail */}
-        <div className="ag-rail-slot">
+        {/* 4. Groups */}
+        <div className="ag-rail-slot" role="listitem">
           <button
             type="button"
-            className={`ag-rail-tile ag-rail-mail ${isMailActive ? 'active' : ''} ${mailUnread > 0 ? 'has-unread' : ''}`}
+            className={`ag-rail-app-tile ag-rail-groups ${isGroupsActive ? 'active' : ''} ${totalServerUnread > 0 || totalServerMentions > 0 ? 'has-unread' : ''}`}
+            onClick={() => {
+              onPlaySound?.('click')
+              if (onSelectGroups) {
+                onSelectGroups()
+              } else {
+                if (workspace !== 'chat') onSelectWorkspace('chat')
+                onSelectChatTab('servers')
+              }
+            }}
+            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Groups', 'Alt+4')}
+            onMouseLeave={hideTooltip}
+            onFocus={(e) => showTooltip(e.currentTarget, 'Groups', 'Alt+4')}
+            onBlur={hideTooltip}
+            aria-label="Groups"
+            aria-current={isGroupsActive ? 'page' : undefined}
+          >
+            <span className="ag-rail-indicator" aria-hidden="true" />
+            <Users size={18} strokeWidth={isGroupsActive ? 2.15 : 1.8} />
+            <span className="ag-rail-app-label">Groups</span>
+            {totalServerMentions > 0 ? (
+              <span className="ag-rail-badge ping tabular">
+                {formatBadgeCount(totalServerMentions)}
+              </span>
+            ) : totalServerUnread > 0 ? (
+              <span className="ag-rail-badge unread tabular">
+                {formatBadgeCount(totalServerUnread)}
+              </span>
+            ) : null}
+          </button>
+        </div>
+
+        {/* 5. Agmail */}
+        <div className="ag-rail-slot" role="listitem">
+          <button
+            type="button"
+            className={`ag-rail-app-tile ag-rail-mail ${isMailActive ? 'active' : ''} ${mailUnread > 0 ? 'has-unread' : ''}`}
             onClick={() => {
               onPlaySound?.('click')
               onSelectWorkspace('mail')
@@ -247,7 +382,7 @@ export const AppRail: React.FC<AppRailProps> = ({
               showTooltip(
                 e.currentTarget,
                 'Agmail',
-                mailUnread > 0 ? `${mailUnread} unread` : undefined
+                mailUnread > 0 ? `${mailUnread} unread · Alt+5` : 'Alt+5'
               )
             }
             onMouseLeave={hideTooltip}
@@ -255,7 +390,7 @@ export const AppRail: React.FC<AppRailProps> = ({
               showTooltip(
                 e.currentTarget,
                 'Agmail',
-                mailUnread > 0 ? `${mailUnread} unread` : undefined
+                mailUnread > 0 ? `${mailUnread} unread · Alt+5` : 'Alt+5'
               )
             }
             onBlur={hideTooltip}
@@ -263,18 +398,19 @@ export const AppRail: React.FC<AppRailProps> = ({
             aria-current={isMailActive ? 'page' : undefined}
           >
             <span className="ag-rail-indicator" aria-hidden="true" />
-            <Mail size={19} strokeWidth={isMailActive ? 2.15 : 1.85} />
+            <Mail size={18} strokeWidth={isMailActive ? 2.15 : 1.8} />
+            <span className="ag-rail-app-label">Agmail</span>
             {mailUnread > 0 && (
               <span className="ag-rail-badge ping tabular">{formatBadgeCount(mailUnread)}</span>
             )}
           </button>
         </div>
 
-        {/* Agwallet */}
-        <div className="ag-rail-slot">
+        {/* 6. Agwallet */}
+        <div className="ag-rail-slot" role="listitem">
           <button
             type="button"
-            className={`ag-rail-tile ag-rail-wallet ${isWalletActive ? 'active' : ''}`}
+            className={`ag-rail-app-tile ag-rail-wallet ${isWalletActive ? 'active' : ''}`}
             onClick={() => {
               onPlaySound?.('click')
               onSelectWorkspace('wallet')
@@ -283,7 +419,7 @@ export const AppRail: React.FC<AppRailProps> = ({
               showTooltip(
                 e.currentTarget,
                 'Agwallet',
-                walletSats > 0 ? `${walletSats.toLocaleString()} sats` : undefined
+                walletSats > 0 ? `${walletSats.toLocaleString()} sats · Alt+6` : 'Alt+6'
               )
             }
             onMouseLeave={hideTooltip}
@@ -291,7 +427,7 @@ export const AppRail: React.FC<AppRailProps> = ({
               showTooltip(
                 e.currentTarget,
                 'Agwallet',
-                walletSats > 0 ? `${walletSats.toLocaleString()} sats` : undefined
+                walletSats > 0 ? `${walletSats.toLocaleString()} sats · Alt+6` : 'Alt+6'
               )
             }
             onBlur={hideTooltip}
@@ -301,15 +437,16 @@ export const AppRail: React.FC<AppRailProps> = ({
             aria-current={isWalletActive ? 'page' : undefined}
           >
             <span className="ag-rail-indicator" aria-hidden="true" />
-            <Wallet size={19} strokeWidth={isWalletActive ? 2.15 : 1.85} />
+            <Wallet size={18} strokeWidth={isWalletActive ? 2.15 : 1.8} />
+            <span className="ag-rail-app-label">Agwallet</span>
           </button>
         </div>
       </div>
 
       <div className="ag-rail-divider" aria-hidden="true" />
 
-      {/* Discord-Style Vertical Server Squircle Rail */}
-      <div className="ag-rail-servers" onScroll={hideTooltip} role="list" aria-label="Groups">
+      {/* Compact Joined Groups Quick-Jump Strip */}
+      <div className="ag-rail-servers" onScroll={hideTooltip} role="list" aria-label="Joined groups">
         {engine.servers.joinedServers.map((server) => {
           const active =
             workspace === 'chat' &&
@@ -339,7 +476,7 @@ export const AppRail: React.FC<AppRailProps> = ({
             <div key={server.id} className="ag-rail-slot" role="listitem">
               <button
                 type="button"
-                className={`ag-rail-tile ag-rail-srv ${active ? 'active' : ''} ${hasUnread ? 'has-unread' : ''}`}
+                className={`ag-rail-tile compact ag-rail-srv ${active ? 'active' : ''} ${hasUnread ? 'has-unread' : ''}`}
                 style={accentStyle}
                 onClick={() => {
                   onPlaySound?.('click')
@@ -390,11 +527,11 @@ export const AppRail: React.FC<AppRailProps> = ({
           )
         })}
 
-        {/* Add / Join Server */}
+        {/* Add / Join Group */}
         <div className="ag-rail-slot" role="listitem">
           <button
             type="button"
-            className="ag-rail-tile ag-rail-add"
+            className="ag-rail-tile compact ag-rail-add"
             onClick={() => {
               onPlaySound?.('click')
               onOpenServerHub('create')
@@ -405,12 +542,12 @@ export const AppRail: React.FC<AppRailProps> = ({
             onBlur={hideTooltip}
             aria-label="Create or join group"
           >
-            <Plus size={19} strokeWidth={2} />
+            <Plus size={17} strokeWidth={2} />
           </button>
         </div>
       </div>
 
-      {/* Bottom Utility Actions */}
+      {/* Bottom Utility Dock */}
       <div className="ag-rail-bottom">
         <div className="ag-rail-divider" aria-hidden="true" />
 
@@ -422,16 +559,36 @@ export const AppRail: React.FC<AppRailProps> = ({
               onPlaySound?.('click')
               onOpenMap()
             }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Map')}
+            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Radar Map')}
             onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'Map')}
+            onFocus={(e) => showTooltip(e.currentTarget, 'Radar Map')}
             onBlur={hideTooltip}
-            aria-label="Map"
+            aria-label="Radar Map"
             aria-pressed={mapActive}
           >
-            <MapIcon size={18} strokeWidth={mapActive ? 2.1 : 1.8} />
+            <MapIcon size={17} strokeWidth={mapActive ? 2.1 : 1.8} />
           </button>
         </div>
+
+        {onOpenSearch && (
+          <div className="ag-rail-slot">
+            <button
+              type="button"
+              className="ag-rail-util"
+              onClick={() => {
+                onPlaySound?.('click')
+                onOpenSearch()
+              }}
+              onMouseEnter={(e) => showTooltip(e.currentTarget, 'Quick Search', '⌘K')}
+              onMouseLeave={hideTooltip}
+              onFocus={(e) => showTooltip(e.currentTarget, 'Quick Search', '⌘K')}
+              onBlur={hideTooltip}
+              aria-label="Quick Search"
+            >
+              <Search size={17} strokeWidth={1.8} />
+            </button>
+          </div>
+        )}
 
         <div className="ag-rail-slot">
           <button
@@ -448,7 +605,7 @@ export const AppRail: React.FC<AppRailProps> = ({
             aria-label="Settings"
             aria-pressed={settingsActive}
           >
-            <Settings size={18} strokeWidth={settingsActive ? 2.1 : 1.8} />
+            <Settings size={17} strokeWidth={settingsActive ? 2.1 : 1.8} />
           </button>
         </div>
 
@@ -467,7 +624,7 @@ export const AppRail: React.FC<AppRailProps> = ({
               onBlur={hideTooltip}
               aria-label="Install Agnostr App"
             >
-              <Download size={18} strokeWidth={1.85} />
+              <Download size={17} strokeWidth={1.85} />
             </button>
           </div>
         )}

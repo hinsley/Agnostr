@@ -13,6 +13,7 @@ import {
   Hash,
   Info,
   Key,
+  Landmark,
   Languages,
   Link2,
   Lock,
@@ -38,6 +39,7 @@ import {
   ShieldCheck,
   Square,
   Terminal,
+  Users,
   Video,
   Volume2,
   Wallet,
@@ -93,6 +95,10 @@ export interface CommandPaletteProps {
   onLocateMe: () => void
   onOpenRoomInfo: () => void
   onOpenSettings: (tab?: SettingsTab) => void
+  onOpenAgora?: (opts?: { compose?: boolean }) => void
+  onSelectBitchat?: () => void
+  onSelectPeople?: () => void
+  onSelectGroups?: () => void
   onOpenAmail?: (section?: 'inbox' | 'compose' | 'contacts' | 'mesh') => void
   onOpenWallet?: (intent?: WalletInitialIntent) => void
   onToggleSound: () => void
@@ -117,6 +123,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onLocateMe,
   onOpenRoomInfo,
   onOpenSettings,
+  onOpenAgora,
+  onSelectBitchat,
+  onSelectPeople,
+  onSelectGroups,
   onOpenAmail,
   onOpenWallet,
   onToggleSound,
@@ -268,6 +278,131 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           })
         }
       }
+    }
+
+    // Agnostr Suite (Unified 6-app switcher)
+    if (onOpenAgora) {
+      list.push(
+        {
+          id: 'suite-agora',
+          group: 'Agnostr Suite',
+          title: 'Open Agora',
+          subtitle:
+            engine.agora.unreadNotificationCount > 0
+              ? `${engine.agora.unreadNotificationCount} unread · Public square, notes, profiles & hashtags`
+              : 'Public square · notes, profiles, threads & hashtags',
+          keywords:
+            'open agora nostr feed social timeline public square posts notes profiles hashtags alt+1',
+          badge: 'Alt+1',
+          icon: <Landmark size={15} style={{ color: 'var(--accent)' }} />,
+          run: () => {
+            onClose()
+            onOpenAgora()
+          },
+        },
+        {
+          id: 'suite-agora-compose',
+          group: 'Agnostr Suite',
+          title: 'New Agora Post',
+          subtitle: 'Compose and publish a public note on Agora',
+          keywords: 'new agora post compose write publish note nostr public square',
+          badge: 'POST',
+          icon: <PenLine size={15} style={{ color: 'var(--accent)' }} />,
+          run: () => {
+            onClose()
+            onOpenAgora({ compose: true })
+          },
+        }
+      )
+    }
+
+    list.push({
+      id: 'suite-bitchat',
+      group: 'Agnostr Suite',
+      title: 'Open Bitchat',
+      subtitle: 'Geohash rooms & named topic channels',
+      keywords: 'open bitchat geo geohash topic channels rooms chat alt+2',
+      badge: 'Alt+2',
+      icon: <Waves size={15} style={{ color: 'var(--accent)' }} />,
+      run: () => {
+        onClose()
+        if (onSelectBitchat) onSelectBitchat()
+        else onTuneChannel(engine.activeGeohash)
+      },
+    })
+
+    if (onSelectPeople) {
+      list.push({
+        id: 'suite-people',
+        group: 'Agnostr Suite',
+        title: 'Open People',
+        subtitle:
+          engine.totalDmUnread > 0
+            ? `${engine.totalDmUnread} unread · Encrypted direct messages`
+            : 'Encrypted direct messages & trusted friends',
+        keywords: 'open people dm dms direct messages friends encrypted chat alt+3',
+        badge: 'Alt+3',
+        icon: <MessageCircle size={15} style={{ color: 'var(--dm-accent)' }} />,
+        run: () => {
+          onClose()
+          onSelectPeople()
+        },
+      })
+    }
+
+    if (onSelectGroups) {
+      list.push({
+        id: 'suite-groups',
+        group: 'Agnostr Suite',
+        title: 'Open Groups',
+        subtitle:
+          engine.servers.joinedServers.length > 0
+            ? `${engine.servers.joinedServers.length} joined · Communities, channels & voice`
+            : 'Encrypted communities, channels & voice lounges',
+        keywords: 'open groups servers communities channels voice lounge alt+4',
+        badge: 'Alt+4',
+        icon: <Users size={15} style={{ color: 'var(--accent)' }} />,
+        run: () => {
+          onClose()
+          onSelectGroups()
+        },
+      })
+    }
+
+    if (onOpenAmail) {
+      list.push({
+        id: 'suite-agmail',
+        group: 'Agnostr Suite',
+        title: 'Open Agmail',
+        subtitle:
+          engine.amail.unreadInboxCount > 0
+            ? `${engine.amail.unreadInboxCount} unread · ${engine.amail.meshPeers.filter((p) => p.state === 'connected').length} mesh connected`
+            : `Encrypted mesh mail · ${engine.amail.contacts.length} ${engine.amail.contacts.length === 1 ? 'contact' : 'contacts'}`,
+        keywords: 'open agmail amail inbox email snailmail mail encrypted mesh messages alt+5',
+        badge: 'Alt+5',
+        icon: <Mail size={15} style={{ color: 'var(--accent)' }} />,
+        run: () => {
+          onClose()
+          onOpenAmail('inbox')
+        },
+      })
+    }
+
+    if (onOpenWallet) {
+      list.push({
+        id: 'suite-agwallet',
+        group: 'Agnostr Suite',
+        title: 'Open Agwallet',
+        subtitle: `${engine.wallet.totalBalanceSats.toLocaleString()} sats across ${engine.wallet.mints.length} ${engine.wallet.mints.length === 1 ? 'mint' : 'mints'}`,
+        keywords:
+          'open agwallet cashu ecash wallet bitcoin sats lightning mint boltz balance zap alt+6',
+        badge: 'Alt+6',
+        icon: <Wallet size={15} style={{ color: 'var(--status-warn)' }} />,
+        run: () => {
+          onClose()
+          onOpenWallet({ tab: 'overview' })
+        },
+      })
     }
 
     // People (Active DMs + Trusted Friends)
@@ -799,25 +934,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       ...(onOpenAmail
         ? [
             {
-              id: 'act-amail-inbox',
-              group: 'Agmail',
-              title: 'Open Agmail',
-              subtitle:
-                engine.amail.unreadInboxCount > 0
-                  ? `${engine.amail.unreadInboxCount} unread · ${engine.amail.meshPeers.filter((p) => p.state === 'connected').length} mesh connected`
-                  : `Encrypted mesh mail · ${engine.amail.contacts.length} ${engine.amail.contacts.length === 1 ? 'contact' : 'contacts'}`,
-              keywords: 'open agmail amail inbox email snailmail mail encrypted mesh messages',
-              badge:
-                engine.amail.unreadInboxCount > 0
-                  ? `${engine.amail.unreadInboxCount} UNREAD`
-                  : 'MAIL',
-              icon: <Mail size={15} style={{ color: 'var(--accent)' }} />,
-              run: () => {
-                onClose()
-                onOpenAmail('inbox')
-              },
-            },
-            {
               id: 'act-amail-compose',
               group: 'Agmail',
               title: 'Compose Agmail',
@@ -881,19 +997,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       },
       ...(onOpenWallet
         ? [
-            {
-              id: 'act-wallet-open',
-              group: 'Agwallet & Zaps',
-              title: 'Open Agwallet',
-              subtitle: `${engine.wallet.totalBalanceSats.toLocaleString()} sats across ${engine.wallet.mints.length} ${engine.wallet.mints.length === 1 ? 'mint' : 'mints'}`,
-              keywords: 'open agwallet cashu ecash wallet bitcoin sats lightning mint boltz balance zap',
-              badge: `${engine.wallet.totalBalanceSats.toLocaleString()} sats`,
-              icon: <Wallet size={15} style={{ color: 'var(--status-warn)' }} />,
-              run: () => {
-                onClose()
-                onOpenWallet({ tab: 'overview' })
-              },
-            },
             {
               id: 'act-wallet-receive',
               group: 'Agwallet & Zaps',
@@ -1177,6 +1280,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     onLocateMe,
     onOpenRoomInfo,
     onOpenSettings,
+    onOpenAgora,
+    onSelectBitchat,
+    onSelectPeople,
+    onSelectGroups,
     onOpenAmail,
     onOpenWallet,
     onToggleSound,
@@ -1246,7 +1353,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 entries[clampedIdx]?.run()
               }
             }}
-            placeholder="Search rooms, groups, #geohash, #topic, or actions…"
+            placeholder="Search Agora, rooms, groups, #geohash, #topic, or actions…"
           />
           <kbd className="ag-kbd">ESC</kbd>
         </div>
@@ -1305,7 +1412,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
         <div className="ag-cmdk-footer">
           <span>↑↓ Navigate · ↵ Open</span>
-          <span>⌘K Search · ⌘F Find · ⌘I Info · ⌘, Settings</span>
+          <span>⌘K Search · Alt+0 Suite · ⌘F Find · ⌘, Settings</span>
         </div>
       </div>
     </div>

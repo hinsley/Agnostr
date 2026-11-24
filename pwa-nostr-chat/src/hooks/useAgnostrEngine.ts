@@ -152,6 +152,7 @@ import {
 import { buildNip42AuthTemplate } from '../lib/nip29.ts'
 import { CALL_SIGNALING_RELAYS } from '../lib/callSignaling.ts'
 import { revokeVoicePreviewUrl } from '../lib/voiceRecorder.ts'
+import { useAgora } from './useAgora.ts'
 import { useAmail } from './useAmail.ts'
 import { useCallEngine } from './useCallEngine.ts'
 import { useCashuWallet } from './useCashuWallet.ts'
@@ -1981,6 +1982,18 @@ export function useAgnostrEngine(): AgnostrEngine {
     onIncomingMail: handleIncomingAmail,
     onNotifyPushPoke: handlePushPoke,
     pushToast,
+  })
+
+  // Agora — Lazy-activated Nostr public social engine (NIP-01/02/10/18/19/25/27/36/50/51/57/65/92)
+  const agoraEngine = useAgora({
+    relayPool: pool,
+    identityManager,
+    masterPubkey: identity.masterPubkey,
+    blockedSet,
+    customRelays,
+    blossomServers,
+    pushToast,
+    onDiscoverProfileLud16: zapsEngine.ingestPeerLightningAddress,
   })
 
   // Silent Multi-Device Same-Key Background Sync (NIP-44 self-encrypted CRDT + delta messages)
@@ -4336,6 +4349,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     zapsEngine.resetAll()
     deviceSyncEngine.resetAll()
     void amailEngine.resetAll()
+    agoraEngine.resetAll()
     resetAllCalls()
     pool.closeAll()
     voiceCacheRef.current?.revokeAll()
@@ -4411,6 +4425,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     zapsEngine,
     deviceSyncEngine,
     amailEngine,
+    agoraEngine,
     resetLocation,
     identityManager,
     clearToasts,
@@ -4734,6 +4749,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     zaps: zapsEngine,
     deviceSync: deviceSyncEngine,
     amail: amailEngine,
+    agora: agoraEngine,
     notifications: notificationsEngine,
 
     commands: SLASH_COMMANDS,

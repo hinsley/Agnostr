@@ -17,7 +17,7 @@ export const BITCHAT_GEO_RELAYS_CSV_URL =
  */
 export const CORE_DM_RELAYS: readonly string[] = [
   'wss://nos.lol',
-  'wss://relay.primal.net',
+  'wss://relay.snort.social',
   'wss://offchain.pub',
   'wss://nostr.bitcoiner.social',
   'wss://relay.damus.io',
@@ -36,7 +36,7 @@ export const PULSE_RELAYS: readonly string[] = [
   'wss://nostr.mom',
   'wss://staging.yabu.me',
   'wss://nostr-01.yakihonne.com',
-  'wss://relay.primal.net',
+  'wss://relay.snort.social',
   'wss://nos.lol',
 ]
 
@@ -59,7 +59,7 @@ export const BUNDLED_GEO_RELAYS: readonly GeoRelayEntry[] = [
   { url: 'wss://staging.yabu.me', lat: 35.6092, lon: 139.73, supportsDm: false },
   { url: 'wss://nostr-01.yakihonne.com', lat: 1.32123, lon: 103.695, supportsDm: false },
   { url: 'wss://nos.lol', lat: 50.1109, lon: 8.6821, supportsDm: true },
-  { url: 'wss://relay.primal.net', lat: 40.7128, lon: -74.006, supportsDm: true },
+  { url: 'wss://relay.snort.social', lat: 40.7128, lon: -74.006, supportsDm: true },
   { url: 'wss://relay.damus.io', lat: 43.6532, lon: -79.3832, supportsDm: true },
 ]
 

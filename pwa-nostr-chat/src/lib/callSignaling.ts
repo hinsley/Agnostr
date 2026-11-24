@@ -37,7 +37,7 @@ export const MAX_SIGNAL_AGE_SEC = 60
  * without web-of-trust burst rejection for auto-generated keys.
  */
 export const CALL_SIGNALING_RELAYS: readonly string[] = [
-  'wss://relay.primal.net',
+  'wss://offchain.pub',
   'wss://nos.lol',
   'wss://nostr.mom',
   'wss://relay.fundstr.me',
