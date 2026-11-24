@@ -2,7 +2,6 @@ import React, { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Landmark,
-  LayoutGrid,
   Mail,
   Map as MapIcon,
   MessageCircle,
@@ -15,6 +14,7 @@ import {
 } from 'lucide-react'
 import { useBackHandler } from '../hooks/useBackNavigation'
 import type { SoundCue } from '../utils/sound'
+import { AgnostrLogo } from './AgnostrLogo'
 import type { ActiveWorkspace } from './AppRail'
 import type { ListTab } from './ConversationList'
 
@@ -207,7 +207,7 @@ export const SuiteLauncher: React.FC<SuiteLauncherProps> = ({
         <div className="ag-suite-head">
           <div className="ag-suite-title-wrap">
             <span className="ag-suite-crest" aria-hidden="true">
-              <LayoutGrid size={13} strokeWidth={2.2} />
+              <AgnostrLogo size={18} className="ag-suite-brand-mark" />
             </span>
             <span className="ag-suite-title">Agnostr Suite</span>
           </div>

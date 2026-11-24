@@ -25,6 +25,7 @@ import type { ListTab } from './ConversationList'
 import type { ServerHubTab } from './ServerHubModal'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { SettingsTab } from './SettingsModal'
+import { AgnostrLogo } from './AgnostrLogo'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu'
 
 export type ActiveWorkspace = 'chat' | 'agora' | 'mail' | 'wallet'
@@ -217,10 +218,8 @@ export const AppRail: React.FC<AppRailProps> = ({
           aria-haspopup="dialog"
           aria-expanded={suiteLauncherOpen}
         >
-          <span className="ag-rail-brand-monogram" aria-hidden="true">
-            A
-          </span>
-          <LayoutGrid size={11} strokeWidth={2.2} className="ag-rail-brand-grid" aria-hidden="true" />
+          <AgnostrLogo size={20} className="ag-rail-brand-mark" />
+          <LayoutGrid size={10} strokeWidth={2.2} className="ag-rail-brand-grid" aria-hidden="true" />
         </button>
       </div>
 

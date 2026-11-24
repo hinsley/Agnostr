@@ -27,9 +27,9 @@
 
 .ag-rail-brand {
   position: relative;
-  width: 46px;
-  height: 34px;
-  border-radius: 10px;
+  width: 48px;
+  height: 36px;
+  border-radius: 11px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -48,13 +48,13 @@
 .ag-rail-brand:hover {
   background-color: var(--bg-elevated);
   border-color: var(--border-accent);
-  color: var(--accent);
+  color: var(--text-primary);
 }
 
 .ag-rail-brand.active {
   background-color: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--text-primary);
   box-shadow: var(--accent-glow);
 }
 
@@ -67,15 +67,24 @@
   box-shadow: var(--accent-glow);
 }
 
-.ag-rail-brand-monogram {
-  font-size: 13.5px;
-  font-weight: 800;
-  line-height: 1;
-  letter-spacing: -0.04em;
+.ag-rail-brand-mark {
+  display: block;
+  flex-shrink: 0;
 }
 
 .ag-rail-brand-grid {
-  opacity: 0.78;
+  color: var(--text-muted);
+  opacity: 0.82;
+  flex-shrink: 0;
+  transition:
+    color var(--dur-fast) ease,
+    opacity var(--dur-fast) ease;
+}
+
+.ag-rail-brand:hover .ag-rail-brand-grid,
+.ag-rail-brand.active .ag-rail-brand-grid {
+  color: var(--accent);
+  opacity: 1;
 }
 
 .ag-rail-group {
@@ -529,19 +538,25 @@
 .ag-suite-title-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
 }
 
 .ag-suite-crest {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  background-color: var(--accent-soft);
-  color: var(--accent);
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
+}
+
+.ag-suite-brand-mark {
+  display: block;
   flex-shrink: 0;
 }
 
