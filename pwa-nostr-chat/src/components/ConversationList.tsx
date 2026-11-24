@@ -215,6 +215,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
   // Quick Profile Card Popover state (toggled from bottom user dock)
   const [quickProfileOpen, setQuickProfileOpen] = useState(false)
+  const [qpAvatarMenuOpen, setQpAvatarMenuOpen] = useState(false)
   const [qpEditingName, setQpEditingName] = useState(false)
   const [qpNameDraft, setQpNameDraft] = useState('')
   const [qpUploadingPhoto, setQpUploadingPhoto] = useState(false)
@@ -224,6 +225,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const footerRef = useRef<HTMLDivElement | null>(null)
   const profileTriggerRef = useRef<HTMLButtonElement | null>(null)
   const quickProfileRef = useRef<HTMLDivElement | null>(null)
+  const qpAvatarWrapRef = useRef<HTMLDivElement | null>(null)
   const qpNameInputRef = useRef<HTMLInputElement | null>(null)
   const qpFileInputRef = useRef<HTMLInputElement | null>(null)
   const qpCopyTimerRef = useRef<number | null>(null)
@@ -246,6 +248,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
   const closeQuickProfile = useCallback(() => {
     setQuickProfileOpen(false)
+    setQpAvatarMenuOpen(false)
     setQpEditingName(false)
     setQpPhotoError(null)
   }, [])
@@ -254,11 +257,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     onPlaySound?.('click')
     setQuickProfileOpen((prev) => {
       if (prev) {
+        setQpAvatarMenuOpen(false)
         setQpEditingName(false)
         setQpPhotoError(null)
         return false
       }
       setQpPos(computeQuickProfilePos())
+      setQpAvatarMenuOpen(false)
       setQpPhotoError(null)
       setQpEditingName(false)
       return true
@@ -306,6 +311,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     const handlePointerDown = (ev: PointerEvent) => {
       const target = ev.target as Node | null
       if (!target) return
+      if (qpAvatarMenuOpen && !qpAvatarWrapRef.current?.contains(target)) {
+        setQpAvatarMenuOpen(false)
+      }
       if (quickProfileRef.current?.contains(target)) return
       if (profileTriggerRef.current?.contains(target)) return
       closeQuickProfile()
@@ -314,6 +322,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       if (ev.key !== 'Escape') return
       ev.preventDefault()
       ev.stopPropagation()
+      if (qpAvatarMenuOpen) {
+        setQpAvatarMenuOpen(false)
+        return
+      }
       if (qpEditingName) {
         setQpEditingName(false)
         return
@@ -331,7 +343,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       window.removeEventListener('keydown', handleKeyDown, true)
       window.removeEventListener('resize', handleViewportMove)
     }
-  }, [isQuickProfileVisible, qpEditingName, closeQuickProfile, computeQuickProfilePos])
+  }, [
+    isQuickProfileVisible,
+    qpAvatarMenuOpen,
+    qpEditingName,
+    closeQuickProfile,
+    computeQuickProfilePos,
+  ])
 
   useEffect(() => {
     if (!qpEditingName) return
@@ -390,6 +408,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   }, [engine, onPlaySound])
 
   const handleStartQuickNameEdit = useCallback(() => {
+    setQpAvatarMenuOpen(false)
     setQpNameDraft(engine.identity.nickname)
     setQpEditingName(true)
   }, [engine.identity.nickname])
@@ -2976,66 +2995,141 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               />
 
               <div className="ag-qp-header">
-                <button
-                  type="button"
-                  className="ag-qp-avatar-btn"
-                  disabled={qpUploadingPhoto}
-                  onClick={() => qpFileInputRef.current?.click()}
-                  title="Change profile photo"
-                  aria-label="Change profile photo"
-                >
-                  <AvatarImg
-                    pubkey={masterPk}
-                    pictureUrl={myPictureUrl}
-                    width={52}
-                    height={52}
-                    className="ag-qp-avatar"
-                  />
-                  <span className="ag-qp-avatar-overlay" aria-hidden="true">
-                    {qpUploadingPhoto ? (
-                      <Loader2 size={15} className="ag-spin" />
-                    ) : (
-                      <Camera size={15} />
-                    )}
-                  </span>
-                  <span
-                    className={`ag-qp-status-ring ${relayCount > 0 ? 'online' : 'reconnecting'}`}
-                    aria-hidden="true"
-                  />
-                </button>
-
-                <div className="ag-qp-photo-actions">
+                <div ref={qpAvatarWrapRef} className="ag-qp-avatar-wrap">
                   <button
                     type="button"
-                    className="ag-qp-photo-btn"
+                    className={`ag-qp-avatar-btn ${qpAvatarMenuOpen ? 'menu-open' : ''}`}
                     disabled={qpUploadingPhoto}
-                    onClick={() => qpFileInputRef.current?.click()}
+                    onClick={() => {
+                      if (myPictureUrl) {
+                        onPlaySound?.('click')
+                        setQpAvatarMenuOpen((v) => !v)
+                      } else {
+                        setQpAvatarMenuOpen(false)
+                        qpFileInputRef.current?.click()
+                      }
+                    }}
+                    title={myPictureUrl ? 'Profile photo options' : 'Upload profile photo'}
+                    aria-label={myPictureUrl ? 'Profile photo options' : 'Upload profile photo'}
+                    aria-haspopup={myPictureUrl ? 'menu' : undefined}
+                    aria-expanded={myPictureUrl ? qpAvatarMenuOpen : undefined}
                   >
-                    {qpUploadingPhoto ? (
-                      <>
-                        <Loader2 size={12} className="ag-spin" aria-hidden="true" />
-                        <span>Uploading…</span>
-                      </>
-                    ) : (
-                      <>
-                        <Camera size={12} aria-hidden="true" />
-                        <span>Change Photo</span>
-                      </>
-                    )}
+                    <AvatarImg
+                      pubkey={masterPk}
+                      pictureUrl={myPictureUrl}
+                      width={52}
+                      height={52}
+                      className="ag-qp-avatar"
+                    />
+                    <span className="ag-qp-avatar-overlay" aria-hidden="true">
+                      {qpUploadingPhoto ? (
+                        <Loader2 size={15} className="ag-spin" />
+                      ) : (
+                        <Camera size={15} />
+                      )}
+                    </span>
+                    <span
+                      className={`ag-qp-status-ring ${relayCount > 0 ? 'online' : 'reconnecting'}`}
+                      aria-hidden="true"
+                    />
                   </button>
-                  {myPictureUrl && (
-                    <button
-                      type="button"
-                      className="ag-qp-photo-remove"
-                      disabled={qpUploadingPhoto}
-                      onClick={() => void handleQuickPhotoRemove()}
-                      title="Remove profile photo"
-                      aria-label="Remove profile photo"
+
+                  {myPictureUrl && qpAvatarMenuOpen && (
+                    <div
+                      className="ag-qp-avatar-menu"
+                      role="menu"
+                      aria-label="Profile photo options"
                     >
-                      <Trash2 size={12} aria-hidden="true" />
-                      <span>Remove</span>
-                    </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="ag-qp-avatar-menu-item"
+                        disabled={qpUploadingPhoto}
+                        onClick={() => {
+                          setQpAvatarMenuOpen(false)
+                          qpFileInputRef.current?.click()
+                        }}
+                      >
+                        <Camera size={13} aria-hidden="true" />
+                        <span>Change photo</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="ag-qp-avatar-menu-item danger"
+                        disabled={qpUploadingPhoto}
+                        onClick={() => {
+                          setQpAvatarMenuOpen(false)
+                          void handleQuickPhotoRemove()
+                        }}
+                      >
+                        <Trash2 size={13} aria-hidden="true" />
+                        <span>Remove photo</span>
+                      </button>
+                    </div>
                   )}
+                </div>
+
+                {/* Inline Display Name Editor + Live Status */}
+                <div className="ag-qp-name-block">
+                  {qpEditingName ? (
+                    <form className="ag-qp-name-form" onSubmit={handleSaveQuickName}>
+                      <input
+                        ref={qpNameInputRef}
+                        type="text"
+                        className="ag-qp-name-input"
+                        value={qpNameDraft}
+                        maxLength={32}
+                        placeholder="Display name"
+                        aria-label="Display name"
+                        onChange={(ev) => setQpNameDraft(ev.target.value)}
+                      />
+                      <button
+                        type="submit"
+                        className="ag-qp-icon-btn primary"
+                        title="Save display name"
+                        aria-label="Save display name"
+                      >
+                        <Check size={14} aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-qp-icon-btn"
+                        onClick={() => setQpEditingName(false)}
+                        title="Cancel"
+                        aria-label="Cancel editing display name"
+                      >
+                        <X size={14} aria-hidden="true" />
+                      </button>
+                    </form>
+                  ) : (
+                    <div className="ag-qp-name-row">
+                      <span className="ag-qp-display-name truncate">
+                        {engine.identity.nickname}
+                      </span>
+                      <button
+                        type="button"
+                        className="ag-qp-icon-btn"
+                        onClick={handleStartQuickNameEdit}
+                        title="Edit display name"
+                        aria-label="Edit display name"
+                      >
+                        <Pencil size={13} aria-hidden="true" />
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="ag-qp-status-line">
+                    <span
+                      className={`ag-qp-status-dot ${relayCount > 0 ? 'online' : 'reconnecting'}`}
+                      aria-hidden="true"
+                    />
+                    <span className="truncate">
+                      {relayCount > 0
+                        ? `Online · ${relayCount} ${relayCount === 1 ? 'relay' : 'relays'}`
+                        : 'Reconnecting…'}
+                    </span>
+                  </div>
                 </div>
               </div>
 
@@ -3044,68 +3138,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   {qpPhotoError}
                 </div>
               )}
-
-              {/* Inline Display Name Editor */}
-              <div className="ag-qp-name-block">
-                {qpEditingName ? (
-                  <form className="ag-qp-name-form" onSubmit={handleSaveQuickName}>
-                    <input
-                      ref={qpNameInputRef}
-                      type="text"
-                      className="ag-qp-name-input"
-                      value={qpNameDraft}
-                      maxLength={32}
-                      placeholder="Display name"
-                      aria-label="Display name"
-                      onChange={(ev) => setQpNameDraft(ev.target.value)}
-                    />
-                    <button
-                      type="submit"
-                      className="ag-qp-icon-btn primary"
-                      title="Save display name"
-                      aria-label="Save display name"
-                    >
-                      <Check size={14} aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      className="ag-qp-icon-btn"
-                      onClick={() => setQpEditingName(false)}
-                      title="Cancel"
-                      aria-label="Cancel editing display name"
-                    >
-                      <X size={14} aria-hidden="true" />
-                    </button>
-                  </form>
-                ) : (
-                  <div className="ag-qp-name-row">
-                    <span className="ag-qp-display-name truncate">
-                      {engine.identity.nickname}
-                    </span>
-                    <button
-                      type="button"
-                      className="ag-qp-icon-btn"
-                      onClick={handleStartQuickNameEdit}
-                      title="Edit display name"
-                      aria-label="Edit display name"
-                    >
-                      <Pencil size={13} aria-hidden="true" />
-                    </button>
-                  </div>
-                )}
-
-                <div className="ag-qp-status-line">
-                  <span
-                    className={`ag-qp-status-dot ${relayCount > 0 ? 'online' : 'reconnecting'}`}
-                    aria-hidden="true"
-                  />
-                  <span className="truncate">
-                    {relayCount > 0
-                      ? `Online · ${relayCount} ${relayCount === 1 ? 'relay' : 'relays'}`
-                      : 'Reconnecting…'}
-                  </span>
-                </div>
-              </div>
 
               {/* Identity npub + 1-click Copy */}
               <div className="ag-qp-npub-row">

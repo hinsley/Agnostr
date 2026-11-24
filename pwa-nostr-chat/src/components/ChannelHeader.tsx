@@ -538,7 +538,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
 
               <button
                 type="button"
-                className="ag-circle-btn"
+                className="ag-circle-btn ag-mobile-only"
                 onClick={onExpandRadar}
                 title="Open Map"
                 aria-label="Open Map"

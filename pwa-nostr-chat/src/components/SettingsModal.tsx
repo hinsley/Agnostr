@@ -42,7 +42,6 @@ import {
   User,
   Volume2,
   VolumeX,
-  Wallet,
   Waves,
   X,
   Zap,
@@ -93,7 +92,6 @@ export interface SettingsModalProps {
   initialTab?: SettingsTab
   onClose: () => void
   onOpenInstall: () => void
-  onOpenWallet?: () => void
   onPlaySound?: (cue: SoundCue) => void
   onShowQr?: (target: QrShareTarget) => void
   onOpenScanner?: () => void
@@ -293,7 +291,6 @@ export function SettingsModal({
   initialTab,
   onClose,
   onOpenInstall,
-  onOpenWallet,
   onPlaySound,
   onShowQr,
   inShell = false,
@@ -323,10 +320,29 @@ export function SettingsModal({
   const [lud16Saving, setLud16Saving] = useState(false)
   const [lud16Feedback, setLud16Feedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [profilePicBusy, setProfilePicBusy] = useState(false)
+  const [heroAvatarMenuOpen, setHeroAvatarMenuOpen] = useState(false)
   const profilePicInputRef = useRef<HTMLInputElement | null>(null)
+  const heroAvatarMenuRef = useRef<HTMLDivElement | null>(null)
+
+  // Rotate Keys Confirmation Dialog
+  const [rotateConfirmOpen, setRotateConfirmOpen] = useState(false)
+  const [rotateConfirmAck, setRotateConfirmAck] = useState(false)
+  const rotateCancelBtnRef = useRef<HTMLButtonElement | null>(null)
 
   const myProfilePicture = engine.getProfilePicture(identity.masterPubkey)
   const ensureProfilePictures = engine.ensureProfilePictures
+
+  useEffect(() => {
+    if (!heroAvatarMenuOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null
+      if (heroAvatarMenuRef.current && target && !heroAvatarMenuRef.current.contains(target)) {
+        setHeroAvatarMenuOpen(false)
+      }
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [heroAvatarMenuOpen])
 
   useEffect(() => {
     if (!open) return
@@ -540,13 +556,22 @@ export function SettingsModal({
     setPendingCfDisable(null)
   }, [])
 
-  // Android / PWA Back button cancels image-filter disable warning dialog
-  useBackHandler(Boolean(pendingCfDisable), cancelCfDisable)
+  const cancelRotateConfirm = useCallback(() => {
+    setRotateConfirmOpen(false)
+    setRotateConfirmAck(false)
+  }, [])
 
-  // Clear pending disable warning when Settings closes; default focus to Keep Protection On
+  // Android / PWA Back button cancels nested confirmation dialogs before closing Settings
+  useBackHandler(Boolean(pendingCfDisable), cancelCfDisable)
+  useBackHandler(rotateConfirmOpen, cancelRotateConfirm)
+
+  // Clear nested dialogs/menus when Settings closes
   useEffect(() => {
     if (!open) {
       setPendingCfDisable(null)
+      setRotateConfirmOpen(false)
+      setRotateConfirmAck(false)
+      setHeroAvatarMenuOpen(false)
     }
   }, [open])
 
@@ -558,6 +583,14 @@ export function SettingsModal({
     return () => window.cancelAnimationFrame(rafId)
   }, [pendingCfDisable])
 
+  useEffect(() => {
+    if (!rotateConfirmOpen) return
+    const rafId = window.requestAnimationFrame(() => {
+      rotateCancelBtnRef.current?.focus()
+    })
+    return () => window.cancelAnimationFrame(rafId)
+  }, [rotateConfirmOpen])
+
   // Escape dismissal
   useEffect(() => {
     if (!open) return
@@ -568,12 +601,27 @@ export function SettingsModal({
           setPendingCfDisable(null)
           return
         }
+        if (rotateConfirmOpen) {
+          cancelRotateConfirm()
+          return
+        }
+        if (heroAvatarMenuOpen) {
+          setHeroAvatarMenuOpen(false)
+          return
+        }
         onClose()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, pendingCfDisable, onClose])
+  }, [
+    open,
+    pendingCfDisable,
+    rotateConfirmOpen,
+    heroAvatarMenuOpen,
+    cancelRotateConfirm,
+    onClose,
+  ])
 
   const cancelPanicHold = useCallback(() => {
     if (rafRef.current !== null) {
@@ -1017,14 +1065,80 @@ export function SettingsModal({
   const renderProfileTab = () => (
     <div className="ag-set-pane-stack">
       <div className="ag-set-profile-hero">
-        <AvatarImg
-          pubkey={identity.activePubkey}
-          pictureUrl={engine.getProfilePicture(identity.activePubkey)}
-          alt=""
-          width={56}
-          height={56}
-          className="ag-set-avatar-lg"
-        />
+        <div className="ag-set-hero-avatar-wrap" ref={heroAvatarMenuRef}>
+          <input
+            ref={profilePicInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={(e) => void handleProfilePictureSelect(e)}
+          />
+          <button
+            type="button"
+            className="ag-set-hero-avatar-btn"
+            disabled={profilePicBusy}
+            onClick={() => {
+              if (myProfilePicture) {
+                setHeroAvatarMenuOpen((v) => !v)
+              } else {
+                profilePicInputRef.current?.click()
+              }
+            }}
+            aria-haspopup={myProfilePicture ? 'menu' : undefined}
+            aria-expanded={myProfilePicture ? heroAvatarMenuOpen : undefined}
+            aria-label={myProfilePicture ? 'Change or remove profile photo' : 'Upload profile photo'}
+            title={myProfilePicture ? 'Change or remove photo' : 'Upload profile photo'}
+          >
+            <AvatarImg
+              pubkey={identity.masterPubkey}
+              pictureUrl={myProfilePicture}
+              alt=""
+              width={56}
+              height={56}
+              className="ag-set-avatar-lg"
+            />
+            <span
+              className={`ag-set-hero-avatar-overlay${profilePicBusy ? ' is-busy' : ''}`}
+              aria-hidden="true"
+            >
+              {profilePicBusy ? (
+                <Loader2 size={16} className="ag-spin" />
+              ) : (
+                <Camera size={16} />
+              )}
+            </span>
+          </button>
+
+          {heroAvatarMenuOpen && myProfilePicture && (
+            <div className="ag-avatar-photo-menu" role="menu" aria-label="Profile photo options">
+              <button
+                type="button"
+                className="ag-avatar-photo-menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setHeroAvatarMenuOpen(false)
+                  profilePicInputRef.current?.click()
+                }}
+              >
+                <Camera size={14} />
+                <span>Change photo</span>
+              </button>
+              <button
+                type="button"
+                className="ag-avatar-photo-menu-item danger"
+                role="menuitem"
+                onClick={() => {
+                  setHeroAvatarMenuOpen(false)
+                  void handleRemoveProfilePicture()
+                }}
+              >
+                <Trash2 size={14} />
+                <span>Remove photo</span>
+              </button>
+            </div>
+          )}
+        </div>
+
         <div className="ag-set-profile-meta">
           <div
             className="ag-set-profile-handle truncate"
@@ -1036,80 +1150,26 @@ export function SettingsModal({
             {shortPubkey(identity.activeNpub, 12, 6)}
           </div>
         </div>
+
         <button
           type="button"
-          className="ag-btn ag-btn-secondary ag-btn-sm"
+          className="ag-btn ag-btn-danger-outline ag-btn-sm ag-set-rotate-btn"
           disabled={identity.signMode === 'extension'}
           onClick={() => {
-            setRevealNsec(false)
-            engine.rotateIdentity()
-            onPlaySound?.('tune')
+            setHeroAvatarMenuOpen(false)
+            setRotateConfirmAck(false)
+            setRotateConfirmOpen(true)
+            onPlaySound?.('click')
           }}
           title={
             identity.signMode === 'extension'
-              ? 'Switch to Auto or Local key to rotate identity'
-              : 'Generate a fresh keypair'
+              ? 'Switch to Auto or Local key to rotate keys'
+              : 'Generate a fresh Nostr keypair (requires confirmation)'
           }
         >
           <RefreshCw size={13} />
-          <span>Rotate</span>
+          <span>Rotate keys</span>
         </button>
-      </div>
-
-      {/* Global Profile Picture (verified kind: 0) */}
-      <div className="ag-set-group">
-        <span className="ag-set-label">Profile Picture</span>
-        <div className="ag-set-pic-card">
-          <div className="ag-set-pic-row">
-            <AvatarImg
-              pubkey={identity.masterPubkey}
-              pictureUrl={myProfilePicture}
-              alt=""
-              width={52}
-              height={52}
-              className="ag-set-pic-avatar"
-            />
-            <div className="ag-set-pic-copy">
-              <div className="ag-set-pic-actions">
-                <input
-                  ref={profilePicInputRef}
-                  type="file"
-                  accept="image/*"
-                  style={{ display: 'none' }}
-                  onChange={(e) => void handleProfilePictureSelect(e)}
-                />
-                <button
-                  type="button"
-                  className="ag-btn ag-btn-primary ag-btn-sm"
-                  disabled={profilePicBusy}
-                  onClick={() => profilePicInputRef.current?.click()}
-                >
-                  {profilePicBusy ? (
-                    <Loader2 size={13} className="ag-spin" />
-                  ) : (
-                    <Camera size={13} />
-                  )}
-                  <span>{profilePicBusy ? 'Updating…' : 'Change Photo'}</span>
-                </button>
-                {myProfilePicture && (
-                  <button
-                    type="button"
-                    className="ag-btn ag-btn-secondary ag-btn-sm"
-                    disabled={profilePicBusy}
-                    onClick={() => void handleRemoveProfilePicture()}
-                  >
-                    <Trash2 size={13} />
-                    <span>Remove</span>
-                  </button>
-                )}
-              </div>
-              <p className="ag-set-helper">
-                Your verified <span className="mono">kind: 0</span> picture is shared across Agora,
-                People, and Groups. Bitchat geohash aliases stay private.
-              </p>
-            </div>
-          </div>
-        </div>
       </div>
 
       {/* Shareable Direct Message Link & QR Code */}
@@ -1149,38 +1209,6 @@ export function SettingsModal({
           </button>
         )}
       </div>
-
-      {/* Cashu Ecash Wallet Shortcut */}
-      {onOpenWallet && (
-        <button
-          type="button"
-          className="ag-set-wallet-shortcut"
-          onClick={() => {
-            onPlaySound?.('click')
-            onClose()
-            onOpenWallet()
-          }}
-        >
-          <span className="ag-set-wallet-shortcut-left">
-            <span className="ag-set-wallet-shortcut-icon" aria-hidden="true">
-              <Wallet size={15} />
-            </span>
-            <span className="ag-set-wallet-shortcut-copy">
-              <span className="ag-set-wallet-shortcut-title">Open Agwallet</span>
-              <span className="ag-set-wallet-shortcut-sub">
-                Ecash tokens, Lightning &amp; on-chain swaps
-              </span>
-            </span>
-          </span>
-          <span className="ag-set-wallet-shortcut-right">
-            <span className="ag-set-wallet-bal mono">
-              <Zap size={11} />
-              <span>{engine.wallet.totalBalanceSats.toLocaleString()} sats</span>
-            </span>
-            <ChevronRight size={15} />
-          </span>
-        </button>
-      )}
 
       {/* Nickname */}
       <form className="ag-set-group" onSubmit={handleNickSubmit}>
@@ -4303,6 +4331,131 @@ export function SettingsModal({
                 >
                   <ShieldCheck size={15} />
                   <span>Keep Protection On</span>
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+
+      {rotateConfirmOpen &&
+        createPortal(
+          <div
+            className="ag-cf-confirm-backdrop"
+            role="presentation"
+            onClick={cancelRotateConfirm}
+          >
+            <div
+              className="ag-cf-confirm-modal ag-rotate-confirm-modal"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="ag-rotate-confirm-title"
+              aria-describedby="ag-rotate-confirm-desc"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="ag-cf-confirm-head">
+                <span className="ag-cf-confirm-badge" aria-hidden="true">
+                  <AlertTriangle size={22} />
+                </span>
+                <div className="ag-cf-confirm-title-wrap">
+                  <h2 id="ag-rotate-confirm-title" className="ag-cf-confirm-title">
+                    Rotate Nostr Keys?
+                  </h2>
+                  <p className="ag-cf-confirm-subtitle">
+                    Destructive action · Replaces your current identity
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="ag-cf-confirm-close"
+                  onClick={cancelRotateConfirm}
+                  aria-label="Cancel key rotation"
+                  title="Cancel (Esc)"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="ag-cf-confirm-callout">
+                <AlertTriangle size={16} className="ag-cf-confirm-callout-icon" aria-hidden="true" />
+                <p id="ag-rotate-confirm-desc" className="ag-cf-confirm-callout-text">
+                  Rotating keys generates a brand-new Nostr private &amp; public keypair (
+                  <span className="mono">nsec</span> / <span className="mono">npub</span>) on this
+                  device and replaces your current identity.
+                </p>
+              </div>
+
+              <ul className="ag-rotate-confirm-list">
+                <li>
+                  <strong>Permanent loss without backup:</strong> Unless you have backed up your
+                  current private key (<span className="mono">nsec</span>), you will permanently
+                  lose access to this identity, your Agora profile, DMs, group admin/member roles,
+                  Agmail, and any unbacked-up Agwallet funds.
+                </li>
+                <li>
+                  <strong>New identity to others:</strong> Contacts, followers, and trusted peers
+                  will no longer recognize you as the same <span className="mono">npub</span>.
+                </li>
+                <li>
+                  <strong>Device sync reset:</strong> Other devices synced to your current key will
+                  stop syncing with this device until re-linked.
+                </li>
+              </ul>
+
+              {identity.exportableNsec && (
+                <div className="ag-rotate-confirm-backup-row">
+                  <button
+                    type="button"
+                    className="ag-btn ag-btn-secondary ag-btn-sm"
+                    onClick={() => void handleCopyKey('nsec', identity.exportableNsec!)}
+                  >
+                    {copiedField === 'nsec' ? <Check size={13} /> : <Copy size={13} />}
+                    <span>
+                      {copiedField === 'nsec'
+                        ? 'Copied current nsec'
+                        : 'Copy current nsec backup'}
+                    </span>
+                  </button>
+                </div>
+              )}
+
+              <label className="ag-rotate-confirm-check">
+                <input
+                  type="checkbox"
+                  checked={rotateConfirmAck}
+                  onChange={(e) => setRotateConfirmAck(e.target.checked)}
+                />
+                <span>
+                  I understand and have backed up my current private key (
+                  <span className="mono">nsec</span>) if I want to keep it
+                </span>
+              </label>
+
+              <div className="ag-cf-confirm-actions">
+                <button
+                  ref={rotateCancelBtnRef}
+                  type="button"
+                  className="ag-btn ag-btn-secondary ag-rotate-confirm-cancel-btn"
+                  onClick={() => {
+                    cancelRotateConfirm()
+                    onPlaySound?.('click')
+                  }}
+                >
+                  <span>Cancel</span>
+                </button>
+                <button
+                  type="button"
+                  className="ag-rotate-confirm-danger-btn"
+                  disabled={!rotateConfirmAck}
+                  onClick={() => {
+                    setRevealNsec(false)
+                    engine.rotateIdentity()
+                    onPlaySound?.('tune')
+                    cancelRotateConfirm()
+                  }}
+                >
+                  <RefreshCw size={14} />
+                  <span>Rotate Keys Permanently</span>
                 </button>
               </div>
             </div>

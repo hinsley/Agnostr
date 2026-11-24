@@ -2153,6 +2153,11 @@
   min-width: 0;
 }
 
+.ag-agora-edit-avatar-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
 .ag-agora-edit-avatar-btn {
   position: relative;
   width: 72px;
@@ -2161,13 +2166,21 @@
   border: none;
   border-radius: var(--radius-full);
   background: transparent;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   cursor: pointer;
 }
 
+.ag-agora-edit-avatar-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .ag-agora-edit-avatar-btn:disabled {
-  opacity: 0.65;
-  cursor: not-allowed;
+  cursor: wait;
 }
 
 .ag-agora-edit-avatar-img {
@@ -2180,24 +2193,70 @@
   background-color: var(--bg-surface);
 }
 
-.ag-agora-edit-avatar-cam {
+.ag-agora-edit-avatar-overlay {
   position: absolute;
-  right: -2px;
-  bottom: -2px;
-  width: 26px;
-  height: 26px;
+  inset: 0;
   border-radius: var(--radius-full);
-  background-color: var(--accent);
-  color: var(--text-inverse);
-  border: 2px solid var(--bg-elevated);
+  background-color: rgba(0, 0, 0, 0.52);
+  color: #ffffff;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: transform var(--dur-fast) ease;
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease;
+  pointer-events: none;
 }
 
-.ag-agora-edit-avatar-btn:hover:not(:disabled) .ag-agora-edit-avatar-cam {
-  transform: scale(1.06);
+.ag-agora-edit-avatar-btn:hover .ag-agora-edit-avatar-overlay,
+.ag-agora-edit-avatar-btn:focus-visible .ag-agora-edit-avatar-overlay,
+.ag-agora-edit-avatar-overlay.is-busy {
+  opacity: 1;
+}
+
+.ag-agora-photo-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 154px;
+  padding: 0.28rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-agora-photo-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.48rem;
+  padding: 0.44rem 0.58rem;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+  text-align: left;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-photo-menu-item:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-agora-photo-menu-item.danger {
+  color: var(--status-danger);
+}
+
+.ag-agora-photo-menu-item.danger:hover {
+  background-color: var(--status-danger-soft);
 }
 
 .ag-agora-edit-photo-meta {
@@ -2221,12 +2280,11 @@
   line-height: 1.2;
 }
 
-.ag-agora-edit-photo-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  margin-top: 0.28rem;
+.ag-agora-edit-photo-hint {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+  margin-top: 0.12rem;
 }
 
 .ag-agora-edit-photo-url-wrap {

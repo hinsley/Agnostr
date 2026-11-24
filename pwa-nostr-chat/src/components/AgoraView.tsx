@@ -1573,9 +1573,11 @@ const EditProfileModal: React.FC<{
   const [website, setWebsite] = useState(current?.website ?? '')
   const [saving, setSaving] = useState(false)
   const [uploadingField, setUploadingField] = useState<'picture' | 'banner' | null>(null)
+  const [avatarMenuOpen, setAvatarMenuOpen] = useState(false)
 
   const avatarFileRef = useRef<HTMLInputElement | null>(null)
   const bannerFileRef = useRef<HTMLInputElement | null>(null)
+  const avatarMenuWrapRef = useRef<HTMLDivElement | null>(null)
 
   useBackHandler(true, onClose)
 
@@ -1583,12 +1585,28 @@ const EditProfileModal: React.FC<{
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
+        if (avatarMenuOpen) {
+          setAvatarMenuOpen(false)
+          return
+        }
         onClose()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [avatarMenuOpen, onClose])
+
+  useEffect(() => {
+    if (!avatarMenuOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null
+      if (avatarMenuWrapRef.current && target && !avatarMenuWrapRef.current.contains(target)) {
+        setAvatarMenuOpen(false)
+      }
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [avatarMenuOpen])
 
   const handlePhotoUpload = async (
     field: 'picture' | 'banner',
@@ -1673,30 +1691,84 @@ const EditProfileModal: React.FC<{
         <div className="ag-agora-modal-body">
           <div className="ag-agora-edit-photo-card">
             <div className="ag-agora-edit-photo-top">
-              <button
-                type="button"
-                className="ag-agora-edit-avatar-btn"
-                disabled={uploadingField !== null}
-                onClick={() => avatarFileRef.current?.click()}
-                aria-label="Upload profile photo"
-                title="Upload profile photo"
-              >
-                <AvatarImg
-                  pubkey={agora.myPubkey}
-                  pictureUrl={picture}
-                  width={72}
-                  height={72}
-                  className="ag-agora-edit-avatar-img"
-                  alt="Avatar preview"
+              <div className="ag-agora-edit-avatar-wrap" ref={avatarMenuWrapRef}>
+                <input
+                  ref={avatarFileRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={(e) => void handlePhotoUpload('picture', e)}
                 />
-                <span className="ag-agora-edit-avatar-cam" aria-hidden="true">
-                  {uploadingField === 'picture' ? (
-                    <Loader2 size={14} className="ag-agora-spin" />
-                  ) : (
-                    <Camera size={14} />
-                  )}
-                </span>
-              </button>
+                <button
+                  type="button"
+                  className="ag-agora-edit-avatar-btn"
+                  disabled={uploadingField !== null}
+                  onClick={() => {
+                    if (picture.trim()) {
+                      setAvatarMenuOpen((v) => !v)
+                    } else {
+                      avatarFileRef.current?.click()
+                    }
+                  }}
+                  aria-haspopup={picture.trim() ? 'menu' : undefined}
+                  aria-expanded={picture.trim() ? avatarMenuOpen : undefined}
+                  aria-label={
+                    picture.trim() ? 'Change or remove profile photo' : 'Upload profile photo'
+                  }
+                  title={picture.trim() ? 'Change or remove photo' : 'Upload profile photo'}
+                >
+                  <AvatarImg
+                    pubkey={agora.myPubkey}
+                    pictureUrl={picture}
+                    width={72}
+                    height={72}
+                    className="ag-agora-edit-avatar-img"
+                    alt="Avatar preview"
+                  />
+                  <span
+                    className={`ag-agora-edit-avatar-overlay${
+                      uploadingField === 'picture' ? ' is-busy' : ''
+                    }`}
+                    aria-hidden="true"
+                  >
+                    {uploadingField === 'picture' ? (
+                      <Loader2 size={18} className="ag-agora-spin" />
+                    ) : (
+                      <Camera size={18} />
+                    )}
+                  </span>
+                </button>
+
+                {avatarMenuOpen && picture.trim() && (
+                  <div className="ag-agora-photo-menu" role="menu" aria-label="Profile photo options">
+                    <button
+                      type="button"
+                      className="ag-agora-photo-menu-item"
+                      role="menuitem"
+                      onClick={() => {
+                        setAvatarMenuOpen(false)
+                        avatarFileRef.current?.click()
+                      }}
+                    >
+                      <Camera size={14} />
+                      <span>Change photo</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-agora-photo-menu-item danger"
+                      role="menuitem"
+                      onClick={() => {
+                        setAvatarMenuOpen(false)
+                        onPlaySound?.('click')
+                        setPicture('')
+                      }}
+                    >
+                      <Trash2 size={14} />
+                      <span>Remove photo</span>
+                    </button>
+                  </div>
+                )}
+              </div>
 
               <div className="ag-agora-edit-photo-meta">
                 <span className="ag-agora-edit-photo-name truncate">
@@ -1707,42 +1779,13 @@ const EditProfileModal: React.FC<{
                 <span className="ag-agora-edit-photo-npub mono truncate">
                   {shortPubkey(encodeNpubSafe(agora.myPubkey), 10, 6)}
                 </span>
-                <div className="ag-agora-edit-photo-actions">
-                  <input
-                    ref={avatarFileRef}
-                    type="file"
-                    accept="image/*"
-                    style={{ display: 'none' }}
-                    onChange={(e) => void handlePhotoUpload('picture', e)}
-                  />
-                  <button
-                    type="button"
-                    className="ag-agora-pill-btn primary"
-                    disabled={uploadingField !== null}
-                    onClick={() => avatarFileRef.current?.click()}
-                  >
-                    {uploadingField === 'picture' ? (
-                      <Loader2 size={13} className="ag-agora-spin" />
-                    ) : (
-                      <Camera size={13} />
-                    )}
-                    <span>{uploadingField === 'picture' ? 'Uploading…' : 'Upload Photo'}</span>
-                  </button>
-                  {picture.trim() && (
-                    <button
-                      type="button"
-                      className="ag-agora-pill-btn"
-                      disabled={uploadingField !== null}
-                      onClick={() => {
-                        onPlaySound?.('click')
-                        setPicture('')
-                      }}
-                    >
-                      <Trash2 size={13} />
-                      <span>Remove</span>
-                    </button>
-                  )}
-                </div>
+                <span className="ag-agora-edit-photo-hint">
+                  {uploadingField === 'picture'
+                    ? 'Uploading photo…'
+                    : picture.trim()
+                      ? 'Click avatar to change or remove photo'
+                      : 'Click avatar to upload a photo'}
+                </span>
               </div>
             </div>
 

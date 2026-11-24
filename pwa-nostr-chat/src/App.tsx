@@ -2467,7 +2467,6 @@ export function App() {
               initialTab={settingsState.tab}
               onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
               onOpenInstall={handleOpenInstall}
-              onOpenWallet={() => handleOpenWallet({ tab: 'overview' })}
               onShowQr={setQrShareTarget}
               onOpenScanner={handleOpenScanner}
               onPlaySound={playSound}
@@ -2541,7 +2540,6 @@ export function App() {
             initialTab={settingsState.tab}
             onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
             onOpenInstall={handleOpenInstall}
-            onOpenWallet={() => handleOpenWallet({ tab: 'overview' })}
             onShowQr={setQrShareTarget}
             onOpenScanner={handleOpenScanner}
             onPlaySound={playSound}
