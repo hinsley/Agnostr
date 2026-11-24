@@ -37,11 +37,13 @@ export function ImageLightboxModal({ payload, onClose }: ImageLightboxModalProps
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
+        e.stopPropagation()
+        e.stopImmediatePropagation()
         onClose()
       }
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
   }, [payload, onClose])
 
   if (!payload) return null

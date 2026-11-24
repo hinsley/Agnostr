@@ -2,9 +2,30 @@
    Amail — E2EE Briar-Inspired Store-and-Forward Meshnet Snailmail Types
    ========================================================================== */
 
+import type { VoiceMemoEncryption } from './protocol.ts'
+
 export type AmailBuiltinFolder = 'inbox' | 'starred' | 'sent' | 'drafts' | 'archive' | 'trash'
 export type AmailFolder = AmailBuiltinFolder | (string & {})
 export type AmailFolderSortMode = 'manual' | 'az' | 'za'
+
+export type AmailAttachmentKind = 'image' | 'voice' | 'file'
+
+export const MAX_AMAIL_ATTACHMENTS = 10
+
+export interface AmailAttachment {
+  id: string
+  kind: AmailAttachmentKind
+  url: string
+  sha256: string
+  mime: string
+  size: number
+  name?: string
+  encryption: VoiceMemoEncryption
+  width?: number
+  height?: number
+  durationSec?: number
+  peaks?: number[]
+}
 
 export interface AmailRecipient {
   pubkey: string
@@ -52,6 +73,7 @@ export interface AmailMessage {
   isBccRecipient?: boolean
   subject: string
   body: string
+  attachments?: AmailAttachment[]
   /** Unix seconds when composed/sent */
   sentAt: number
   /** Unix seconds when decrypted by recipient */
@@ -188,6 +210,7 @@ export interface AmailSendInput {
   bccPubkeys?: string[]
   subject: string
   body: string
+  attachments?: AmailAttachment[]
   inReplyTo?: string
   threadId?: string
   requestReadReceipt?: boolean
@@ -203,6 +226,7 @@ export interface AmailDraftInput {
   bccPubkeys?: string[]
   subject: string
   body: string
+  attachments?: AmailAttachment[]
   inReplyTo?: string
   threadId?: string
   requestReadReceipt?: boolean
@@ -236,6 +260,18 @@ export interface AmailEngine {
   isSyncing: boolean
 
   updateSettings: (patch: Partial<AmailRelaySettings>) => Promise<void>
+  uploadAttachment: (
+    file: File | Blob,
+    opts?: {
+      kind?: AmailAttachmentKind
+      name?: string
+      width?: number
+      height?: number
+      durationSec?: number
+      peaks?: number[]
+    }
+  ) => Promise<AmailAttachment>
+  downloadAttachment: (attachment: AmailAttachment) => Promise<Blob>
   sendMail: (input: AmailSendInput) => Promise<AmailMessage | null>
   saveDraft: (draft: AmailDraftInput) => Promise<AmailMessage>
   deleteDraft: (id: string) => Promise<void>

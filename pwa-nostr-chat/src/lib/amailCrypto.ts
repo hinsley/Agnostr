@@ -6,10 +6,14 @@ import {
   type Event as NostrEvent,
   type EventTemplate,
 } from 'nostr-tools'
-import type {
-  AmailAckTombstone,
-  AmailSealedCapsule,
+import {
+  MAX_AMAIL_ATTACHMENTS,
+  type AmailAckTombstone,
+  type AmailAttachment,
+  type AmailAttachmentKind,
+  type AmailSealedCapsule,
 } from '../types/amail.ts'
+import { cleanMimeType, MAX_MEDIA_BLOB_BYTES } from './blossom.ts'
 import { bytesToHex, type IdentityManager, type SigningKeyMaterial } from './identity.ts'
 
 export const KIND_AMAIL_CAPSULE_SIG = 25059
@@ -36,6 +40,7 @@ export interface AmailInnerMailPayload {
   cc?: AmailInnerRecipient[]
   subject: string
   body: string
+  attachments?: AmailAttachment[]
   sentAt: number
   requestReadReceipt: boolean
   ttlSec: number
@@ -43,6 +48,140 @@ export interface AmailInnerMailPayload {
 
 const MAX_INNER_RECIPIENTS = 50
 const MAX_INNER_RECIPIENT_NAME_LEN = 48
+const MAX_ATTACHMENT_ID_LEN = 64
+const MAX_ATTACHMENT_URL_LEN = 2048
+const MAX_ATTACHMENT_MIME_LEN = 120
+const MAX_ATTACHMENT_NAME_LEN = 120
+const MAX_ATTACHMENT_PEAKS = 64
+
+function isAttachmentKind(v: unknown): v is AmailAttachmentKind {
+  return v === 'image' || v === 'voice' || v === 'file'
+}
+
+function sanitizeHttpsAttachmentUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  if (!trimmed || trimmed.length > MAX_ATTACHMENT_URL_LEN || !/^https:\/\//i.test(trimmed)) {
+    return null
+  }
+  try {
+    const parsed = new URL(trimmed)
+    return parsed.protocol === 'https:' && parsed.toString().length <= MAX_ATTACHMENT_URL_LEN
+      ? parsed.toString()
+      : null
+  } catch {
+    return null
+  }
+}
+
+export function sanitizeAttachmentFilename(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  let cleaned = ''
+  for (let i = 0; i < raw.length; i += 1) {
+    const code = raw.charCodeAt(i)
+    if (code < 0x20 || code === 0x7f) continue
+    const ch = raw[i]
+    if (ch === '/' || ch === '\\') continue
+    cleaned += ch
+  }
+  const trimmed = cleaned.trim().slice(0, MAX_ATTACHMENT_NAME_LEN)
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+export function sanitizeAmailAttachments(raw: unknown): AmailAttachment[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const seenIds = new Set<string>()
+  const clean: AmailAttachment[] = []
+
+  for (const item of raw) {
+    if (clean.length >= MAX_AMAIL_ATTACHMENTS) break
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const rec = item as Record<string, unknown>
+
+    const id = typeof rec.id === 'string' ? rec.id.trim() : ''
+    if (!id || id.length > MAX_ATTACHMENT_ID_LEN || seenIds.has(id)) continue
+
+    if (!isAttachmentKind(rec.kind)) continue
+
+    const url = sanitizeHttpsAttachmentUrl(rec.url)
+    if (!url) continue
+
+    const sha256 = typeof rec.sha256 === 'string' ? rec.sha256.trim().toLowerCase() : ''
+    if (!/^[0-9a-f]{64}$/.test(sha256)) continue
+
+    if (typeof rec.mime !== 'string' || !rec.mime.trim()) continue
+    const mime = cleanMimeType(rec.mime, 'application/octet-stream').slice(
+      0,
+      MAX_ATTACHMENT_MIME_LEN
+    )
+
+    if (typeof rec.size !== 'number' || !Number.isFinite(rec.size)) continue
+    const size = Math.floor(rec.size)
+    if (size <= 0 || size > MAX_MEDIA_BLOB_BYTES) continue
+
+    if (!rec.encryption || typeof rec.encryption !== 'object' || Array.isArray(rec.encryption)) {
+      continue
+    }
+    const enc = rec.encryption as Record<string, unknown>
+    if (enc.alg !== 'aes-gcm-256') continue
+    const keyB64 = typeof enc.keyB64 === 'string' ? enc.keyB64.trim() : ''
+    const ivB64 = typeof enc.ivB64 === 'string' ? enc.ivB64.trim() : ''
+    if (!keyB64 || keyB64.length > 128 || !ivB64 || ivB64.length > 64) continue
+    const rawPlainSha =
+      typeof enc.plaintextSha256 === 'string' ? enc.plaintextSha256.trim().toLowerCase() : ''
+    if (rawPlainSha && !/^[0-9a-f]{64}$/.test(rawPlainSha)) continue
+
+    const name = sanitizeAttachmentFilename(rec.name)
+
+    const width =
+      typeof rec.width === 'number' && Number.isFinite(rec.width) && rec.width > 0
+        ? Math.min(16384, Math.floor(rec.width))
+        : undefined
+    const height =
+      typeof rec.height === 'number' && Number.isFinite(rec.height) && rec.height > 0
+        ? Math.min(16384, Math.floor(rec.height))
+        : undefined
+    const durationSec =
+      typeof rec.durationSec === 'number' && Number.isFinite(rec.durationSec) && rec.durationSec > 0
+        ? Math.min(86_400, Math.round(rec.durationSec * 100) / 100)
+        : undefined
+
+    let peaks: number[] | undefined
+    if (Array.isArray(rec.peaks)) {
+      const clamped: number[] = []
+      for (const v of rec.peaks) {
+        if (clamped.length >= MAX_ATTACHMENT_PEAKS) break
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue
+        const c = Math.max(0, Math.min(1, v))
+        clamped.push(Math.round(c * 1000) / 1000)
+      }
+      if (clamped.length > 0) peaks = clamped
+    }
+
+    seenIds.add(id)
+    clean.push({
+      id,
+      kind: rec.kind,
+      url,
+      sha256,
+      mime,
+      size,
+      ...(name ? { name } : {}),
+      encryption: {
+        alg: 'aes-gcm-256',
+        keyB64,
+        ivB64,
+        plaintextSha256: rawPlainSha,
+      },
+      ...(width !== undefined ? { width } : {}),
+      ...(height !== undefined ? { height } : {}),
+      ...(durationSec !== undefined ? { durationSec } : {}),
+      ...(peaks ? { peaks } : {}),
+    })
+  }
+
+  return clean.length > 0 ? clean : undefined
+}
 
 function sanitizeInnerRecipients(raw: unknown): AmailInnerRecipient[] | undefined {
   if (!Array.isArray(raw)) return undefined
@@ -69,6 +208,7 @@ function sanitizePayloadForWire(payload: AmailInnerPayload): AmailInnerPayload {
   if (payload.type === 'mail') {
     const cleanTo = sanitizeInnerRecipients(payload.to)
     const cleanCc = sanitizeInnerRecipients(payload.cc)
+    const cleanAttachments = sanitizeAmailAttachments(payload.attachments)
     // Strictly allow-list wire fields so BCC recipients can NEVER leak into any sealed capsule
     return {
       v: 1,
@@ -81,6 +221,7 @@ function sanitizePayloadForWire(payload: AmailInnerPayload): AmailInnerPayload {
       ...(cleanCc && cleanCc.length > 0 ? { cc: cleanCc } : {}),
       subject: payload.subject,
       body: payload.body,
+      ...(cleanAttachments ? { attachments: cleanAttachments } : {}),
       sentAt: payload.sentAt,
       requestReadReceipt: Boolean(payload.requestReadReceipt),
       ttlSec: payload.ttlSec,
@@ -384,6 +525,7 @@ export async function unsealAmailCapsule(
       }
       const to = sanitizeInnerRecipients(parsed.to)
       const cc = sanitizeInnerRecipients(parsed.cc)
+      const attachments = sanitizeAmailAttachments(parsed.attachments)
       return {
         v: 1,
         type: 'mail',
@@ -395,6 +537,7 @@ export async function unsealAmailCapsule(
         ...(cc && cc.length > 0 ? { cc } : {}),
         subject: parsed.subject,
         body: parsed.body,
+        ...(attachments ? { attachments } : {}),
         sentAt: parsed.sentAt,
         requestReadReceipt: Boolean(parsed.requestReadReceipt),
         ttlSec: typeof parsed.ttlSec === 'number' ? parsed.ttlSec : 7 * 86_400,

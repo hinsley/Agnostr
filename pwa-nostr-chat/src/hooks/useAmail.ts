@@ -5,6 +5,8 @@ import type { ToastLevel, TrustedPeerEntry } from '../types/protocol.ts'
 import {
   DEFAULT_AMAIL_RELAY_SETTINGS,
   type AmailAckTombstone,
+  type AmailAttachment,
+  type AmailAttachmentKind,
   type AmailBuiltinFolder,
   type AmailContact,
   type AmailCustomFolder,
@@ -24,6 +26,8 @@ import {
 } from '../types/amail.ts'
 import {
   createSignedAckTombstone,
+  sanitizeAmailAttachments,
+  sanitizeAttachmentFilename,
   sealAmailCapsule,
   unsealAmailCapsule,
   type AmailInnerMailPayload,
@@ -31,6 +35,21 @@ import {
 } from '../lib/amailCrypto.ts'
 import { AmailMeshNode } from '../lib/amailMesh.ts'
 import { AmailStorage } from '../lib/amailStorage.ts'
+import {
+  cleanMimeType,
+  computeSha256HexAsync,
+  decryptMediaBytesAesGcm,
+  DEFAULT_BLOSSOM_SERVERS,
+  encryptMediaBytesAesGcm,
+  MAX_MEDIA_BLOB_BYTES,
+  normalizeBlossomServerUrl,
+  uploadBlobToBlossom,
+} from '../lib/blossom.ts'
+import {
+  isSupportedImageFile,
+  prepareImageFile,
+  revokeImagePreviewUrl,
+} from '../lib/imageProcessor.ts'
 import {
   decodePubkeyInput,
   encodeNpubSafe,
@@ -47,6 +66,7 @@ export interface UseAmailOptions {
   activeNickname: string
   trustedPubkeys: TrustedPeerEntry[]
   blockedPubkeys: string[]
+  blossomServers?: readonly string[]
   turnConfig?: TurnServerConfig | null
   onLocalChange?: () => void
   onIncomingMail?: (input: {
@@ -97,6 +117,38 @@ const BUILTIN_FOLDERS: ReadonlySet<string> = new Set([
 ])
 
 const MAX_RECIPIENTS_PER_MAIL = 50
+const MAX_ATTACHMENT_CACHE_ENTRIES = 60
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength)
+  copy.set(bytes)
+  return copy.buffer
+}
+
+async function fetchCiphertextWithTimeout(url: string, timeoutMs = 20_000): Promise<Uint8Array> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, { method: 'GET', mode: 'cors', signal: controller.signal })
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`)
+    }
+    const contentLength = Number.parseInt(res.headers.get('content-length') ?? '', 10)
+    if (Number.isFinite(contentLength) && contentLength > MAX_MEDIA_BLOB_BYTES) {
+      throw new Error('Attachment exceeds maximum allowed download size.')
+    }
+    const rawBuf = await res.arrayBuffer()
+    if (rawBuf.byteLength === 0) {
+      throw new Error('Downloaded attachment blob is empty.')
+    }
+    if (rawBuf.byteLength > MAX_MEDIA_BLOB_BYTES) {
+      throw new Error('Attachment exceeds maximum allowed download size.')
+    }
+    return new Uint8Array(rawBuf)
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
 
 function isBuiltinFolder(folder: string): folder is AmailBuiltinFolder {
   return BUILTIN_FOLDERS.has(folder)
@@ -195,6 +247,15 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
   const trustedMapRef = useRef<Map<string, TrustedPeerEntry>>(new Map())
   trustedMapRef.current = new Map(trustedPubkeys.map((t) => [t.pubkey.toLowerCase(), t]))
+
+  const blossomServersRef = useRef<readonly string[]>(DEFAULT_BLOSSOM_SERVERS)
+  blossomServersRef.current =
+    options.blossomServers && options.blossomServers.length > 0
+      ? options.blossomServers
+      : DEFAULT_BLOSSOM_SERVERS
+
+  const attachmentBlobCacheRef = useRef<Map<string, Blob>>(new Map())
+  const attachmentInflightRef = useRef<Map<string, Promise<Blob>>>(new Map())
 
   const storageRef = useRef<AmailStorage | null>(null)
   if (!storageRef.current) {
@@ -427,6 +488,9 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           ...(isBccRecipient ? { isBccRecipient: true } : {}),
           subject: inner.subject || '(no subject)',
           body: inner.body,
+          ...(inner.attachments && inner.attachments.length > 0
+            ? { attachments: inner.attachments }
+            : {}),
           sentAt: inner.sentAt,
           receivedAt: nowSec,
           isRead: false,
@@ -623,6 +687,229 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
     [refreshFromStorage]
   )
 
+  const cacheAttachmentBlob = useCallback((cacheKey: string, blob: Blob) => {
+    const cache = attachmentBlobCacheRef.current
+    if (cache.has(cacheKey)) {
+      cache.delete(cacheKey)
+    } else if (cache.size >= MAX_ATTACHMENT_CACHE_ENTRIES) {
+      const oldestKey = cache.keys().next().value
+      if (oldestKey !== undefined) {
+        cache.delete(oldestKey)
+      }
+    }
+    cache.set(cacheKey, blob)
+  }, [])
+
+  const uploadAttachment = useCallback(
+    async (
+      file: File | Blob,
+      opts?: {
+        kind?: AmailAttachmentKind
+        name?: string
+        width?: number
+        height?: number
+        durationSec?: number
+        peaks?: number[]
+      }
+    ): Promise<AmailAttachment> => {
+      if (!file || file.size <= 0) {
+        throw new Error('Cannot attach an empty file.')
+      }
+
+      const rawMime = cleanMimeType(file.type || '', 'application/octet-stream')
+      const inferredName = sanitizeAttachmentFilename(
+        opts?.name ?? (file instanceof File ? file.name : undefined)
+      )
+      const isSvg = rawMime === 'image/svg+xml'
+      const kind: AmailAttachmentKind =
+        opts?.kind === 'image' || opts?.kind === 'voice' || opts?.kind === 'file'
+          ? opts.kind
+          : !isSvg &&
+              (rawMime.startsWith('image/') ||
+                (file instanceof File && isSupportedImageFile(file)))
+            ? 'image'
+            : 'file'
+
+      let blobToEncrypt: Blob = file
+      let finalMime = rawMime
+      let finalName = inferredName
+      let width =
+        typeof opts?.width === 'number' && Number.isFinite(opts.width) && opts.width > 0
+          ? Math.floor(opts.width)
+          : undefined
+      let height =
+        typeof opts?.height === 'number' && Number.isFinite(opts.height) && opts.height > 0
+          ? Math.floor(opts.height)
+          : undefined
+
+      if (kind === 'image' && rawMime !== 'image/gif' && !isSvg) {
+        const asFile =
+          file instanceof File
+            ? file
+            : new File([file], finalName || 'image.png', { type: rawMime || 'image/png' })
+        try {
+          const prepared = await prepareImageFile(asFile)
+          blobToEncrypt = prepared.blob
+          finalMime = prepared.mime
+          width = prepared.width
+          height = prepared.height
+          if (!finalName) {
+            finalName = sanitizeAttachmentFilename(prepared.fileName)
+          }
+          revokeImagePreviewUrl(prepared)
+        } catch {
+          // Graceful fallback for non-canvas/unsupported image formats (still bounded by MAX_MEDIA_BLOB_BYTES)
+        }
+      }
+
+      const plaintextBytes = new Uint8Array(await blobToEncrypt.arrayBuffer())
+      if (plaintextBytes.byteLength === 0) {
+        throw new Error('Cannot attach an empty file.')
+      }
+      if (plaintextBytes.byteLength > MAX_MEDIA_BLOB_BYTES) {
+        throw new Error('Attachment exceeds the 15 MiB maximum encrypted size limit.')
+      }
+
+      const encrypted = await encryptMediaBytesAesGcm(plaintextBytes)
+      if (encrypted.ciphertext.byteLength > MAX_MEDIA_BLOB_BYTES) {
+        throw new Error('Encrypted attachment exceeds the 15 MiB Blossom size limit.')
+      }
+
+      const activeBlossomServers =
+        blossomServersRef.current.length > 0
+          ? blossomServersRef.current
+          : DEFAULT_BLOSSOM_SERVERS
+
+      const uploaded = await uploadBlobToBlossom({
+        bytes: encrypted.ciphertext,
+        mime: 'application/octet-stream',
+        servers: activeBlossomServers,
+        signAuthEvent: (tpl) => identityManager.signEvent(tpl),
+      })
+
+      const uploadedUrl = uploaded.url.trim()
+      let validatedHttpsUrl = ''
+      try {
+        const parsed = new URL(uploadedUrl)
+        if (parsed.protocol === 'https:') {
+          validatedHttpsUrl = parsed.toString()
+        }
+      } catch {
+        // Handled below
+      }
+      if (!validatedHttpsUrl) {
+        throw new Error('Blossom server returned a non-HTTPS attachment URL.')
+      }
+
+      const durationSec =
+        typeof opts?.durationSec === 'number' &&
+        Number.isFinite(opts.durationSec) &&
+        opts.durationSec > 0
+          ? Math.min(86_400, Math.round(opts.durationSec * 100) / 100)
+          : undefined
+
+      let peaks: number[] | undefined
+      if (Array.isArray(opts?.peaks) && opts.peaks.length > 0) {
+        const clamped: number[] = []
+        for (const v of opts.peaks.slice(0, 64)) {
+          if (typeof v !== 'number' || !Number.isFinite(v)) continue
+          const c = Math.max(0, Math.min(1, v))
+          clamped.push(Math.round(c * 1000) / 1000)
+        }
+        if (clamped.length > 0) peaks = clamped
+      }
+
+      const cleanMime = cleanMimeType(finalMime, 'application/octet-stream').slice(0, 120)
+      const sha256 = uploaded.sha256.toLowerCase()
+      const attachment: AmailAttachment = {
+        id: makeAmailId('att'),
+        kind,
+        url: validatedHttpsUrl,
+        sha256,
+        mime: cleanMime,
+        size: plaintextBytes.byteLength,
+        ...(finalName ? { name: finalName } : {}),
+        encryption: encrypted.encryption,
+        ...(width !== undefined ? { width } : {}),
+        ...(height !== undefined ? { height } : {}),
+        ...(durationSec !== undefined ? { durationSec } : {}),
+        ...(peaks ? { peaks } : {}),
+      }
+
+      const cacheKey = `${sha256}:${encrypted.encryption.plaintextSha256 ?? ''}`
+      cacheAttachmentBlob(cacheKey, new Blob([toArrayBuffer(plaintextBytes)], { type: cleanMime }))
+      return attachment
+    },
+    [identityManager, cacheAttachmentBlob]
+  )
+
+  const downloadAttachment = useCallback(
+    async (attachment: AmailAttachment): Promise<Blob> => {
+      const sanitized = sanitizeAmailAttachments([attachment])?.[0]
+      if (!sanitized) {
+        throw new Error('Malformed or unsafe Agmail attachment descriptor.')
+      }
+
+      const sha256 = sanitized.sha256.toLowerCase()
+      const cacheKey = `${sha256}:${sanitized.encryption.plaintextSha256 ?? ''}`
+      const cached = attachmentBlobCacheRef.current.get(cacheKey)
+      if (cached) {
+        cacheAttachmentBlob(cacheKey, cached)
+        return cached
+      }
+
+      const inflight = attachmentInflightRef.current.get(cacheKey)
+      if (inflight) {
+        return await inflight
+      }
+
+      const task = (async (): Promise<Blob> => {
+        const candidateUrls: string[] = [sanitized.url]
+        const seen = new Set<string>([sanitized.url])
+        const mirrorServers = [...blossomServersRef.current, ...DEFAULT_BLOSSOM_SERVERS]
+        for (const rawServer of mirrorServers) {
+          const normalized = normalizeBlossomServerUrl(rawServer)
+          if (!normalized || !normalized.startsWith('https://')) continue
+          const mirrorUrl = `${normalized}/${sha256}`
+          if (!seen.has(mirrorUrl)) {
+            seen.add(mirrorUrl)
+            candidateUrls.push(mirrorUrl)
+          }
+        }
+
+        const errors: string[] = []
+        for (const candidateUrl of candidateUrls) {
+          try {
+            const ciphertext = await fetchCiphertextWithTimeout(candidateUrl, 20_000)
+            const actualHash = await computeSha256HexAsync(ciphertext)
+            if (actualHash !== sha256) {
+              errors.push('SHA-256 mismatch')
+              continue
+            }
+            const plaintext = await decryptMediaBytesAesGcm(ciphertext, sanitized.encryption)
+            const blob = new Blob([toArrayBuffer(plaintext)], {
+              type: cleanMimeType(sanitized.mime),
+            })
+            cacheAttachmentBlob(cacheKey, blob)
+            return blob
+          } catch (err) {
+            errors.push(err instanceof Error ? err.message : 'download error')
+          }
+        }
+
+        throw new Error(
+          `Failed to download encrypted attachment (${errors.slice(0, 3).join('; ')})`
+        )
+      })().finally(() => {
+        attachmentInflightRef.current.delete(cacheKey)
+      })
+
+      attachmentInflightRef.current.set(cacheKey, task)
+      return await task
+    },
+    [cacheAttachmentBlob]
+  )
+
   const sendMail = useCallback(
     async (input: AmailSendInput): Promise<AmailMessage | null> => {
       const storage = storageRef.current
@@ -680,8 +967,18 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       const mailId = makeAmailId('amail')
       const threadId = input.threadId?.trim() || mailId
       const sentAt = Math.floor(Date.now() / 1000)
-      const subject = input.subject.trim() || '(no subject)'
+      const rawSubject = input.subject.trim()
       const body = input.body.trim()
+      const cleanAttachments = sanitizeAmailAttachments(input.attachments)
+      if (!rawSubject && !body && !(cleanAttachments && cleanAttachments.length > 0)) {
+        pushToastRef.current?.(
+          'error',
+          'Empty Agmail',
+          'Add a subject, message body, or attachment before sending.'
+        )
+        return null
+      }
+      const subject = rawSubject || '(no subject)'
       const requestReadReceipt = input.requestReadReceipt ?? true
 
       // STRICT E2EE BCC PRIVACY: only `to` and `cc` are placed inside the wire payload;
@@ -699,6 +996,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           : {}),
         subject,
         body,
+        ...(cleanAttachments ? { attachments: cleanAttachments } : {}),
         sentAt,
         requestReadReceipt,
         ttlSec,
@@ -747,6 +1045,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
             ...(selfIsOnlyInBcc ? { isBccRecipient: true } : {}),
             subject,
             body,
+            ...(cleanAttachments ? { attachments: cleanAttachments } : {}),
             sentAt,
             receivedAt: sentAt,
             deliveredAt: sentAt,
@@ -780,6 +1079,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           ...(groups.bcc.length > 0 ? { bccRecipients: groups.bcc } : {}),
           subject,
           body,
+          ...(cleanAttachments ? { attachments: cleanAttachments } : {}),
           sentAt,
           ...(isSelfOnly ? { deliveredAt: sentAt } : {}),
           isRead: true,
@@ -904,6 +1204,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       const nowSec = Math.floor(Date.now() / 1000)
       const ttlSec = draft.ttlSec ?? curSettings.defaultTtlSec
 
+      const cleanAttachments = sanitizeAmailAttachments(draft.attachments)
+
       const entry: AmailMessage = {
         id,
         threadId: draft.threadId || id,
@@ -921,6 +1223,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         ...(groups.bcc.length > 0 ? { bccRecipients: groups.bcc } : {}),
         subject: draft.subject,
         body: draft.body,
+        ...(cleanAttachments ? { attachments: cleanAttachments } : {}),
         sentAt: nowSec,
         isRead: true,
         isStarred: existing?.isStarred ?? false,
@@ -1503,8 +1806,15 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           continue
         }
         const local = storage.getMessage(rm.id)
+        const cleanRemoteAttachments = sanitizeAmailAttachments(rm.attachments)
         if (!local) {
-          await storage.putMessage(rm)
+          const sanitizedRemote: AmailMessage = { ...rm }
+          if (cleanRemoteAttachments) {
+            sanitizedRemote.attachments = cleanRemoteAttachments
+          } else {
+            delete sanitizedRemote.attachments
+          }
+          await storage.putMessage(sanitizedRemote)
           changed = true
           continue
         }
@@ -1535,8 +1845,13 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           (remoteNewer ? rm.isBccRecipient : local.isBccRecipient) ??
           local.isBccRecipient ??
           rm.isBccRecipient
+        const cleanLocalAttachments = sanitizeAmailAttachments(local.attachments)
+        const mergedAttachments =
+          (remoteNewer ? cleanRemoteAttachments : cleanLocalAttachments) ??
+          cleanLocalAttachments ??
+          cleanRemoteAttachments
 
-        const merged: AmailMessage = {
+        const mergedBase: AmailMessage = {
           ...(remoteNewer ? rm : local),
           deliveryStatus: bestStatus,
           deliveredAt: local.deliveredAt ?? rm.deliveredAt,
@@ -1552,6 +1867,12 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
           ...(mergedReadPubkeys ? { readPubkeys: mergedReadPubkeys } : {}),
           updatedAt: Math.max(local.updatedAt ?? 0, rm.updatedAt ?? 0),
         }
+        if (mergedAttachments) {
+          mergedBase.attachments = mergedAttachments
+        } else {
+          delete mergedBase.attachments
+        }
+        const merged = mergedBase
         if (JSON.stringify(merged) !== JSON.stringify(local)) {
           await storage.putMessage(merged)
           changed = true
@@ -1684,6 +2005,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
     if (storageRef.current) {
       await storageRef.current.wipeDatabase()
     }
+    attachmentBlobCacheRef.current.clear()
+    attachmentInflightRef.current.clear()
     setMessages([])
     setStoredContacts([])
     setCustomFolders([])
@@ -1715,6 +2038,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       settings,
       isSyncing,
       updateSettings,
+      uploadAttachment,
+      downloadAttachment,
       sendMail,
       saveDraft,
       deleteDraft,
@@ -1751,6 +2076,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       settings,
       isSyncing,
       updateSettings,
+      uploadAttachment,
+      downloadAttachment,
       sendMail,
       saveDraft,
       deleteDraft,

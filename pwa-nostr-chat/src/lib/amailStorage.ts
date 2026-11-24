@@ -10,7 +10,11 @@ import {
   type AmailSealedCapsule,
   type AmailStorageStats,
 } from '../types/amail.ts'
-import { estimateCapsuleSizeBytes, utf8ByteLength } from './amailCrypto.ts'
+import {
+  estimateCapsuleSizeBytes,
+  sanitizeAmailAttachments,
+  utf8ByteLength,
+} from './amailCrypto.ts'
 
 export const AMAIL_DB_NAME = 'agnostr-amail-db'
 const AMAIL_DB_VERSION = 1
@@ -52,6 +56,17 @@ export interface AmailStorageSnapshot {
 function normalizeFolderSortMode(raw: unknown): AmailFolderSortMode {
   if (raw === 'az' || raw === 'za' || raw === 'manual') return raw
   return 'manual'
+}
+
+function sanitizeStoredMessage(msg: AmailMessage): AmailMessage {
+  if (!('attachments' in msg) || msg.attachments === undefined) return msg
+  const clean = sanitizeAmailAttachments(msg.attachments)
+  if (clean && clean.length > 0) {
+    return { ...msg, attachments: clean }
+  }
+  const copy: AmailMessage = { ...msg }
+  delete copy.attachments
+  return copy
 }
 
 function toCapsuleMeta(c: AmailSealedCapsule): AmailRelayCapsuleMeta {
@@ -179,7 +194,7 @@ export class AmailStorage {
 
       this.mailMap.clear()
       for (const m of mails) {
-        if (m && m.id) this.mailMap.set(m.id, m)
+        if (m && m.id) this.mailMap.set(m.id, sanitizeStoredMessage(m))
       }
       this.contactMap.clear()
       for (const c of contacts) {
@@ -465,12 +480,13 @@ export class AmailStorage {
      ------------------------------------------------------------------------ */
 
   async putMessage(msg: AmailMessage): Promise<void> {
-    this.mailMap.set(msg.id, msg)
-    if (this.syncTombstones.deletedMessageIds[msg.id]) {
-      delete this.syncTombstones.deletedMessageIds[msg.id]
+    const clean = sanitizeStoredMessage(msg)
+    this.mailMap.set(clean.id, clean)
+    if (this.syncTombstones.deletedMessageIds[clean.id]) {
+      delete this.syncTombstones.deletedMessageIds[clean.id]
       await this.persistSyncTombstones()
     }
-    await this.idbPut(STORES.mail, msg)
+    await this.idbPut(STORES.mail, clean)
   }
 
   async deleteMessage(id: string, recordTombstone = true): Promise<void> {

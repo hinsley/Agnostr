@@ -2413,6 +2413,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     activeNickname: identity.nickname,
     trustedPubkeys,
     blockedPubkeys,
+    blossomServers,
     turnConfig: callsEngine.turnConfig,
     onLocalChange: handleAmailLocalChange,
     onIncomingMail: handleIncomingAmail,

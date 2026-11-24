@@ -5,6 +5,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
+  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
   type FocusEvent as ReactFocusEvent,
   type FormEvent,
@@ -23,16 +25,24 @@ import {
   ChevronUp,
   Clock,
   Copy,
+  Download,
+  File,
+  FileAudio,
   FileText,
+  FileVideo,
   Folder,
   FolderInput,
   FolderPlus,
   Forward,
   HardDrive,
+  Image as ImageIcon,
   Inbox,
+  Loader2,
   Lock,
   Mail,
   MailOpen,
+  Mic,
+  Paperclip,
   Pencil,
   PenSquare,
   Plus,
@@ -51,24 +61,41 @@ import {
   Waves,
   X,
 } from 'lucide-react'
-import type { AgnostrEngine } from '../types/protocol.ts'
 import type {
-  AmailBuiltinFolder,
-  AmailContact,
-  AmailCustomFolder,
-  AmailDeliveryStatus,
-  AmailFolder,
-  AmailFolderSortMode,
-  AmailMessage,
-  AmailRecipient,
+  AgnostrEngine,
+  ImageAttachment,
+  RecordedVoiceMemo,
+  VoiceMemoAttachment,
+} from '../types/protocol.ts'
+import {
+  MAX_AMAIL_ATTACHMENTS,
+  type AmailAttachment,
+  type AmailAttachmentKind,
+  type AmailBuiltinFolder,
+  type AmailContact,
+  type AmailCustomFolder,
+  type AmailDeliveryStatus,
+  type AmailFolder,
+  type AmailFolderSortMode,
+  type AmailMessage,
+  type AmailRecipient,
 } from '../types/amail.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { encodeNpubSafe } from '../lib/identity.ts'
 import { parseShareTarget } from '../lib/shareLinks.ts'
+import {
+  VoiceRecorderController,
+  formatVoiceDuration,
+  isVoiceRecordingSupported,
+  revokeVoicePreviewUrl,
+} from '../lib/voiceRecorder.ts'
 import { RichMessageContent } from '../utils/markdown.tsx'
 import { identiconDataUrl, pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
+import { ImageAttachmentCard } from './ImageAttachmentCard.tsx'
+import type { LightboxImagePayload } from './ImageLightboxModal.tsx'
+import { VoiceMemoPlayer } from './VoiceMemoPlayer.tsx'
 import '../styles/amail.css'
 
 export type AmailInitialSection = 'inbox' | 'compose' | 'contacts' | 'mesh'
@@ -87,6 +114,7 @@ export interface AmailViewProps {
   initialSection?: AmailInitialSection
   initialComposeTo?: AmailComposeTarget | null
   onOpenScanner?: () => void
+  onOpenLightbox?: (payload: LightboxImagePayload) => void
   onPlaySound?: (cue: SoundCue) => void
 }
 
@@ -142,11 +170,24 @@ interface ComposerInitOpts {
   bccList?: AmailRecipient[]
   subject?: string
   body?: string
+  attachments?: AmailAttachment[]
   draftId?: string
   threadId?: string
   inReplyTo?: string
   requestReadReceipt?: boolean
   ttlSec?: number
+}
+
+interface UploadingAttachmentItem {
+  tempId: string
+  name: string
+  kind: AmailAttachmentKind
+  error?: string
+}
+
+interface FileDownloadState {
+  loading: boolean
+  error?: string
 }
 
 const BUILTIN_FOLDER_LABELS: Record<AmailBuiltinFolder, string> = {
@@ -265,6 +306,74 @@ function formatThreadSubject(rawSubject: string): string {
   return trimmed.replace(/^(re:\s*){2,}/i, 'Re: ')
 }
 
+function sanitizeDisplayFilename(raw: string | undefined, mime?: string): string {
+  const cleaned = (raw ?? '')
+    .replace(/[/\\]/g, '_')
+    .replace(/[\p{Cc}]/gu, '')
+    .trim()
+    .slice(0, 120)
+  if (cleaned) return cleaned
+  const lower = (mime ?? '').toLowerCase()
+  if (lower.startsWith('image/')) return 'image'
+  if (lower.startsWith('audio/')) return 'audio-clip'
+  if (lower.startsWith('video/')) return 'video-clip'
+  if (lower === 'application/pdf') return 'document.pdf'
+  return 'attachment'
+}
+
+function getFileIconKind(mime: string, name?: string): 'text' | 'audio' | 'video' | 'file' {
+  const lowerMime = (mime || '').toLowerCase()
+  const lowerName = (name || '').toLowerCase()
+  if (lowerMime.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|flac|aac|opus)$/.test(lowerName)) {
+    return 'audio'
+  }
+  if (lowerMime.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/.test(lowerName)) {
+    return 'video'
+  }
+  if (
+    lowerMime.startsWith('text/') ||
+    lowerMime === 'application/pdf' ||
+    lowerMime === 'application/json' ||
+    /\.(pdf|txt|md|csv|json|xml|doc|docx|rtf|log)$/.test(lowerName)
+  ) {
+    return 'text'
+  }
+  return 'file'
+}
+
+function scalePeaksToWaveform100(peaks: readonly number[] | undefined): number[] {
+  if (!peaks || peaks.length === 0) return []
+  return peaks.map((p) => {
+    const safe = Number.isFinite(p) ? p : 0
+    return safe <= 1 ? Math.round(safe * 100) : Math.round(safe)
+  })
+}
+
+function adaptAmailImageAttachment(att: AmailAttachment): ImageAttachment {
+  return {
+    url: att.url,
+    sha256: att.sha256,
+    mime: att.mime,
+    size: att.size,
+    width: att.width ?? 0,
+    height: att.height ?? 0,
+    alt: att.name,
+    encryption: att.encryption,
+  }
+}
+
+function adaptAmailVoiceAttachment(att: AmailAttachment): VoiceMemoAttachment {
+  return {
+    url: att.url,
+    sha256: att.sha256,
+    mime: att.mime,
+    size: att.size,
+    durationSec: att.durationSec ?? 0,
+    waveform: scalePeaksToWaveform100(att.peaks),
+    encryption: att.encryption,
+  }
+}
+
 function matchesMailQuery(m: AmailMessage, q: string): boolean {
   const recipMatch = [
     ...(m.toRecipients ?? []),
@@ -276,6 +385,9 @@ function matchesMailQuery(m: AmailMessage, q: string): boolean {
       r.npub.toLowerCase().includes(q) ||
       r.pubkey.toLowerCase().includes(q),
   )
+  const attachMatch = (m.attachments ?? []).some((a) =>
+    (a.name ?? '').toLowerCase().includes(q),
+  )
   return (
     m.subject.toLowerCase().includes(q) ||
     m.body.toLowerCase().includes(q) ||
@@ -283,7 +395,8 @@ function matchesMailQuery(m: AmailMessage, q: string): boolean {
     m.toName.toLowerCase().includes(q) ||
     m.fromNpub.toLowerCase().includes(q) ||
     m.toNpub.toLowerCase().includes(q) ||
-    recipMatch
+    recipMatch ||
+    attachMatch
   )
 }
 
@@ -479,6 +592,7 @@ export function AmailView({
   initialSection = 'inbox',
   initialComposeTo = null,
   onOpenScanner,
+  onOpenLightbox,
   onPlaySound,
 }: AmailViewProps) {
   const { amail } = engine
@@ -543,6 +657,23 @@ export function AmailView({
   const [composeTtlSec, setComposeTtlSec] = useState(amail.settings.defaultTtlSec)
   const [sendingMail, setSendingMail] = useState(false)
   const [composeError, setComposeError] = useState<string | null>(null)
+
+  // Compose E2EE Attachments & Live Voicemail Recorder state
+  const [composeAttachments, setComposeAttachments] = useState<AmailAttachment[]>([])
+  const [uploadingItems, setUploadingItems] = useState<UploadingAttachmentItem[]>([])
+  const [composeLocalPreviews, setComposeLocalPreviews] = useState<Record<string, string>>({})
+  const [composeDragOver, setComposeDragOver] = useState(false)
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false)
+  const [voiceElapsedSec, setVoiceElapsedSec] = useState(0)
+  const [voiceLiveBars, setVoiceLiveBars] = useState<number[]>([])
+  const [fileDownloads, setFileDownloads] = useState<Record<string, FileDownloadState>>({})
+
+  const composeImageInputRef = useRef<HTMLInputElement | null>(null)
+  const composeFileInputRef = useRef<HTMLInputElement | null>(null)
+  const composeDragDepthRef = useRef(0)
+  const voiceRecorderRef = useRef<VoiceRecorderController | null>(null)
+  const composeLocalPreviewsRef = useRef<Record<string, string>>({})
+  const attachmentUrlCacheRef = useRef<Map<string, string>>(new Map())
 
   // Contacts add form state
   const [contactKeyDraft, setContactKeyDraft] = useState('')
@@ -765,8 +896,168 @@ export function AmailView({
     [mergedContacts, myPubkey, myNpub],
   )
 
+  const revokeAllComposePreviews = useCallback(() => {
+    const map = composeLocalPreviewsRef.current
+    for (const url of Object.values(map)) {
+      try {
+        URL.revokeObjectURL(url)
+      } catch {
+        // Ignore
+      }
+    }
+    composeLocalPreviewsRef.current = {}
+    setComposeLocalPreviews({})
+  }, [])
+
+  const stopAndDiscardVoiceRecorder = useCallback(() => {
+    if (voiceRecorderRef.current) {
+      voiceRecorderRef.current.cancel()
+      voiceRecorderRef.current = null
+    }
+    setIsRecordingVoice(false)
+    setVoiceElapsedSec(0)
+    setVoiceLiveBars([])
+  }, [])
+
+  // Cleanup active voice recorder & object URLs on unmount
+  useEffect(() => {
+    const urlCache = attachmentUrlCacheRef.current
+    return () => {
+      if (voiceRecorderRef.current) {
+        voiceRecorderRef.current.cancel()
+        voiceRecorderRef.current = null
+      }
+      for (const url of Object.values(composeLocalPreviewsRef.current)) {
+        try {
+          URL.revokeObjectURL(url)
+        } catch {
+          // Ignore
+        }
+      }
+      composeLocalPreviewsRef.current = {}
+      for (const url of urlCache.values()) {
+        try {
+          URL.revokeObjectURL(url)
+        } catch {
+          // Ignore
+        }
+      }
+      urlCache.clear()
+    }
+  }, [])
+
+  // Stop any live voicemail recording if composer closes or Agmail closes
+  useEffect(() => {
+    if (!open || !composing) {
+      stopAndDiscardVoiceRecorder()
+      composeDragDepthRef.current = 0
+      setComposeDragOver(false)
+    }
+  }, [open, composing, stopAndDiscardVoiceRecorder])
+
+  const fetchAmailImageUrl = useCallback(
+    async (image: ImageAttachment): Promise<string> => {
+      const cacheKey = image.sha256 || image.url
+      const cached = attachmentUrlCacheRef.current.get(cacheKey)
+      if (cached) return cached
+      if (!image.encryption) {
+        throw new Error('Missing encryption metadata for Agmail image attachment.')
+      }
+      const att: AmailAttachment = {
+        id: cacheKey,
+        kind: 'image',
+        url: image.url,
+        sha256: image.sha256,
+        mime: image.mime,
+        size: image.size,
+        name: image.alt,
+        width: image.width,
+        height: image.height,
+        encryption: image.encryption,
+      }
+      const blob = await amail.downloadAttachment(att)
+      const objUrl = URL.createObjectURL(blob)
+      attachmentUrlCacheRef.current.set(cacheKey, objUrl)
+      return objUrl
+    },
+    [amail],
+  )
+
+  const fetchAmailVoiceUrl = useCallback(
+    async (memo: VoiceMemoAttachment): Promise<string> => {
+      const cacheKey = memo.sha256 || memo.url
+      const cached = attachmentUrlCacheRef.current.get(cacheKey)
+      if (cached) return cached
+      if (!memo.encryption) {
+        throw new Error('Missing encryption metadata for Agmail voicemail attachment.')
+      }
+      const att: AmailAttachment = {
+        id: cacheKey,
+        kind: 'voice',
+        url: memo.url,
+        sha256: memo.sha256,
+        mime: memo.mime,
+        size: memo.size,
+        durationSec: memo.durationSec,
+        encryption: memo.encryption,
+      }
+      const blob = await amail.downloadAttachment(att)
+      const objUrl = URL.createObjectURL(blob)
+      attachmentUrlCacheRef.current.set(cacheKey, objUrl)
+      return objUrl
+    },
+    [amail],
+  )
+
+  const handleOpenAmailLightbox = useCallback(
+    (payload: LightboxImagePayload) => {
+      onOpenLightbox?.(payload)
+    },
+    [onOpenLightbox],
+  )
+
+  const handleTrustAttachmentSender = useCallback(
+    (pubkey: string, nickname: string) => {
+      engine.trustPubkey(pubkey, nickname)
+      onPlaySound?.('click')
+    },
+    [engine, onPlaySound],
+  )
+
+  const handleBlockAttachmentSender = useCallback(
+    (pubkey: string, displayHandle: string) => {
+      engine.toggleBlockPeer(pubkey, displayHandle)
+      onPlaySound?.('click')
+    },
+    [engine, onPlaySound],
+  )
+
+  const handleInspectAttachmentSender = useCallback(
+    (pubkey: string, nickname: string) => {
+      const npub = encodeNpubSafe(pubkey)
+      void navigator.clipboard
+        .writeText(npub)
+        .then(() => {
+          onPlaySound?.('click')
+          engine.pushToast('success', `Copied ${nickname || 'sender'} npub`)
+        })
+        .catch(() => {
+          engine.pushToast('error', 'Clipboard copy failed')
+        })
+    },
+    [engine, onPlaySound],
+  )
+
   const openFreshComposer = useCallback(
     (opts?: ComposerInitOpts) => {
+      stopAndDiscardVoiceRecorder()
+      revokeAllComposePreviews()
+      composeDragDepthRef.current = 0
+      setComposeDragOver(false)
+      setUploadingItems([])
+      setComposeAttachments(
+        opts?.attachments ? opts.attachments.slice(0, MAX_AMAIL_ATTACHMENTS) : [],
+      )
       setComposeDraftId(opts?.draftId)
       setComposeThreadId(opts?.threadId)
       setComposeInReplyTo(opts?.inReplyTo)
@@ -826,7 +1117,12 @@ export function AmailView({
       setComposeError(null)
       setComposing(true)
     },
-    [resolveRecipientInfo, amail.settings.defaultTtlSec],
+    [
+      resolveRecipientInfo,
+      amail.settings.defaultTtlSec,
+      stopAndDiscardVoiceRecorder,
+      revokeAllComposePreviews,
+    ],
   )
 
   openFreshComposerRef.current = openFreshComposer
@@ -884,7 +1180,9 @@ export function AmailView({
   useEffect(() => {
     if (!open) return
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
+      if (e.key !== 'Escape' || e.defaultPrevented || document.querySelector('.ag-lightbox-backdrop')) {
+        return
+      }
       if (folderPicker) {
         e.preventDefault()
         setFolderPicker(null)
@@ -1305,6 +1603,7 @@ export function AmailView({
         bccList: msg.bccRecipients ?? [],
         subject: msg.subject,
         body: msg.body,
+        attachments: msg.attachments ?? [],
         draftId: msg.id,
         threadId: msg.threadId,
         inReplyTo: msg.inReplyTo,
@@ -1477,6 +1776,7 @@ export function AmailView({
       toList: [],
       subject: nextSubject,
       body: quoted,
+      attachments: msg.attachments ?? [],
     })
   }
 
@@ -1921,9 +2221,284 @@ export function AmailView({
     return { to, cc, bcc, invalidInputs }
   }
 
+  const hasInFlightUploads = uploadingItems.some((item) => !item.error)
+
+  const handleUploadComposeFiles = async (
+    rawFiles: FileList | readonly File[],
+    forcedKind?: AmailAttachmentKind,
+  ) => {
+    const incoming = Array.from(rawFiles)
+    if (incoming.length === 0) return
+
+    const activeCount = composeAttachments.length + uploadingItems.filter((u) => !u.error).length
+    const remaining = Math.max(0, MAX_AMAIL_ATTACHMENTS - activeCount)
+    if (remaining <= 0) {
+      setComposeError(`Maximum ${MAX_AMAIL_ATTACHMENTS} attachments per message.`)
+      return
+    }
+
+    const toProcess = incoming.slice(0, remaining)
+    if (incoming.length > remaining) {
+      setComposeError(`Only ${MAX_AMAIL_ATTACHMENTS} attachments are allowed per message.`)
+    } else {
+      setComposeError(null)
+    }
+
+    onPlaySound?.('click')
+
+    for (const file of toProcess) {
+      const kind: AmailAttachmentKind =
+        forcedKind ?? (file.type.startsWith('image/') ? 'image' : 'file')
+      const tempId = `up-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const displayName = sanitizeDisplayFilename(
+        file.name,
+        file.type || (kind === 'image' ? 'image/jpeg' : undefined),
+      )
+
+      setUploadingItems((prev) => [...prev, { tempId, name: displayName, kind }])
+
+      try {
+        const uploaded = await amail.uploadAttachment(file, {
+          kind,
+          name: displayName,
+        })
+        if (uploaded.kind === 'image') {
+          try {
+            const previewUrl = URL.createObjectURL(file)
+            composeLocalPreviewsRef.current = {
+              ...composeLocalPreviewsRef.current,
+              [uploaded.id]: previewUrl,
+            }
+            setComposeLocalPreviews((prev) => ({ ...prev, [uploaded.id]: previewUrl }))
+          } catch {
+            // Ignore preview errors
+          }
+        }
+        setComposeAttachments((prev) =>
+          prev.length >= MAX_AMAIL_ATTACHMENTS ? prev : [...prev, uploaded],
+        )
+        setUploadingItems((prev) => prev.filter((item) => item.tempId !== tempId))
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Attachment upload failed.'
+        setUploadingItems((prev) =>
+          prev.map((item) => (item.tempId === tempId ? { ...item, error: msg } : item)),
+        )
+        engine.pushToast('error', 'Attachment upload failed', msg)
+      }
+    }
+  }
+
+  const handleComposeImageInputChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (files && files.length > 0) {
+      void handleUploadComposeFiles(files, 'image')
+    }
+    e.target.value = ''
+  }
+
+  const handleComposeFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (files && files.length > 0) {
+      void handleUploadComposeFiles(files)
+    }
+    e.target.value = ''
+  }
+
+  const handleComposePaste = (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items
+    if (!items || items.length === 0) return
+    const files: File[] = []
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i]
+      if (item.kind === 'file') {
+        const f = item.getAsFile()
+        if (f) files.push(f)
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault()
+      void handleUploadComposeFiles(files)
+    }
+  }
+
+  const handleComposeDragEnter = (e: ReactDragEvent<HTMLFormElement>) => {
+    if (!e.dataTransfer.types.includes('Files')) return
+    e.preventDefault()
+    composeDragDepthRef.current += 1
+    setComposeDragOver(true)
+  }
+
+  const handleComposeDragOver = (e: ReactDragEvent<HTMLFormElement>) => {
+    if (!e.dataTransfer.types.includes('Files')) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+  }
+
+  const handleComposeDragLeave = (e: ReactDragEvent<HTMLFormElement>) => {
+    if (!e.dataTransfer.types.includes('Files')) return
+    e.preventDefault()
+    composeDragDepthRef.current = Math.max(0, composeDragDepthRef.current - 1)
+    if (composeDragDepthRef.current === 0) {
+      setComposeDragOver(false)
+    }
+  }
+
+  const handleComposeDrop = (e: ReactDragEvent<HTMLFormElement>) => {
+    if (!e.dataTransfer.types.includes('Files')) return
+    e.preventDefault()
+    composeDragDepthRef.current = 0
+    setComposeDragOver(false)
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      void handleUploadComposeFiles(e.dataTransfer.files)
+    }
+  }
+
+  const handleRemoveComposeAttachment = (attachmentId: string) => {
+    onPlaySound?.('click')
+    setComposeAttachments((prev) => prev.filter((a) => a.id !== attachmentId))
+    const previewUrl = composeLocalPreviewsRef.current[attachmentId]
+    if (previewUrl) {
+      try {
+        URL.revokeObjectURL(previewUrl)
+      } catch {
+        // Ignore
+      }
+      const nextMap = { ...composeLocalPreviewsRef.current }
+      delete nextMap[attachmentId]
+      composeLocalPreviewsRef.current = nextMap
+      setComposeLocalPreviews(nextMap)
+    }
+  }
+
+  const handleDismissUploadingItem = (tempId: string) => {
+    setUploadingItems((prev) => prev.filter((u) => u.tempId !== tempId))
+  }
+
+  const handleRecordedVoicemail = async (rec: RecordedVoiceMemo) => {
+    revokeVoicePreviewUrl(rec)
+    const tempId = `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const voiceName = `voicemail-${Date.now()}.webm`
+    setUploadingItems((prev) => [...prev, { tempId, name: 'Voicemail', kind: 'voice' }])
+    try {
+      const normalizedPeaks = rec.waveform.map((v) =>
+        Math.max(0, Math.min(1, Number((v / 100).toFixed(3)))),
+      )
+      const uploaded = await amail.uploadAttachment(rec.blob, {
+        kind: 'voice',
+        name: voiceName,
+        durationSec: rec.durationSec,
+        peaks: normalizedPeaks,
+      })
+      setComposeAttachments((prev) =>
+        prev.length >= MAX_AMAIL_ATTACHMENTS ? prev : [...prev, uploaded],
+      )
+      setUploadingItems((prev) => prev.filter((item) => item.tempId !== tempId))
+      onPlaySound?.('click')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Voicemail upload failed.'
+      setUploadingItems((prev) =>
+        prev.map((item) => (item.tempId === tempId ? { ...item, error: msg } : item)),
+      )
+      engine.pushToast('error', 'Voicemail upload failed', msg)
+    }
+  }
+
+  const handleStartVoiceRecording = async () => {
+    if (isRecordingVoice) return
+    const activeCount = composeAttachments.length + uploadingItems.filter((u) => !u.error).length
+    if (activeCount >= MAX_AMAIL_ATTACHMENTS) {
+      setComposeError(`Maximum ${MAX_AMAIL_ATTACHMENTS} attachments per message.`)
+      return
+    }
+    if (!isVoiceRecordingSupported()) {
+      setComposeError('Microphone recording is not supported in this browser.')
+      return
+    }
+    setComposeError(null)
+    const controller = new VoiceRecorderController()
+    voiceRecorderRef.current = controller
+    try {
+      await controller.start({
+        onLevel: (_lvl, liveBars, elapsedSec) => {
+          setVoiceLiveBars(liveBars)
+          setVoiceElapsedSec(elapsedSec)
+        },
+        onAutoStop: (rec) => {
+          voiceRecorderRef.current = null
+          setIsRecordingVoice(false)
+          setVoiceElapsedSec(0)
+          setVoiceLiveBars([])
+          void handleRecordedVoicemail(rec)
+        },
+        onError: (err) => {
+          voiceRecorderRef.current = null
+          setIsRecordingVoice(false)
+          setVoiceElapsedSec(0)
+          setVoiceLiveBars([])
+          setComposeError(err.message)
+        },
+      })
+      setVoiceElapsedSec(0)
+      setVoiceLiveBars(Array.from({ length: 24 }, () => 10))
+      setIsRecordingVoice(true)
+      onPlaySound?.('click')
+    } catch (err) {
+      voiceRecorderRef.current = null
+      setIsRecordingVoice(false)
+      const msg =
+        err instanceof Error ? err.message : 'Unable to access microphone for voicemail.'
+      setComposeError(msg)
+      engine.pushToast('error', 'Microphone error', msg)
+    }
+  }
+
+  const handleFinishVoiceRecording = async () => {
+    const controller = voiceRecorderRef.current
+    if (!controller) return
+    voiceRecorderRef.current = null
+    setIsRecordingVoice(false)
+    const rec = await controller.stop()
+    setVoiceElapsedSec(0)
+    setVoiceLiveBars([])
+    if (rec) {
+      await handleRecordedVoicemail(rec)
+    }
+  }
+
+  const handleDownloadFileAttachment = async (att: AmailAttachment) => {
+    const dlKey = att.id || att.sha256 || att.url
+    if (fileDownloads[dlKey]?.loading) return
+    setFileDownloads((prev) => ({ ...prev, [dlKey]: { loading: true } }))
+    try {
+      const blob = await amail.downloadAttachment(att)
+      const filename = sanitizeDisplayFilename(att.name, att.mime)
+      const objectUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = filename
+      anchor.rel = 'noopener'
+      document.body.appendChild(anchor)
+      anchor.click()
+      document.body.removeChild(anchor)
+      window.setTimeout(() => {
+        try {
+          URL.revokeObjectURL(objectUrl)
+        } catch {
+          // Ignore
+        }
+      }, 10_000)
+      onPlaySound?.('click')
+      setFileDownloads((prev) => ({ ...prev, [dlKey]: { loading: false } }))
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to decrypt & download file.'
+      setFileDownloads((prev) => ({ ...prev, [dlKey]: { loading: false, error: msg } }))
+      engine.pushToast('error', 'Download failed', msg)
+    }
+  }
+
   const handleSendMail = async (e: FormEvent) => {
     e.preventDefault()
-    if (sendingMail) return
+    if (sendingMail || hasInFlightUploads || isRecordingVoice) return
     const { to, cc, bcc, invalidInputs } = collectFinalRecipients()
     if (invalidInputs.length > 0) {
       setComposeError(
@@ -1936,8 +2511,8 @@ export function AmailView({
       setComposeError('Add at least one recipient in To, CC, or BCC.')
       return
     }
-    if (!subjectDraft.trim() && !bodyDraft.trim()) {
-      setComposeError('Add a subject or message before sending.')
+    if (!subjectDraft.trim() && !bodyDraft.trim() && composeAttachments.length === 0) {
+      setComposeError('Add a subject, message, or attachment before sending.')
       return
     }
 
@@ -1952,6 +2527,7 @@ export function AmailView({
         bccPubkeys: bcc.map((r) => r.pubkey),
         subject: subjectDraft.trim() || '(no subject)',
         body: bodyDraft,
+        attachments: composeAttachments.length > 0 ? composeAttachments : undefined,
         inReplyTo: composeInReplyTo,
         threadId: composeThreadId,
         requestReadReceipt: requestReceipt,
@@ -1960,6 +2536,9 @@ export function AmailView({
       })
       if (sent) {
         onPlaySound?.('send')
+        revokeAllComposePreviews()
+        setComposeAttachments([])
+        setUploadingItems([])
         setComposing(false)
         const isReply = Boolean(composeThreadId)
         let keepCurrentSection = false
@@ -2005,6 +2584,7 @@ export function AmailView({
       bccPubkeys: bcc.map((r) => r.pubkey),
       subject: subjectDraft.trim(),
       body: bodyDraft,
+      attachments: composeAttachments.length > 0 ? composeAttachments : undefined,
       inReplyTo: composeInReplyTo,
       threadId: composeThreadId,
       requestReadReceipt: requestReceipt,
@@ -2013,6 +2593,10 @@ export function AmailView({
     setComposeDraftId(saved.id)
     onPlaySound?.('click')
     engine.pushToast('info', 'Saved draft')
+    stopAndDiscardVoiceRecorder()
+    revokeAllComposePreviews()
+    setComposeAttachments([])
+    setUploadingItems([])
     setSelectedMessageId(null)
     setComposing(false)
     setSection('drafts')
@@ -2021,6 +2605,10 @@ export function AmailView({
   const handleDiscardCompose = () => {
     onPlaySound?.('click')
     hideTooltip()
+    stopAndDiscardVoiceRecorder()
+    revokeAllComposePreviews()
+    setComposeAttachments([])
+    setUploadingItems([])
     if (composeDraftId) {
       void amail.deleteDraft(composeDraftId)
     }
@@ -2139,7 +2727,18 @@ export function AmailView({
             const targetIds = thread.sectionMessages.map((m) => m.id)
             const isUnread = thread.isUnread
             const { label: counterpartyName, colorPubkey } = formatThreadParticipants(thread)
-            const snippet = buildBodySnippet(latestMsg.body)
+            const attachmentCount = thread.conversationMessages.reduce(
+              (sum, m) => sum + (m.attachments?.length ?? 0),
+              0,
+            )
+            const rawSnippet = buildBodySnippet(latestMsg.body)
+            const snippet =
+              rawSnippet ||
+              (attachmentCount > 0
+                ? attachmentCount === 1
+                  ? 'Encrypted attachment'
+                  : `${attachmentCount} encrypted attachments`
+                : '')
             const isRestorable = msg.folder === 'trash' || msg.folder === 'archive'
             const restoreTip =
               msg.folder === 'trash' ? 'Restore from Trash' : 'Restore from Archive'
@@ -2205,6 +2804,18 @@ export function AmailView({
                 </div>
 
                 <div className="ag-amail-row-right">
+                  {attachmentCount > 0 && (
+                    <span
+                      className="ag-amail-row-attach"
+                      aria-label={`${attachmentCount} ${attachmentCount === 1 ? 'attachment' : 'attachments'}`}
+                      {...tipProps(
+                        `${attachmentCount} encrypted ${attachmentCount === 1 ? 'attachment' : 'attachments'}`,
+                      )}
+                    >
+                      <Paperclip size={11} aria-hidden="true" />
+                      {attachmentCount > 1 && <span className="mono">{attachmentCount}</span>}
+                    </span>
+                  )}
                   {latestMsg.direction === 'out' && renderStatusIcon(latestMsg.deliveryStatus)}
                   <span className="ag-amail-row-time mono">
                     {formatMailTimestamp(thread.latestSentAt)}
@@ -2613,15 +3224,167 @@ export function AmailView({
                     </div>
                   </header>
 
-                  <div className="ag-amail-msg-body">
-                    <RichMessageContent
-                      content={item.body}
-                      onTuneGeohash={(gh) => {
-                        engine.tuneGeohash(gh)
-                        onClose()
-                      }}
-                    />
-                  </div>
+                  {(item.body.trim().length > 0 || !(item.attachments && item.attachments.length > 0)) && (
+                    <div className="ag-amail-msg-body">
+                      <RichMessageContent
+                        content={item.body}
+                        onTuneGeohash={(gh) => {
+                          engine.tuneGeohash(gh)
+                          onClose()
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  {item.attachments && item.attachments.length > 0 && (() => {
+                    const msgAttachments = item.attachments
+                    const imageAtts = msgAttachments.filter((a) => a.kind === 'image')
+                    const voiceAtts = msgAttachments.filter((a) => a.kind === 'voice')
+                    const fileAtts = msgAttachments.filter((a) => a.kind === 'file')
+                    const isSenderOwn = fromIsSelf || item.direction === 'out'
+                    const isSenderTrusted = isSenderOwn || engine.isTrusted(item.fromPubkey)
+                    const canLoadVoice = isSenderOwn || engine.canLoadVoiceMemo(item.fromPubkey)
+
+                    return (
+                      <div
+                        className="ag-amail-msg-attachments"
+                        aria-label={`Encrypted attachments (${msgAttachments.length})`}
+                      >
+                        <div className="ag-amail-msg-attachments-head">
+                          <Lock size={11} aria-hidden="true" />
+                          <span>
+                            Attachments ({msgAttachments.length}) · Encrypted
+                          </span>
+                        </div>
+
+                        {imageAtts.length > 0 && (
+                          <div className="ag-amail-reader-images">
+                            {imageAtts.map((att) => (
+                              <ImageAttachmentCard
+                                key={att.id || att.sha256 || att.url}
+                                image={adaptAmailImageAttachment(att)}
+                                senderPubkey={item.fromPubkey}
+                                senderNickname={item.fromName}
+                                senderDisplayHandle={item.fromName}
+                                isTrusted={isSenderTrusted}
+                                isOwn={isSenderOwn}
+                                isDmMode={true}
+                                caption={att.name}
+                                contentFilter={engine.contentFilter}
+                                fetchImageAttachmentBlob={fetchAmailImageUrl}
+                                onTrustSender={handleTrustAttachmentSender}
+                                onInspectSender={handleInspectAttachmentSender}
+                                onBlockSender={handleBlockAttachmentSender}
+                                onOpenLightbox={handleOpenAmailLightbox}
+                              />
+                            ))}
+                          </div>
+                        )}
+
+                        {voiceAtts.length > 0 && (
+                          <div className="ag-amail-reader-voices">
+                            {voiceAtts.map((att) => {
+                              const voiceKey = att.sha256 || att.url
+                              return (
+                                <VoiceMemoPlayer
+                                  key={att.id || voiceKey}
+                                  memo={adaptAmailVoiceAttachment(att)}
+                                  memoKey={voiceKey}
+                                  senderPubkey={item.fromPubkey}
+                                  senderNickname={item.fromName}
+                                  senderDisplayHandle={item.fromName}
+                                  isTrusted={isSenderTrusted}
+                                  isAllowed={canLoadVoice}
+                                  isDmMode={true}
+                                  autoTranscribe={engine.transcription.autoTranscribe}
+                                  fetchVoiceMemoBlob={fetchAmailVoiceUrl}
+                                  memoTranscript={engine.transcription.memoTranscripts[voiceKey]}
+                                  transcriptionModelStatus={engine.transcription.modelStatus}
+                                  transcriptionDownloadProgress={
+                                    engine.transcription.downloadProgress
+                                  }
+                                  activeTranscriptionModelLabel={
+                                    engine.transcription.activeModel.label
+                                  }
+                                  onTranscribeMemo={engine.transcription.transcribeVoiceMemo}
+                                  onTrustSender={handleTrustAttachmentSender}
+                                  onInspectSender={handleInspectAttachmentSender}
+                                  onBlockSender={handleBlockAttachmentSender}
+                                />
+                              )
+                            })}
+                          </div>
+                        )}
+
+                        {fileAtts.length > 0 && (
+                          <div className="ag-amail-reader-files">
+                            {fileAtts.map((att) => {
+                              const dlKey = att.id || att.sha256 || att.url
+                              const dlState = fileDownloads[dlKey]
+                              const fileName = sanitizeDisplayFilename(att.name, att.mime)
+                              const iconKind = getFileIconKind(att.mime, fileName)
+                              const FileKindIcon =
+                                iconKind === 'audio'
+                                  ? FileAudio
+                                  : iconKind === 'video'
+                                    ? FileVideo
+                                    : iconKind === 'text'
+                                      ? FileText
+                                      : File
+
+                              return (
+                                <div key={dlKey} className="ag-amail-file-card">
+                                  <div className="ag-amail-file-card-main">
+                                    <span className="ag-amail-file-icon" aria-hidden="true">
+                                      <FileKindIcon size={17} />
+                                    </span>
+                                    <div className="ag-amail-file-meta">
+                                      <span className="ag-amail-file-name truncate" title={fileName}>
+                                        {fileName}
+                                      </span>
+                                      <div className="ag-amail-file-sub">
+                                        <span className="mono">{formatBytes(att.size)}</span>
+                                        <span className="ag-amail-file-e2ee">
+                                          <Lock size={9} aria-hidden="true" />
+                                          <span>E2EE</span>
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="ag-amail-file-dl-btn"
+                                      disabled={Boolean(dlState?.loading)}
+                                      onClick={() => void handleDownloadFileAttachment(att)}
+                                      aria-label={`Download ${fileName}`}
+                                    >
+                                      {dlState?.loading ? (
+                                        <Loader2 size={13} className="ag-spin" />
+                                      ) : (
+                                        <Download size={13} />
+                                      )}
+                                      <span>
+                                        {dlState?.loading
+                                          ? 'Decrypting…'
+                                          : dlState?.error
+                                            ? 'Retry'
+                                            : 'Download'}
+                                      </span>
+                                    </button>
+                                  </div>
+                                  {dlState?.error && (
+                                    <p className="ag-amail-file-err" role="alert">
+                                      <AlertCircle size={12} aria-hidden="true" />
+                                      <span>{dlState.error}</span>
+                                    </p>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </article>
               )
             })}
@@ -2855,166 +3618,414 @@ export function AmailView({
     )
   }
 
-  const renderCompose = () => (
-    <form className="ag-amail-compose" onSubmit={(e) => void handleSendMail(e)}>
-      <div className="ag-amail-compose-head">
-        <div className="ag-amail-compose-title-wrap">
-          <button
-            type="button"
-            className="ag-amail-ghost-btn"
-            onClick={() => {
-              onPlaySound?.('click')
-              setComposing(false)
-            }}
-          >
-            <ArrowLeft size={14} />
-            <span>Back</span>
-          </button>
-          <span className="ag-amail-compose-title">New Message</span>
-        </div>
-        <div className="ag-amail-compose-head-actions">
-          <button
-            type="button"
-            className="ag-amail-tonal-btn"
-            onClick={() => void handleSaveDraft()}
-          >
-            <span>Save Draft</span>
-          </button>
-          <button
-            type="button"
-            className="ag-amail-icon-btn danger"
-            onClick={handleDiscardCompose}
-            aria-label="Discard draft"
-            {...tipProps('Discard draft')}
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
-      </div>
+  const renderCompose = () => {
+    const activeAttachmentSlots =
+      composeAttachments.length + uploadingItems.filter((u) => !u.error).length
+    const atAttachmentCap = activeAttachmentSlots >= MAX_AMAIL_ATTACHMENTS
 
-      <div className="ag-amail-compose-scroll">
-        {/* Multi-recipient To / CC / BCC lines */}
-        <div ref={recipLinesWrapRef}>
-          {renderRecipientLine('to')}
-          {showCc && renderRecipientLine('cc')}
-          {showBcc && renderRecipientLine('bcc')}
-        </div>
-
-        {bccRecipients.length > 0 && (
-          <p className="ag-amail-bcc-note">BCC recipients stay hidden from everyone else.</p>
+    return (
+      <form
+        className={`ag-amail-compose ${composeDragOver ? 'is-drag-over' : ''}`}
+        onSubmit={(e) => void handleSendMail(e)}
+        onDragEnter={handleComposeDragEnter}
+        onDragOver={handleComposeDragOver}
+        onDragLeave={handleComposeDragLeave}
+        onDrop={handleComposeDrop}
+      >
+        {composeDragOver && (
+          <div className="ag-amail-drop-overlay" aria-hidden="true">
+            <Paperclip size={22} />
+            <span>Drop files to encrypt &amp; attach</span>
+          </div>
         )}
 
-        {/* Hairline Subject row */}
-        <div className="ag-amail-compose-line">
-          <input
-            id="ag-amail-subject"
-            type="text"
-            maxLength={180}
-            className="ag-amail-line-input subject"
-            value={subjectDraft}
-            onChange={(e) => setSubjectDraft(e.target.value)}
-            placeholder="Subject"
-            aria-label="Subject"
-          />
+        <div className="ag-amail-compose-head">
+          <div className="ag-amail-compose-title-wrap">
+            <button
+              type="button"
+              className="ag-amail-ghost-btn"
+              onClick={() => {
+                onPlaySound?.('click')
+                stopAndDiscardVoiceRecorder()
+                setComposing(false)
+              }}
+            >
+              <ArrowLeft size={14} />
+              <span>Back</span>
+            </button>
+            <span className="ag-amail-compose-title">New Message</span>
+          </div>
+          <div className="ag-amail-compose-head-actions">
+            <button
+              type="button"
+              className="ag-amail-tonal-btn"
+              disabled={hasInFlightUploads || isRecordingVoice}
+              onClick={() => void handleSaveDraft()}
+            >
+              <span>Save Draft</span>
+            </button>
+            <button
+              type="button"
+              className="ag-amail-icon-btn danger"
+              onClick={handleDiscardCompose}
+              aria-label="Discard draft"
+              {...tipProps('Discard draft')}
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
         </div>
 
-        {/* Body Write | Preview */}
-        <div className="ag-amail-body-field">
-          <div className="ag-amail-body-toolbar">
-            <div className="ag-amail-seg" role="tablist" aria-label="Editor mode">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={composeTab === 'write'}
-                className={composeTab === 'write' ? 'active' : ''}
-                onClick={() => setComposeTab('write')}
-              >
-                Write
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={composeTab === 'preview'}
-                className={composeTab === 'preview' ? 'active' : ''}
-                onClick={() => setComposeTab('preview')}
-              >
-                Preview
-              </button>
+        <div className="ag-amail-compose-scroll">
+          {/* Multi-recipient To / CC / BCC lines */}
+          <div ref={recipLinesWrapRef}>
+            {renderRecipientLine('to')}
+            {showCc && renderRecipientLine('cc')}
+            {showBcc && renderRecipientLine('bcc')}
+          </div>
+
+          {bccRecipients.length > 0 && (
+            <p className="ag-amail-bcc-note">BCC recipients stay hidden from everyone else.</p>
+          )}
+
+          {/* Hairline Subject row */}
+          <div className="ag-amail-compose-line">
+            <input
+              id="ag-amail-subject"
+              type="text"
+              maxLength={180}
+              className="ag-amail-line-input subject"
+              value={subjectDraft}
+              onChange={(e) => setSubjectDraft(e.target.value)}
+              placeholder="Subject"
+              aria-label="Subject"
+            />
+          </div>
+
+          {/* Body Write | Preview */}
+          <div className="ag-amail-body-field">
+            <div className="ag-amail-body-toolbar">
+              <div className="ag-amail-seg" role="tablist" aria-label="Editor mode">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={composeTab === 'write'}
+                  className={composeTab === 'write' ? 'active' : ''}
+                  onClick={() => setComposeTab('write')}
+                >
+                  Write
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={composeTab === 'preview'}
+                  className={composeTab === 'preview' ? 'active' : ''}
+                  onClick={() => setComposeTab('preview')}
+                >
+                  Preview
+                </button>
+              </div>
+            </div>
+
+            {composeTab === 'write' ? (
+              <textarea
+                className="ag-amail-textarea"
+                rows={9}
+                value={bodyDraft}
+                onPaste={handleComposePaste}
+                onChange={(e) => {
+                  setBodyDraft(e.target.value)
+                  if (composeError) setComposeError(null)
+                }}
+                placeholder="Write a message… (drop files or paste images to attach)"
+                aria-label="Email body"
+              />
+            ) : (
+              <div className="ag-amail-preview-box">
+                {bodyDraft.trim() ? (
+                  <RichMessageContent content={bodyDraft} />
+                ) : (
+                  <p className="ag-amail-preview-empty">Nothing to preview</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Options Strip */}
+          <div className="ag-amail-compose-opts">
+            <label className="ag-amail-check-row">
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={requestReceipt}
+                onChange={() => setRequestReceipt((v) => !v)}
+              />
+              <span>Read receipt</span>
+            </label>
+
+            <div className="ag-amail-ttl-group">
+              <span className="ag-amail-ttl-label">Expires</span>
+              <div className="ag-amail-seg" role="group" aria-label="Message lifetime">
+                {TTL_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.sec}
+                    type="button"
+                    aria-pressed={composeTtlSec === opt.sec}
+                    className={composeTtlSec === opt.sec ? 'active' : ''}
+                    onClick={() => setComposeTtlSec(opt.sec)}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          {composeTab === 'write' ? (
-            <textarea
-              className="ag-amail-textarea"
-              rows={9}
-              value={bodyDraft}
-              onChange={(e) => {
-                setBodyDraft(e.target.value)
-                if (composeError) setComposeError(null)
-              }}
-              placeholder="Write a message…"
-              aria-label="Email body"
-            />
-          ) : (
-            <div className="ag-amail-preview-box">
-              {bodyDraft.trim() ? (
-                <RichMessageContent content={bodyDraft} />
-              ) : (
-                <p className="ag-amail-preview-empty">Nothing to preview</p>
-              )}
-            </div>
+          {composeError && (
+            <p className="ag-field-hint ag-field-hint-danger" role="alert">
+              {composeError}
+            </p>
           )}
         </div>
 
-        {/* Options Strip */}
-        <div className="ag-amail-compose-opts">
-          <label className="ag-amail-check-row">
-            <input
-              type="checkbox"
-              className="ag-switch"
-              checked={requestReceipt}
-              onChange={() => setRequestReceipt((v) => !v)}
-            />
-            <span>Read receipt</span>
-          </label>
+        {/* Inline Live Voicemail Recorder Bar */}
+        {isRecordingVoice && (
+          <div
+            className="ag-amail-voice-rec-bar"
+            role="region"
+            aria-label="Recording encrypted voicemail"
+          >
+            <div className="ag-amail-voice-rec-left">
+              <span className="ag-amail-voice-rec-dot" aria-hidden="true" />
+              <span className="ag-amail-voice-rec-timer mono">
+                {formatVoiceDuration(voiceElapsedSec)}
+              </span>
+              <div className="ag-amail-voice-rec-bars" aria-hidden="true">
+                {(voiceLiveBars.length > 0 ? voiceLiveBars.slice(-24) : [10, 14, 10]).map(
+                  (bar, idx) => (
+                    <span
+                      key={idx}
+                      className="ag-amail-voice-rec-bar-seg"
+                      style={{ height: `${Math.max(18, Math.min(100, bar))}%` }}
+                    />
+                  ),
+                )}
+              </div>
+            </div>
 
-          <div className="ag-amail-ttl-group">
-            <span className="ag-amail-ttl-label">Expires</span>
-            <div className="ag-amail-seg" role="group" aria-label="Message lifetime">
-              {TTL_OPTIONS.map((opt) => (
-                <button
-                  key={opt.sec}
-                  type="button"
-                  aria-pressed={composeTtlSec === opt.sec}
-                  className={composeTtlSec === opt.sec ? 'active' : ''}
-                  onClick={() => setComposeTtlSec(opt.sec)}
-                >
-                  {opt.label}
-                </button>
-              ))}
+            <div className="ag-amail-voice-rec-actions">
+              <button
+                type="button"
+                className="ag-amail-icon-btn danger"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  stopAndDiscardVoiceRecorder()
+                }}
+                aria-label="Cancel voicemail recording"
+                title="Cancel recording"
+              >
+                <X size={14} />
+              </button>
+              <button
+                type="button"
+                className="ag-amail-tonal-btn accent"
+                onClick={() => void handleFinishVoiceRecording()}
+                aria-label="Attach voicemail"
+                title="Attach voicemail"
+              >
+                <Check size={14} />
+                <span>Attach Voicemail</span>
+              </button>
             </div>
           </div>
-        </div>
-
-        {composeError && (
-          <p className="ag-field-hint ag-field-hint-danger" role="alert">
-            {composeError}
-          </p>
         )}
-      </div>
 
-      <div className="ag-amail-compose-footer">
-        <button
-          type="submit"
-          className="ag-amail-action-primary"
-          disabled={sendingMail}
-        >
-          <Send size={14} />
-          <span>{sendingMail ? 'Sending…' : 'Send'}</span>
-        </button>
-      </div>
-    </form>
-  )
+        {/* Compose Attachments Tray */}
+        {(composeAttachments.length > 0 || uploadingItems.length > 0) && (
+          <div className="ag-amail-compose-attachments" aria-label="Pending attachments">
+            {composeAttachments.map((att) => {
+              const localThumb = att.kind === 'image' ? composeLocalPreviews[att.id] : undefined
+              const displayName =
+                att.kind === 'voice'
+                  ? `Voicemail · ${formatVoiceDuration(att.durationSec ?? 0)}`
+                  : sanitizeDisplayFilename(att.name, att.mime)
+              const fileIconKind =
+                att.kind === 'file' ? getFileIconKind(att.mime, att.name) : 'file'
+              const FileKindIcon =
+                fileIconKind === 'audio'
+                  ? FileAudio
+                  : fileIconKind === 'video'
+                    ? FileVideo
+                    : fileIconKind === 'text'
+                      ? FileText
+                      : File
+
+              return (
+                <div
+                  key={att.id}
+                  className={`ag-amail-attach-chip kind-${att.kind}`}
+                >
+                  {att.kind === 'image' ? (
+                    localThumb ? (
+                      <img
+                        src={localThumb}
+                        alt=""
+                        className="ag-amail-attach-thumb"
+                      />
+                    ) : (
+                      <span className="ag-amail-attach-chip-icon" aria-hidden="true">
+                        <ImageIcon size={14} />
+                      </span>
+                    )
+                  ) : att.kind === 'voice' ? (
+                    <span className="ag-amail-attach-chip-icon voice" aria-hidden="true">
+                      <Mic size={14} />
+                    </span>
+                  ) : (
+                    <span className="ag-amail-attach-chip-icon" aria-hidden="true">
+                      <FileKindIcon size={14} />
+                    </span>
+                  )}
+
+                  <div className="ag-amail-attach-chip-copy">
+                    <span className="ag-amail-attach-chip-name truncate" title={displayName}>
+                      {displayName}
+                    </span>
+                    <span className="ag-amail-attach-chip-size mono">
+                      {formatBytes(att.size)} · E2EE
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="ag-amail-attach-chip-rm"
+                    onClick={() => handleRemoveComposeAttachment(att.id)}
+                    aria-label={`Remove ${displayName}`}
+                    title="Remove attachment"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )
+            })}
+
+            {uploadingItems.map((up) => (
+              <div
+                key={up.tempId}
+                className={`ag-amail-attach-chip ${up.error ? 'is-error' : 'is-uploading'}`}
+                title={up.error || `Encrypting & uploading ${up.name}…`}
+              >
+                <span className="ag-amail-attach-chip-icon" aria-hidden="true">
+                  {up.error ? (
+                    <AlertCircle size={14} />
+                  ) : (
+                    <Loader2 size={14} className="ag-spin" />
+                  )}
+                </span>
+                <div className="ag-amail-attach-chip-copy">
+                  <span className="ag-amail-attach-chip-name truncate">{up.name}</span>
+                  <span className="ag-amail-attach-chip-size">
+                    {up.error ? 'Upload failed' : 'Encrypting…'}
+                  </span>
+                </div>
+                {up.error && (
+                  <button
+                    type="button"
+                    className="ag-amail-attach-chip-rm"
+                    onClick={() => handleDismissUploadingItem(up.tempId)}
+                    aria-label={`Dismiss failed upload ${up.name}`}
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="ag-amail-compose-footer">
+          <div className="ag-amail-compose-attach-btns">
+            <input
+              ref={composeImageInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{ display: 'none' }}
+              onChange={handleComposeImageInputChange}
+            />
+            <input
+              ref={composeFileInputRef}
+              type="file"
+              multiple
+              style={{ display: 'none' }}
+              onChange={handleComposeFileInputChange}
+            />
+
+            <button
+              type="button"
+              className="ag-amail-icon-btn"
+              disabled={atAttachmentCap || isRecordingVoice}
+              onClick={() => composeImageInputRef.current?.click()}
+              aria-label="Attach image"
+              title="Attach image"
+            >
+              <ImageIcon size={16} />
+            </button>
+
+            <button
+              type="button"
+              className={`ag-amail-icon-btn ${isRecordingVoice ? 'active recording' : ''}`}
+              disabled={!isRecordingVoice && atAttachmentCap}
+              onClick={() => {
+                if (isRecordingVoice) {
+                  void handleFinishVoiceRecording()
+                } else {
+                  void handleStartVoiceRecording()
+                }
+              }}
+              aria-label={isRecordingVoice ? 'Stop and attach voicemail' : 'Record voicemail'}
+              aria-pressed={isRecordingVoice}
+              title={isRecordingVoice ? 'Stop and attach voicemail' : 'Record voicemail'}
+            >
+              <Mic size={16} />
+            </button>
+
+            <button
+              type="button"
+              className="ag-amail-icon-btn"
+              disabled={atAttachmentCap || isRecordingVoice}
+              onClick={() => composeFileInputRef.current?.click()}
+              aria-label="Attach file"
+              title="Attach file (any type)"
+            >
+              <Paperclip size={16} />
+            </button>
+
+            {composeAttachments.length > 0 && (
+              <span className="ag-amail-attach-counter mono">
+                {composeAttachments.length}/{MAX_AMAIL_ATTACHMENTS}
+              </span>
+            )}
+          </div>
+
+          <button
+            type="submit"
+            className="ag-amail-action-primary"
+            disabled={sendingMail || hasInFlightUploads || isRecordingVoice}
+          >
+            <Send size={14} />
+            <span>
+              {sendingMail
+                ? 'Sending…'
+                : hasInFlightUploads
+                  ? 'Uploading…'
+                  : 'Send'}
+            </span>
+          </button>
+        </div>
+      </form>
+    )
+  }
 
   const renderContacts = () => (
     <div className="ag-amail-section-scroll">

@@ -2109,6 +2109,7 @@ export function App() {
                 initialSection={amailState.section}
                 initialComposeTo={amailState.composeTo}
                 onOpenScanner={handleOpenScanner}
+                onOpenLightbox={setLightboxImage}
                 onPlaySound={playSound}
               />
             </Suspense>
