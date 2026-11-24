@@ -12,7 +12,6 @@ import {
   Search,
   ShieldCheck,
   Users,
-  Video,
   Waves,
   Zap,
 } from 'lucide-react'
@@ -121,7 +120,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     !isDm && !isServer && !inThisGeoCall && geoCallCount >= engine.calls.maxParticipants
   const isDisconnected = engine.connectedRelayCount === 0
 
-  const handleDmCallClick = (media: 'audio' | 'video') => {
+  const handleDmCallClick = () => {
     if (!dmThread) return
     if (inThisDmCall) {
       onFocusActiveCall?.()
@@ -135,7 +134,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
       )
       return
     }
-    void engine.calls.startDmCall(dmThread.peerPubkey, media, dmThread.peerNickname)
+    void engine.calls.startDmCall(dmThread.peerPubkey, 'audio', dmThread.peerNickname)
   }
 
   const handleServerCallClick = () => {
@@ -155,7 +154,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     void engine.calls.joinServerCall(activeServer.id, 'audio')
   }
 
-  const handleGeoCallClick = (media: 'audio' | 'video') => {
+  const handleGeoCallClick = () => {
     if (inThisGeoCall) {
       onFocusActiveCall?.()
       return
@@ -168,7 +167,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
       )
       return
     }
-    void engine.calls.joinGeoCall(engine.activeGeohash, media)
+    void engine.calls.joinGeoCall(engine.activeGeohash, 'audio')
   }
 
   const onlineSubtitle = isTopicBitchat
@@ -357,33 +356,17 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
               <button
                 type="button"
                 className={`ag-circle-btn ${inThisDmCall ? 'active-ok' : ''}`}
-                onClick={() => handleDmCallClick('audio')}
+                onClick={handleDmCallClick}
                 title={
                   inThisDmCall
-                    ? 'Focus active voice call'
+                    ? 'Focus active call'
                     : dmPeerTrusted
-                      ? `Voice call ${dmThread.peerDisplayHandle}`
+                      ? `Call ${dmThread.peerDisplayHandle}`
                       : `Trust ${dmThread.peerDisplayHandle} first to unlock calls`
                 }
-                aria-label={inThisDmCall ? 'Focus active voice call' : 'Start voice call'}
+                aria-label={inThisDmCall ? 'Focus active call' : 'Start call'}
               >
                 <Phone size={18} />
-              </button>
-
-              <button
-                type="button"
-                className={`ag-circle-btn ${inThisDmCall && activeCall?.mediaType === 'video' ? 'active-ok' : ''}`}
-                onClick={() => handleDmCallClick('video')}
-                title={
-                  inThisDmCall
-                    ? 'Focus active video call'
-                    : dmPeerTrusted
-                      ? `Video call ${dmThread.peerDisplayHandle}`
-                      : `Trust ${dmThread.peerDisplayHandle} first to unlock calls`
-                }
-                aria-label={inThisDmCall ? 'Focus active video call' : 'Start video call'}
-              >
-                <Video size={18} />
               </button>
 
               <button
@@ -505,7 +488,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
               <button
                 type="button"
                 className={`ag-header-call-btn ${inThisGeoCall || geoCallCount > 0 ? 'has-peers' : ''} ${inThisGeoCall ? 'active-ok' : ''}`}
-                onClick={() => handleGeoCallClick('audio')}
+                onClick={handleGeoCallClick}
                 disabled={isGeoCallFull}
                 title={
                   inThisGeoCall
@@ -513,15 +496,15 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                     : isGeoCallFull
                       ? `${isTopicBitchat ? 'Topic Bitchat' : 'Geo Bitchat'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
                       : geoCallCount > 0
-                        ? `Join ${bitchatLabel} Voice Call (${geoCallCount}/${engine.calls.maxParticipants})`
-                        : `Start Voice Call in ${bitchatLabel}`
+                        ? `Join ${bitchatLabel} Call (${geoCallCount}/${engine.calls.maxParticipants})`
+                        : `Start Call in ${bitchatLabel}`
                 }
                 aria-label={
                   inThisGeoCall
-                    ? 'Focus active voice call'
+                    ? 'Focus active call'
                     : geoCallCount > 0
-                      ? `Join voice call (${geoCallCount} of ${engine.calls.maxParticipants})`
-                      : `Start voice call in ${bitchatLabel}`
+                      ? `Join call (${geoCallCount} of ${engine.calls.maxParticipants})`
+                      : `Start call in ${bitchatLabel}`
                 }
               >
                 <Phone size={17} />
@@ -530,29 +513,6 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                     {geoCallCount}/{engine.calls.maxParticipants}
                   </span>
                 )}
-              </button>
-
-              <button
-                type="button"
-                className={`ag-circle-btn ${inThisGeoCall && activeCall?.mediaType === 'video' ? 'active-ok' : ''}`}
-                onClick={() => handleGeoCallClick('video')}
-                disabled={isGeoCallFull}
-                title={
-                  inThisGeoCall
-                    ? `Focus active ${bitchatLabel} call`
-                    : isGeoCallFull
-                      ? `${isTopicBitchat ? 'Topic Bitchat' : 'Geo Bitchat'} call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
-                      : geoCallCount > 0
-                        ? `Join ${bitchatLabel} Video Call (${geoCallCount}/${engine.calls.maxParticipants})`
-                        : `Start Video Call in ${bitchatLabel}`
-                }
-                aria-label={
-                  inThisGeoCall
-                    ? 'Focus active video call'
-                    : `Start video call in ${bitchatLabel}`
-                }
-              >
-                <Video size={18} />
               </button>
 
               <button
