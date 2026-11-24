@@ -79,6 +79,7 @@ export interface ContentFilterEngine {
   webGpuSupported: boolean
 
   preloadModel: (opts?: PreloadModelOptions) => Promise<boolean>
+  cancelDownload: () => void
   clearModelCache: () => Promise<void>
   clearVerdictCache: () => void
   cachedVerdictCount: number

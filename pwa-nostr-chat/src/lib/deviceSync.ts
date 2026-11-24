@@ -17,12 +17,14 @@ import type {
   DeviceSyncScopeDigest,
   DeviceSyncScopeRequest,
   DeviceSyncStatePacket,
+  DeviceSyncWalletChunkPacket,
   DeviceSyncWirePacket,
   SyncedBlockedRecord,
   SyncedPeerNoteRecord,
   SyncedRecentMessagesTail,
   SyncedServerRecord,
   SyncedTrustedRecord,
+  SyncedWalletState,
 } from '../types/deviceSync.ts'
 import type {
   DmMessage,
@@ -838,14 +840,16 @@ export function computeJsonDigest(value: unknown): string {
 }
 
 /**
- * Fits a CRDT checkpoint (plus optional Amail snapshot & bounded recent messages tail)
- * strictly within `MAX_NIP44_CHUNK_BYTES` so NIP-44 encryption can never overflow.
+ * Fits a CRDT checkpoint (plus high-priority linked Agwallet snapshot, optional Amail snapshot,
+ * and bounded recent messages tail) strictly within `MAX_NIP44_CHUNK_BYTES` so NIP-44 encryption
+ * can never overflow.
  */
 export function fitCheckpointStateWithinBudget(
   crdt: DeviceSyncCrdtState,
   amailSnapshot: { updatedAt: number; hash: string; payload: unknown } | null,
   recentMessages?: SyncedRecentMessagesTail,
-  maxBytes = MAX_NIP44_CHUNK_BYTES
+  maxBytes = MAX_NIP44_CHUNK_BYTES,
+  walletSnapshot?: SyncedWalletState | null
 ): DeviceSyncCrdtState {
   const base: DeviceSyncCrdtState = {
     v: 1,
@@ -859,8 +863,10 @@ export function fitCheckpointStateWithinBudget(
     peerNotes: crdt.peerNotes ?? {},
   }
 
+  // 1. Full (`base + wallet + amail + recentMessages`)
   let candidate: DeviceSyncCrdtState = {
     ...base,
+    ...(walletSnapshot ? { wallet: walletSnapshot } : {}),
     ...(amailSnapshot ? { amail: amailSnapshot } : {}),
     ...(recentMessages ? { recentMessages } : {}),
   }
@@ -868,7 +874,7 @@ export function fitCheckpointStateWithinBudget(
     return candidate
   }
 
-  // Step 1: Trim recentMessages to compact recent slice if oversized
+  // 2. `base + wallet + amail + trimmedTail`
   if (recentMessages) {
     const trimmedTail: SyncedRecentMessagesTail = {}
     if (recentMessages.dm) {
@@ -895,6 +901,7 @@ export function fitCheckpointStateWithinBudget(
     }
     candidate = {
       ...base,
+      ...(walletSnapshot ? { wallet: walletSnapshot } : {}),
       ...(amailSnapshot ? { amail: amailSnapshot } : {}),
       recentMessages: trimmedTail,
     }
@@ -903,7 +910,23 @@ export function fitCheckpointStateWithinBudget(
     }
   }
 
-  // Step 2: Keep CRDT + Amail (omit recentMessages; live sibling sync will transfer full deltas)
+  // 3. `base + wallet + amail` (drop recentMessages; live sibling sync transfers message deltas)
+  if (walletSnapshot && amailSnapshot) {
+    candidate = { ...base, wallet: walletSnapshot, amail: amailSnapshot }
+    if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
+      return candidate
+    }
+  }
+
+  // 4. `base + wallet` (high priority for offline Agwallet catch-up; Amail transfers via sync-amail-chunk)
+  if (walletSnapshot) {
+    candidate = { ...base, wallet: walletSnapshot }
+    if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
+      return candidate
+    }
+  }
+
+  // 5. Fallback if wallet itself exceeds budget (live sync-wallet-chunk transfers full wallet cleanly)
   if (amailSnapshot) {
     candidate = { ...base, amail: amailSnapshot }
     if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
@@ -911,7 +934,6 @@ export function fitCheckpointStateWithinBudget(
     }
   }
 
-  // Step 3: Keep CRDT + recentMessages without Amail (Amail transfers via chunked sync-amail-chunk)
   if (recentMessages) {
     const tinyTail: SyncedRecentMessagesTail = {}
     if (recentMessages.dm) {
@@ -930,7 +952,7 @@ export function fitCheckpointStateWithinBudget(
     }
   }
 
-  // Step 4: Pure core CRDT state
+  // Pure core CRDT state
   return base
 }
 
@@ -1029,6 +1051,50 @@ export function buildAmailChunkPackets(params: {
     targetDeviceId: params.targetDeviceId,
     ts,
     transferId: params.transferId,
+    updatedAt: params.updatedAt,
+    hash: params.hash,
+    chunkIndex: idx,
+    totalChunks,
+    data,
+  }))
+}
+
+/**
+ * Splits a serialized Agwallet sync snapshot JSON string into `< 48 KB` NIP-44-safe chunk packets.
+ */
+export function buildWalletChunkPackets(params: {
+  deviceId: string
+  targetDeviceId: string
+  transferId: string
+  fingerprint: string
+  updatedAt: number
+  hash: string
+  payload: unknown
+  maxChunkChars?: number
+}): DeviceSyncWalletChunkPacket[] {
+  const maxChunkChars = params.maxChunkChars ?? 28_000
+  let serialized: string
+  try {
+    serialized = JSON.stringify(params.payload)
+  } catch {
+    return []
+  }
+  if (!serialized) return []
+
+  const slices: string[] = []
+  for (let i = 0; i < serialized.length; i += maxChunkChars) {
+    slices.push(serialized.slice(i, i + maxChunkChars))
+  }
+  const totalChunks = slices.length
+  const ts = Date.now()
+  return slices.map((data, idx) => ({
+    v: 1,
+    type: 'sync-wallet-chunk',
+    deviceId: params.deviceId,
+    targetDeviceId: params.targetDeviceId,
+    ts,
+    transferId: params.transferId,
+    fingerprint: params.fingerprint,
     updatedAt: params.updatedAt,
     hash: params.hash,
     chunkIndex: idx,
@@ -1284,6 +1350,24 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     }
   }
 
+  let wallet: DeviceSyncCrdtState['wallet'] = undefined
+  if (
+    isRecord(raw.wallet) &&
+    typeof raw.wallet.hash === 'string' &&
+    typeof raw.wallet.fingerprint === 'string' &&
+    raw.wallet.fingerprint.trim().length > 0
+  ) {
+    wallet = {
+      updatedAt:
+        typeof raw.wallet.updatedAt === 'number' && Number.isFinite(raw.wallet.updatedAt)
+          ? raw.wallet.updatedAt
+          : 0,
+      fingerprint: raw.wallet.fingerprint.trim(),
+      hash: raw.wallet.hash,
+      payload: raw.wallet.payload,
+    }
+  }
+
   let amail: DeviceSyncCrdtState['amail'] = undefined
   if (isRecord(raw.amail) && typeof raw.amail.hash === 'string') {
     amail = {
@@ -1311,6 +1395,7 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     lud16,
     nickname,
     peerNotes,
+    ...(wallet ? { wallet } : {}),
     ...(amail ? { amail } : {}),
     ...(recentMessages ? { recentMessages } : {}),
   }
@@ -1370,6 +1455,23 @@ export async function parseDeviceSyncEphemeralEvent(
                   hash: digests.amail.hash,
                 }
               : null,
+          wallet:
+            isRecord(digests.wallet) &&
+            Boolean(digests.wallet.initialized) &&
+            typeof digests.wallet.fingerprint === 'string' &&
+            digests.wallet.fingerprint.trim().length > 0 &&
+            typeof digests.wallet.hash === 'string'
+              ? {
+                  initialized: true,
+                  fingerprint: digests.wallet.fingerprint.trim(),
+                  updatedAt:
+                    typeof digests.wallet.updatedAt === 'number' &&
+                    Number.isFinite(digests.wallet.updatedAt)
+                      ? digests.wallet.updatedAt
+                      : 0,
+                  hash: digests.wallet.hash,
+                }
+              : null,
         },
       } satisfies DeviceSyncHelloPacket
     }
@@ -1410,6 +1512,7 @@ export async function parseDeviceSyncEphemeralEvent(
         ts: typeof parsed.ts === 'number' ? parsed.ts : Date.now(),
         scopes,
         wantAmail: Boolean(parsed.wantAmail),
+        wantWallet: Boolean(parsed.wantWallet),
       } satisfies DeviceSyncMsgReqPacket
     }
 
@@ -1472,6 +1575,35 @@ export async function parseDeviceSyncEphemeralEvent(
         totalChunks: parsed.totalChunks,
         data: parsed.data,
       } satisfies DeviceSyncAmailChunkPacket
+    }
+
+    case 'sync-wallet-chunk': {
+      if (
+        typeof parsed.targetDeviceId !== 'string' ||
+        typeof parsed.transferId !== 'string' ||
+        typeof parsed.fingerprint !== 'string' ||
+        !parsed.fingerprint.trim() ||
+        typeof parsed.hash !== 'string' ||
+        typeof parsed.data !== 'string' ||
+        typeof parsed.chunkIndex !== 'number' ||
+        typeof parsed.totalChunks !== 'number'
+      ) {
+        return null
+      }
+      return {
+        v: 1,
+        type: 'sync-wallet-chunk',
+        deviceId: parsed.deviceId,
+        targetDeviceId: parsed.targetDeviceId,
+        ts: typeof parsed.ts === 'number' ? parsed.ts : Date.now(),
+        transferId: parsed.transferId,
+        fingerprint: parsed.fingerprint.trim(),
+        updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+        hash: parsed.hash,
+        chunkIndex: parsed.chunkIndex,
+        totalChunks: parsed.totalChunks,
+        data: parsed.data,
+      } satisfies DeviceSyncWalletChunkPacket
     }
 
     default:

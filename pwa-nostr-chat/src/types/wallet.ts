@@ -1,4 +1,5 @@
 import type { Event as NostrEvent } from 'nostr-tools'
+import type { WalletSyncExportInfo } from './deviceSync.ts'
 
 /* ==========================================================================
    Cashu Ecash Wallet, Boltz v2 On-Chain Swaps & NIP-57 Lightning Zaps Types
@@ -219,12 +220,32 @@ export interface BoltzSwapRecord {
 export interface WalletBackupPayload {
   version: 1
   exportedAt: number
+  updatedAt?: number
   activeMintUrl: string
   mnemonic?: string
   privateKeyHex?: string
   keysetCounters?: Record<string, number>
   mints: CashuMintAccount[]
   proofsByMint: Record<string, StoredCashuProof[]>
+  spentProofSecrets?: string[]
+  history: WalletTransaction[]
+  sentTokens: CashuSentTokenRecord[]
+  boltzSwaps: BoltzSwapRecord[]
+  boltzApiUrl?: string
+}
+
+export interface WalletSyncPayload {
+  version: 1
+  initialized: boolean
+  fingerprint: string
+  updatedAt: number
+  activeMintUrl: string
+  mnemonic?: string
+  privateKeyHex?: string
+  keysetCounters?: Record<string, number>
+  mints: CashuMintAccount[]
+  proofsByMint: Record<string, StoredCashuProof[]>
+  spentProofSecrets: string[]
   history: WalletTransaction[]
   sentTokens: CashuSentTokenRecord[]
   boltzSwaps: BoltzSwapRecord[]
@@ -523,6 +544,10 @@ export interface WalletEngine {
   ) => Promise<BoltzSwapRecord>
   refreshBoltzSwap: (swapId: string) => Promise<BoltzSwapRecord | null>
   exportBoltzSwapRescueJson: (swapId: string) => string | null
+
+  // Encrypted multi-device sync
+  exportSyncState: () => WalletSyncExportInfo | null
+  mergeSyncState: (remote: unknown) => boolean
 
   // Backup, restore & Panic Wipe
   exportBackupJson: () => string

@@ -262,6 +262,7 @@ export function useTranscription(
   const activeMemoKeyRef = useRef<string | null>(null)
   const reqSeqRef = useRef<number>(0)
   const loadedModelKeyRef = useRef<string | null>(null)
+  const downloadCancelledRef = useRef<boolean>(false)
   const activeCallRef = useRef<ActiveCallSession | null>(activeCall)
   activeCallRef.current = activeCall
   const lastCallIdRef = useRef<string | null>(activeCall?.callId ?? null)
@@ -603,6 +604,7 @@ export function useTranscription(
   }, [clearIdleTeardownTimer, handleWorkerMessage])
 
   const preloadModel = useCallback(async (): Promise<boolean> => {
+    downloadCancelledRef.current = false
     const model = activeModelRef.current
     const targetKey = loadedKeyForModel(model)
     if (loadedModelKeyRef.current === targetKey && workerRef.current) {
@@ -638,6 +640,38 @@ export function useTranscription(
       return false
     }
   }, [ensureWorker, nextRequestId])
+
+  const cancelDownload = useCallback(() => {
+    downloadCancelledRef.current = true
+    clearMemoQueue()
+    if (liveCaptionsEnabledRef.current) {
+      liveCaptionsEnabledRef.current = false
+      setLiveCaptionsEnabled(false)
+      stopCapturer()
+    }
+    terminateWorker()
+    setMemoTranscripts((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const [key, entry] of Object.entries(next)) {
+        if (entry.status === 'loading') {
+          delete next[key]
+          changed = true
+        }
+      }
+      if (changed) {
+        memoTranscriptsRef.current = next
+        return next
+      }
+      return prev
+    })
+    setModelStatus('idle')
+    setDownloadProgress(0)
+    setDownloadFile(null)
+    setRuntimeDevice(null)
+    setModelError(null)
+    pushToastRef.current('info', 'Transcription model download cancelled')
+  }, [clearMemoQueue, stopCapturer, terminateWorker])
 
   const setActiveModelId = useCallback(
     (modelId: string) => {
@@ -989,7 +1023,9 @@ export function useTranscription(
         const ok = await preloadModel()
         if (!ok) {
           throw new Error(
-            modelErrorRef.current || `Failed to load ${model.label} for transcription.`
+            downloadCancelledRef.current
+              ? 'Transcription model download cancelled.'
+              : modelErrorRef.current || `Failed to load ${model.label} for transcription.`
           )
         }
       }
@@ -1323,6 +1359,7 @@ export function useTranscription(
   }, [])
 
   const resetAllTranscription = useCallback(() => {
+    downloadCancelledRef.current = false
     clearMemoQueue()
     clearMemoTranscriptCache()
     persistedTranscriptsRef.current = {}
@@ -1366,6 +1403,7 @@ export function useTranscription(
       runtimeDevice,
       modelError,
       preloadModel,
+      cancelDownload,
       clearModelCache,
       memoTranscripts,
       cachedTranscriptCount,
@@ -1396,6 +1434,7 @@ export function useTranscription(
       runtimeDevice,
       modelError,
       preloadModel,
+      cancelDownload,
       clearModelCache,
       memoTranscripts,
       cachedTranscriptCount,

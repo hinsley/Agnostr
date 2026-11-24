@@ -52,6 +52,7 @@ interface PersistedOutgoingRecord extends OutgoingOriginalEntry {
 
 interface PendingLoadRequest {
   kind: 'load'
+  modelKey: TranslatorModelKey
   modelId: string
   resolve: (ok: boolean) => void
 }
@@ -67,6 +68,7 @@ interface PendingMessageRequest {
 
 interface PendingOutgoingRequest {
   kind: 'outgoing'
+  modelKey: TranslatorModelKey
   originalText: string
   resolve: (text: string) => void
   reject: (err: Error) => void
@@ -491,6 +493,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
   const reqSeqRef = useRef<number>(0)
   const idleTeardownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const persistRequestedRef = useRef<boolean>(false)
+  const downloadCancelledRef = useRef<boolean>(false)
 
   const clearIdleTeardownTimer = useCallback(() => {
     if (idleTeardownTimerRef.current !== null) {
@@ -957,6 +960,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
   }, [clearIdleTeardownTimer, handleWorkerMessage])
 
   const preloadModel = useCallback(async (): Promise<boolean> => {
+    downloadCancelledRef.current = false
     const model = activeModelRef.current
     const targetModelId =
       model.key === 'opus'
@@ -982,6 +986,16 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       return await loadPromiseRef.current.promise
     }
 
+    // If a worker already has active requests for this same model key (e.g. a translate job
+    // is already loading the needed Opus pair), do not post a competing `{ type: 'load' }` job.
+    if (workerRef.current && pendingRef.current.size > 0) {
+      for (const req of pendingRef.current.values()) {
+        if (req.modelKey === model.key) {
+          return true
+        }
+      }
+    }
+
     void requestPersistentStorage()
 
     const promise = (async (): Promise<boolean> => {
@@ -997,6 +1011,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         return await new Promise<boolean>((resolve) => {
           pendingRef.current.set(requestId, {
             kind: 'load',
+            modelKey: model.key,
             modelId: targetModelId,
             resolve,
           })
@@ -1026,6 +1041,34 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
     loadPromiseRef.current = { modelKey: model.key, promise }
     return await promise
   }, [ensureWorker, nextRequestId, requestPersistentStorage, scheduleIdleWorkerTeardown])
+
+  const cancelDownload = useCallback(() => {
+    downloadCancelledRef.current = true
+    terminateWorker()
+    setTranslations((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const [key, entry] of Object.entries(next)) {
+        if (entry.status === 'loading') {
+          delete next[key]
+          changed = true
+        }
+      }
+      if (changed) {
+        translationsRef.current = next
+        return next
+      }
+      return prev
+    })
+    setModelStatus('idle')
+    modelStatusRef.current = 'idle'
+    setDownloadProgress(0)
+    setDownloadFile(null)
+    setRuntimeDevice(null)
+    setModelError(null)
+    void refreshModelCacheStatus(settingsRef.current.model)
+    pushToastRef.current?.('info', 'Translation model download cancelled')
+  }, [refreshModelCacheStatus, terminateWorker])
 
   const updateSettings = useCallback(
     (patch: Partial<TranslatorSettings>) => {
@@ -1073,6 +1116,10 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       }
 
       if (modelChanged) {
+        downloadCancelledRef.current = false
+        if (modelStatusRef.current === 'downloading' || loadPromiseRef.current !== null) {
+          terminateWorker()
+        }
         // Clear in-memory translations (preserving outgoing originals) so messages re-translate with the new model
         inFlightByKeyRef.current.clear()
         const rehydrated = loadTranslationCache(next.model)
@@ -1112,16 +1159,21 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
         return
       }
 
+      if (langChanged && next.enabled) {
+        downloadCancelledRef.current = false
+      }
+
       // Kick off lazy model preload when user turns Translator Mode on while idle or errored
       if (
         !prev.enabled &&
         next.enabled &&
         (modelStatusRef.current === 'idle' || modelStatusRef.current === 'error')
       ) {
+        downloadCancelledRef.current = false
         void preloadModel()
       }
     },
-    [cancelScope, preloadModel, refreshModelCacheStatus]
+    [cancelScope, preloadModel, refreshModelCacheStatus, terminateWorker]
   )
 
   const recordOutgoingOriginal = useCallback(
@@ -1222,6 +1274,15 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
 
       const inFlight = inFlightByKeyRef.current.get(cacheKey)
       if (inFlight) return inFlight
+
+      // Do not automatically restart a download the user explicitly cancelled or after a worker error
+      // until the user explicitly retries/preloads or re-enables Translator Mode.
+      if (
+        (downloadCancelledRef.current || modelStatusRef.current === 'error') &&
+        !workerRef.current
+      ) {
+        return Promise.resolve(null)
+      }
 
       const model = activeModelRef.current
       void requestPersistentStorage()
@@ -1337,6 +1398,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       return await new Promise<string>((resolve, reject) => {
         pendingRef.current.set(requestId, {
           kind: 'outgoing',
+          modelKey: model.key,
           originalText: text,
           resolve,
           reject,
@@ -1415,6 +1477,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
   }, [refreshModelCacheStatus, terminateWorker])
 
   const resetAll = useCallback(() => {
+    downloadCancelledRef.current = false
     terminateWorker()
     safeStorageRemove(PREFS_STORAGE_KEY)
     safeStorageRemove(TRANSLATIONS_STORAGE_KEY)
@@ -1465,6 +1528,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       cachedModelBytes,
       storagePersisted,
       preloadModel,
+      cancelDownload,
       clearModelCache,
       translations,
       originalOutgoingById,
@@ -1490,6 +1554,7 @@ export function useTranslator(params?: UseTranslatorParams): TranslatorEngine {
       cachedModelBytes,
       storagePersisted,
       preloadModel,
+      cancelDownload,
       clearModelCache,
       translations,
       originalOutgoingById,

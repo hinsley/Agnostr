@@ -331,6 +331,7 @@ export function SettingsModal({
   const [requestingNotifPerm, setRequestingNotifPerm] = useState(false)
   const [testingNotif, setTestingNotif] = useState(false)
   const [testingBgPush, setTestingBgPush] = useState(false)
+  const [bgPushFeedback, setBgPushFeedback] = useState<{ ok: boolean; msg: string } | null>(null)
   const [notifTestFeedback, setNotifTestFeedback] = useState<{ ok: boolean; msg: string } | null>(
     null,
   )
@@ -1119,7 +1120,7 @@ export function SettingsModal({
                 <span>Silent Background Sync</span>
               </span>
               <span className="ag-set-toggle-desc">
-                Encrypted sync for groups, friends, notes, pins, Agmail, and messages.
+                Encrypted sync for groups, friends, notes, pins, Agmail, Agwallet, and messages.
               </span>
             </div>
             <input
@@ -1414,21 +1415,48 @@ export function SettingsModal({
         .finally(() => setTestingNotif(false))
     }
 
-    const handleTestBackgroundPushClick = () => {
+    const handleQuickConnectBackgroundPush = () => {
+      if (notif.pushStatus === 'connecting') return
+      const rawUrl = bridgeUrlDraft.trim() || ns.pushBridgeUrl.trim() || DEFAULT_PUSH_BRIDGE_URL
+      const normalizedUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`
+      const rawVapid =
+        vapidKeyDraft.trim() ||
+        ns.vapidPublicKey.trim() ||
+        (normalizedUrl.replace(/\/+$/, '') === DEFAULT_PUSH_BRIDGE_URL
+          ? DEFAULT_VAPID_PUBLIC_KEY
+          : '')
+      setBridgeFeedback(null)
+      setBgPushFeedback(null)
+      setNotifTestFeedback(null)
+      onPlaySound?.('click')
+      void notif.connectPushBridge(normalizedUrl, rawVapid || undefined).then((ok) => {
+        if (ok) {
+          setBridgeUrlDraft(normalizedUrl)
+          setBgPushFeedback({ ok: true, msg: 'Device connected to background push bridge' })
+          onPlaySound?.('tune')
+        }
+      })
+    }
+
+    const handleTestBackgroundPushClick = (fromTopBanner = false) => {
       if (testingBgPush) return
       setTestingBgPush(true)
-      setNotifTestFeedback(null)
+      if (fromTopBanner) {
+        setBgPushFeedback(null)
+      } else {
+        setNotifTestFeedback(null)
+      }
       void notif
         .sendTestPush()
         .then((res) => {
-          if (res.ok) {
-            onPlaySound?.('tune')
-            setNotifTestFeedback({ ok: true, msg: res.detail || 'Test background push sent' })
+          const feedback = res.ok
+            ? { ok: true, msg: res.detail || 'Test background push sent' }
+            : { ok: false, msg: res.detail || 'Could not send background push' }
+          if (res.ok) onPlaySound?.('tune')
+          if (fromTopBanner) {
+            setBgPushFeedback(feedback)
           } else {
-            setNotifTestFeedback({
-              ok: false,
-              msg: res.detail || 'Could not send background push',
-            })
+            setNotifTestFeedback(feedback)
           }
         })
         .finally(() => setTestingBgPush(false))
@@ -1492,6 +1520,9 @@ export function SettingsModal({
                             ? 'Unsupported'
                             : 'Off'}
                   </span>
+                  {bannerState === 'granted' && notif.pushStatus === 'connected' && (
+                    <span className="ag-badge ag-badge-accent">Background Push Active</span>
+                  )}
                 </div>
                 <p className="ag-set-notif-banner-desc">
                   {bannerState === 'ios-install'
@@ -1520,6 +1551,68 @@ export function SettingsModal({
               />
             )}
           </div>
+
+          {bannerState === 'granted' && notif.isPushSupported && (
+            <>
+              <div className="ag-set-notif-banner-actions">
+                {notif.pushStatus !== 'connected' && (
+                  <button
+                    type="button"
+                    className="ag-btn ag-btn-primary ag-btn-sm"
+                    disabled={notif.pushStatus === 'connecting'}
+                    onClick={handleQuickConnectBackgroundPush}
+                  >
+                    {notif.pushStatus === 'connecting' ? (
+                      <Loader2 size={14} className="ag-spin" />
+                    ) : (
+                      <Server size={14} />
+                    )}
+                    <span>
+                      {notif.pushStatus === 'connecting'
+                        ? 'Connecting…'
+                        : 'Connect Background Push'}
+                    </span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-secondary ag-btn-sm"
+                  disabled={testingBgPush || notif.pushStatus === 'connecting'}
+                  onClick={() => handleTestBackgroundPushClick(true)}
+                >
+                  {testingBgPush ? (
+                    <Loader2 size={14} className="ag-spin" />
+                  ) : (
+                    <BellRing size={14} />
+                  )}
+                  <span>Test Background Push</span>
+                </button>
+              </div>
+
+              {notif.pushStatus !== 'connected' && notif.pushError && (
+                <p
+                  className="ag-field-hint ag-field-hint-danger"
+                  role="alert"
+                  style={{ marginTop: '0.25rem' }}
+                >
+                  {notif.pushError}
+                </p>
+              )}
+
+              {bgPushFeedback && (notif.pushStatus === 'connected' || !notif.pushError) && (
+                <p
+                  className={`ag-field-hint ${
+                    bgPushFeedback.ok ? 'ag-field-hint-accent' : 'ag-field-hint-danger'
+                  }`}
+                  role="status"
+                  style={{ marginTop: '0.25rem' }}
+                >
+                  {bgPushFeedback.msg}
+                </p>
+              )}
+            </>
+          )}
 
           {bannerState === 'default' && (
             <div className="ag-set-notif-banner-actions">
@@ -1777,7 +1870,7 @@ export function SettingsModal({
               <span>Send Test Notification</span>
             </button>
 
-            {notif.isPushSupported && (
+            {notif.isPushSupported && bannerState !== 'granted' && (
               <button
                 type="button"
                 className="ag-btn ag-btn-secondary ag-btn-sm"
@@ -1787,7 +1880,7 @@ export function SettingsModal({
                   notif.permission === 'denied' ||
                   notif.isIosRequiresInstall
                 }
-                onClick={handleTestBackgroundPushClick}
+                onClick={() => handleTestBackgroundPushClick(false)}
               >
                 {testingBgPush ? (
                   <Loader2 size={14} className="ag-spin" />
@@ -2273,23 +2366,50 @@ export function SettingsModal({
           </p>
 
           <div className="ag-set-ai-actions">
-            {canReloadModel && (
-              <button
-                type="button"
-                className="ag-btn ag-btn-primary ag-btn-sm"
-                onClick={() => {
-                  setCfFeedback(null)
-                  onPlaySound?.('click')
-                  void cf.preloadModel().then((ok) => {
-                    if (ok) {
-                      setCfFeedback({ ok: true, msg: `${cf.modelLabel} is ready locally` })
-                    }
-                  })
-                }}
-              >
-                <RefreshCw size={13} />
-                <span>Reload Model</span>
-              </button>
+            {isDownloading ? (
+              <>
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-primary ag-btn-sm"
+                  disabled
+                >
+                  <Loader2 size={13} className="ag-spin" />
+                  <span>{pct > 0 ? `Loading ${pct}%` : 'Loading…'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-secondary ag-btn-sm"
+                  onClick={() => {
+                    setCfFeedback(null)
+                    onPlaySound?.('click')
+                    cf.cancelDownload()
+                  }}
+                  aria-label="Cancel content filter download"
+                >
+                  <X size={13} />
+                  <span>Cancel</span>
+                </button>
+              </>
+            ) : (
+              canReloadModel && (
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-primary ag-btn-sm"
+                  onClick={() => {
+                    setCfFeedback(null)
+                    onPlaySound?.('click')
+                    void cf.preloadModel().then((ok) => {
+                      if (ok) {
+                        setCfFeedback({ ok: true, msg: `${cf.modelLabel} is ready locally` })
+                      }
+                    })
+                  }}
+                >
+                  <RefreshCw size={13} />
+                  <span>Reload Model</span>
+                </button>
+              )
             )}
 
             <button
@@ -2586,7 +2706,7 @@ export function SettingsModal({
         ? '__custom__'
         : trs.outgoingLanguage
 
-    const activeModelMeta = TRANSLATOR_MODELS[trs.model] ?? TRANSLATOR_MODELS.m2m100
+    const activeModelMeta = TRANSLATOR_MODELS[trs.model] ?? TRANSLATOR_MODELS.opus
     const modelOptions: readonly TranslatorModelKey[] = ['opus', 'm2m100', 'nllb200']
     const modelSizeLabels: Record<TranslatorModelKey, string> = {
       opus: '~107 MB',
@@ -2679,6 +2799,22 @@ export function SettingsModal({
               </span>
             </button>
 
+            {isDownloading && (
+              <button
+                type="button"
+                className="ag-btn ag-btn-secondary ag-btn-sm"
+                onClick={() => {
+                  setTrFeedback(null)
+                  onPlaySound?.('click')
+                  tr.cancelDownload()
+                }}
+                aria-label="Cancel translation model download"
+              >
+                <X size={13} />
+                <span>Cancel</span>
+              </button>
+            )}
+
             <button
               type="button"
               className="ag-btn ag-btn-secondary ag-btn-sm"
@@ -2726,7 +2862,7 @@ export function SettingsModal({
         <div className="ag-set-scope-item">
           <div className="ag-set-label-row" style={{ flexWrap: 'wrap', rowGap: '0.18rem' }}>
             <span className="ag-set-scope-title">Translation Model</span>
-            <span className="ag-set-scope-default">Mobile default: Opus-MT · Desktop: M2M-100</span>
+            <span className="ag-set-scope-default">Default: Opus-MT</span>
           </div>
           <div
             className="ag-segmented"
@@ -3206,6 +3342,22 @@ export function SettingsModal({
                     : 'Preload Model'}
               </span>
             </button>
+
+            {isDownloadingModel && (
+              <button
+                type="button"
+                className="ag-btn ag-btn-secondary ag-btn-sm"
+                onClick={() => {
+                  setModelFeedback(null)
+                  onPlaySound?.('click')
+                  transcription.cancelDownload()
+                }}
+                aria-label="Cancel transcription model download"
+              >
+                <X size={13} />
+                <span>Cancel</span>
+              </button>
+            )}
 
             <button
               type="button"

@@ -9,6 +9,7 @@ import type {
   VoiceMemoAttachment,
   VoiceSendPhase,
 } from '../types/protocol.ts'
+import type { PushPokePayload } from '../types/notifications.ts'
 import type {
   CreateNip29GroupInput,
   CreateVirtualServerInput,
@@ -197,6 +198,7 @@ export interface UseServersOptions {
   onSeedMemoTranscript?: (memoKey: string, text: string, modelLabel?: string) => void
   lightningAddress?: string | null
   onIngestEventTags?: (pubkey: string, tags: string[][]) => void
+  onNotifyPushPoke?: (payload: PushPokePayload) => void
   sendDirectMessage: (peerPubkey: string, content: string) => Promise<boolean>
   pushToast: (level: ToastLevel, title: string, detail?: string) => void
 }
@@ -226,6 +228,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     onSeedMemoTranscript,
     lightningAddress,
     onIngestEventTags,
+    onNotifyPushPoke,
     sendDirectMessage,
     pushToast,
   } = opts
@@ -296,6 +299,11 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const activeViewRef = useRef<ActiveView>(activeView)
   const lightningAddressRef = useRef<string | null>(lightningAddress ?? null)
   const onIngestEventTagsRef = useRef(onIngestEventTags)
+  const onNotifyPushPokeRef = useRef(onNotifyPushPoke)
+  const membersRef = useRef<{ serverId: string; members: Nip29Member[] }>({
+    serverId: '',
+    members: [],
+  })
   const bgSeenIdsRef = useRef<Set<string>>(new Set())
   const serverUnreadItemsRef = useRef<Map<string, ServerUnreadItem[]>>(new Map())
   const serverSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
@@ -311,6 +319,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   useLayoutEffect(() => {
     replyingToRef.current = replyingTo
   }, [replyingTo])
+
+  useLayoutEffect(() => {
+    onNotifyPushPokeRef.current = onNotifyPushPoke
+  }, [onNotifyPushPoke])
 
   useLayoutEffect(() => {
     activeServerChanKeyRef.current = activeServerChanKey
@@ -1347,6 +1359,13 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     return { myRole: role, canModerate: modPower, members: list }
   }, [activeServer, rawMessages, ownPubkeys, trustedSet, identityManager, presenceTracker])
 
+  useLayoutEffect(() => {
+    membersRef.current = {
+      serverId: activeServer?.id ?? '',
+      members,
+    }
+  }, [activeServer?.id, members])
+
   // Navigation
   const selectServer = useCallback(
     (serverId: string, channelId?: string) => {
@@ -2014,7 +2033,84 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           { allowBackgroundPersist: true }
         )
 
-        if (!ok) {
+        if (ok) {
+          const pokeSet = new Set<string>()
+          const isValidRecipient = (raw?: string | null): string | null => {
+            if (!raw) return null
+            const pk = raw.trim().toLowerCase()
+            if (!/^[0-9a-f]{64}$/.test(pk)) return null
+            if (pk === masterPk || ownPubkeysRef.current.has(pk)) return null
+            return pk
+          }
+
+          // 1. Replied-to author pubkey (highest priority)
+          if (replyTarget && !replyTarget.isSystem) {
+            const rpk = isValidRecipient(replyTarget.pubkey)
+            if (rpk) pokeSet.add(rpk)
+          }
+
+          // 2. Mentioned group members resolved from roster
+          const roster =
+            membersRef.current.serverId === server.id ? membersRef.current.members : []
+          const contentMentions = extractMentions(body)
+          if (contentMentions.length > 0) {
+            for (const member of roster) {
+              if (member.isSelf || member.isBanned) continue
+              const mpk = isValidRecipient(member.pubkey)
+              if (!mpk) continue
+              if (doesContentMentionUser(body, contentMentions, member.nickname, mpk)) {
+                pokeSet.add(mpk)
+              }
+            }
+          }
+
+          // 3. Up to 10 other known group members (excluding self & banned)
+          let extraAdded = 0
+          const addExtraMember = (raw?: string | null) => {
+            if (extraAdded >= 10) return
+            const pk = isValidRecipient(raw)
+            if (!pk || pokeSet.has(pk)) return
+            pokeSet.add(pk)
+            extraAdded += 1
+          }
+          for (const member of roster) {
+            if (member.isSelf || member.isBanned) continue
+            addExtraMember(member.pubkey)
+          }
+          addExtraMember(server.founderPubkey)
+          for (const modPk of server.moderators) addExtraMember(modPk)
+          for (const admin of server.admins ?? []) addExtraMember(admin.pubkey)
+          for (const mPk of server.members ?? []) addExtraMember(mPk)
+
+          if (pokeSet.size > 0) {
+            let cleanPreview: string | undefined
+            if (!server.encrypted) {
+              let stripped = body.trim()
+              if (voiceAttachment?.url) {
+                stripped = stripped.split(voiceAttachment.url).join('').trim()
+              }
+              if (imageAttachment?.url) {
+                stripped = stripped.split(imageAttachment.url).join('').trim()
+              }
+              if (stripped) {
+                cleanPreview = stripped.slice(0, 110)
+              } else if (voiceAttachment) {
+                cleanPreview = 'Voice memo'
+              } else if (imageAttachment) {
+                cleanPreview = 'Photo'
+              }
+            }
+            onNotifyPushPokeRef.current?.({
+              recipientPubkeys: Array.from(pokeSet),
+              category: 'server-message',
+              eventId: signed.id,
+              serverId: server.id,
+              channelId: chanId,
+              senderName: nick,
+              preview: cleanPreview,
+            })
+          }
+        } else {
           const reason =
             res.rejectedRelays[0]?.reason || 'No connected group relay accepted the message.'
           pushToast('error', 'Message failed to send', reason)

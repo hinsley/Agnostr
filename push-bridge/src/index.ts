@@ -1,7 +1,9 @@
 import { verifyNip98Request } from './nip98.ts'
 import { runNostrPushCron } from './nostrCron.ts'
 import {
+  aliasKeyForPubkey,
   DEFAULT_PUSH_PREFERENCES,
+  MAX_ALIAS_PUBKEYS,
   MAX_DEVICES_PER_PUBKEY,
   PUBKEYS_INDEX_KEY,
   subKeyForPubkey,
@@ -50,29 +52,44 @@ function normalizeStringList(raw: unknown, maxItems: number, maxLen: number): st
   return out
 }
 
+function normalizeAliasPubkeys(raw: unknown, masterPubkey: string): string[] {
+  if (!Array.isArray(raw)) return []
+  const master = masterPubkey.toLowerCase()
+  const out: string[] = []
+  for (const item of raw) {
+    if (!isHex64(item)) continue
+    const clean = item.toLowerCase()
+    if (clean === master || out.includes(clean)) continue
+    out.push(clean)
+    if (out.length >= MAX_ALIAS_PUBKEYS) break
+  }
+  return out
+}
+
+function parseFilterOrBool(raw: unknown, fallback: boolean): boolean {
+  if (typeof raw === 'boolean') return raw
+  if (typeof raw === 'string') {
+    const clean = raw.trim().toLowerCase()
+    if (clean === 'off' || clean === 'false' || clean === 'none') return false
+    if (clean === 'all' || clean === 'mentions' || clean === 'true') return true
+  }
+  return fallback
+}
+
 function normalizePreferences(raw: unknown): StoredPushPreferences {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_PUSH_PREFERENCES }
-  const obj = raw as Partial<StoredPushPreferences>
+  const obj = raw as Record<string, unknown>
   return {
-    dms: typeof obj.dms === 'boolean' ? obj.dms : DEFAULT_PUSH_PREFERENCES.dms,
-    directPings:
-      typeof obj.directPings === 'boolean' ? obj.directPings : DEFAULT_PUSH_PREFERENCES.directPings,
-    dmCallRinging:
-      typeof obj.dmCallRinging === 'boolean'
-        ? obj.dmCallRinging
-        : DEFAULT_PUSH_PREFERENCES.dmCallRinging,
-    serverMessages:
-      typeof obj.serverMessages === 'boolean'
-        ? obj.serverMessages
-        : DEFAULT_PUSH_PREFERENCES.serverMessages,
-    serverCalls:
-      typeof obj.serverCalls === 'boolean' ? obj.serverCalls : DEFAULT_PUSH_PREFERENCES.serverCalls,
-    geoMessages:
-      typeof obj.geoMessages === 'boolean' ? obj.geoMessages : DEFAULT_PUSH_PREFERENCES.geoMessages,
-    showPreviews:
-      typeof obj.showPreviews === 'boolean'
-        ? obj.showPreviews
-        : DEFAULT_PUSH_PREFERENCES.showPreviews,
+    dms: parseFilterOrBool(obj.dms, DEFAULT_PUSH_PREFERENCES.dms),
+    directPings: parseFilterOrBool(obj.directPings, DEFAULT_PUSH_PREFERENCES.directPings),
+    dmCallRinging: parseFilterOrBool(obj.dmCallRinging, DEFAULT_PUSH_PREFERENCES.dmCallRinging),
+    serverMessages: parseFilterOrBool(
+      obj.serverMessages,
+      DEFAULT_PUSH_PREFERENCES.serverMessages
+    ),
+    serverCalls: parseFilterOrBool(obj.serverCalls, DEFAULT_PUSH_PREFERENCES.serverCalls),
+    geoMessages: parseFilterOrBool(obj.geoMessages, DEFAULT_PUSH_PREFERENCES.geoMessages),
+    showPreviews: parseFilterOrBool(obj.showPreviews, DEFAULT_PUSH_PREFERENCES.showPreviews),
   }
 }
 
@@ -114,20 +131,67 @@ async function readPubkeysIndex(kv: KVNamespace): Promise<string[]> {
   )
 }
 
-async function addPubkeyToIndex(kv: KVNamespace, pubkey: string): Promise<void> {
-  const pk = pubkey.toLowerCase()
+async function syncPubkeysIndex(
+  kv: KVNamespace,
+  addPubkeys: string[],
+  removePubkeys: string[] = []
+): Promise<void> {
   const list = await readPubkeysIndex(kv)
-  if (list.includes(pk)) return
-  list.push(pk)
-  await kv.put(PUBKEYS_INDEX_KEY, JSON.stringify(list))
+  const set = new Set<string>(list)
+  let changed = false
+
+  for (const raw of removePubkeys) {
+    const pk = raw.toLowerCase()
+    if (set.delete(pk)) changed = true
+  }
+  for (const raw of addPubkeys) {
+    if (!isHex64(raw)) continue
+    const pk = raw.toLowerCase()
+    if (!set.has(pk)) {
+      set.add(pk)
+      changed = true
+    }
+  }
+
+  if (changed) {
+    await kv.put(PUBKEYS_INDEX_KEY, JSON.stringify(Array.from(set)))
+  }
 }
 
-async function removePubkeyFromIndex(kv: KVNamespace, pubkey: string): Promise<void> {
-  const pk = pubkey.toLowerCase()
-  const list = await readPubkeysIndex(kv)
-  if (!list.includes(pk)) return
-  const next = list.filter((x) => x !== pk)
-  await kv.put(PUBKEYS_INDEX_KEY, JSON.stringify(next))
+async function deleteOwnedAliases(
+  kv: KVNamespace,
+  masterPubkey: string,
+  aliases: string[]
+): Promise<string[]> {
+  const owner = masterPubkey.toLowerCase()
+  const deleted: string[] = []
+  for (const raw of aliases) {
+    if (!isHex64(raw)) continue
+    const aliasPk = raw.toLowerCase()
+    const key = aliasKeyForPubkey(aliasPk)
+    const current = await kv.get(key)
+    if (!current || current.toLowerCase() === owner) {
+      if (current) {
+        await kv.delete(key)
+      }
+      deleted.push(aliasPk)
+    }
+  }
+  return deleted
+}
+
+async function deleteUserRecordAndAliases(
+  kv: KVNamespace,
+  masterPubkey: string,
+  existingRecord?: StoredUserRecord | null
+): Promise<void> {
+  const pk = masterPubkey.toLowerCase()
+  const priorAliases = Array.isArray(existingRecord?.aliasPubkeys)
+    ? existingRecord.aliasPubkeys
+    : []
+  await kv.delete(subKeyForPubkey(pk))
+  const removedAliases = await deleteOwnedAliases(kv, pk, priorAliases)
+  await syncPubkeysIndex(kv, [], [pk, ...removedAliases])
 }
 
 async function handlePostSubscribe(request: Request, env: Env): Promise<Response> {
@@ -137,6 +201,7 @@ async function handlePostSubscribe(request: Request, env: Env): Promise<Response
 
   let body: {
     pubkey?: unknown
+    aliasPubkeys?: unknown
     subscription?: unknown
     relays?: unknown
     geohashes?: unknown
@@ -181,15 +246,36 @@ async function handlePostSubscribe(request: Request, env: Env): Promise<Response
   merged.sort((a, b) => (a.updatedAt ?? 0) - (b.updatedAt ?? 0))
   const capped = merged.slice(-MAX_DEVICES_PER_PUBKEY)
 
+  const priorAliases = normalizeAliasPubkeys(existing?.aliasPubkeys, auth.pubkey)
+  const nextAliases =
+    body.aliasPubkeys !== undefined
+      ? normalizeAliasPubkeys(body.aliasPubkeys, auth.pubkey)
+      : priorAliases
+
+  const nextAliasSet = new Set(nextAliases)
+  const priorAliasSet = new Set(priorAliases)
+  const staleAliases = priorAliases.filter((a) => !nextAliasSet.has(a))
+  const addedAliases = nextAliases.filter((a) => !priorAliasSet.has(a))
+
   const record: StoredUserRecord = {
     pubkey: auth.pubkey,
     devices: capped,
+    aliasPubkeys: nextAliases,
     updatedAt: now,
   }
   await env.PUSH_KV.put(key, JSON.stringify(record))
-  await addPubkeyToIndex(env.PUSH_KV, auth.pubkey)
 
-  return jsonResponse({ ok: true, devices: capped.length })
+  for (const aliasPk of addedAliases) {
+    await env.PUSH_KV.put(aliasKeyForPubkey(aliasPk), auth.pubkey)
+  }
+  const removedStaleAliases =
+    staleAliases.length > 0
+      ? await deleteOwnedAliases(env.PUSH_KV, auth.pubkey, staleAliases)
+      : []
+
+  await syncPubkeysIndex(env.PUSH_KV, [auth.pubkey, ...nextAliases], removedStaleAliases)
+
+  return jsonResponse({ ok: true, devices: capped.length, aliases: nextAliases.length })
 }
 
 async function handleDeleteSubscribe(request: Request, env: Env): Promise<Response> {
@@ -213,7 +299,7 @@ async function handleDeleteSubscribe(request: Request, env: Env): Promise<Respon
   const existing = (await env.PUSH_KV.get(key, 'json')) as StoredUserRecord | null
 
   if (!existing || !Array.isArray(existing.devices) || existing.devices.length === 0) {
-    await removePubkeyFromIndex(env.PUSH_KV, auth.pubkey)
+    await deleteUserRecordAndAliases(env.PUSH_KV, auth.pubkey, existing)
     return jsonResponse({ ok: true, devices: 0 })
   }
 
@@ -222,14 +308,14 @@ async function handleDeleteSubscribe(request: Request, env: Env): Promise<Respon
     : []
 
   if (remaining.length === 0) {
-    await env.PUSH_KV.delete(key)
-    await removePubkeyFromIndex(env.PUSH_KV, auth.pubkey)
+    await deleteUserRecordAndAliases(env.PUSH_KV, auth.pubkey, existing)
   } else {
     await env.PUSH_KV.put(
       key,
       JSON.stringify({
         pubkey: auth.pubkey,
         devices: remaining,
+        aliasPubkeys: normalizeAliasPubkeys(existing.aliasPubkeys, auth.pubkey),
         updatedAt: Date.now(),
       } satisfies StoredUserRecord)
     )
@@ -297,14 +383,14 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
 
   if (pruned) {
     if (surviving.length === 0) {
-      await env.PUSH_KV.delete(key)
-      await removePubkeyFromIndex(env.PUSH_KV, auth.pubkey)
+      await deleteUserRecordAndAliases(env.PUSH_KV, auth.pubkey, record)
     } else {
       await env.PUSH_KV.put(
         key,
         JSON.stringify({
           pubkey: auth.pubkey,
           devices: surviving,
+          aliasPubkeys: normalizeAliasPubkeys(record.aliasPubkeys, auth.pubkey),
           updatedAt: Date.now(),
         } satisfies StoredUserRecord)
       )
@@ -416,7 +502,7 @@ function buildPokePayload(opts: {
 
   if (category === 'server-call') {
     return {
-      title: safeSender ? `${safeSender} started a server call` : 'Server Call Active',
+      title: safeSender ? `${safeSender} started a group call` : 'Group Call Active',
       body: safePreview || 'Tap to join the call.',
       tag: serverId ? `agnostr-srvcall-${serverId.slice(0, 12)}` : 'agnostr-srvcall',
       callId,
@@ -465,8 +551,8 @@ function buildPokePayload(opts: {
 
   if (category === 'server-message') {
     return {
-      title: safeSender ? `${safeSender}` : 'New Server Message',
-      body: safePreview || 'New message in one of your servers.',
+      title: safeSender ? `${safeSender}` : 'New Group Message',
+      body: safePreview || 'New message in one of your groups.',
       tag: serverId ? `agnostr-srv-${serverId.slice(0, 12)}` : 'agnostr-srv',
       data: {
         category: 'server-message',
@@ -589,14 +675,37 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
   let delivered = 0
   let skipped = 0
   let failed = 0
+  const handledMasterPubkeys = new Set<string>()
 
   for (const recipientPk of filteredRecipients) {
-    const key = subKeyForPubkey(recipientPk)
-    const record = (await env.PUSH_KV.get(key, 'json')) as StoredUserRecord | null
+    let resolvedMasterPk = recipientPk
+    let key = subKeyForPubkey(resolvedMasterPk)
+    let record = (await env.PUSH_KV.get(key, 'json')) as StoredUserRecord | null
+
+    // Resolve derived Radio alias pubkeys (`alias:<derivedPk> -> masterPubkey`)
+    if (!record || !Array.isArray(record.devices) || record.devices.length === 0) {
+      const mappedMaster = await env.PUSH_KV.get(aliasKeyForPubkey(recipientPk))
+      if (isHex64(mappedMaster)) {
+        resolvedMasterPk = mappedMaster.toLowerCase()
+        if (category !== 'agmail' && resolvedMasterPk === auth.pubkey) {
+          skipped += 1
+          continue
+        }
+        key = subKeyForPubkey(resolvedMasterPk)
+        record = (await env.PUSH_KV.get(key, 'json')) as StoredUserRecord | null
+      }
+    }
+
     if (!record || !Array.isArray(record.devices) || record.devices.length === 0) {
       skipped += 1
       continue
     }
+
+    if (handledMasterPubkeys.has(resolvedMasterPk)) {
+      skipped += 1
+      continue
+    }
+    handledMasterPubkeys.add(resolvedMasterPk)
 
     const surviving: StoredDeviceSubscription[] = []
     let pruned = false
@@ -641,14 +750,14 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
 
     if (pruned) {
       if (surviving.length === 0) {
-        await env.PUSH_KV.delete(key)
-        await removePubkeyFromIndex(env.PUSH_KV, recipientPk)
+        await deleteUserRecordAndAliases(env.PUSH_KV, resolvedMasterPk, record)
       } else {
         await env.PUSH_KV.put(
           key,
           JSON.stringify({
-            pubkey: recipientPk,
+            pubkey: resolvedMasterPk,
             devices: surviving,
+            aliasPubkeys: normalizeAliasPubkeys(record.aliasPubkeys, resolvedMasterPk),
             updatedAt: Date.now(),
           } satisfies StoredUserRecord)
         )

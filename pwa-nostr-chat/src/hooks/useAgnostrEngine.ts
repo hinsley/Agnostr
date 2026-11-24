@@ -1821,8 +1821,13 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   // Client-side Cashu Ecash Wallet + Boltz Swaps + NIP-57 Lightning Zaps
+  const notifyWalletChangedRef = useRef<() => void>(() => {})
+  const handleLocalWalletChanged = useCallback(() => {
+    notifyWalletChangedRef.current()
+  }, [])
   const walletEngine = useCashuWallet({
     pushToast,
+    onLocalWalletChanged: handleLocalWalletChanged,
   })
 
   const getZapPublishRelayUrls = useCallback(
@@ -1875,6 +1880,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     onIngestEventTags: zapsEngine.ingestEventTags,
     setVoiceSendPhase: setServerVoiceSendPhase,
     onSeedMemoTranscript: handleSeedMemoTranscript,
+    onNotifyPushPoke: handlePushPoke,
     sendDirectMessage,
     pushToast,
   })
@@ -2159,6 +2165,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     deviceSync: deviceSyncEngine,
     registerAmailSyncProvider,
     notifyAmailChanged,
+    registerWalletSyncProvider,
+    notifyWalletChanged,
   } = useDeviceSync({
     relayPool: pool,
     identityManager,
@@ -2195,6 +2203,10 @@ export function useAgnostrEngine(): AgnostrEngine {
     notifyAmailChangedRef.current = notifyAmailChanged
   }, [notifyAmailChanged])
 
+  useLayoutEffect(() => {
+    notifyWalletChangedRef.current = notifyWalletChanged
+  }, [notifyWalletChanged])
+
   const exportAmailSyncState = amailEngine.exportSyncState
   const mergeAmailSyncState = amailEngine.mergeSyncState
   useEffect(() => {
@@ -2207,6 +2219,18 @@ export function useAgnostrEngine(): AgnostrEngine {
       registerAmailSyncProvider(null)
     }
   }, [registerAmailSyncProvider, exportAmailSyncState, mergeAmailSyncState])
+
+  const exportWalletSyncState = walletEngine.exportSyncState
+  const mergeWalletSyncState = walletEngine.mergeSyncState
+  useEffect(() => {
+    registerWalletSyncProvider({
+      exportSyncState: exportWalletSyncState,
+      mergeSyncState: mergeWalletSyncState,
+    })
+    return () => {
+      registerWalletSyncProvider(null)
+    }
+  }, [registerWalletSyncProvider, exportWalletSyncState, mergeWalletSyncState])
 
   // Keep active geohash + DM + pulse + active server/NIP-29 + call signaling relays synced in RelayPool
   useLayoutEffect(() => {
@@ -3528,9 +3552,32 @@ export function useAgnostrEngine(): AgnostrEngine {
     return set
   }, [identityManager, identityVersion, activeGeohash, pinnedGeohashList, callsEngine.activeCall])
 
+  const notificationAliasPubkeys = useMemo(() => {
+    void identityVersion
+    const masterPk = identity.masterPubkey.toLowerCase()
+    const out: string[] = []
+    const seen = new Set<string>()
+    const hashes = new Set<string>([activeGeohash, ...pinnedGeohashList])
+    for (const gh of hashes) {
+      if (!isValidRadioChannelKey(gh)) continue
+      const derivedPk = identityManager.getDerivedGeohashKeyMaterial(gh).pubkey.toLowerCase()
+      if (
+        derivedPk === masterPk ||
+        seen.has(derivedPk) ||
+        !/^[0-9a-f]{64}$/.test(derivedPk)
+      ) {
+        continue
+      }
+      seen.add(derivedPk)
+      out.push(derivedPk)
+      if (out.length >= 16) break
+    }
+    return out
+  }, [identityManager, identityVersion, identity.masterPubkey, activeGeohash, pinnedGeohashList])
+
   const signNotificationEvent = useCallback(
     (tmpl: Parameters<IdentityManager['signEvent']>[0]) =>
-      identityManager.signEvent(tmpl),
+      identityManager.signEventWithMaterial(tmpl, identityManager.getMasterKeyMaterial()),
     [identityManager]
   )
 
@@ -3547,6 +3594,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     trustedSet,
     strictWhitelistMode: settings.strictWhitelistMode,
     masterPubkey: identity.masterPubkey,
+    aliasPubkeys: notificationAliasPubkeys,
     nickname: identity.nickname,
     dmThreads,
     joinedServers: serversEngine.joinedServers,

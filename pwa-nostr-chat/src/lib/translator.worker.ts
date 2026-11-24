@@ -166,7 +166,9 @@ interface TranslationRunOutput {
 
 const MAX_PENDING_NORMAL_JOBS = 64
 const MAX_SEGMENT_CHARS = 900
-const INFERENCE_TIMEOUT_MS = 30_000
+const MAX_OPUS_RAM_HANDLES = 2
+const INFERENCE_TIMEOUT_MS = 45_000
+const INFERENCE_UNWIND_WAIT_MS = 4_000
 const LEGACY_TRANSFORMERS_CACHE_KEY = 'transformers-cache'
 
 // Verified encoder + decoder ONNX byte totals from HuggingFace live probe:
@@ -203,7 +205,9 @@ function normalizeWorkerModelKey(raw: unknown): TranslatorModelKey {
 const COMPACT_SCRIPT_RE = /[\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0E00-\u0E7F]/
 
 let transformersModulePromise: Promise<typeof import('@huggingface/transformers')> | null = null
-let activeHandle: ActiveModelHandle | null = null
+const opusHandles = new Map<string, ActiveModelHandle>()
+let heavyHandle: ActiveModelHandle | null = null
+let lastActiveHandle: ActiveModelHandle | null = null
 let webGpuFailed = false
 let legacyEvictionStarted = false
 
@@ -211,8 +215,10 @@ const queue: QueuedJob[] = []
 const cancelledRequestIds = new Set<string>()
 let activeJob: QueuedJob | null = null
 let activeStoppingCriteria: InterruptableCriteriaLike | null = null
+let activeInferencePromise: Promise<unknown> | null = null
 let activePreempted = false
 let activeCancelled = false
+let disposePending = false
 let processing = false
 
 const wrappedForwardModels = new WeakSet<object>()
@@ -389,17 +395,106 @@ async function probeWebGpu(): Promise<{ available: boolean; hasFp16: boolean }> 
   }
 }
 
-async function disposeActiveModel(): Promise<void> {
-  const prev = activeHandle
-  activeHandle = null
-  if (!prev) return
-  if (typeof prev.pipe.dispose === 'function') {
+function getMruOpusHandle(): ActiveModelHandle | null {
+  let mru: ActiveModelHandle | null = null
+  for (const h of opusHandles.values()) {
+    mru = h
+  }
+  return mru
+}
+
+function getLastActiveHandle(preferredModelKey?: TranslatorModelKey): ActiveModelHandle | null {
+  if (preferredModelKey === 'opus') {
+    return getMruOpusHandle()
+  }
+  if (preferredModelKey === 'm2m100' || preferredModelKey === 'nllb200') {
+    return heavyHandle && heavyHandle.modelKey === preferredModelKey ? heavyHandle : null
+  }
+  return lastActiveHandle ?? heavyHandle ?? getMruOpusHandle()
+}
+
+function hasLoadedHandleForModelKey(modelKey: TranslatorModelKey): boolean {
+  if (modelKey === 'opus') return opusHandles.size > 0
+  return heavyHandle !== null && heavyHandle.modelKey === modelKey
+}
+
+async function waitForActiveInferenceUnwind(): Promise<void> {
+  const pending = activeInferencePromise
+  if (!pending) return
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    await Promise.race([
+      pending.then(
+        () => undefined,
+        () => undefined
+      ),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, INFERENCE_UNWIND_WAIT_MS)
+      }),
+    ])
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer)
+    }
+  }
+}
+
+async function trackInference<T>(fn: () => Promise<T>): Promise<T> {
+  const promise = fn()
+  activeInferencePromise = promise
+  try {
+    return await promise
+  } finally {
+    if (activeInferencePromise === promise) {
+      activeInferencePromise = null
+    }
+  }
+}
+
+async function disposeHandleSafe(handle: ActiveModelHandle | null): Promise<void> {
+  if (!handle) return
+  await waitForActiveInferenceUnwind()
+  if (lastActiveHandle === handle) {
+    lastActiveHandle = heavyHandle ?? getMruOpusHandle()
+  }
+  if (typeof handle.pipe.dispose === 'function') {
     try {
-      await prev.pipe.dispose()
+      await handle.pipe.dispose()
     } catch {
       // Ignore disposal errors
     }
   }
+}
+
+async function disposeHeavyHandle(): Promise<void> {
+  const prev = heavyHandle
+  heavyHandle = null
+  await disposeHandleSafe(prev)
+}
+
+async function disposeAllOpusHandles(): Promise<void> {
+  if (opusHandles.size === 0) return
+  await waitForActiveInferenceUnwind()
+  const handles = Array.from(opusHandles.values())
+  opusHandles.clear()
+  if (lastActiveHandle?.modelKey === 'opus') {
+    lastActiveHandle = heavyHandle
+  }
+  for (const handle of handles) {
+    if (typeof handle.pipe.dispose === 'function') {
+      try {
+        await handle.pipe.dispose()
+      } catch {
+        // Ignore disposal errors
+      }
+    }
+  }
+}
+
+async function disposeAllModels(): Promise<void> {
+  await disposeHeavyHandle()
+  await disposeAllOpusHandles()
+  lastActiveHandle = null
 }
 
 function extractTranslationText(
@@ -529,30 +624,107 @@ async function verifyNllbWebGpuSanity(pipe: TranslationPipelineLike): Promise<bo
 async function ensureModel(
   rawModelKey: TranslatorModelKey,
   rawModelId: string,
-  forceWasm = false
+  forceWasm = false,
+  protectedOpusModelId?: string
 ): Promise<ActiveModelHandle> {
   void evictLegacyCacheOnce()
 
   const modelKey = normalizeWorkerModelKey(rawModelKey)
   const modelId = rawModelId || TRANSLATOR_MODELS[modelKey].id
 
-  if (
-    activeHandle &&
-    activeHandle.modelKey === modelKey &&
-    activeHandle.modelId === modelId &&
-    (!forceWasm || activeHandle.device === 'wasm')
-  ) {
-    return activeHandle
+  if (modelKey === 'opus') {
+    if (heavyHandle) {
+      await disposeHeavyHandle()
+    }
+
+    const cached = opusHandles.get(modelId)
+    if (cached) {
+      // Promote to MRU and return immediately (0 ms, zero status churn, zero dispose)
+      opusHandles.delete(modelId)
+      opusHandles.set(modelId, cached)
+      lastActiveHandle = cached
+      return cached
+    }
+
+    // Bounded 2-slot LRU RAM pool (~214 MB max — phone-safe on Pixel 8 / 4 GB Android).
+    // Evict only the least-recently-used pair, never evicting the active sibling hop.
+    while (opusHandles.size >= MAX_OPUS_RAM_HANDLES) {
+      let victimKey: string | null = null
+      for (const key of opusHandles.keys()) {
+        if (key !== protectedOpusModelId) {
+          victimKey = key
+          break
+        }
+      }
+      if (!victimKey) {
+        victimKey = opusHandles.keys().next().value ?? null
+      }
+      if (!victimKey) break
+      const victim = opusHandles.get(victimKey) ?? null
+      opusHandles.delete(victimKey)
+      await disposeHandleSafe(victim)
+    }
+
+    const mod = await getTransformersModule()
+    let pipe: TranslationPipelineLike | null = null
+    try {
+      pipe = await createPipelineAttempt(mod, 'opus', modelId, 'wasm', 'q8')
+      installCooperativeTokenYield(pipe)
+      const nextHandle: ActiveModelHandle = {
+        modelKey: 'opus',
+        modelId,
+        device: 'wasm',
+        dtype: 'q8',
+        pipe,
+      }
+      opusHandles.set(modelId, nextHandle)
+      lastActiveHandle = nextHandle
+      postOut({
+        type: 'status',
+        status: 'ready',
+        modelKey: 'opus',
+        modelId,
+        progress: 100,
+        file: null,
+        runtimeDevice: 'wasm',
+        dtype: 'q8',
+      })
+      return nextHandle
+    } catch (err) {
+      if (pipe && typeof pipe.dispose === 'function') {
+        try {
+          await pipe.dispose()
+        } catch {
+          // Ignore dispose error
+        }
+      }
+      throw err instanceof Error
+        ? err
+        : new Error(`Unable to load local ${TRANSLATOR_MODELS.opus.shortLabel} translation model.`)
+    }
   }
 
-  // Phone-safe RAM budget: keep strictly 1 active ONNX session in RAM while leaving
-  // all previously downloaded model weights permanently cached in Cache Storage.
-  await disposeActiveModel()
+  // Heavy models (M2M-100 / NLLB-200): strictly 1 session in RAM
+  if (opusHandles.size > 0) {
+    await disposeAllOpusHandles()
+  }
+
+  if (
+    heavyHandle &&
+    heavyHandle.modelKey === modelKey &&
+    heavyHandle.modelId === modelId &&
+    (!forceWasm || heavyHandle.device === 'wasm')
+  ) {
+    lastActiveHandle = heavyHandle
+    return heavyHandle
+  }
+
+  await disposeHeavyHandle()
 
   const mod = await getTransformersModule()
 
   // Empirically verified runtime matrix:
-  // - Opus-MT Lite: ALWAYS WASM q8 (~107 MiB/pair, phone-safe RAM, fast).
+  // - Opus-MT Lite: ALWAYS WASM q8 (~107 MiB/pair, 2-slot LRU RAM pool, fast).
   // - M2M-100: ALWAYS WASM q8 (602.7 MiB, 260–650 ms/msg, 100% accurate).
   //   Never WebGPU q4f16/fp16 (FP16 collapse outputs "."/"¿ ¿,") or WebGPU q8 (3× slower).
   // - NLLB-200: WebGPU q4f16 when WebGPU+shader-f16 passes 1-shot sanity check (207–440 ms/msg),
@@ -592,13 +764,14 @@ async function ensureModel(
         }
       }
       installCooperativeTokenYield(pipe)
-      activeHandle = {
+      heavyHandle = {
         modelKey,
         modelId,
         device: attempt.device,
         dtype: attempt.dtype,
         pipe,
       }
+      lastActiveHandle = heavyHandle
       postOut({
         type: 'status',
         status: 'ready',
@@ -609,7 +782,7 @@ async function ensureModel(
         runtimeDevice: attempt.device,
         dtype: attempt.dtype,
       })
-      return activeHandle
+      return heavyHandle
     } catch (err) {
       lastErr = err
       if (pipe && typeof pipe.dispose === 'function') {
@@ -781,7 +954,7 @@ async function translateProseChunk(
     if (stoppingCriteria) {
       pipeOptions.stopping_criteria = stoppingCriteria
     }
-    const out = await handle.pipe(chunk, pipeOptions)
+    const out = await trackInference(() => handle.pipe(chunk, pipeOptions))
     if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
       return ''
     }
@@ -815,7 +988,7 @@ async function translateOpusDirectProseChunk(
     if (stoppingCriteria) {
       pipeOptions.stopping_criteria = stoppingCriteria
     }
-    const out = await handle.pipe(chunk, pipeOptions)
+    const out = await trackInference(() => handle.pipe(chunk, pipeOptions))
     if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
       return ''
     }
@@ -906,7 +1079,7 @@ async function translateOpusEnMulProseChunk(
       generateOpts.stopping_criteria = stoppingCriteria
     }
 
-    const outputTokenIds = await model.generate(generateOpts)
+    const outputTokenIds = await trackInference(() => model.generate!(generateOpts))
     if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
       return ''
     }
@@ -932,22 +1105,47 @@ function resolveSourceLanguageForMessage(
   const targetLower = cleanTarget.toLowerCase()
   const detected = detectLanguageDetailed(text)
 
-  if ((detected.confidence === 'high' || detected.confidence === 'medium') && detected.lang) {
-    return { sourceLang: detected.lang, alreadySameLanguage: false }
-  }
+  const detectedMatchesTarget =
+    Boolean(detected.lang) &&
+    (detected.lang!.toLowerCase() === targetLower ||
+      resolveLanguageCodes(detected.lang!).nllbCode === targetResolved.nllbCode)
 
   const hintClean = roomHintLang?.trim() ?? ''
-  if (hintClean && hintClean.toLowerCase() !== 'auto') {
-    const hintResolved = resolveLanguageCodes(hintClean)
-    if (
+  const hintResolved =
+    hintClean && hintClean.toLowerCase() !== 'auto'
+      ? resolveLanguageCodes(hintClean)
+      : null
+  const hasValidForeignRoomHint = Boolean(
+    hintResolved &&
       hintClean.toLowerCase() !== targetLower &&
       hintResolved.nllbCode !== targetResolved.nllbCode
+  )
+
+  if (hasValidForeignRoomHint) {
+    // Same-language message in a foreign room (high or medium confidence): skip in 0 ms
+    if (
+      detectedMatchesTarget &&
+      (detected.confidence === 'high' || detected.confidence === 'medium') &&
+      detected.lang
     ) {
-      return { sourceLang: hintClean, alreadySameLanguage: false }
+      return { sourceLang: detected.lang, alreadySameLanguage: true }
+    }
+    // Only override sticky room language to a DIFFERENT foreign language on HIGH confidence;
+    // medium/low single-word cognates stick to roomHintLang to prevent model flip-flopping.
+    if (detected.confidence === 'high' && detected.lang) {
+      return { sourceLang: detected.lang, alreadySameLanguage: false }
+    }
+    return { sourceLang: hintClean, alreadySameLanguage: false }
+  }
+
+  if ((detected.confidence === 'high' || detected.confidence === 'medium') && detected.lang) {
+    return {
+      sourceLang: detected.lang,
+      alreadySameLanguage: detectedMatchesTarget,
     }
   }
 
-  if (detected.lang && detected.lang.toLowerCase() !== targetLower) {
+  if (detected.lang && !detectedMatchesTarget) {
     return { sourceLang: detected.lang, alreadySameLanguage: false }
   }
 
@@ -1122,22 +1320,52 @@ interface OpusTranslationRunOutput extends TranslationRunOutput {
   handle: ActiveModelHandle | null
 }
 
+function getOpusPairModelId(src: ResolvedLanguageCodes, tgt: ResolvedLanguageCodes): string {
+  if (tgt.m2mCode === 'en') {
+    return OPUS_TO_EN_MODELS[src.m2mCode] ?? OPUS_DEFAULT_TO_EN_MODEL
+  }
+  return OPUS_FROM_EN_MODELS[tgt.m2mCode] ?? OPUS_DEFAULT_FROM_EN_MODEL
+}
+
+function predictOpusModelIdsForJob(job: QueuedJob): string[] {
+  if (job.type !== 'translate' || job.modelKey !== 'opus') return []
+  const sourceText = job.text ?? ''
+  if (!sourceText.trim()) return []
+  const cleanTarget = (job.targetLang ?? 'English').trim() || 'English'
+  const { sourceLang: effectiveSource, alreadySameLanguage } = resolveSourceLanguageForMessage(
+    sourceText,
+    cleanTarget,
+    job.sourceLang,
+    job.roomHintLang
+  )
+  if (alreadySameLanguage) return []
+  const srcResolved = resolveLanguageCodes(effectiveSource)
+  const tgtResolved = resolveLanguageCodes(cleanTarget)
+  if (srcResolved.m2mCode === tgtResolved.m2mCode) return []
+  if (srcResolved.m2mCode === 'en' || tgtResolved.m2mCode === 'en') {
+    return [getOpusPairModelId(srcResolved, tgtResolved)]
+  }
+  return [
+    getOpusPairModelId(srcResolved, ENGLISH_RESOLVED),
+    getOpusPairModelId(ENGLISH_RESOLVED, tgtResolved),
+  ]
+}
+
 async function runOpusSingleHop(
   mod: typeof import('@huggingface/transformers'),
   text: string,
   src: ResolvedLanguageCodes,
   tgt: ResolvedLanguageCodes,
   effectiveSource: string,
-  stoppingCriteria: InterruptableCriteriaLike
+  stoppingCriteria: InterruptableCriteriaLike,
+  protectedOpusModelId?: string
 ): Promise<OpusTranslationRunOutput> {
   const isToEnglish = tgt.m2mCode === 'en'
-  const pairModelId = isToEnglish
-    ? (OPUS_TO_EN_MODELS[src.m2mCode] ?? OPUS_DEFAULT_TO_EN_MODEL)
-    : (OPUS_FROM_EN_MODELS[tgt.m2mCode] ?? OPUS_DEFAULT_FROM_EN_MODEL)
+  const pairModelId = getOpusPairModelId(src, tgt)
   const useEnMulTag = !isToEnglish && pairModelId === OPUS_DEFAULT_FROM_EN_MODEL
 
   // Load/swap outside inference timeout so slow mobile downloads never spuriously time out
-  const pairHandle = await ensureModel('opus', pairModelId, true)
+  const pairHandle = await ensureModel('opus', pairModelId, true, protectedOpusModelId)
 
   if (stoppingCriteria.interrupted || activePreempted || activeCancelled) {
     return {
@@ -1190,7 +1418,7 @@ async function runOpusTranslation(
       text: text.trim(),
       detectedSourceLang: effectiveSource,
       sameLanguage: true,
-      handle: activeHandle,
+      handle: getLastActiveHandle('opus'),
     }
   }
 
@@ -1203,7 +1431,7 @@ async function runOpusTranslation(
       text: text.trim(),
       detectedSourceLang: effectiveSource,
       sameLanguage: true,
-      handle: activeHandle,
+      handle: getLastActiveHandle('opus'),
     }
   }
 
@@ -1219,14 +1447,18 @@ async function runOpusTranslation(
     )
   }
 
-  // Clean 2-step English pivot (src -> en -> tgt), keeping strictly 1 model in RAM at a time
+  // Clean 2-step English pivot (src -> en -> tgt): both hops stay hot in the 2-slot LRU RAM pool
+  const hop1ModelId = getOpusPairModelId(srcResolved, ENGLISH_RESOLVED)
+  const hop2ModelId = getOpusPairModelId(ENGLISH_RESOLVED, tgtResolved)
+
   const toEn = await runOpusSingleHop(
     mod,
     text,
     srcResolved,
     ENGLISH_RESOLVED,
     effectiveSource,
-    stoppingCriteria
+    stoppingCriteria,
+    hop2ModelId
   )
   if (stoppingCriteria.interrupted || activePreempted || activeCancelled || !toEn.text) {
     return toEn
@@ -1238,7 +1470,8 @@ async function runOpusTranslation(
     ENGLISH_RESOLVED,
     tgtResolved,
     effectiveSource,
-    stoppingCriteria
+    stoppingCriteria,
+    hop1ModelId
   )
 }
 
@@ -1325,12 +1558,55 @@ function enqueueTranslateJob(job: QueuedJob): void {
   }
 }
 
+/**
+ * Picks the next job while strictly preserving priority order:
+ * `load (-1) > high (0) > live (1) > visible (2) > normal (3)`.
+ * Only within the SAME backfill tier (`visible` or `normal`) for Opus-MT, prefers
+ * the newest job whose required model(s) are already hot in `opusHandles` to avoid
+ * thrashing if 3+ dedicated models are interleaved in history.
+ */
+function pickNextJobFromQueue(): QueuedJob | undefined {
+  if (queue.length === 0) return undefined
+  const head = queue[0]
+  if (
+    head.type !== 'translate' ||
+    head.modelKey !== 'opus' ||
+    (head.priority !== 'visible' && head.priority !== 'normal') ||
+    opusHandles.size === 0
+  ) {
+    return queue.shift()
+  }
+
+  const headNeeds = predictOpusModelIdsForJob(head)
+  if (headNeeds.every((id) => opusHandles.has(id))) {
+    return queue.shift()
+  }
+
+  // Scan only the contiguous prefix of the exact same backfill priority tier
+  for (let i = 1; i < queue.length; i += 1) {
+    const candidate = queue[i]
+    if (
+      candidate.type !== 'translate' ||
+      candidate.modelKey !== 'opus' ||
+      candidate.priority !== head.priority
+    ) {
+      break
+    }
+    const needs = predictOpusModelIdsForJob(candidate)
+    if (needs.every((id) => opusHandles.has(id))) {
+      return queue.splice(i, 1)[0]
+    }
+  }
+
+  return queue.shift()
+}
+
 async function processQueue(): Promise<void> {
   if (processing) return
   processing = true
   try {
-    while (queue.length > 0) {
-      const job = queue.shift()
+    while (queue.length > 0 && !disposePending) {
+      const job = pickNextJobFromQueue()
       if (!job) continue
       activeJob = job
       activePreempted = false
@@ -1343,8 +1619,46 @@ async function processQueue(): Promise<void> {
         }
 
         if (job.type === 'load') {
-          const handle = await ensureModel(job.modelKey, job.modelId)
-          if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+          let handle: ActiveModelHandle
+          if (job.modelKey === 'opus' && opusHandles.has(job.modelId)) {
+            // Already hot in LRU pool: promote to MRU and confirm ready in 0 ms
+            handle = opusHandles.get(job.modelId)!
+            opusHandles.delete(job.modelId)
+            opusHandles.set(job.modelId, handle)
+            lastActiveHandle = handle
+            postOut({
+              type: 'status',
+              status: 'ready',
+              modelKey: 'opus',
+              modelId: handle.modelId,
+              progress: 100,
+              file: null,
+              runtimeDevice: handle.device,
+              dtype: handle.dtype,
+            })
+          } else if (
+            job.modelKey === 'opus' &&
+            job.modelId === OPUS_DEFAULT_TO_EN_MODEL &&
+            opusHandles.size >= MAX_OPUS_RAM_HANDLES
+          ) {
+            // Never evict an actively used Opus pair just for a generic preload
+            handle = getMruOpusHandle()!
+            lastActiveHandle = handle
+            postOut({
+              type: 'status',
+              status: 'ready',
+              modelKey: 'opus',
+              modelId: handle.modelId,
+              progress: 100,
+              file: null,
+              runtimeDevice: handle.device,
+              dtype: handle.dtype,
+            })
+          } else {
+            handle = await ensureModel(job.modelKey, job.modelId)
+          }
+
+          if (activeCancelled || cancelledRequestIds.delete(job.requestId) || disposePending) {
             postOut({ type: 'dropped', requestId: job.requestId })
             continue
           }
@@ -1363,14 +1677,15 @@ async function processQueue(): Promise<void> {
         const sourceText = job.text ?? ''
         const targetLang = job.targetLang ?? 'English'
         if (!sourceText.trim()) {
+          const fallbackHandle = getLastActiveHandle(job.modelKey)
           postOut({
             type: 'result',
             requestId: job.requestId,
             text: '',
             modelKey: job.modelKey,
-            modelId: activeHandle?.modelId || job.modelId,
-            runtimeDevice: activeHandle?.device ?? 'wasm',
-            dtype: activeHandle?.dtype ?? 'q8',
+            modelId: fallbackHandle?.modelId || job.modelId,
+            runtimeDevice: fallbackHandle?.device ?? 'wasm',
+            dtype: fallbackHandle?.dtype ?? 'q8',
             sameLanguage: true,
           })
           continue
@@ -1382,7 +1697,7 @@ async function processQueue(): Promise<void> {
             new mod.InterruptableStoppingCriteria()
           activeStoppingCriteria = stoppingCriteria
 
-          if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+          if (activeCancelled || cancelledRequestIds.delete(job.requestId) || disposePending) {
             postOut({ type: 'dropped', requestId: job.requestId })
             continue
           }
@@ -1400,7 +1715,7 @@ async function processQueue(): Promise<void> {
             stoppingCriteria
           )
 
-          if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+          if (activeCancelled || cancelledRequestIds.delete(job.requestId) || disposePending) {
             postOut({ type: 'dropped', requestId: job.requestId })
             continue
           }
@@ -1409,7 +1724,7 @@ async function processQueue(): Promise<void> {
             continue
           }
 
-          const resolvedHandle = opusOut.handle ?? activeHandle
+          const resolvedHandle = opusOut.handle ?? getLastActiveHandle('opus')
           postOut({
             type: 'result',
             requestId: job.requestId,
@@ -1426,7 +1741,7 @@ async function processQueue(): Promise<void> {
 
         const handle = await ensureModel(job.modelKey, job.modelId)
 
-        if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+        if (activeCancelled || cancelledRequestIds.delete(job.requestId) || disposePending) {
           postOut({ type: 'dropped', requestId: job.requestId })
           continue
         }
@@ -1440,7 +1755,7 @@ async function processQueue(): Promise<void> {
           new mod.InterruptableStoppingCriteria()
         activeStoppingCriteria = stoppingCriteria
 
-        if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+        if (activeCancelled || cancelledRequestIds.delete(job.requestId) || disposePending) {
           postOut({ type: 'dropped', requestId: job.requestId })
           continue
         }
@@ -1466,7 +1781,9 @@ async function processQueue(): Promise<void> {
             () => stoppingCriteria.interrupt()
           )
         } catch (inferErr) {
-          if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+          stoppingCriteria.interrupt()
+          await waitForActiveInferenceUnwind()
+          if (activeCancelled || cancelledRequestIds.delete(job.requestId) || disposePending) {
             postOut({ type: 'dropped', requestId: job.requestId })
             continue
           }
@@ -1477,7 +1794,7 @@ async function processQueue(): Promise<void> {
           if (handle.device === 'webgpu') {
             webGpuFailed = true
             finalHandle = await ensureModel(job.modelKey, job.modelId, true)
-            if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+            if (activeCancelled || cancelledRequestIds.delete(job.requestId) || disposePending) {
               postOut({ type: 'dropped', requestId: job.requestId })
               continue
             }
@@ -1504,7 +1821,7 @@ async function processQueue(): Promise<void> {
           }
         }
 
-        if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+        if (activeCancelled || cancelledRequestIds.delete(job.requestId) || disposePending) {
           postOut({ type: 'dropped', requestId: job.requestId })
           continue
         }
@@ -1525,7 +1842,9 @@ async function processQueue(): Promise<void> {
           sameLanguage: runOut.sameLanguage,
         })
       } catch (err) {
-        if (activeCancelled || cancelledRequestIds.delete(job.requestId)) {
+        activeStoppingCriteria?.interrupt()
+        await waitForActiveInferenceUnwind()
+        if (activeCancelled || cancelledRequestIds.delete(job.requestId) || disposePending) {
           postOut({ type: 'dropped', requestId: job.requestId })
           continue
         }
@@ -1534,7 +1853,7 @@ async function processQueue(): Promise<void> {
           continue
         }
         const message = err instanceof Error ? err.message : 'Local translation failed.'
-        if (job.type === 'load' || !activeHandle) {
+        if (job.type === 'load' || !hasLoadedHandleForModelKey(job.modelKey)) {
           postOut({
             type: 'status',
             status: 'error',
@@ -1550,6 +1869,10 @@ async function processQueue(): Promise<void> {
           error: message,
         })
       } finally {
+        if (activeInferencePromise) {
+          activeStoppingCriteria?.interrupt()
+          await waitForActiveInferenceUnwind()
+        }
         if (activeJob?.requestId === job.requestId) {
           activeJob = null
           activeStoppingCriteria = null
@@ -1563,6 +1886,11 @@ async function processQueue(): Promise<void> {
     activeStoppingCriteria = null
     activePreempted = false
     activeCancelled = false
+    if (disposePending) {
+      disposePending = false
+      closeYieldChannel()
+      await disposeAllModels()
+    }
     processing = false
   }
 }
@@ -1586,8 +1914,13 @@ self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
       activeCancelled = true
       activeStoppingCriteria?.interrupt()
     }
-    closeYieldChannel()
-    void disposeActiveModel()
+    if (processing) {
+      // Defer disposal until processQueue unwinds the active WASM session.run() safely
+      disposePending = true
+    } else {
+      closeYieldChannel()
+      void disposeAllModels()
+    }
     return
   }
 
@@ -1615,6 +1948,7 @@ self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
   }
 
   if (msg.type === 'load') {
+    disposePending = false
     const modelKey = normalizeWorkerModelKey(msg.modelKey)
     insertJobAtTierTail({
       type: 'load',
@@ -1628,6 +1962,7 @@ self.onmessage = (event: MessageEvent<TranslatorWorkerInMessage>) => {
   }
 
   if (msg.type === 'translate') {
+    disposePending = false
     const modelKey = normalizeWorkerModelKey(msg.modelKey)
     const job: QueuedJob = {
       type: 'translate',

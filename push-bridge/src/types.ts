@@ -37,6 +37,7 @@ export interface StoredDeviceSubscription {
 export interface StoredUserRecord {
   pubkey: string
   devices: StoredDeviceSubscription[]
+  aliasPubkeys?: string[]
   updatedAt: number
 }
 
@@ -85,10 +86,15 @@ export const DEFAULT_PUSH_PREFERENCES: StoredPushPreferences = {
 }
 
 export const MAX_DEVICES_PER_PUBKEY = 5
+export const MAX_ALIAS_PUBKEYS = 16
 export const PUBKEYS_INDEX_KEY = 'pubkeys:index'
 
 export function subKeyForPubkey(pubkey: string): string {
   return `sub:${pubkey.toLowerCase()}`
+}
+
+export function aliasKeyForPubkey(aliasPubkey: string): string {
+  return `alias:${aliasPubkey.toLowerCase()}`
 }
 
 export function seenKeyForEvent(eventId: string): string {

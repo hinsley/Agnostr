@@ -13,6 +13,8 @@ import type {
   DeviceSyncWirePacket,
   LinkedDeviceInfo,
   SyncedRecentMessagesTail,
+  SyncedWalletState,
+  WalletSyncProvider,
 } from '../types/deviceSync.ts'
 import type {
   DmMessage,
@@ -28,6 +30,7 @@ import {
   buildMessageChunkPackets,
   buildSignedDeviceSyncCheckpointEvent,
   buildSignedDeviceSyncEphemeralEvent,
+  buildWalletChunkPackets,
   computeCrdtStateHash,
   computeJsonDigest,
   computeScopeDigest,
@@ -45,6 +48,7 @@ import {
   fitCheckpointStateWithinBudget,
   KIND_DEVICE_SYNC_CHECKPOINT,
   KIND_DEVICE_SYNC_EPHEMERAL,
+  MAX_NIP44_CHUNK_BYTES,
   mergeCrdtStates,
   parseDeviceSyncCheckpointEvent,
   parseDeviceSyncEphemeralEvent,
@@ -128,6 +132,15 @@ interface PendingAmailTransfer {
   startedAt: number
 }
 
+interface PendingWalletTransfer {
+  totalChunks: number
+  fingerprint: string
+  updatedAt: number
+  hash: string
+  chunks: Map<number, string>
+  startedAt: number
+}
+
 const SIBLING_STATE_COOLDOWN_MS = 3_000
 const SIBLING_REQ_COOLDOWN_MS = 4_000
 const MAX_SEEN_SYNC_EVENTS = 1200
@@ -136,6 +149,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   deviceSync: DeviceSyncEngine
   registerAmailSyncProvider: (provider: AmailSyncProvider | null) => void
   notifyAmailChanged: () => void
+  registerWalletSyncProvider: (provider: WalletSyncProvider | null) => void
+  notifyWalletChanged: () => void
 } {
   const {
     relayPool,
@@ -220,6 +235,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   const amailProviderRef = useRef<AmailSyncProvider | null>(null)
   const amailTransfersRef = useRef<Map<string, PendingAmailTransfer>>(new Map())
   const amailLastUpdatedAtRef = useRef<number>(0)
+  const walletProviderRef = useRef<WalletSyncProvider | null>(null)
+  const walletTransfersRef = useRef<Map<string, PendingWalletTransfer>>(new Map())
+  const walletNotifyTimerRef = useRef<number | null>(null)
   const subSeqRef = useRef<number>(0)
 
   // Always-fresh refs for callbacks and live snapshots
@@ -490,6 +508,36 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     }
   }, [])
 
+  const getWalletExportInfo = useCallback(async (): Promise<{
+    initialized: true
+    fingerprint: string
+    updatedAt: number
+    hash: string
+    payload: unknown
+  } | null> => {
+    const provider = walletProviderRef.current
+    if (!provider) return null
+    try {
+      const info = await provider.exportSyncState()
+      if (!info || !info.initialized || !info.fingerprint || !info.payload) return null
+      const cleanFp = info.fingerprint.trim()
+      if (!cleanFp) return null
+      const updatedAt =
+        typeof info.updatedAt === 'number' && Number.isFinite(info.updatedAt)
+          ? info.updatedAt
+          : Date.now()
+      return {
+        initialized: true,
+        fingerprint: cleanFp,
+        updatedAt,
+        hash: computeJsonDigest(info.payload),
+        payload: info.payload,
+      }
+    } catch {
+      return null
+    }
+  }, [])
+
   const computeLocalMsgDigests = useCallback(async (): Promise<DeviceSyncMsgDigests> => {
     const { dmMap, serverMap, radioMap } = collectLocalMessageBuckets()
     const dm: Record<string, DeviceSyncScopeDigest> = {}
@@ -504,14 +552,25 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     for (const [gh, msgs] of radioMap.entries()) {
       radio[gh] = computeScopeDigest(msgs)
     }
-    const amailInfo = await getAmailExportInfo()
+    const [amailInfo, walletInfo] = await Promise.all([
+      getAmailExportInfo(),
+      getWalletExportInfo(),
+    ])
     return {
       dm,
       server,
       radio,
       amail: amailInfo ? { updatedAt: amailInfo.updatedAt, hash: amailInfo.hash } : null,
+      wallet: walletInfo
+        ? {
+            initialized: true,
+            fingerprint: walletInfo.fingerprint,
+            updatedAt: walletInfo.updatedAt,
+            hash: walletInfo.hash,
+          }
+        : null,
     }
-  }, [collectLocalMessageBuckets, getAmailExportInfo])
+  }, [collectLocalMessageBuckets, getAmailExportInfo, getWalletExportInfo])
 
   const buildRecentMessagesTail = useCallback((): SyncedRecentMessagesTail => {
     const { dmMap, serverMap, radioMap } = collectLocalMessageBuckets()
@@ -582,9 +641,26 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       const relays = getSyncRelayUrlsRef.current()
       if (relays.length === 0) return false
 
-      const amailInfo = await getAmailExportInfo()
+      const [amailInfo, walletInfo] = await Promise.all([
+        getAmailExportInfo(),
+        getWalletExportInfo(),
+      ])
+      const walletSnapshot: SyncedWalletState | null = walletInfo
+        ? {
+            updatedAt: walletInfo.updatedAt,
+            fingerprint: walletInfo.fingerprint,
+            hash: walletInfo.hash,
+            payload: walletInfo.payload,
+          }
+        : null
       const recentTail = buildRecentMessagesTail()
-      const bounded = fitCheckpointStateWithinBudget(crdtRef.current, amailInfo, recentTail)
+      const bounded = fitCheckpointStateWithinBudget(
+        crdtRef.current,
+        amailInfo,
+        recentTail,
+        MAX_NIP44_CHUNK_BYTES,
+        walletSnapshot
+      )
 
       const signed = await buildSignedDeviceSyncCheckpointEvent(
         bounded,
@@ -605,6 +681,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       identityManager,
       relayPool,
       getAmailExportInfo,
+      getWalletExportInfo,
       buildRecentMessagesTail,
       recordSyncedActivity,
     ]
@@ -657,8 +734,25 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
       lastStateSentToPeerRef.current.set(key, now)
 
-      const amailInfo = await getAmailExportInfo()
-      const statePayload = fitCheckpointStateWithinBudget(crdtRef.current, amailInfo, undefined)
+      const [amailInfo, walletInfo] = await Promise.all([
+        getAmailExportInfo(),
+        getWalletExportInfo(),
+      ])
+      const walletSnapshot: SyncedWalletState | null = walletInfo
+        ? {
+            updatedAt: walletInfo.updatedAt,
+            fingerprint: walletInfo.fingerprint,
+            hash: walletInfo.hash,
+            payload: walletInfo.payload,
+          }
+        : null
+      const statePayload = fitCheckpointStateWithinBudget(
+        crdtRef.current,
+        amailInfo,
+        undefined,
+        MAX_NIP44_CHUNK_BYTES,
+        walletSnapshot
+      )
       const packet: DeviceSyncStatePacket = {
         v: 1,
         type: 'sync-state',
@@ -671,7 +765,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
       return await publishEphemeralPacket(packet, allowExtensionPrompt)
     },
-    [deviceLabel, getAmailExportInfo, publishEphemeralPacket]
+    [deviceLabel, getAmailExportInfo, getWalletExportInfo, publishEphemeralPacket]
   )
 
   const applyRecentMessagesTail = useCallback(
@@ -795,6 +889,19 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         }
       }
 
+      if (remoteState.wallet && walletProviderRef.current) {
+        try {
+          const res = await walletProviderRef.current.mergeSyncState(remoteState.wallet.payload)
+          if (typeof res === 'number' && res > 0) {
+            itemsApplied += res
+          } else if (res === true) {
+            itemsApplied += 1
+          }
+        } catch {
+          // Ignore malformed optional wallet payload
+        }
+      }
+
       if (itemsApplied > 0 || changed) {
         recordSyncedActivity(itemsApplied)
       }
@@ -861,7 +968,19 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           remoteDigests.amail.hash !== localDigests.amail?.hash
       )
 
-      if (scopes.length > 0 || wantAmail) {
+      const remoteWallet = remoteDigests.wallet
+      const localWallet = localDigests.wallet
+      const wantWallet = Boolean(
+        walletProviderRef.current &&
+          remoteWallet?.initialized &&
+          remoteWallet.fingerprint &&
+          remoteWallet.hash &&
+          (!localWallet?.initialized ||
+            (localWallet.fingerprint === remoteWallet.fingerprint &&
+              localWallet.hash !== remoteWallet.hash))
+      )
+
+      if (scopes.length > 0 || wantAmail || wantWallet) {
         lastReqSentToPeerRef.current.set(peerDeviceId, now)
         const req: DeviceSyncMsgReqPacket = {
           v: 1,
@@ -871,6 +990,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           ts: now,
           scopes,
           ...(wantAmail ? { wantAmail: true } : {}),
+          ...(wantWallet ? { wantWallet: true } : {}),
         }
         void publishEphemeralPacket(req, false)
       }
@@ -988,6 +1108,24 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
             }
           }
         }
+
+        if (packet.wantWallet) {
+          const walletInfo = await getWalletExportInfo()
+          if (walletInfo) {
+            const chunks = buildWalletChunkPackets({
+              deviceId: deviceIdRef.current,
+              targetDeviceId: packet.deviceId,
+              transferId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+              fingerprint: walletInfo.fingerprint,
+              updatedAt: walletInfo.updatedAt,
+              hash: walletInfo.hash,
+              payload: walletInfo.payload,
+            })
+            for (const chunk of chunks) {
+              await publishEphemeralPacket(chunk, false)
+            }
+          }
+        }
         return
       }
 
@@ -1067,6 +1205,54 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
             // Ignore malformed reassembled payload
           }
         }
+        return
+      }
+
+      if (packet.type === 'sync-wallet-chunk') {
+        if (!walletProviderRef.current || packet.totalChunks <= 0 || packet.totalChunks > 64) {
+          return
+        }
+        const tKey = `${packet.deviceId}:${packet.transferId}`
+        const now = Date.now()
+        // Prune stale incomplete transfers (> 90s old)
+        for (const [k, v] of walletTransfersRef.current.entries()) {
+          if (now - v.startedAt > 90_000) {
+            walletTransfersRef.current.delete(k)
+          }
+        }
+        let transfer = walletTransfersRef.current.get(tKey)
+        if (!transfer) {
+          transfer = {
+            totalChunks: packet.totalChunks,
+            fingerprint: packet.fingerprint,
+            updatedAt: packet.updatedAt,
+            hash: packet.hash,
+            chunks: new Map(),
+            startedAt: now,
+          }
+          walletTransfersRef.current.set(tKey, transfer)
+        }
+        transfer.chunks.set(packet.chunkIndex, packet.data)
+        if (transfer.chunks.size >= transfer.totalChunks) {
+          walletTransfersRef.current.delete(tKey)
+          let combined = ''
+          for (let i = 0; i < transfer.totalChunks; i += 1) {
+            const part = transfer.chunks.get(i)
+            if (typeof part !== 'string') return
+            combined += part
+          }
+          try {
+            const parsed: unknown = JSON.parse(combined)
+            const res = await walletProviderRef.current.mergeSyncState(parsed)
+            const count = typeof res === 'number' ? res : res === true ? 1 : 0
+            if (count > 0) {
+              recordSyncedActivity(count)
+              scheduleCheckpointPublish()
+            }
+          } catch {
+            // Ignore malformed reassembled wallet payload
+          }
+        }
       }
     },
     [
@@ -1078,6 +1264,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       applyMergedRemoteCrdt,
       scheduleCheckpointPublish,
       getAmailExportInfo,
+      getWalletExportInfo,
       recordSyncedActivity,
     ]
   )
@@ -1094,6 +1281,11 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     checkpointDirtyRef.current = false
     seenEventIdsRef.current.clear()
     amailTransfersRef.current.clear()
+    walletTransfersRef.current.clear()
+    if (walletNotifyTimerRef.current !== null) {
+      window.clearTimeout(walletNotifyTimerRef.current)
+      walletNotifyTimerRef.current = null
+    }
     lastStateSentToPeerRef.current.clear()
     lastReqSentToPeerRef.current.clear()
     lastPeerDigestsRef.current.clear()
@@ -1366,6 +1558,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       if (msgSyncNotifyTimerRef.current !== null) {
         window.clearTimeout(msgSyncNotifyTimerRef.current)
       }
+      if (walletNotifyTimerRef.current !== null) {
+        window.clearTimeout(walletNotifyTimerRef.current)
+      }
     }
   }, [])
 
@@ -1470,6 +1665,28 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     }
   }, [scheduleCheckpointPublish, broadcastHello])
 
+  const registerWalletSyncProvider = useCallback((provider: WalletSyncProvider | null) => {
+    walletProviderRef.current = provider
+  }, [])
+
+  const notifyWalletChanged = useCallback(() => {
+    if (!enabledRef.current || isApplyingRemoteRef.current) return
+    scheduleCheckpointPublish()
+    const hasOnlineSibling = linkedDevicesRef.current.some(
+      (d) => Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
+    )
+    if (!hasOnlineSibling) return
+    if (walletNotifyTimerRef.current !== null) {
+      window.clearTimeout(walletNotifyTimerRef.current)
+    }
+    walletNotifyTimerRef.current = window.setTimeout(() => {
+      walletNotifyTimerRef.current = null
+      if (!enabledRef.current || isApplyingRemoteRef.current) return
+      void broadcastHello(false)
+      void sendStateToPeer(undefined, false)
+    }, 600)
+  }, [scheduleCheckpointPublish, broadcastHello, sendStateToPeer])
+
   const resetAll = useCallback(() => {
     if (checkpointTimerRef.current !== null) {
       window.clearTimeout(checkpointTimerRef.current)
@@ -1478,6 +1695,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     if (msgSyncNotifyTimerRef.current !== null) {
       window.clearTimeout(msgSyncNotifyTimerRef.current)
       msgSyncNotifyTimerRef.current = null
+    }
+    if (walletNotifyTimerRef.current !== null) {
+      window.clearTimeout(walletNotifyTimerRef.current)
+      walletNotifyTimerRef.current = null
     }
     clearDeviceSyncState()
     const freshId = resetDeviceId()
@@ -1492,6 +1713,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     checkpointDirtyRef.current = false
     seenEventIdsRef.current.clear()
     amailTransfersRef.current.clear()
+    walletTransfersRef.current.clear()
     lastStateSentToPeerRef.current.clear()
     lastReqSentToPeerRef.current.clear()
     lastPeerDigestsRef.current.clear()
@@ -1541,5 +1763,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     deviceSync,
     registerAmailSyncProvider,
     notifyAmailChanged,
+    registerWalletSyncProvider,
+    notifyWalletChanged,
   }
 }

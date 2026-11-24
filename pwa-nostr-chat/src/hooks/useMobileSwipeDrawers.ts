@@ -207,10 +207,10 @@ export function useMobileSwipeDrawers(
 
         if (absX >= HORIZONTAL_SLOP_PX && absX > absY * HORIZONTAL_RATIO) {
           if (!opts.leftOpen && !opts.rightOpen) {
-            if (dx > 0 && session.startX <= session.viewportWidth * 0.65) {
+            if (dx > 0) {
               session.activeDrawer = 'left'
               session.mode = 'opening'
-            } else if (dx < 0 && session.startX >= session.viewportWidth * 0.35) {
+            } else if (dx < 0) {
               session.activeDrawer = 'right'
               session.mode = 'opening'
             } else {

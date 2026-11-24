@@ -835,6 +835,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     originalOutgoingById,
     translateMessage,
     cancelScope,
+    cancelDownload,
     updateSettings,
     preloadModel,
   } = translator
@@ -924,7 +925,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
   // Live-first incoming priority ('live', unthrottled) + low-priority interruptible backfill (MAX_ACTIVE_BACKFILL = 2)
   useEffect(() => {
-    if (!translatorEnabled) return
+    if (!translatorEnabled || translator.modelStatus === 'error') return
     const total = visibleMessages.length
     if (total === 0) return
 
@@ -1046,6 +1047,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     }
   }, [
     translatorEnabled,
+    translator.modelStatus,
     visibleMessages,
     viewportRange,
     myLanguage,
@@ -1208,15 +1210,26 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
             <div className="ag-translator-bar-right">
               {translator.modelStatus === 'downloading' ? (
-                <span
-                  className="ag-translator-model-status downloading tabular"
-                  title={translator.modelLabel}
-                >
-                  <Loader2 size={12} className="ag-spin" />
-                  <span>
-                    {translatorShortLabel} · {Math.round(translator.downloadProgress)}%
+                <>
+                  <span
+                    className="ag-translator-model-status downloading tabular"
+                    title={translator.modelLabel}
+                  >
+                    <Loader2 size={12} className="ag-spin" />
+                    <span>
+                      {translatorShortLabel} · {Math.round(translator.downloadProgress)}%
+                    </span>
                   </span>
-                </span>
+                  <button
+                    type="button"
+                    className="ag-translator-pill-btn"
+                    onClick={() => cancelDownload()}
+                    title="Cancel model download"
+                    aria-label="Cancel model download"
+                  >
+                    <span>Cancel</span>
+                  </button>
+                </>
               ) : translator.modelStatus === 'error' ? (
                 <button
                   type="button"

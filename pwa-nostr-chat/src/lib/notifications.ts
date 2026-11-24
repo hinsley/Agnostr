@@ -314,11 +314,44 @@ export interface PushBridgeRegisterParams {
   bridgeUrl: string
   vapidPublicKey?: string
   pubkey: string
+  aliasPubkeys?: string[]
   relays: string[]
   geohashes: string[]
   serverIds: string[]
   settings: NotificationSettings
   signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
+}
+
+async function waitForActiveSwRegistration(
+  timeoutMs = 8000
+): Promise<ServiceWorkerRegistration | null> {
+  const existing = await getPwaSwRegistration()
+  if (existing?.active && existing.pushManager) {
+    return existing
+  }
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+    return existing?.pushManager ? existing : null
+  }
+
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    const ready = await Promise.race<ServiceWorkerRegistration | null>([
+      navigator.serviceWorker.ready,
+      new Promise<null>((resolve) => {
+        timer = globalThis.setTimeout(() => resolve(null), timeoutMs)
+      }),
+    ])
+    if (ready?.pushManager) return ready
+  } catch {
+    // Fall through to any available registration
+  } finally {
+    if (timer !== null) {
+      globalThis.clearTimeout(timer)
+    }
+  }
+
+  const fallback = existing ?? (await getPwaSwRegistration())
+  return fallback?.pushManager ? fallback : null
 }
 
 export async function registerWithPushBridge(
@@ -327,7 +360,7 @@ export async function registerWithPushBridge(
   if (!isWebPushSupported()) {
     throw new Error('Web Push (PushManager) is unavailable in this browser.')
   }
-  const reg = await getPwaSwRegistration()
+  const reg = await waitForActiveSwRegistration(8000)
   if (!reg || !reg.pushManager) {
     throw new Error('Service Worker is not active yet. Reload once and retry.')
   }
@@ -362,9 +395,19 @@ export async function registerWithPushBridge(
     })
   }
 
+  const normalizedPubkey = params.pubkey.toLowerCase()
+  const aliasPubkeys = Array.from(
+    new Set(
+      (params.aliasPubkeys ?? [])
+        .map((pk) => pk.trim().toLowerCase())
+        .filter((pk) => /^[0-9a-f]{64}$/.test(pk) && pk !== normalizedPubkey)
+    )
+  ).slice(0, 16)
+
   const endpointUrl = `${normalizedBridge}/subscribe`
   const bodyObj = {
-    pubkey: params.pubkey.toLowerCase(),
+    pubkey: normalizedPubkey,
+    aliasPubkeys,
     subscription: subscription.toJSON(),
     relays: params.relays.slice(0, 12),
     geohashes: params.geohashes.slice(0, 12),
@@ -456,7 +499,7 @@ export async function sendTestWebPush(opts: {
   bridgeUrl: string
   pubkey: string
   signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
-}): Promise<{ ok: boolean; delivered: number; failed: number; detail: string }> {
+}): Promise<{ ok: boolean; delivered: number; failed: number; status?: number; detail: string }> {
   const normalized = normalizePushBridgeUrl(opts.bridgeUrl)
   if (!normalized) {
     return {
@@ -529,6 +572,7 @@ export async function sendTestWebPush(opts: {
         ok: false,
         delivered,
         failed,
+        status: res.status,
         detail: `Test push failed (HTTP ${res.status}): ${errDetail}`,
       }
     }
@@ -538,6 +582,7 @@ export async function sendTestWebPush(opts: {
         ok: true,
         delivered,
         failed,
+        status: res.status,
         detail: `Background push delivered to ${delivered} device${delivered === 1 ? '' : 's'}${failed > 0 ? ` (${failed} failed)` : ''}.`,
       }
     }
@@ -546,6 +591,7 @@ export async function sendTestWebPush(opts: {
       ok: false,
       delivered,
       failed,
+      status: res.status,
       detail:
         parsed?.error ||
         parsed?.detail ||

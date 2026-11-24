@@ -13,10 +13,10 @@ export const TRANSLATOR_MODELS: Record<TranslatorModelKey, TranslatorModelOption
   opus: {
     key: 'opus',
     id: 'Xenova/opus-mt-mul-en',
-    label: 'Opus-MT Lite (Mobile)',
+    label: 'Opus-MT Lite',
     shortLabel: 'Opus-MT',
     sizeHint: '~107 MB per language pair (WASM q8)',
-    description: 'Lightweight, phone-safe fast translation (~107 MB/pair, Default on mobile)',
+    description: 'Fast, lightweight translation (~107 MB/pair, Default)',
   },
   m2m100: {
     key: 'm2m100',
@@ -24,7 +24,7 @@ export const TRANSLATOR_MODELS: Record<TranslatorModelKey, TranslatorModelOption
     label: 'M2M-100 (418M)',
     shortLabel: 'M2M-100',
     sizeHint: '~603 MB (WASM q8)',
-    description: 'Fast, lightweight 100-language translation (Default on desktop)',
+    description: '100-language all-in-one model (~603 MB)',
   },
   nllb200: {
     key: 'nllb200',
@@ -36,50 +36,29 @@ export const TRANSLATOR_MODELS: Record<TranslatorModelKey, TranslatorModelOption
   },
 }
 
-export const DEFAULT_TRANSLATOR_MODEL_KEY: TranslatorModelKey = 'm2m100'
+export const DEFAULT_TRANSLATOR_MODEL_KEY: TranslatorModelKey = 'opus'
 
 export function getDefaultTranslatorModelKey(): TranslatorModelKey {
-  if (typeof window !== 'undefined') {
-    const isNarrow = window.matchMedia?.('(max-width: 867px)')?.matches ?? false
-    const isCoarse = window.matchMedia?.('(pointer: coarse)')?.matches ?? false
-    const isMobileUa =
-      typeof navigator !== 'undefined' &&
-      /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-    if (isNarrow || isCoarse || isMobileUa) {
-      return 'opus'
-    }
-  }
   return DEFAULT_TRANSLATOR_MODEL_KEY
 }
 
-export const TRANSLATOR_MODEL_ID = TRANSLATOR_MODELS.m2m100.id
-export const TRANSLATOR_MODEL_LABEL = TRANSLATOR_MODELS.m2m100.label
-export const TRANSLATOR_MODEL_SIZE_HINT = TRANSLATOR_MODELS.m2m100.sizeHint
+export const TRANSLATOR_MODEL_ID = TRANSLATOR_MODELS.opus.id
+export const TRANSLATOR_MODEL_LABEL = TRANSLATOR_MODELS.opus.label
+export const TRANSLATOR_MODEL_SIZE_HINT = TRANSLATOR_MODELS.opus.sizeHint
 export const TRANSLATOR_CACHE_KEY = 'agnostr-translator-cache' as const
 
+/**
+ * Dedicated `<src> -> en` Opus-MT pairs ONLY for languages where multilingual
+ * `Xenova/opus-mt-mul-en` fails or underperforms (live-verified: Korean collapses
+ * on `mul-en`, and dedicated `ja-en`/`zh-en` significantly improve CJK fidelity).
+ * All other languages (es, fr, de, it, pt, nl, pl, ru, uk, tr, sv, cs, id, vi,
+ * ar, hi, th, etc.) consolidate onto `Xenova/opus-mt-mul-en` for zero-swap
+ * translation across mixed/global rooms.
+ */
 export const OPUS_TO_EN_MODELS: Readonly<Record<string, string>> = {
-  es: 'Xenova/opus-mt-es-en',
-  fr: 'Xenova/opus-mt-fr-en',
-  de: 'Xenova/opus-mt-de-en',
-  it: 'Xenova/opus-mt-it-en',
-  pt: 'Xenova/opus-mt-ROMANCE-en',
-  ro: 'Xenova/opus-mt-ROMANCE-en',
-  ca: 'Xenova/opus-mt-ROMANCE-en',
   ja: 'Xenova/opus-mt-ja-en',
   ko: 'Xenova/opus-mt-ko-en',
   zh: 'Xenova/opus-mt-zh-en',
-  ru: 'Xenova/opus-mt-ru-en',
-  ar: 'Xenova/opus-mt-ar-en',
-  hi: 'Xenova/opus-mt-hi-en',
-  nl: 'Xenova/opus-mt-nl-en',
-  pl: 'Xenova/opus-mt-pl-en',
-  tr: 'Xenova/opus-mt-tr-en',
-  uk: 'Xenova/opus-mt-uk-en',
-  vi: 'Xenova/opus-mt-vi-en',
-  th: 'Xenova/opus-mt-th-en',
-  id: 'Xenova/opus-mt-id-en',
-  sv: 'Xenova/opus-mt-sv-en',
-  cs: 'Xenova/opus-mt-cs-en',
 }
 
 export const OPUS_FROM_EN_MODELS: Readonly<Record<string, string>> = {
@@ -344,7 +323,7 @@ export function resolveInitialOpusModelId(
 export interface TranslatorSettings {
   /** Switches chat view into Double-Column Translator Mode (default: false) */
   enabled: boolean
-  /** On-device translation model selection (default: 'm2m100') */
+  /** On-device translation model selection (default: 'opus') */
   model: TranslatorModelKey
   /** Source language of incoming chat messages ('Auto' for automatic detection, or an explicit language) */
   sourceLanguage: string
@@ -438,6 +417,7 @@ export interface TranslatorEngine {
   cachedModelBytes: number
   storagePersisted: boolean
   preloadModel: () => Promise<boolean>
+  cancelDownload: () => void
   clearModelCache: () => Promise<void>
 
   // Message translations & outgoing originals

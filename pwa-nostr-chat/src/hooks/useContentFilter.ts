@@ -152,6 +152,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
   const inflightScreenRef = useRef<Map<string, Promise<ContentFilterVerdict>>>(new Map())
   const inflightPreloadRef = useRef<Promise<boolean> | null>(null)
   const skipNextAutoLoadRef = useRef<boolean>(false)
+  const cancelInFlightRef = useRef<boolean>(false)
   const reqSeqRef = useRef<number>(0)
 
   const safeObjectUrlsRef = useRef<Map<string, string>>(new Map())
@@ -436,6 +437,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
 
       const silent = Boolean(preloadOpts?.silent)
       skipNextAutoLoadRef.current = false
+      cancelInFlightRef.current = false
       const requestId = `cf-preload-${++reqSeqRef.current}`
 
       const task = (async (): Promise<boolean> => {
@@ -453,6 +455,9 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
           }
           return false
         } catch (err) {
+          if (cancelInFlightRef.current) {
+            return false
+          }
           const message =
             err instanceof Error
               ? err.message
@@ -471,6 +476,34 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     },
     [postWorkerRequest]
   )
+
+  const cancelDownload = useCallback(() => {
+    skipNextAutoLoadRef.current = true
+    cancelInFlightRef.current = true
+    terminateWorker()
+    setVerdicts((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const [key, verdict] of Object.entries(next)) {
+        if (verdict.status === 'downloading' || verdict.status === 'scanning') {
+          delete next[key]
+          changed = true
+        }
+      }
+      if (changed) {
+        verdictsRef.current = next
+        return next
+      }
+      return prev
+    })
+    setModelStatus('idle')
+    modelStatusRef.current = 'idle'
+    setDownloadProgress(0)
+    setDownloadFile(null)
+    setRuntimeDevice(null)
+    setModelError(null)
+    pushToastRef.current?.('info', 'Content filter download cancelled')
+  }, [terminateWorker])
 
   // Auto-load the 22.6 MB image safety model on app startup (and whenever protection becomes active while idle)
   useEffect(() => {
@@ -634,6 +667,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
 
       const task = (async (): Promise<ContentFilterVerdict> => {
         try {
+          cancelInFlightRef.current = false
           const requestId = `cf-img-${++reqSeqRef.current}`
           const res = await postWorkerRequest({
             type: 'screen',
@@ -658,6 +692,15 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
           }
           return finalVerdict
         } catch (err) {
+          if (cancelInFlightRef.current) {
+            return {
+              status: 'idle',
+              safe: false,
+              flagged: false,
+              categories: [],
+              checkedAt: Date.now(),
+            }
+          }
           const errorVerdict: ContentFilterVerdict = {
             status: 'error',
             safe: false,
@@ -783,6 +826,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
           }
 
           // 3. Run on-device safety screening in Web Worker BEFORE any objectUrl is created!
+          cancelInFlightRef.current = false
           const requestId = `cf-att-${++reqSeqRef.current}`
           const res = await postWorkerRequest({
             type: 'screen',
@@ -815,6 +859,15 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
           }
           return finalVerdict
         } catch (err) {
+          if (cancelInFlightRef.current) {
+            return {
+              status: 'idle',
+              safe: false,
+              flagged: false,
+              categories: [],
+              checkedAt: Date.now(),
+            }
+          }
           const errorVerdict: ContentFilterVerdict = {
             status: 'error',
             safe: false,
@@ -925,6 +978,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
 
   const resetAll = useCallback(() => {
     skipNextAutoLoadRef.current = true
+    cancelInFlightRef.current = false
     terminateWorker()
     revokeAllObjectUrls()
     clearFilterVerdictsStorage()
@@ -961,6 +1015,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       modelError,
       webGpuSupported,
       preloadModel,
+      cancelDownload,
       clearModelCache,
       clearVerdictCache,
       cachedVerdictCount,
@@ -986,6 +1041,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       modelError,
       webGpuSupported,
       preloadModel,
+      cancelDownload,
       clearModelCache,
       clearVerdictCache,
       cachedVerdictCount,

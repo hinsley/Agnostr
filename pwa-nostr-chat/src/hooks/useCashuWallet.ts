@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { mnemonicToSeedSync } from '@scure/bip39'
+import type { WalletSyncExportInfo } from '../types/deviceSync.ts'
 import type { ToastLevel } from '../types/protocol.ts'
 import type {
   BoltzReversePairInfo,
@@ -38,6 +39,7 @@ import {
 import { findCatalogMint, formatMintHost, normalizeMintUrl } from '../lib/cashuMints.ts'
 import {
   CASHU_WALLET_STORAGE_KEY,
+  buildWalletSyncExport,
   checkAndMintCashuQuote,
   checkCashuSentTokenClaimed,
   claimCashuTokenProofs,
@@ -58,11 +60,13 @@ import {
   inspectCashuMint,
   isValidBip39Mnemonic,
   loadPersistedCashuWallet,
+  mergeSyncedWalletState,
   normalizeMintError,
   normalizeMnemonicPhrase,
   parseWalletBackupJson,
   parseWalletPrivateKeyHex,
   restoreCashuProofsFromMint,
+  sanitizeSpentProofSecrets,
   savePersistedCashuWallet,
   sendCashuTokenProofs,
   sendP2pkCashuProofs,
@@ -78,6 +82,7 @@ import {
 
 export interface UseCashuWalletOptions {
   pushToast?: (level: ToastLevel, title: string, detail?: string) => void
+  onLocalWalletChanged?: () => void
 }
 
 function makeId(prefix: string): string {
@@ -87,6 +92,19 @@ function makeId(prefix: string): string {
 export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngine {
   const pushToastRef = useRef(options.pushToast)
   pushToastRef.current = options.pushToast
+
+  const onLocalWalletChangedRef = useRef(options.onLocalWalletChanged)
+  onLocalWalletChangedRef.current = options.onLocalWalletChanged
+
+  const notifyPendingRef = useRef(false)
+  const scheduleNotifyLocalWalletChanged = useCallback(() => {
+    if (notifyPendingRef.current) return
+    notifyPendingRef.current = true
+    queueMicrotask(() => {
+      notifyPendingRef.current = false
+      onLocalWalletChangedRef.current?.()
+    })
+  }, [])
 
   const [walletState, setWalletState] = useState<PersistedCashuWalletState>(() =>
     loadPersistedCashuWallet()
@@ -109,14 +127,61 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
   const swapPollInFlightRef = useRef(false)
 
   const commitState = useCallback(
-    (updater: (prev: PersistedCashuWalletState) => PersistedCashuWalletState) => {
-      const next = updater(stateRef.current)
+    (
+      updater: (prev: PersistedCashuWalletState) => PersistedCashuWalletState,
+      opts?: { fromRemoteSync?: boolean; resetSpentSecrets?: boolean }
+    ) => {
+      const prev = stateRef.current
+      const rawNext = updater(prev)
+      if (rawNext === prev) return prev
+
+      let spentProofSecrets = sanitizeSpentProofSecrets(
+        rawNext.spentProofSecrets ?? (opts?.resetSpentSecrets ? [] : (prev.spentProofSecrets ?? []))
+      )
+
+      if (!opts?.resetSpentSecrets && !opts?.fromRemoteSync) {
+        const nextSecrets = new Set<string>()
+        for (const list of Object.values(rawNext.proofsByMint)) {
+          for (const p of list) {
+            if (p?.secret) nextSecrets.add(p.secret)
+          }
+        }
+        const removedSecrets: string[] = []
+        for (const list of Object.values(prev.proofsByMint)) {
+          for (const p of list) {
+            if (p?.secret && !nextSecrets.has(p.secret)) {
+              removedSecrets.push(p.secret)
+            }
+          }
+        }
+        if (removedSecrets.length > 0) {
+          spentProofSecrets = sanitizeSpentProofSecrets([
+            ...spentProofSecrets,
+            ...removedSecrets,
+          ])
+        }
+      }
+
+      const updatedAt = opts?.fromRemoteSync
+        ? (rawNext.updatedAt ?? prev.updatedAt ?? Date.now())
+        : Math.max(Date.now(), (prev.updatedAt ?? 0) + 1)
+
+      const next: PersistedCashuWalletState = {
+        ...rawNext,
+        updatedAt,
+        spentProofSecrets,
+      }
+
       stateRef.current = next
       savePersistedCashuWallet(next)
       setWalletState(next)
+
+      if (!opts?.fromRemoteSync && next.initialized) {
+        scheduleNotifyLocalWalletChanged()
+      }
       return next
     },
-    []
+    [scheduleNotifyLocalWalletChanged]
   )
 
   const syncRuntimeSeed = useCallback(
@@ -144,13 +209,32 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     syncRuntimeSeed(walletState)
   }, [syncRuntimeSeed, walletState])
 
-  const commitSwaps = useCallback((updater: (prev: BoltzSwapRecord[]) => BoltzSwapRecord[]) => {
-    const next = updater(boltzSwapsRef.current)
-    boltzSwapsRef.current = next
-    saveStoredBoltzSwaps(next)
-    setBoltzSwaps(next)
-    return next
-  }, [])
+  const commitSwaps = useCallback(
+    (
+      updater: (prev: BoltzSwapRecord[]) => BoltzSwapRecord[],
+      opts?: { fromRemoteSync?: boolean }
+    ) => {
+      const prev = boltzSwapsRef.current
+      const next = updater(prev)
+      if (next === prev) return prev
+      boltzSwapsRef.current = next
+      saveStoredBoltzSwaps(next)
+      setBoltzSwaps(next)
+
+      if (!opts?.fromRemoteSync && stateRef.current.initialized) {
+        const cur = stateRef.current
+        const bumped: PersistedCashuWalletState = {
+          ...cur,
+          updatedAt: Math.max(Date.now(), (cur.updatedAt ?? 0) + 1),
+        }
+        stateRef.current = bumped
+        savePersistedCashuWallet(bumped)
+        scheduleNotifyLocalWalletChanged()
+      }
+      return next
+    },
+    [scheduleNotifyLocalWalletChanged]
+  )
 
   const setActiveQuoteSynced = useCallback((quote: CashuMintQuoteRecord | null) => {
     activeMintQuoteRef.current = quote
@@ -297,25 +381,29 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
       const requestedMint = opts?.mintUrl ? normalizeMintUrl(opts.mintUrl) : null
 
-      const next = commitState((prev) => {
-        const mints = prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints
-        const activeMintUrl =
-          requestedMint && mints.some((m) => m.url === requestedMint)
-            ? requestedMint
-            : prev.activeMintUrl
-        return {
-          version: 1,
-          initialized: true,
-          ...(draft.mnemonic ? { mnemonic: draft.mnemonic } : {}),
-          privateKeyHex: draft.privateKeyHex,
-          keysetCounters: {},
-          activeMintUrl,
-          mints,
-          proofsByMint: {},
-          history: [],
-          sentTokens: [],
-        }
-      })
+      const next = commitState(
+        (prev) => {
+          const mints = prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints
+          const activeMintUrl =
+            requestedMint && mints.some((m) => m.url === requestedMint)
+              ? requestedMint
+              : prev.activeMintUrl
+          return {
+            version: 1,
+            initialized: true,
+            ...(draft.mnemonic ? { mnemonic: draft.mnemonic } : {}),
+            privateKeyHex: draft.privateKeyHex,
+            keysetCounters: {},
+            activeMintUrl,
+            mints,
+            proofsByMint: {},
+            spentProofSecrets: [],
+            history: [],
+            sentTokens: [],
+          }
+        },
+        { resetSpentSecrets: true }
+      )
 
       syncRuntimeSeed(next)
       pushToastRef.current?.('success', 'Agwallet created', formatMintHost(next.activeMintUrl))
@@ -442,6 +530,10 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
         const adoptedMnemonic = backup.mnemonic ?? prev.mnemonic
         const adoptedPrivKey = backup.privateKeyHex ?? prev.privateKeyHex
+        const mergedSpent = sanitizeSpentProofSecrets([
+          ...(prev.spentProofSecrets ?? []),
+          ...(backup.spentProofSecrets ?? []),
+        ])
 
         return {
           version: 1,
@@ -454,6 +546,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
             : prev.activeMintUrl,
           mints: Array.from(mintMap.values()),
           proofsByMint: nextProofsByMint,
+          spentProofSecrets: mergedSpent,
           history: mergedHistory,
           sentTokens: mergedSent,
         }
@@ -531,39 +624,47 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         if (detected.mode === 'mnemonic') {
           const mnemonic = normalizeMnemonicPhrase(rawInput)
           const privateKeyHex = derivePrivateKeyHexFromSeed(mnemonicToSeedSync(mnemonic))
-          const next = commitState((prev) => ({
-            version: 1,
-            initialized: true,
-            mnemonic,
-            privateKeyHex,
-            keysetCounters: {},
-            activeMintUrl: prev.mints.some((m) => m.url === targetMint)
-              ? targetMint
-              : prev.activeMintUrl,
-            mints: prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints,
-            proofsByMint: {},
-            history: [],
-            sentTokens: [],
-          }))
+          const next = commitState(
+            (prev) => ({
+              version: 1,
+              initialized: true,
+              mnemonic,
+              privateKeyHex,
+              keysetCounters: {},
+              activeMintUrl: prev.mints.some((m) => m.url === targetMint)
+                ? targetMint
+                : prev.activeMintUrl,
+              mints: prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints,
+              proofsByMint: {},
+              spentProofSecrets: [],
+              history: [],
+              sentTokens: [],
+            }),
+            { resetSpentSecrets: true }
+          )
           syncRuntimeSeed(next)
         } else {
           const privateKeyHex = parseWalletPrivateKeyHex(rawInput)
           if (!privateKeyHex) {
             throw new Error('Invalid private key.')
           }
-          const next = commitState((prev) => ({
-            version: 1,
-            initialized: true,
-            privateKeyHex,
-            keysetCounters: {},
-            activeMintUrl: prev.mints.some((m) => m.url === targetMint)
-              ? targetMint
-              : prev.activeMintUrl,
-            mints: prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints,
-            proofsByMint: {},
-            history: [],
-            sentTokens: [],
-          }))
+          const next = commitState(
+            (prev) => ({
+              version: 1,
+              initialized: true,
+              privateKeyHex,
+              keysetCounters: {},
+              activeMintUrl: prev.mints.some((m) => m.url === targetMint)
+                ? targetMint
+                : prev.activeMintUrl,
+              mints: prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints,
+              proofsByMint: {},
+              spentProofSecrets: [],
+              history: [],
+              sentTokens: [],
+            }),
+            { resetSpentSecrets: true }
+          )
           syncRuntimeSeed(next)
         }
 
@@ -611,15 +712,18 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
   const exportBackupJson = useCallback((): string => {
     const cur = stateRef.current
+    const spentProofSecrets = sanitizeSpentProofSecrets(cur.spentProofSecrets)
     const payload: WalletBackupPayload = {
       version: 1,
       exportedAt: Date.now(),
+      ...(cur.updatedAt ? { updatedAt: cur.updatedAt } : {}),
       activeMintUrl: cur.activeMintUrl,
       ...(cur.mnemonic ? { mnemonic: cur.mnemonic } : {}),
       ...(cur.privateKeyHex ? { privateKeyHex: cur.privateKeyHex } : {}),
       keysetCounters: cur.keysetCounters,
       mints: cur.mints,
       proofsByMint: cur.proofsByMint,
+      ...(spentProofSecrets.length > 0 ? { spentProofSecrets } : {}),
       history: cur.history,
       sentTokens: cur.sentTokens,
       boltzSwaps: boltzSwapsRef.current,
@@ -641,7 +745,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       const norm = normalizeMintUrl(mintUrl)
       if (!norm) return
       commitState((prev) => {
-        if (!prev.mints.some((m) => m.url === norm)) return prev
+        if (prev.activeMintUrl === norm || !prev.mints.some((m) => m.url === norm)) return prev
         return { ...prev, activeMintUrl: norm }
       })
       setLastError(null)
@@ -1375,11 +1479,25 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
      On-Chain BTC <-> Cashu Ecash via Boltz Exchange v2
      ------------------------------------------------------------------------ */
 
-  const setBoltzApiUrl = useCallback((url: string) => {
-    const saved = saveStoredBoltzApiUrl(url)
-    boltzApiUrlRef.current = saved
-    setBoltzApiUrlState(saved)
-  }, [])
+  const setBoltzApiUrl = useCallback(
+    (url: string) => {
+      const prev = boltzApiUrlRef.current
+      const saved = saveStoredBoltzApiUrl(url)
+      boltzApiUrlRef.current = saved
+      setBoltzApiUrlState(saved)
+      if (saved !== prev && stateRef.current.initialized) {
+        const cur = stateRef.current
+        const bumped: PersistedCashuWalletState = {
+          ...cur,
+          updatedAt: Math.max(Date.now(), (cur.updatedAt ?? 0) + 1),
+        }
+        stateRef.current = bumped
+        savePersistedCashuWallet(bumped)
+        scheduleNotifyLocalWalletChanged()
+      }
+    },
+    [scheduleNotifyLocalWalletChanged]
+  )
 
   const fetchBoltzSubmarinePair = useCallback(async (): Promise<BoltzSubmarinePairInfo> => {
     return await fetchBoltzSubmarinePairApi(boltzApiUrlRef.current)
@@ -1652,6 +1770,69 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     return buildBoltzSwapRescueJson(swap)
   }, [])
 
+  /* ------------------------------------------------------------------------
+     Proof-Safe Encrypted Multi-Device Sync (`exportSyncState` / `mergeSyncState`)
+     ------------------------------------------------------------------------ */
+
+  const exportSyncState = useCallback((): WalletSyncExportInfo | null => {
+    return buildWalletSyncExport(stateRef.current, boltzSwapsRef.current, boltzApiUrlRef.current)
+  }, [])
+
+  const mergeSyncState = useCallback(
+    (rawRemote: unknown): boolean => {
+      const merged = mergeSyncedWalletState({
+        localState: stateRef.current,
+        localSwaps: boltzSwapsRef.current,
+        localBoltzApiUrl: boltzApiUrlRef.current,
+        rawRemote,
+      })
+      if (!merged.changed) return false
+
+      if (merged.adoptedNewWallet) {
+        clearCashuWalletInstanceCache()
+        setActiveQuoteSynced(null)
+        commitState(() => merged.nextState, { fromRemoteSync: true, resetSpentSecrets: true })
+        syncRuntimeSeed(merged.nextState)
+
+        if (merged.swapsChanged) {
+          commitSwaps(() => merged.nextSwaps, { fromRemoteSync: true })
+        }
+        if (merged.apiUrlChanged) {
+          const saved = saveStoredBoltzApiUrl(merged.nextBoltzApiUrl)
+          boltzApiUrlRef.current = saved
+          setBoltzApiUrlState(saved)
+        }
+
+        let totalSats = 0
+        for (const list of Object.values(merged.nextState.proofsByMint)) {
+          totalSats += sumStoredProofs(list)
+        }
+        const host = formatMintHost(merged.nextState.activeMintUrl)
+        pushToastRef.current?.(
+          'info',
+          'Agwallet synced from linked device',
+          totalSats > 0 ? `${totalSats.toLocaleString()} sats · ${host}` : host
+        )
+        return true
+      }
+
+      if (merged.stateChanged) {
+        commitState(() => merged.nextState, { fromRemoteSync: true })
+        syncRuntimeSeed(merged.nextState)
+      }
+      if (merged.swapsChanged) {
+        commitSwaps(() => merged.nextSwaps, { fromRemoteSync: true })
+      }
+      if (merged.apiUrlChanged) {
+        const saved = saveStoredBoltzApiUrl(merged.nextBoltzApiUrl)
+        boltzApiUrlRef.current = saved
+        setBoltzApiUrlState(saved)
+      }
+      return true
+    },
+    [commitState, commitSwaps, setActiveQuoteSynced, syncRuntimeSeed]
+  )
+
   const clearHistory = useCallback(() => {
     commitState((prev) => ({ ...prev, history: [] }))
   }, [commitState])
@@ -1730,6 +1911,8 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       createOnchainSendSwap,
       refreshBoltzSwap,
       exportBoltzSwapRescueJson,
+      exportSyncState,
+      mergeSyncState,
       exportBackupJson,
       importBackupJson,
       clearHistory,
@@ -1784,6 +1967,8 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       createOnchainSendSwap,
       refreshBoltzSwap,
       exportBoltzSwapRescueJson,
+      exportSyncState,
+      mergeSyncState,
       exportBackupJson,
       importBackupJson,
       clearHistory,

@@ -89,6 +89,7 @@ export interface TranscriptionEngine {
   runtimeDevice: TranscriptionRuntimeDevice | null
   modelError: string | null
   preloadModel: () => Promise<boolean>
+  cancelDownload: () => void
   clearModelCache: () => Promise<void>
 
   // On-demand & automatic voice memo transcription (strictly Trusted-Peers gated)

@@ -1,5 +1,6 @@
 import { verifyEvent, type Event as NostrEvent } from 'nostr-tools/pure'
 import {
+  aliasKeyForPubkey,
   PUBKEYS_INDEX_KEY,
   seenKeyForEvent,
   subKeyForPubkey,
@@ -183,8 +184,8 @@ function buildPayloadForEvent(
     if (!prefs.serverMessages && !prefs.directPings) return null
     const serverId = getTagValue(ev.tags, 'h') || undefined
     return {
-      title: showPreviews && senderNick ? `${senderNick} in Server` : 'New Server Message',
-      body: cleanPreview || 'New message in one of your servers.',
+      title: showPreviews && senderNick ? `${senderNick} in Group` : 'New Group Message',
+      body: cleanPreview || 'New message in one of your groups.',
       tag: serverId ? `agnostr-srv-${serverId.slice(0, 12)}` : 'agnostr-srv',
       data: {
         category: 'server-message',
@@ -278,17 +279,57 @@ export async function runNostrPushCron(env: Env): Promise<{
 
   let delivered = 0
   const userCache = new Map<string, StoredUserRecord | null>()
+  const aliasCache = new Map<string, string | null>()
   const dirtyUsers = new Set<string>()
   const removedPubkeys = new Set<string>()
 
+  const resolveRecordForRecipient = async (
+    rawPk: string
+  ): Promise<{ masterPk: string; record: StoredUserRecord } | null> => {
+    const pk = rawPk.toLowerCase()
+    if (!userCache.has(pk)) {
+      const direct = (await env.PUSH_KV.get(subKeyForPubkey(pk), 'json')) as StoredUserRecord | null
+      userCache.set(pk, direct)
+    }
+    const directRec = userCache.get(pk)
+    if (directRec && Array.isArray(directRec.devices) && directRec.devices.length > 0) {
+      return { masterPk: pk, record: directRec }
+    }
+
+    if (!aliasCache.has(pk)) {
+      const mapped = await env.PUSH_KV.get(aliasKeyForPubkey(pk))
+      const clean =
+        typeof mapped === 'string' && /^[0-9a-f]{64}$/i.test(mapped)
+          ? mapped.toLowerCase()
+          : null
+      aliasCache.set(pk, clean)
+    }
+    const masterPk = aliasCache.get(pk)
+    if (!masterPk) return null
+
+    if (!userCache.has(masterPk)) {
+      const stored = (await env.PUSH_KV.get(
+        subKeyForPubkey(masterPk),
+        'json'
+      )) as StoredUserRecord | null
+      userCache.set(masterPk, stored)
+    }
+    const aliasedRec = userCache.get(masterPk)
+    if (aliasedRec && Array.isArray(aliasedRec.devices) && aliasedRec.devices.length > 0) {
+      return { masterPk, record: aliasedRec }
+    }
+    return null
+  }
+
   for (const ev of uniqueById.values()) {
+    const authorPk = ev.pubkey.toLowerCase()
     const recipients = getAllTagValues(ev.tags, 'p')
       .map((p) => p.toLowerCase())
       .filter((p) => pubkeySet.has(p))
 
     // Avoid self-push noise on regular chat/mentions (keep gift-wrap 1059 since wrap pubkey is ephemeral)
     const filteredRecipients = Array.from(new Set(recipients)).filter(
-      (r) => ev.kind === 1059 || ev.kind === 9735 || ev.kind === 9321 || r !== ev.pubkey.toLowerCase()
+      (r) => ev.kind === 1059 || ev.kind === 9735 || ev.kind === 9321 || r !== authorPk
     )
     if (filteredRecipients.length === 0) continue
 
@@ -305,13 +346,24 @@ export async function runNostrPushCron(env: Env): Promise<{
     if (alreadySeen) continue
     await env.PUSH_KV.put(seenKey, '1', { expirationTtl: SEEN_TTL_SECONDS })
 
+    const deliveredMastersForEvent = new Set<string>()
+
     for (const recipientPk of filteredRecipients) {
-      if (!userCache.has(recipientPk)) {
-        const stored = (await env.PUSH_KV.get(subKeyForPubkey(recipientPk), 'json')) as StoredUserRecord | null
-        userCache.set(recipientPk, stored)
+      const resolved = await resolveRecordForRecipient(recipientPk)
+      if (!resolved) continue
+      const { masterPk, record } = resolved
+
+      if (deliveredMastersForEvent.has(masterPk)) continue
+      if (
+        ev.kind !== 1059 &&
+        ev.kind !== 9735 &&
+        ev.kind !== 9321 &&
+        (masterPk === authorPk ||
+          (Array.isArray(record.aliasPubkeys) && record.aliasPubkeys.includes(authorPk)))
+      ) {
+        continue
       }
-      const record = userCache.get(recipientPk)
-      if (!record || !Array.isArray(record.devices) || record.devices.length === 0) continue
+      deliveredMastersForEvent.add(masterPk)
 
       const survivingDevices: StoredDeviceSubscription[] = []
       let recordChanged = false
@@ -343,9 +395,14 @@ export async function runNostrPushCron(env: Env): Promise<{
       if (recordChanged) {
         record.devices = survivingDevices
         record.updatedAt = Date.now()
-        dirtyUsers.add(recipientPk)
+        dirtyUsers.add(masterPk)
         if (survivingDevices.length === 0) {
-          removedPubkeys.add(recipientPk)
+          removedPubkeys.add(masterPk)
+          if (Array.isArray(record.aliasPubkeys)) {
+            for (const aliasPk of record.aliasPubkeys) {
+              removedPubkeys.add(aliasPk.toLowerCase())
+            }
+          }
         }
       }
     }
@@ -356,6 +413,15 @@ export async function runNostrPushCron(env: Env): Promise<{
     const rec = userCache.get(pk)
     if (!rec || rec.devices.length === 0) {
       await env.PUSH_KV.delete(subKeyForPubkey(pk))
+      if (Array.isArray(rec?.aliasPubkeys)) {
+        for (const aliasPk of rec.aliasPubkeys) {
+          const aliasKey = aliasKeyForPubkey(aliasPk)
+          const owner = await env.PUSH_KV.get(aliasKey)
+          if (owner?.toLowerCase() === pk) {
+            await env.PUSH_KV.delete(aliasKey)
+          }
+        }
+      }
     } else {
       await env.PUSH_KV.put(subKeyForPubkey(pk), JSON.stringify(rec))
     }

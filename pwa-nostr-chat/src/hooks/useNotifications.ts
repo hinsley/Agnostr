@@ -47,6 +47,19 @@ import {
 
 const MAX_NOTIFIED_IDS = 500
 const LIVE_RECENCY_WINDOW_SEC = 180
+const NOTIFICATIONS_STORAGE_KEY = 'agnostr:v2:notifications'
+const AUTO_PUSH_RETRY_DELAYS_MS = [5_000, 15_000, 45_000] as const
+
+function hasExplicitlyDisabledNotificationsInStorage(): boolean {
+  try {
+    const raw = localStorage.getItem(NOTIFICATIONS_STORAGE_KEY)
+    if (!raw) return false
+    const parsed = JSON.parse(raw) as { enabled?: unknown }
+    return parsed?.enabled === false
+  } catch {
+    return false
+  }
+}
 
 export interface NotifyGeoMessageInput {
   id: string
@@ -91,6 +104,7 @@ export interface UseNotificationsParams {
   ownGeoCallPubkeys: Set<string>
   relayUrls: string[]
   pinnedGeohashes: string[]
+  aliasPubkeys?: string[]
   canAutoSign?: boolean
   signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
   pushToast: (level: ToastLevel, title: string, detail?: string) => void
@@ -144,6 +158,7 @@ export function useNotifications(
     ownGeoCallPubkeys,
     relayUrls,
     pinnedGeohashes,
+    aliasPubkeys = [],
     canAutoSign = false,
     signEvent,
     pushToast,
@@ -152,11 +167,24 @@ export function useNotifications(
   const [permission, setPermission] = useState<NotificationPermissionState>(() =>
     getBrowserNotificationPermission()
   )
+  const explicitlyDisabledRef = useRef<boolean>(
+    hasExplicitlyDisabledNotificationsInStorage()
+  )
   const [settings, setSettings] = useState<NotificationSettings>(() => {
     const loaded = loadNotificationSettings()
     const perm = getBrowserNotificationPermission()
-    if (perm === 'granted' && loaded.enabled) return loaded
-    if (perm === 'denied' && loaded.enabled) return { ...loaded, enabled: false }
+    if (perm === 'denied' && loaded.enabled) {
+      return { ...loaded, enabled: false }
+    }
+    if (
+      perm === 'granted' &&
+      !loaded.enabled &&
+      !hasExplicitlyDisabledNotificationsInStorage()
+    ) {
+      const autoEnabled: NotificationSettings = { ...loaded, enabled: true }
+      saveNotificationSettings(autoEnabled)
+      return autoEnabled
+    }
     return loaded
   })
 
@@ -189,6 +217,10 @@ export function useNotifications(
   pushErrorRef.current = pushError
   const pushRegisterInFlightRef = useRef<boolean>(false)
   const lastSyncedPushFingerprintRef = useRef<string | null>(null)
+  const prefsFingerprintRef = useRef<string>('')
+  const autoRetryAttemptRef = useRef<number>(0)
+  const autoRetryTimerRef = useRef<number | null>(null)
+  const [autoSyncTick, setAutoSyncTick] = useState<number>(0)
   const canAutoSignRef = useRef<boolean>(canAutoSign)
   canAutoSignRef.current = canAutoSign
 
@@ -226,6 +258,20 @@ export function useNotifications(
   relayUrlsRef.current = relayUrls
   const pinnedGeohashesRef = useRef(pinnedGeohashes)
   pinnedGeohashesRef.current = pinnedGeohashes
+  const normalizedAliasPubkeys = useMemo(() => {
+    const master = masterPubkey.toLowerCase()
+    return Array.from(
+      new Set(
+        aliasPubkeys
+          .map((pk) => pk.trim().toLowerCase())
+          .filter((pk) => /^[0-9a-f]{64}$/.test(pk) && pk !== master)
+      )
+    )
+      .sort()
+      .slice(0, 16)
+  }, [aliasPubkeys, masterPubkey])
+  const aliasPubkeysRef = useRef<string[]>(normalizedAliasPubkeys)
+  aliasPubkeysRef.current = normalizedAliasPubkeys
   const joinedServersRef = useRef(joinedServers)
   joinedServersRef.current = joinedServers
   const signEventRef = useRef(signEvent)
@@ -266,6 +312,11 @@ export function useNotifications(
   }, [])
 
   const updateSettings = useCallback((patch: Partial<NotificationSettings>) => {
+    if (patch.enabled === false) {
+      explicitlyDisabledRef.current = true
+    } else if (patch.enabled === true) {
+      explicitlyDisabledRef.current = false
+    }
     setSettings((prev) => {
       const next: NotificationSettings = { ...prev, ...patch }
       settingsRef.current = next
@@ -274,14 +325,27 @@ export function useNotifications(
     })
   }, [])
 
-  // Sync browser permission on visibility return + detect existing PushManager subscription
+  // Sync browser permission on visibility return + detect existing PushManager endpoint
+  // (NEVER lie pushStatus='connected' before bridge registration actually confirms HTTP 200)
   useEffect(() => {
     const syncPermission = () => {
       const next = getBrowserNotificationPermission()
       permissionRef.current = next
       setPermission(next)
       if (next === 'denied' && settingsRef.current.enabled) {
-        updateSettings({ enabled: false })
+        setSettings((prev) => {
+          const updated: NotificationSettings = { ...prev, enabled: false }
+          settingsRef.current = updated
+          saveNotificationSettings(updated)
+          return updated
+        })
+      } else if (
+        next === 'granted' &&
+        !settingsRef.current.enabled &&
+        !explicitlyDisabledRef.current &&
+        !hasExplicitlyDisabledNotificationsInStorage()
+      ) {
+        updateSettings({ enabled: true })
       }
     }
 
@@ -294,7 +358,7 @@ export function useNotifications(
           const existing = await reg.pushManager.getSubscription()
           if (existing) {
             setPushEndpoint(existing.endpoint)
-            setPushStatus('connected')
+            pushEndpointRef.current = existing.endpoint
           }
         } catch {
           // Ignore
@@ -936,6 +1000,7 @@ export function useNotifications(
       silent?: boolean
       promptPermission?: boolean
       syncFingerprint?: string
+      isFinalAutoRetry?: boolean
     }): Promise<boolean> => {
       if (!isWebPushSupported()) {
         setPushStatus('unsupported')
@@ -1009,6 +1074,7 @@ export function useNotifications(
           bridgeUrl: normalizedUrl,
           vapidPublicKey: manualKey || undefined,
           pubkey: masterPubkeyRef.current,
+          aliasPubkeys: aliasPubkeysRef.current,
           relays: relayUrlsRef.current,
           geohashes: pinnedGeohashesRef.current,
           serverIds: joinedServersRef.current.map((s) => s.id),
@@ -1028,15 +1094,20 @@ export function useNotifications(
             vapidPublicKey: result.vapidPublicKey,
           })
         }
+        autoRetryAttemptRef.current = 0
+        if (autoRetryTimerRef.current !== null) {
+          window.clearTimeout(autoRetryTimerRef.current)
+          autoRetryTimerRef.current = null
+        }
         setPushEndpoint(result.endpoint)
         pushEndpointRef.current = result.endpoint
         setPushStatus('connected')
         pushStatusRef.current = 'connected'
         setPushError(null)
         pushErrorRef.current = null
-        if (opts.syncFingerprint) {
-          lastSyncedPushFingerprintRef.current = opts.syncFingerprint
-        }
+        const confirmedFingerprint =
+          opts.syncFingerprint || prefsFingerprintRef.current || result.endpoint
+        lastSyncedPushFingerprintRef.current = confirmedFingerprint
         if (!opts.silent) {
           pushToastRef.current(
             'success',
@@ -1050,19 +1121,20 @@ export function useNotifications(
           err instanceof Error
             ? err.message
             : 'Unable to register with push bridge.'
+        // Always record diagnostic error and NEVER cache syncFingerprint on failure so retries run cleanly
+        setPushError(msg)
+        pushErrorRef.current = msg
         if (opts.silent) {
-          if (!pushEndpointRef.current) {
+          if (opts.isFinalAutoRetry) {
+            setPushStatus('error')
+            pushStatusRef.current = 'error'
+          } else if (pushStatusRef.current !== 'connected') {
             setPushStatus('disconnected')
             pushStatusRef.current = 'disconnected'
-          }
-          if (opts.syncFingerprint) {
-            lastSyncedPushFingerprintRef.current = opts.syncFingerprint
           }
         } else {
           setPushStatus('error')
           pushStatusRef.current = 'error'
-          setPushError(msg)
-          pushErrorRef.current = msg
           pushToastRef.current('error', 'Push bridge connection failed', msg)
         }
         return false
@@ -1091,10 +1163,19 @@ export function useNotifications(
           isWebPushSupported() &&
           normalizePushBridgeUrl(settingsRef.current.pushBridgeUrl)
         ) {
-          void registerBridgeInternal({ silent: true, promptPermission: false })
+          void registerBridgeInternal({
+            silent: true,
+            promptPermission: false,
+            syncFingerprint: prefsFingerprintRef.current || undefined,
+          })
         }
       } else if (result === 'denied') {
-        updateSettings({ enabled: false })
+        setSettings((prev) => {
+          const updated: NotificationSettings = { ...prev, enabled: false }
+          settingsRef.current = updated
+          saveNotificationSettings(updated)
+          return updated
+        })
         pushToastRef.current(
           'warning',
           'Notifications blocked',
@@ -1215,12 +1296,17 @@ export function useNotifications(
       settingsRef.current.vapidPublicKey.trim() ||
       (bridgeUrl === DEFAULT_PUSH_BRIDGE_URL ? DEFAULT_VAPID_PUBLIC_KEY : '')
 
-    if (pushStatusRef.current !== 'connected' || !pushEndpointRef.current) {
+    if (
+      !lastSyncedPushFingerprintRef.current ||
+      pushStatusRef.current !== 'connected' ||
+      !pushEndpointRef.current
+    ) {
       const connected = await registerBridgeInternal({
         bridgeUrlOverride: bridgeUrl,
         vapidKeyOverride: vapidKey || undefined,
         silent: false,
         promptPermission: false,
+        syncFingerprint: prefsFingerprintRef.current || undefined,
       })
       if (!connected) {
         return {
@@ -1230,11 +1316,30 @@ export function useNotifications(
       }
     }
 
-    const res = await sendTestWebPush({
+    let res = await sendTestWebPush({
       bridgeUrl,
       pubkey: masterPubkeyRef.current,
       signEvent: (tmpl) => signEventRef.current(tmpl),
     })
+
+    // If bridge KV lost/pruned registration (HTTP 404), auto re-register once and retry
+    if (!res.ok && res.status === 404) {
+      lastSyncedPushFingerprintRef.current = null
+      const reconnected = await registerBridgeInternal({
+        bridgeUrlOverride: bridgeUrl,
+        vapidKeyOverride: vapidKey || undefined,
+        silent: true,
+        promptPermission: false,
+        syncFingerprint: prefsFingerprintRef.current || undefined,
+      })
+      if (reconnected) {
+        res = await sendTestWebPush({
+          bridgeUrl,
+          pubkey: masterPubkeyRef.current,
+          signEvent: (tmpl) => signEventRef.current(tmpl),
+        })
+      }
+    }
 
     if (res.ok) {
       pushToastRef.current('success', 'Test background push sent', res.detail)
@@ -1268,7 +1373,7 @@ export function useNotifications(
     })
   }, [])
 
-  // Debounced (2.5s) startup & preference-sync auto-registration for local-key PWAs
+  // Debounced startup & preference-sync auto-registration for local-key PWAs (with backoff retries)
   const prefsFingerprint = useMemo(() => {
     const bridgeUrl = normalizePushBridgeUrl(settings.pushBridgeUrl)
     if (!bridgeUrl || !masterPubkey) return ''
@@ -1276,6 +1381,7 @@ export function useNotifications(
       url: bridgeUrl,
       key: settings.vapidPublicKey.trim(),
       pk: masterPubkey.toLowerCase(),
+      aliases: normalizedAliasPubkeys,
       dms: settings.dms,
       directPings: settings.directPings,
       dmCallRinging: settings.dmCallRinging,
@@ -1290,6 +1396,7 @@ export function useNotifications(
   }, [
     joinedServers,
     masterPubkey,
+    normalizedAliasPubkeys,
     pinnedGeohashes,
     relayUrls,
     settings.directPings,
@@ -1302,6 +1409,15 @@ export function useNotifications(
     settings.showPreviews,
     settings.vapidPublicKey,
   ])
+  prefsFingerprintRef.current = prefsFingerprint
+
+  useEffect(() => {
+    autoRetryAttemptRef.current = 0
+    if (autoRetryTimerRef.current !== null) {
+      window.clearTimeout(autoRetryTimerRef.current)
+      autoRetryTimerRef.current = null
+    }
+  }, [prefsFingerprint])
 
   useEffect(() => {
     if (
@@ -1316,16 +1432,41 @@ export function useNotifications(
     if (lastSyncedPushFingerprintRef.current === prefsFingerprint) {
       return
     }
+
+    let cancelled = false
+    const delayMs = autoSyncTick > 0 ? 400 : 2500
     const timer = window.setTimeout(() => {
-      if (lastSyncedPushFingerprintRef.current === prefsFingerprint) return
+      if (cancelled || lastSyncedPushFingerprintRef.current === prefsFingerprint) return
+      const currentAttempt = autoRetryAttemptRef.current
+      const isFinalAutoRetry = currentAttempt >= AUTO_PUSH_RETRY_DELAYS_MS.length
       void registerBridgeInternal({
         silent: true,
         promptPermission: false,
         syncFingerprint: prefsFingerprint,
+        isFinalAutoRetry,
+      }).then((ok) => {
+        if (cancelled || ok) return
+        if (lastSyncedPushFingerprintRef.current === prefsFingerprint) return
+        if (currentAttempt < AUTO_PUSH_RETRY_DELAYS_MS.length) {
+          autoRetryAttemptRef.current = currentAttempt + 1
+          const retryWaitMs = AUTO_PUSH_RETRY_DELAYS_MS[currentAttempt]
+          if (autoRetryTimerRef.current !== null) {
+            window.clearTimeout(autoRetryTimerRef.current)
+          }
+          autoRetryTimerRef.current = window.setTimeout(() => {
+            autoRetryTimerRef.current = null
+            setAutoSyncTick((t) => t + 1)
+          }, retryWaitMs)
+        }
       })
-    }, 2500)
-    return () => window.clearTimeout(timer)
+    }, delayMs)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
   }, [
+    autoSyncTick,
     canAutoSign,
     isPushSupported,
     permission,
@@ -1333,6 +1474,53 @@ export function useNotifications(
     registerBridgeInternal,
     settings.enabled,
   ])
+
+  // Re-trigger background push sync when connectivity, visibility, or SW controller recovers
+  useEffect(() => {
+    if (!isPushSupported) return
+    const triggerIfUnsynced = () => {
+      if (
+        permissionRef.current !== 'granted' ||
+        !settingsRef.current.enabled ||
+        !canAutoSignRef.current ||
+        !prefsFingerprintRef.current ||
+        lastSyncedPushFingerprintRef.current === prefsFingerprintRef.current
+      ) {
+        return
+      }
+      if (autoRetryTimerRef.current !== null) {
+        window.clearTimeout(autoRetryTimerRef.current)
+        autoRetryTimerRef.current = null
+      }
+      autoRetryAttemptRef.current = 0
+      setAutoSyncTick((t) => t + 1)
+    }
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        triggerIfUnsynced()
+      }
+    }
+
+    window.addEventListener('online', triggerIfUnsynced)
+    document.addEventListener('visibilitychange', onVisibility)
+    const hasSw = typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+    if (hasSw) {
+      navigator.serviceWorker.addEventListener('controllerchange', triggerIfUnsynced)
+    }
+
+    return () => {
+      window.removeEventListener('online', triggerIfUnsynced)
+      document.removeEventListener('visibilitychange', onVisibility)
+      if (hasSw) {
+        navigator.serviceWorker.removeEventListener('controllerchange', triggerIfUnsynced)
+      }
+      if (autoRetryTimerRef.current !== null) {
+        window.clearTimeout(autoRetryTimerRef.current)
+        autoRetryTimerRef.current = null
+      }
+    }
+  }, [isPushSupported])
 
   // Stop sounds on unmount
   useEffect(() => {
@@ -1351,6 +1539,12 @@ export function useNotifications(
     })
     activeRingingCallIdRef.current = null
     lastSyncedPushFingerprintRef.current = null
+    autoRetryAttemptRef.current = 0
+    explicitlyDisabledRef.current = false
+    if (autoRetryTimerRef.current !== null) {
+      window.clearTimeout(autoRetryTimerRef.current)
+      autoRetryTimerRef.current = null
+    }
     notifiedIdsRef.current.clear()
     seenDmIdsRef.current = null
     seenServerMsgIdsRef.current.clear()
