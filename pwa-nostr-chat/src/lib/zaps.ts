@@ -315,7 +315,7 @@ export function buildProfileMetadataTemplate(params: {
 }): EventTemplate {
   const payload: Record<string, unknown> = {
     ...(params.existingProfile ?? {}),
-    name: params.name.trim() || 'agnon',
+    name: params.name.trim() || 'anon',
   }
   const normalized = normalizeLightningAddress(params.lud16)
   if (normalized) {

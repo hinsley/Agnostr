@@ -791,7 +791,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const resolveReactorName = useCallback(
     (pubkey: string): string => {
       const pk = pubkey.trim().toLowerCase()
-      if (!pk) return 'agnon'
+      if (!pk) return 'anon'
       if (
         pk === engine.identity.activePubkey.toLowerCase() ||
         pk === engine.identity.masterPubkey.toLowerCase()
@@ -802,7 +802,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       if (mapped) return mapped
       const lookedUp = engine.getPeerByPubkey(pk)?.nickname?.trim()
       if (lookedUp) return lookedUp
-      return `agnon${pk.slice(-4)}`
+      return `anon${pk.slice(-4)}`
     },
     [engine, reactorNameMap]
   )

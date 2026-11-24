@@ -152,7 +152,7 @@ function formatBubbleSnippet(preview: string): string {
 
 function formatBubbleSender(sender: string): string {
   const cleaned = sender.replace(/^@+/, '').replace(/\s+/g, ' ').trim()
-  if (!cleaned) return 'agnon'
+  if (!cleaned) return 'anon'
   if (cleaned.length <= 11) return cleaned
   return `${cleaned.slice(0, 10).trimEnd()}…`
 }

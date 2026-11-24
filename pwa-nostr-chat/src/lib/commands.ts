@@ -181,8 +181,8 @@ function resolvePeer(query: string, peers: PeerInfo[]): PeerInfo | null {
     return {
       pubkey: directPk,
       npub: clean.startsWith('npub1') ? clean : directPk,
-      nickname: `agnon${directPk.slice(-4)}`,
-      displayHandle: `@agnon${directPk.slice(-4)}#${directPk.slice(-4)}`,
+      nickname: `anon${directPk.slice(-4)}`,
+      displayHandle: `@anon${directPk.slice(-4)}#${directPk.slice(-4)}`,
       lastSeenAt: 0,
       isOnline: false,
       isSelf: false,

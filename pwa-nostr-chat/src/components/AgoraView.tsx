@@ -179,7 +179,7 @@ const AgoraAvatar: React.FC<{
 }> = ({ pubkey, picture, size = 'md', alt = '' }) => {
   const [failedSrc, setFailedSrc] = useState<string | null>(null)
   const safeSrc = useMemo(() => sanitizeHttpUrl(picture), [picture])
-  const fallback = useMemo(() => identiconDataUrl(pubkey || 'agnon'), [pubkey])
+  const fallback = useMemo(() => identiconDataUrl(pubkey || 'anon'), [pubkey])
   const showPicture = Boolean(safeSrc) && failedSrc !== safeSrc
 
   return (

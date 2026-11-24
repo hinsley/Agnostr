@@ -1999,7 +1999,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 livePeer?.nickname ??
                 srvMember?.nickname ??
                 rawLabel ??
-                'agnon'
+                'anon'
               const handle = formatHandle(bestName, entry.pubkey)
               return {
                 entry,

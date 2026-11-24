@@ -270,7 +270,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
         const pk = rawPk.trim().toLowerCase()
         if (!pk || seen.has(pk)) continue
         seen.add(pk)
-        const name = resolveReactorName ? resolveReactorName(pk) : `agnon${pk.slice(-4)}`
+        const name = resolveReactorName ? resolveReactorName(pk) : `anon${pk.slice(-4)}`
         if (name === 'You') {
           hasYou = true
         } else {

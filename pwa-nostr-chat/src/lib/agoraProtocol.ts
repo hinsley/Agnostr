@@ -281,7 +281,7 @@ export function getProfileDisplayName(
   const name = profile?.name?.trim()
   if (name) return name
   const pk = pubkey.toLowerCase()
-  return `agnon${pk.slice(-4)}`
+  return `anon${pk.slice(-4)}`
 }
 
 /* --------------------------------------------------------------------------

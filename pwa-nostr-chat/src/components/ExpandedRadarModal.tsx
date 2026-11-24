@@ -581,7 +581,7 @@ export function ExpandedRadarModal({
             <div className="ag-radar-inspect-snippet">
               <MessageSquare size={12} className="ag-radar-hud-accent" aria-hidden="true" />
               <span className="ag-radar-inspect-snippet-sender">
-                {matchingPulse?.lastSender?.trim().replace(/^@+/, '') || 'agnon'}:
+                {matchingPulse?.lastSender?.trim().replace(/^@+/, '') || 'anon'}:
               </span>
               <span className="ag-radar-inspect-snippet-text truncate">{matchingPulseSnippet}</span>
             </div>

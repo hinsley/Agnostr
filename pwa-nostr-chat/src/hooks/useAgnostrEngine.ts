@@ -207,7 +207,7 @@ function extractLatestVisiblePreview(
     return {
       id: m.id,
       preview,
-      sender: (m.nickname || m.displayHandle || `agnon${pk.slice(-4)}`).trim(),
+      sender: (m.nickname || m.displayHandle || `anon${pk.slice(-4)}`).trim(),
       senderPubkey: pk,
       createdAt,
       updatedAtMs: Math.min(createdAt * 1000, nowMs),
@@ -654,6 +654,16 @@ export function useAgnostrEngine(): AgnostrEngine {
     [activeGeohash, pinnedChannels]
   )
 
+  const onObserveClientTagRef = useRef<
+    (pubkey: string, clientName: string | undefined, isAgnostr: boolean) => void
+  >(() => {})
+  const handleObserveGlobalClientTag = useCallback(
+    (pubkey: string, clientName: string | undefined, isAgnostr: boolean) => {
+      onObserveClientTagRef.current(pubkey, clientName, isAgnostr)
+    },
+    []
+  )
+
   // Global Pulse Radar (strictly respects muted/blocked peers & strict whitelist mode)
   const { pulseRooms, recordRoomMessage, clearRoomMessages, clearPulse } = useGlobalPulse(
     pool,
@@ -664,6 +674,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       ownPubkeys,
       strictWhitelistMode: settings.strictWhitelistMode,
       priorityChannels,
+      onObserveClientTag: handleObserveGlobalClientTag,
     }
   )
 
@@ -720,7 +731,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       const nextItem: BitchatChannelPreview = {
         id: entry.id,
         preview: cleanPreview,
-        sender: entry.sender.trim() || `agnon${pk.slice(-4)}`,
+        sender: entry.sender.trim() || `anon${pk.slice(-4)}`,
         senderPubkey: pk,
         createdAt,
         updatedAtMs: Math.min(createdAt * 1000, nowMs),
@@ -888,7 +899,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         if (strictWhitelistRef.current && !trustedSetRef.current.has(pk)) return
       }
 
-      const itemId = meta?.id ?? `agnon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const itemId = meta?.id ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       const list = geoUnreadItemsRef.current[gh] ?? []
       if (list.some((item) => item.id === itemId)) return
       list.push({ id: itemId, pubkey: pk, isDirectPing })
@@ -1000,6 +1011,50 @@ export function useAgnostrEngine(): AgnostrEngine {
     },
     [presenceTracker]
   )
+
+  const applyObservedClientHint = useCallback(
+    (
+      pubkey: string,
+      clientName: string | undefined,
+      isAgnostr: boolean,
+      channelHint?: string
+    ) => {
+      if (!clientName && !isAgnostr) return
+      const pk = pubkey.toLowerCase()
+      if (blockedSetRef.current.has(pk) || ownPubkeysRef.current.has(pk)) return
+      const updated = presenceTracker.recordClientHint(pk, clientName, isAgnostr)
+      if (!updated) return
+      const gh = channelHint ?? activeGeohashRef.current
+      updateChannelMessages(gh, (prev) => {
+        let changed = false
+        const next = prev.map((m) => {
+          if (m.pubkey.toLowerCase() !== pk) return m
+          const needsAgnostr = isAgnostr && !m.isAgnostrClient
+          const needsClient = Boolean(clientName && m.clientName !== clientName)
+          if (needsAgnostr || needsClient) {
+            changed = true
+            return {
+              ...m,
+              ...(needsAgnostr ? { isAgnostrClient: true } : {}),
+              ...(clientName ? { clientName } : {}),
+            }
+          }
+          return m
+        })
+        return changed ? next : null
+      })
+      if (gh === activeGeohashRef.current) {
+        refreshPeers(gh)
+      }
+    },
+    [presenceTracker, updateChannelMessages, refreshPeers]
+  )
+
+  useLayoutEffect(() => {
+    onObserveClientTagRef.current = (pk, clientName, isAgnostr) => {
+      applyObservedClientHint(pk, clientName, isAgnostr)
+    }
+  }, [applyObservedClientHint])
 
   // Periodic peer online-window refresh (every 15s) & immediate update when trust/block changes
   useEffect(() => {
@@ -1139,6 +1194,11 @@ export function useAgnostrEngine(): AgnostrEngine {
           if (ev.kind === KIND_EPHEMERAL_REACTION) {
             const parsed = parseReactionEvent(ev, gh)
             if (!parsed || parsed.geohash !== gh) return
+            const evClient = parseClientTag(ev.tags)
+            const isAgnostr = isAgnostrClientTag(ev.tags)
+            if (evClient || isAgnostr) {
+              applyObservedClientHint(pk, evClient, isAgnostr, gh)
+            }
             updateChannelMessages(gh, (prev) => {
               let foundTarget = false
               let changed = false
@@ -1332,7 +1392,7 @@ export function useAgnostrEngine(): AgnostrEngine {
             })
             if (parsedPreview) {
               const previewSender =
-                parsed.nickname || parsed.displayHandle || `agnon${pk.slice(-4)}`
+                parsed.nickname || parsed.displayHandle || `anon${pk.slice(-4)}`
               upsertChannelPreview(
                 gh,
                 {
@@ -1415,6 +1475,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     relaySelection.channelRelays,
     presenceTracker,
     refreshPeers,
+    applyObservedClientHint,
     updateChannelMessages,
     identityManager,
     incrementGeoUnread,
@@ -1459,6 +1520,11 @@ export function useAgnostrEngine(): AgnostrEngine {
 
           const parsed = parseLocationNoteEvent(ev, gh, ownPubkeysRef.current)
           if (!parsed || parsed.geohash !== gh) return
+          const noteClient = parseClientTag(ev.tags)
+          const noteIsAgnostr = isAgnostrClientTag(ev.tags)
+          if (noteClient || noteIsAgnostr) {
+            applyObservedClientHint(notePk, noteClient, noteIsAgnostr, gh)
+          }
           zapsIngestEventTagsRef.current(notePk, ev.tags)
           setLocationNotesState((prev) => {
             if (activeGeohashRef.current !== gh) return prev
@@ -1492,7 +1558,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       window.clearTimeout(noteEoseFallback)
       unsub()
     }
-  }, [pool, activeGeohash, relaySelection.dmRelays, notesRefreshNonce])
+  }, [pool, activeGeohash, relaySelection.dmRelays, notesRefreshNonce, applyObservedClientHint])
 
   // Background unread watcher for pinned channels (excluding activeGeohash, which has its own live subscription).
   // Depend on a stable sorted primitive key so unread/mention increments NEVER tear down & re-subscribe!
@@ -1635,7 +1701,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
 
           const rawNick = getTagValue(ev.tags, 'n')
-          const previewSender = rawNick?.trim() || `agnon${pk.slice(-4)}`
+          const previewSender = rawNick?.trim() || `anon${pk.slice(-4)}`
 
           // Always keep pinned room activity previews up to date (including media-only
           // events and own same-key messages sent from another device)
@@ -1745,6 +1811,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     let cancelled = false
     let timerId: number | null = null
+    let sentCount = 0
 
     const broadcastOnce = async () => {
       if (cancelled) return
@@ -1757,8 +1824,12 @@ export function useAgnostrEngine(): AgnostrEngine {
       } catch {
         // Ignore transient signing/network failures
       }
+      sentCount += 1
       if (!cancelled) {
-        timerId = window.setTimeout(() => void broadcastOnce(), nextPresenceDelayMs())
+        // One fast confirmation heartbeat (~14s) after the initial cold-start ping so slower
+        // WebSockets connecting after the 2–5s window still receive our ['client', 'agnostr'] tag quickly.
+        const delayMs = sentCount === 1 ? 14_000 : nextPresenceDelayMs()
+        timerId = window.setTimeout(() => void broadcastOnce(), delayMs)
       }
     }
 
@@ -2777,6 +2848,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         targetEventId: message.id,
         targetPubkey: message.pubkey,
         emoji: cleanEmoji,
+        broadcastClientTag: settings.broadcastClientTag,
       })
 
       try {
@@ -2815,7 +2887,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         pushToast('error', 'Reaction failed', err instanceof Error ? err.message : 'Could not sign reaction.')
       }
     },
-    [pool, identityManager, relaySelection.dmRelays, relaySelection.channelRelays, updateChannelMessages, pushToast]
+    [pool, identityManager, relaySelection.dmRelays, relaySelection.channelRelays, settings.broadcastClientTag, updateChannelMessages, pushToast]
   )
 
   const postLocationNote = useCallback(
@@ -2836,6 +2908,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           geohash: gh,
           nickname: identityManager.getNickname(),
           content,
+          broadcastClientTag: settings.broadcastClientTag,
         })
         const signed = await identityManager.signEvent(template, gh)
         const res = await pool.publish(relaySelection.dmRelays, signed)
@@ -2862,7 +2935,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         return false
       }
     },
-    [pool, identityManager, relaySelection.dmRelays, pushToast]
+    [pool, identityManager, relaySelection.dmRelays, settings.broadcastClientTag, pushToast]
   )
 
   const refreshLocationNotes = useCallback(() => {

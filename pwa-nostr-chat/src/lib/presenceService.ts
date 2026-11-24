@@ -84,7 +84,7 @@ export class PresenceTracker {
     } else {
       channelMap.set(pk, {
         pubkey: pk,
-        nickname: cleanNick || this.globalNicknames.get(pk) || `agnon${pk.slice(-4)}`,
+        nickname: cleanNick || this.globalNicknames.get(pk) || `anon${pk.slice(-4)}`,
         lastSeenAt: opts.seenAtSec,
         isTeleported: Boolean(opts.isTeleported),
         isMeshBridge: Boolean(opts.isMeshBridge),
@@ -94,6 +94,50 @@ export class PresenceTracker {
         channels: new Set([gh]),
       })
     }
+  }
+
+  /**
+   * Records a client tag hint (e.g. `['client', 'agnostr']`) observed from any verified event
+   * (presence, reaction, location note, or Global Pulse) and backfills existing `PeerRecord`s
+   * across channels WITHOUT fabricating presence in channels the peer is not active in.
+   * Returns `true` if newly learned or updated.
+   */
+  recordClientHint(
+    pubkey: string,
+    clientName?: string | null,
+    isAgnostrClient?: boolean
+  ): boolean {
+    const pk = pubkey.toLowerCase()
+    const cleanClient = clientName?.trim() || (isAgnostrClient ? 'agnostr' : undefined)
+    const isAgnostr = Boolean(isAgnostrClient || cleanClient?.toLowerCase() === 'agnostr')
+    if (!cleanClient && !isAgnostr) return false
+
+    let changed = false
+    if (cleanClient && this.globalClients.get(pk) !== cleanClient) {
+      this.globalClients.set(pk, cleanClient)
+      changed = true
+    }
+    if (isAgnostr && !this.agnostrPeers.has(pk)) {
+      this.agnostrPeers.add(pk)
+      changed = true
+    }
+
+    const resolvedClient =
+      cleanClient || this.globalClients.get(pk) || (isAgnostr ? 'agnostr' : undefined)
+    for (const channelMap of this.byChannel.values()) {
+      const rec = channelMap.get(pk)
+      if (!rec) continue
+      if (isAgnostr && !rec.isAgnostrClient) {
+        rec.isAgnostrClient = true
+        changed = true
+      }
+      if (resolvedClient && rec.clientName !== resolvedClient) {
+        rec.clientName = resolvedClient
+        changed = true
+      }
+    }
+
+    return changed
   }
 
   isKnownAgnostrPeer(pubkey: string): boolean {
@@ -189,7 +233,7 @@ export class PresenceTracker {
         }
       }
     }
-    const nick = this.globalNicknames.get(pk) || latest?.nickname || `agnon${pk.slice(-4)}`
+    const nick = this.globalNicknames.get(pk) || latest?.nickname || `anon${pk.slice(-4)}`
     const isAgnostr = Boolean(latest?.isAgnostrClient || this.agnostrPeers.has(pk))
     const clientName =
       latest?.clientName || this.globalClients.get(pk) || (isAgnostr ? 'agnostr' : undefined)

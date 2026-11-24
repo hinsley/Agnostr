@@ -650,6 +650,7 @@ export function buildReactionTemplate(opts: {
   targetEventId: string
   targetPubkey: string
   emoji: string
+  broadcastClientTag?: boolean
 }): EventTemplate {
   const topicSlug = getTopicSlug(opts.geohash)
   const tags: string[][] = topicSlug
@@ -664,6 +665,9 @@ export function buildReactionTemplate(opts: {
         ['e', opts.targetEventId],
         ['p', opts.targetPubkey.toLowerCase()],
       ]
+  if (opts.broadcastClientTag) {
+    tags.push(['client', AGNOSTR_CLIENT_TAG])
+  }
   return {
     kind: KIND_EPHEMERAL_REACTION,
     created_at: Math.floor(Date.now() / 1000),
@@ -677,6 +681,7 @@ export function buildLocationNoteTemplate(opts: {
   nickname: string
   content: string
   ttlSeconds?: number
+  broadcastClientTag?: boolean
 }): EventTemplate {
   const now = Math.floor(Date.now() / 1000)
   const ttl = opts.ttlSeconds ?? 24 * 60 * 60
@@ -684,6 +689,9 @@ export function buildLocationNoteTemplate(opts: {
   const cleanNick = opts.nickname.trim()
   if (cleanNick) tags.push(['n', cleanNick])
   tags.push(['expiration', String(now + ttl)])
+  if (opts.broadcastClientTag) {
+    tags.push(['client', AGNOSTR_CLIENT_TAG])
+  }
   return {
     kind: KIND_LOCATION_NOTE,
     created_at: now,
@@ -713,7 +721,7 @@ export function parseGeohashChatEvent(
 
   const pubkey = event.pubkey.toLowerCase()
   const rawNick = getTagValue(event.tags, 'n')?.trim() ?? ''
-  const nickname = rawNick || `agnon${pubkey.slice(-4)}`
+  const nickname = rawNick || `anon${pubkey.slice(-4)}`
   const displayHandle = formatDisplayHandle(nickname, pubkey)
 
   const isTeleported = hasTagPair(event.tags, 't', 'teleport')
@@ -784,7 +792,7 @@ export function parseNamedBitchatChatEvent(
   const channelKey = `${TOPIC_CHANNEL_PREFIX}${slug}`
   const pubkey = event.pubkey.toLowerCase()
   const rawNick = getTagValue(event.tags, 'n')?.trim() ?? ''
-  const nickname = rawNick || `agnon${pubkey.slice(-4)}`
+  const nickname = rawNick || `anon${pubkey.slice(-4)}`
   const displayHandle = formatDisplayHandle(nickname, pubkey)
 
   const clientTag = parseClientTag(event.tags)
@@ -893,7 +901,7 @@ export function parseLocationNoteEvent(
   if (!Number.isFinite(expiresAt) || expiresAt <= nowSec) return null
 
   const pubkey = event.pubkey.toLowerCase()
-  const nickname = getTagValue(event.tags, 'n')?.trim() || `agnon${pubkey.slice(-4)}`
+  const nickname = getTagValue(event.tags, 'n')?.trim() || `anon${pubkey.slice(-4)}`
 
   return {
     id: event.id,

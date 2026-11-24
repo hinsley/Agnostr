@@ -298,7 +298,7 @@ export function parseNip29ChatEvent(
 
   const pubkey = event.pubkey.toLowerCase()
   const rawNick = getTagValue(event.tags, 'n')?.trim() || getKnownNickname?.(pubkey) || ''
-  const nickname = rawNick || `agnon${pubkey.slice(-4)}`
+  const nickname = rawNick || `anon${pubkey.slice(-4)}`
   const voiceMemo = parseVoiceMemoFromImeta(event.tags)
   const imageAttachment = parseImageFromImeta(event.tags)
 

@@ -4,9 +4,11 @@ import {
   extractGeohashTag,
   extractTopicChannelTag,
   getTagValue,
+  isAgnostrClientTag,
   KIND_GEOHASH_CHAT,
   KIND_GEOHASH_PRESENCE,
   KIND_NAMED_BITCHAT_CHAT,
+  parseClientTag,
   verifyEventCached,
 } from '../lib/bitchatProtocol.ts'
 import { decodeCenter, findNearestCityLabel } from '../lib/geohash.ts'
@@ -123,6 +125,7 @@ export interface UseGlobalPulseOptions {
   ownPubkeys?: Set<string>
   strictWhitelistMode?: boolean
   priorityChannels?: readonly string[]
+  onObserveClientTag?: (pubkey: string, clientName: string | undefined, isAgnostr: boolean) => void
 }
 
 const EMPTY_SET = new Set<string>()
@@ -139,6 +142,7 @@ export function useGlobalPulse(
     ownPubkeys = EMPTY_SET,
     strictWhitelistMode = false,
     priorityChannels,
+    onObserveClientTag,
   } = options
 
   const priorityChannelsKey = priorityChannels
@@ -167,6 +171,11 @@ export function useGlobalPulse(
   const priorityChannelsRef = useRef<Set<string>>(
     new Set(priorityChannelsKey ? priorityChannelsKey.split(',') : [])
   )
+  const onObserveClientTagRef = useRef(onObserveClientTag)
+
+  useLayoutEffect(() => {
+    onObserveClientTagRef.current = onObserveClientTag
+  }, [onObserveClientTag])
 
   useLayoutEffect(() => {
     blockedSetRef.current = blockedSet
@@ -503,7 +512,7 @@ export function useGlobalPulse(
         id: input.id,
         replaceId: input.replaceId,
         pubkey: pk,
-        sender: input.sender.trim() || `agnon${pk.slice(-4)}`,
+        sender: input.sender.trim() || `anon${pk.slice(-4)}`,
         preview,
         createdAtSec,
         tsMs,
@@ -570,6 +579,12 @@ export function useGlobalPulse(
           if (!verifyEventCached(ev)) return
           if (cancelled || blockedSetRef.current.has(pk)) return
 
+          const evClient = parseClientTag(ev.tags)
+          const isAgnostr = isAgnostrClientTag(ev.tags)
+          if (evClient || isAgnostr) {
+            onObserveClientTagRef.current?.(pk, evClient, isAgnostr)
+          }
+
           rememberSeenId(ev.id)
 
           const now = Date.now()
@@ -589,7 +604,7 @@ export function useGlobalPulse(
               tags: ev.tags,
             })
             if (preview) {
-              const sender = getTagValue(ev.tags, 'n')?.trim() || `agnon${pk.slice(-4)}`
+              const sender = getTagValue(ev.tags, 'n')?.trim() || `anon${pk.slice(-4)}`
               upsertRoomMessage(room, {
                 id: ev.id,
                 pubkey: pk,

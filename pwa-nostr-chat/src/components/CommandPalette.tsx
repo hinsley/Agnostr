@@ -444,7 +444,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       if (seenPeople.has(pk) || pk === selfMaster || pk === selfActive) continue
       seenPeople.add(pk)
       const livePeer = engine.getPeerByPubkey(entry.pubkey)
-      const nick = entry.label?.trim() || livePeer?.nickname || 'agnon'
+      const nick = entry.label?.trim() || livePeer?.nickname || 'anon'
       const handle = formatHandle(nick, entry.pubkey)
       const peerNote = engine.peerNotes[pk] ?? ''
       list.push({
@@ -1149,7 +1149,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         group: 'Actions',
         title: 'Rotate Identity',
         subtitle: 'Generate a fresh anonymous keypair right now',
-        keywords: 'rotate identity fresh new key agnon',
+        keywords: 'rotate identity fresh new key anon agnon',
         icon: <RotateCw size={15} />,
         run: () => {
           engine.rotateIdentity()

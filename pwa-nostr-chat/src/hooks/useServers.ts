@@ -1309,7 +1309,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         patch?.nickname ||
         existing?.nickname ||
         presenceTracker.getNickname(pk) ||
-        (ownPubkeys.has(pk) ? identityManager.getNickname() : `agnon${pk.slice(-4)}`)
+        (ownPubkeys.has(pk) ? identityManager.getNickname() : `anon${pk.slice(-4)}`)
       const roles = Array.from(new Set([...(existing?.roles ?? []), ...(patch?.roles ?? [])]))
       memberMap.set(pk, {
         pubkey: pk,

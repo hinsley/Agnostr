@@ -479,7 +479,7 @@ export class WebRtcMesh {
 
     const entry: RemotePeerEntry = {
       pubkey: pk,
-      nickname: bufferedMeta?.nickname?.trim() || nicknameHint?.trim() || `agnon${pk.slice(-4)}`,
+      nickname: bufferedMeta?.nickname?.trim() || nicknameHint?.trim() || `anon${pk.slice(-4)}`,
       pc,
       remoteStream,
       pendingIce: bufferedIce.slice(0, MAX_PENDING_ICE),

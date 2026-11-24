@@ -62,7 +62,7 @@ export function formatShortPubkey(pubkey: string): string {
 
 export function formatDisplayHandle(nickname: string | null | undefined, pubkey: string): string {
   const cleanNick = (nickname ?? '').trim()
-  const base = cleanNick || `agnon${pubkey.slice(-4)}`
+  const base = cleanNick || `anon${pubkey.slice(-4)}`
   const suffix = pubkey.slice(-4).toLowerCase()
   return `@${base}#${suffix}`
 }

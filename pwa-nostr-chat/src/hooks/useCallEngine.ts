@@ -1125,7 +1125,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
       }
 
       meshRef.current = mesh
-      const resolvedNick = nicknameHint?.trim() || getPeerNicknameRef.current(pk) || `agnon${pk.slice(-4)}`
+      const resolvedNick = nicknameHint?.trim() || getPeerNicknameRef.current(pk) || `anon${pk.slice(-4)}`
       const displayHandle = formatDisplayHandle(resolvedNick, pk)
 
       const session: ActiveCallSession = {
@@ -1923,7 +1923,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 return
               }
 
-              const nick = payload.nickname?.trim() || getPeerNicknameRef.current(sender) || `agnon${sender.slice(-4)}`
+              const nick = payload.nickname?.trim() || getPeerNicknameRef.current(sender) || `anon${sender.slice(-4)}`
               const offer: IncomingCallOffer = {
                 callId: payload.callId,
                 callerPubkey: sender,
@@ -2183,7 +2183,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               if (Date.now() - event.created_at * 1000 > ROOM_PEER_TTL_MS) return
               lastPresenceTsByRoomPeerRef.current.set(roomPeerKey, eventTs)
 
-              const nick = payload.nickname?.trim() || getPeerNicknameRef.current(sender) || `agnon${sender.slice(-4)}`
+              const nick = payload.nickname?.trim() || getPeerNicknameRef.current(sender) || `anon${sender.slice(-4)}`
               upsertRosterMember({
                 serverId: srv.id,
                 roomId,
@@ -2253,7 +2253,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
                 payload.nickname?.trim() ||
                 existing?.nickname ||
                 getPeerNicknameRef.current(sender) ||
-                `agnon${sender.slice(-4)}`
+                `anon${sender.slice(-4)}`
               upsertRosterMember({
                 serverId: srv.id,
                 roomId,
@@ -2435,7 +2435,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
             const nick =
               payload.nickname?.trim() ||
               getPeerNicknameRef.current(sender) ||
-              `agnon${sender.slice(-4)}`
+              `anon${sender.slice(-4)}`
             upsertGeoRosterMember({
               geohash: gh,
               roomId,
@@ -2511,7 +2511,7 @@ export function useCallEngine(params: UseCallEngineParams): UseCallEngineResult 
               payload.nickname?.trim() ||
               existing?.nickname ||
               getPeerNicknameRef.current(sender) ||
-              `agnon${sender.slice(-4)}`
+              `anon${sender.slice(-4)}`
             upsertGeoRosterMember({
               geohash: gh,
               roomId,
