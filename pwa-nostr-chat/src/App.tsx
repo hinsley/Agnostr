@@ -142,6 +142,14 @@ export function App() {
       : 'chat'
   )
   const [listTab, setListTab] = useState<ListTab>('bitchat')
+  const [bitchatView, setBitchatView] = useState<'globe' | 'room'>(() =>
+    typeof window !== 'undefined' && Boolean(parseBitchatChannelHash(window.location.hash))
+      ? 'room'
+      : 'globe'
+  )
+  const isBitchatWorkspace = workspace === 'chat' && listTab === 'bitchat'
+  const isBitchatGlobe = isBitchatWorkspace && bitchatView === 'globe'
+  const isBitchatRoom = isBitchatWorkspace && bitchatView === 'room'
   const [suiteLauncherOpen, setSuiteLauncherOpen] = useState(false)
   const [agoraInitialCompose, setAgoraInitialCompose] = useState(false)
   const [selectedServerId, setSelectedServerId] = useState<string | null>(
@@ -370,8 +378,9 @@ export function App() {
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     if (activeCall.mode === 'geo' && activeCall.geohash) {
-      engine.tuneGeohash(activeCall.geohash)
+      engine.tuneBitchatChannel(activeCall.geohash)
       setListTab('bitchat')
+      setBitchatView('room')
       setMobileScreen('chat')
     } else if (activeCall.mode === 'server' && activeCall.serverId) {
       engine.servers.selectServer(activeCall.serverId)
@@ -456,8 +465,9 @@ export function App() {
             payload.category === 'geo-call') &&
           payload.geohash
         ) {
-          engine.tuneGeohash(payload.geohash)
+          engine.tuneBitchatChannel(payload.geohash)
           setListTab('bitchat')
+          setBitchatView('room')
           setMobileScreen('chat')
         } else if (payload.category === 'test') {
           setSettingsState({ open: true, tab: 'notifications' })
@@ -589,6 +599,8 @@ export function App() {
       document.title = `${mailPrefix}Agmail · Agnostr`
     } else if (workspace === 'wallet') {
       document.title = `${unreadPrefix}Agwallet · Agnostr`
+    } else if (isBitchatGlobe) {
+      document.title = `${unreadPrefix}Bitchat Globe · Agnostr`
     } else if (engine.activeView.type === 'dm' && engine.activeDmThread) {
       document.title = `${unreadPrefix}${engine.activeDmThread.peerDisplayHandle} · Agnostr`
     } else if (
@@ -602,6 +614,7 @@ export function App() {
     }
   }, [
     workspace,
+    isBitchatGlobe,
     engine.agora.unreadNotificationCount,
     engine.amail.unreadInboxCount,
     engine.activeView,
@@ -692,6 +705,8 @@ export function App() {
       prevMasterPkRef.current !== engine.identity.masterPubkey
     ) {
       setWorkspace('chat')
+      setListTab('bitchat')
+      setBitchatView('globe')
       setSuiteLauncherOpen(false)
       setAgoraInitialCompose(false)
       setSelectedServerId(null)
@@ -784,6 +799,7 @@ export function App() {
         return
       }
       if (mod && e.key.toLowerCase() === 'b') {
+        if (isBitchatWorkspace) return
         e.preventDefault()
         setSidebarCollapsed((v) => !v)
         return
@@ -861,6 +877,7 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [
     engine,
+    isBitchatWorkspace,
     pendingDeleteDm,
     noteEditorPeer,
     qrScannerOpen,
@@ -926,26 +943,35 @@ export function App() {
     }
   }, [])
 
+  const handleBackToBitchatGlobe = useCallback(() => {
+    setBitchatView('globe')
+    setMobileUserListOpen(false)
+    setRoomInfoOpen(false)
+    setSearchOpen(false)
+    setSearchQuery('')
+    bitchatAudio.play('click')
+  }, [])
+
   const handleSelectBitchat = useCallback(() => {
     setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
+    setSearchOpen(false)
+    setSearchQuery('')
     setZapTarget(null)
     setInspectedPeer(null)
     setWalletIntent(undefined)
     setAmailState({ section: 'inbox', composeTo: null })
     setWorkspace('chat')
     setListTab('bitchat')
-    setSidebarCollapsed(false)
+    setBitchatView('globe')
+    setMobileScreen('chat')
     if (engine.activeView.type !== 'channel') {
-      engine.tuneGeohash(engine.activeGeohash)
+      engine.tuneBitchatChannel(engine.activeGeohash)
     }
-    if (isMobileViewport) {
-      setMobileScreen('list')
-    }
-  }, [engine, isMobileViewport])
+  }, [engine])
 
   const handleSelectPeople = useCallback(() => {
     setSuiteLauncherOpen(false)
@@ -1021,6 +1047,10 @@ export function App() {
 
   const handleSelectChatTab = useCallback(
     (tab: ListTab) => {
+      if (tab === 'bitchat') {
+        handleSelectBitchat()
+        return
+      }
       if (tab === 'servers') {
         handleSelectGroups()
         return
@@ -1035,11 +1065,8 @@ export function App() {
       setWorkspace('chat')
       setListTab(tab)
       setSidebarCollapsed(false)
-      if (tab === 'bitchat' && engine.activeView.type !== 'channel') {
-        engine.tuneGeohash(engine.activeGeohash)
-      }
     },
-    [engine, handleSelectGroups]
+    [handleSelectBitchat, handleSelectGroups]
   )
 
   const handleSelectServer = useCallback(
@@ -1167,35 +1194,47 @@ export function App() {
     isSwipingLeft,
     isSwipingRight,
   } = useMobileSwipeDrawers({
-    leftOpen: mobileScreen === 'list',
+    leftOpen: !isBitchatWorkspace && mobileScreen === 'list',
     rightOpen: mobileUserListOpen,
-    disabled: swipeDisabled || roomInfoOpen,
+    disabled: swipeDisabled || roomInfoOpen || isBitchatGlobe,
+    leftDisabled: isBitchatWorkspace,
     onLeftOpenChange: handleLeftDrawerOpenChange,
     onRightOpenChange: handleRightDrawerOpenChange,
   })
 
   const handleMobileBack = useCallback(() => {
+    if (isBitchatWorkspace) {
+      handleBackToBitchatGlobe()
+      return
+    }
     if (engine.activeView.type === 'dm') setListTab('dms')
     else if (engine.activeView.type === 'server') setListTab('servers')
     else setListTab('bitchat')
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setMobileScreen('list')
-  }, [engine.activeView.type])
+  }, [engine.activeView.type, handleBackToBitchatGlobe, isBitchatWorkspace])
 
-  const handleMobileSelectTab = useCallback((tab: ListTab) => {
-    bitchatAudio.play('click')
-    setSuiteLauncherOpen(false)
-    setWorkspace('chat')
-    setAmailState({ section: 'inbox', composeTo: null })
-    setWalletIntent(undefined)
-    setRadarExpanded(false)
-    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
-    setMobileUserListOpen(false)
-    setRoomInfoOpen(false)
-    setListTab(tab)
-    setMobileScreen('list')
-  }, [])
+  const handleMobileSelectTab = useCallback(
+    (tab: ListTab) => {
+      bitchatAudio.play('click')
+      if (tab === 'bitchat') {
+        handleSelectBitchat()
+        return
+      }
+      setSuiteLauncherOpen(false)
+      setWorkspace('chat')
+      setAmailState({ section: 'inbox', composeTo: null })
+      setWalletIntent(undefined)
+      setRadarExpanded(false)
+      setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+      setMobileUserListOpen(false)
+      setRoomInfoOpen(false)
+      setListTab(tab)
+      setMobileScreen('list')
+    },
+    [handleSelectBitchat]
+  )
 
   const { pushToast } = engine
 
@@ -1289,13 +1328,20 @@ export function App() {
       setSearchQuery('')
       return true
     }
-    if (isMobileViewport && mobileScreen === 'chat') {
+    if (isBitchatRoom) {
+      handleBackToBitchatGlobe()
+      return true
+    }
+    if (isMobileViewport && mobileScreen === 'chat' && !isBitchatWorkspace) {
       handleMobileBack()
       return true
     }
     return false
   }, [
     engine,
+    isBitchatWorkspace,
+    isBitchatRoom,
+    handleBackToBitchatGlobe,
     pendingDeleteDm,
     noteEditorPeer,
     qrScannerOpen,
@@ -1393,7 +1439,7 @@ export function App() {
     mobileUserListOpen ||
     roomInfoOpen ||
     searchOpen ||
-    (isMobileViewport && mobileScreen === 'chat')
+    (isBitchatWorkspace ? bitchatView === 'room' : isMobileViewport && mobileScreen === 'chat')
 
   useEffect(() => {
     if (hasActiveBackTarget) {
@@ -1401,8 +1447,9 @@ export function App() {
     }
   }, [hasActiveBackTarget, rearmGuard])
 
-  const mobileNavActiveTab: ListTab =
-    mobileScreen === 'chat'
+  const mobileNavActiveTab: ListTab = isBitchatWorkspace
+    ? 'bitchat'
+    : mobileScreen === 'chat'
       ? isDm
         ? 'dms'
         : isServer
@@ -1413,7 +1460,7 @@ export function App() {
   const handleTuneChannel = useCallback(
     (channelInput: string): boolean => {
       const resolved = parseQuickTuneInput(channelInput, 'geo')
-      const ok = engine.tuneGeohash(resolved?.key ?? channelInput)
+      const ok = engine.tuneBitchatChannel(resolved?.key ?? channelInput)
       if (ok) {
         bitchatAudio.play('tune')
         setSuiteLauncherOpen(false)
@@ -1421,6 +1468,7 @@ export function App() {
         setAmailState({ section: 'inbox', composeTo: null })
         setWalletIntent(undefined)
         setListTab('bitchat')
+        setBitchatView('room')
         setMobileScreen('chat')
         setMobileUserListOpen(false)
         setRoomInfoOpen(false)
@@ -1800,6 +1848,7 @@ export function App() {
       setMobileUserListOpen(false)
       setRoomInfoOpen(false)
       setListTab('bitchat')
+      setBitchatView('room')
       setMobileScreen('chat')
     }
     window.addEventListener('hashchange', onBitchatHash)
@@ -1811,8 +1860,10 @@ export function App() {
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setWorkspace('chat')
-    engine.tuneGeohash(engine.activeGeohash)
+    engine.tuneBitchatChannel(engine.activeGeohash)
     setListTab('bitchat')
+    setBitchatView('globe')
+    setMobileScreen('chat')
   }, [engine])
 
   const handleOpenDm = useCallback(
@@ -1982,13 +2033,9 @@ export function App() {
   )
 
   const handleExpandRadar = useCallback(() => {
-    setSuiteLauncherOpen(false)
-    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
-    setRadarExpanded(true)
-    setMobileUserListOpen(false)
-    setRoomInfoOpen(false)
+    handleSelectBitchat()
     bitchatAudio.play('click')
-  }, [])
+  }, [handleSelectBitchat])
 
   const handleOpenInstall = useCallback(() => {
     bitchatAudio.play('click')
@@ -2021,6 +2068,7 @@ export function App() {
       bitchatAudio.play('tune')
       setWorkspace('chat')
       setListTab('bitchat')
+      setBitchatView('room')
       setMobileScreen('chat')
     }
   }, [engine])
@@ -2186,6 +2234,7 @@ export function App() {
     <div
       className={`ag-app ag-shell ${panicFlash ? 'ag-panic-active' : ''}`}
       data-workspace={workspace}
+      data-bitchat-view={isBitchatWorkspace ? bitchatView : undefined}
       data-mobile-screen={mobileScreen}
       data-right-drawer={mobileUserListOpen ? 'open' : 'closed'}
     >
@@ -2206,7 +2255,7 @@ export function App() {
             workspace={workspace}
             listTab={listTab}
             selectedServerId={selectedServerId}
-            mapActive={radarExpanded}
+            mapActive={isBitchatGlobe || radarExpanded}
             settingsActive={settingsState.open}
             pwa={pwa}
             agoraUnread={engine.agora.unreadNotificationCount}
@@ -2275,63 +2324,81 @@ export function App() {
               />
             </Suspense>
           </div>
-        ) : (
-          <>
-            {/* Dimmed Interactive Scrim behind Mobile Left Slide-Over Sidebar */}
-            <div
-              className={`ag-drawer-scrim ${mobileScreen === 'list' ? 'active' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
-              onClick={() => setMobileScreen('chat')}
-              aria-hidden="true"
-            />
-
-            {/* Left Pane (Desktop 256px) / Interactive Slide-Over Sidebar Drawer (Mobile <868px) */}
-            <div
-              className={`ag-conv-col ${mobileScreen === 'list' ? 'open' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
-              aria-hidden={
-                isMobileViewport && mobileScreen === 'chat' && !isSwipingLeft ? true : undefined
-              }
-            >
-              <ConversationList
+        ) : isBitchatGlobe ? (
+          <div className="ag-workspace-stage ag-bitchat-globe-stage">
+            <Suspense fallback={workspaceLoadingFallback}>
+              <ExpandedRadarModal
+                open={true}
+                embedded={true}
+                inShell={isMobileViewport}
                 engine={engine}
-                activeTab={listTab}
-                collapsed={sidebarCollapsed}
-                isMobileViewport={isMobileViewport}
-                selectedServerId={selectedServerId}
-                onSelectServer={handleSelectServer}
-                onTabChange={setListTab}
+                onClose={() => setBitchatView('room')}
                 onTuneChannel={handleTuneChannel}
-                onOpenDm={handleOpenDm}
-                onCloseDmThread={handleCloseDmThread}
-                onSelectServerChannel={handleSelectServerChannel}
-                onOpenServerHub={handleOpenServerHub}
-                onOpenServerSettings={handleOpenServerSettings}
-                onOpenCommandPalette={() => setCmdkOpen(true)}
-                onExpandRadar={handleExpandRadar}
-                onOpenSettings={handleOpenSettings}
-                onOpenOwnAgoraProfile={() => {
-                  handleSelectWorkspace('agora')
-                  engine.agora.openProfile(engine.identity.masterPubkey)
-                }}
-                amailOpen={false}
-                onOpenAmail={handleOpenAmail}
-                onOpenAmailCompose={handleOpenAmailCompose}
-                onOpenWallet={handleOpenWallet}
-                onOpenZap={handleOpenZap}
-                onLocateMe={() => void handleLocateMe()}
-                onFocusActiveCall={() => {
-                  setMobileScreen('chat')
-                  setCallExpanded(true)
-                }}
-                onInspectPeer={setInspectedPeer}
-                onEditPeerNote={handleOpenPeerNote}
-                onShowQr={setQrShareTarget}
-                onOpenScanner={handleOpenScanner}
-                onResolvedShareTarget={handleResolvedShareTarget}
-                pwa={pwa}
-                onOpenInstall={handleOpenInstall}
                 onPlaySound={playSound}
               />
-            </div>
+            </Suspense>
+          </div>
+        ) : (
+          <>
+            {!isBitchatWorkspace && (
+              <>
+                {/* Dimmed Interactive Scrim behind Mobile Left Slide-Over Sidebar */}
+                <div
+                  className={`ag-drawer-scrim ${mobileScreen === 'list' ? 'active' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+                  onClick={() => setMobileScreen('chat')}
+                  aria-hidden="true"
+                />
+
+                {/* Left Pane (Desktop 256px) / Interactive Slide-Over Sidebar Drawer (Mobile <868px) */}
+                <div
+                  className={`ag-conv-col ${mobileScreen === 'list' ? 'open' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+                  aria-hidden={
+                    isMobileViewport && mobileScreen === 'chat' && !isSwipingLeft ? true : undefined
+                  }
+                >
+                  <ConversationList
+                    engine={engine}
+                    activeTab={listTab}
+                    collapsed={sidebarCollapsed}
+                    isMobileViewport={isMobileViewport}
+                    selectedServerId={selectedServerId}
+                    onSelectServer={handleSelectServer}
+                    onTabChange={setListTab}
+                    onTuneChannel={handleTuneChannel}
+                    onOpenDm={handleOpenDm}
+                    onCloseDmThread={handleCloseDmThread}
+                    onSelectServerChannel={handleSelectServerChannel}
+                    onOpenServerHub={handleOpenServerHub}
+                    onOpenServerSettings={handleOpenServerSettings}
+                    onOpenCommandPalette={() => setCmdkOpen(true)}
+                    onExpandRadar={handleExpandRadar}
+                    onOpenSettings={handleOpenSettings}
+                    onOpenOwnAgoraProfile={() => {
+                      handleSelectWorkspace('agora')
+                      engine.agora.openProfile(engine.identity.masterPubkey)
+                    }}
+                    amailOpen={false}
+                    onOpenAmail={handleOpenAmail}
+                    onOpenAmailCompose={handleOpenAmailCompose}
+                    onOpenWallet={handleOpenWallet}
+                    onOpenZap={handleOpenZap}
+                    onLocateMe={() => void handleLocateMe()}
+                    onFocusActiveCall={() => {
+                      setMobileScreen('chat')
+                      setCallExpanded(true)
+                    }}
+                    onInspectPeer={setInspectedPeer}
+                    onEditPeerNote={handleOpenPeerNote}
+                    onShowQr={setQrShareTarget}
+                    onOpenScanner={handleOpenScanner}
+                    onResolvedShareTarget={handleResolvedShareTarget}
+                    pwa={pwa}
+                    onOpenInstall={handleOpenInstall}
+                    onPlaySound={playSound}
+                  />
+                </div>
+              </>
+            )}
 
             {/* Main Chat Stage */}
             <main
@@ -2345,6 +2412,7 @@ export function App() {
                 searchOpen={searchOpen}
                 hasOtherUnread={totalUnreadBadge > 0}
                 onMobileBack={handleMobileBack}
+                onBackToGlobe={isBitchatRoom ? handleBackToBitchatGlobe : undefined}
                 onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
                 onToggleUserList={handleToggleUserList}
                 onOpenRoomInfo={handleOpenRoomInfo}
@@ -2547,8 +2615,9 @@ export function App() {
           </>
         )}
 
-        {/* Keep floating active call pill accessible when viewing Agora, Agmail, or Agwallet */}
-        {workspace !== 'chat' && (activeCall || engine.transcription.endedCallTranscript) && (
+        {/* Keep floating active call pill accessible when viewing Agora, Agmail, Agwallet, or Bitchat Globe */}
+        {(workspace !== 'chat' || isBitchatGlobe) &&
+          (activeCall || engine.transcription.endedCallTranscript) && (
           <Suspense fallback={null}>
             <CallStage
               calls={engine.calls}
@@ -2652,7 +2721,7 @@ export function App() {
         variant={isMobileViewport ? 'sheet' : 'popover'}
         workspace={workspace}
         listTab={listTab}
-        mapActive={radarExpanded}
+        mapActive={isBitchatGlobe || radarExpanded}
         settingsActive={settingsState.open}
         agoraUnread={engine.agora.unreadNotificationCount}
         bitchatUnread={engine.totalGeoUnread}

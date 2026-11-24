@@ -1,6 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
-import type { GeoCoords, PulseRoom, ThemeId } from '../types/protocol.ts'
+import { Pin } from 'lucide-react'
+import type { GeoCoords, PinnedChannel, PulseRoom, ThemeId } from '../types/protocol.ts'
 import {
   decodeBounds,
   decodeCenter,
@@ -11,14 +12,21 @@ import {
   getRecommendedPrecisionForZoom,
   getZoomForPrecision,
   isValidGeohash,
+  normalizeGeohash,
   wrapLongitude,
 } from '../lib/geohash.ts'
-import { isTopicChannel } from '../lib/bitchatChannel.ts'
+import { getTopicSlug, isTopicChannel, makeTopicChannelKey } from '../lib/bitchatChannel.ts'
 import {
   computeSublunarPoint,
   computeSubsolarPoint,
   latLonToUnitVec3,
 } from '../lib/astronomy.ts'
+import {
+  computeAsteroidWorldPosition,
+  computeTopicAsteroidSpec,
+  isPointOccludedByEarth,
+  type TopicAsteroidSpec,
+} from '../lib/asteroids.ts'
 
 export type PrecisionSelection = 'auto' | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
 
@@ -26,8 +34,10 @@ export interface TacticalGeohashMapHandle {
   zoomIn: () => void
   zoomOut: () => void
   flyToGeohash: (geohash: string, options?: { animate?: boolean; zoom?: number }) => void
+  flyToTopic: (topicChannelKey: string, options?: { animate?: boolean }) => void
   flyToCoords: (lat: number, lon: number, zoom?: number) => void
   fitWorld: () => void
+  fitAsteroids: () => void
   getZoom: () => number
 }
 
@@ -41,10 +51,17 @@ export interface TacticalGeohashMapProps {
   showPulse: boolean
   showBubbles?: boolean
   pulseRooms: PulseRoom[]
+  pinnedChannels?: PinnedChannel[]
+  topicRooms?: PulseRoom[]
+  extraTopicKeys?: string[]
+  activeChannelKey?: string
+  selectedChannelKey?: string | null
   userCoords: GeoCoords | null
   isTeleported: boolean
   onSelectGeohash: (geohash: string) => void
   onTuneGeohash?: (geohash: string) => void
+  onSelectChannel?: (channelKey: string) => void
+  onTuneChannel?: (channelKey: string) => void
   onViewportInfoChange?: (info: { zoom: number; effectivePrecision: number }) => void
   className?: string
 }
@@ -53,7 +70,7 @@ const DEG2RAD = Math.PI / 180
 const RAD2DEG = 180 / Math.PI
 const MAX_MERCATOR_LAT = 85.05112878
 
-const MIN_VIRTUAL_ZOOM = 1
+const MIN_VIRTUAL_ZOOM = -1.7 // distance ~ 15.8 at full solar-orbit pullback
 const MAX_VIRTUAL_ZOOM = 15.5
 const MAX_ALTITUDE = 3.6 // distance = 4.6 at zoom 1
 const ALTITUDE_DECAY = 0.52325 // distance ~ 1.004 at zoom 14, ~ 1.0018 at zoom 15.5
@@ -65,10 +82,6 @@ const OVERLAY_FILL_RADIUS = 1.00045
 const OVERLAY_LINE_RADIUS = 1.00075
 const FOCUS_LINE_RADIUS = 1.00105
 
-const ESRI_DARK_BASE_URL =
-  'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'
-const ESRI_DARK_REF_URL =
-  'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}'
 const ESRI_TOPO_URL =
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}'
 
@@ -80,6 +93,8 @@ const BUBBLE_FADE_DURATION_MS = 380
 const RECENT_BUBBLE_WINDOW_MS = 120_000
 const VIEWPORT_DEBOUNCE_MS = 130
 const SUN_REFRESH_INTERVAL_MS = 30_000
+
+const UP_Y = new THREE.Vector3(0, 1, 0)
 
 interface MapCanvasPalette {
   accent: string
@@ -232,7 +247,7 @@ function formatBubbleSender(sender: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// GLSL Shaders: Earth Day/Night + Twilight + Atmosphere + Moon + Starfield
+// GLSL Shaders: Earth Day/Night + Atmosphere + Moon + Asteroids + Push-Pins + Stars
 // ---------------------------------------------------------------------------
 
 const EARTH_VERTEX_SHADER = `
@@ -266,37 +281,36 @@ const EARTH_FRAGMENT_SHADER = `
     vec3 V = normalize(cameraPosition - vWorldPos);
 
     float ndotl = dot(N, L);
-    float dayFactor = smoothstep(-0.14, 0.18, ndotl);
-    float twilight = exp(-pow((ndotl - 0.01) / 0.13, 2.0));
+    float dayFactor = smoothstep(-0.15, 0.18, ndotl);
+    float twilight = exp(-pow((ndotl - 0.01) / 0.14, 2.0));
 
-    // Keep the night hemisphere softly illuminated in deep navy-slate so map labels & geohashes stay effortlessly legible
-    float nightAmbient = uIsLight > 0.5 ? 0.50 : 0.36;
-    vec3 nightTint = uIsLight > 0.5 ? vec3(0.76, 0.84, 0.98) : vec3(0.72, 0.84, 1.0);
-    vec3 nightColor = texel * nightAmbient * nightTint;
+    // Luminous, vivid sunlit daylight hemisphere
+    float sunFacing = pow(max(ndotl, 0.0), 0.62);
+    vec3 dayColor = min(
+      texel * vec3(1.06, 1.04, 0.99) * (0.94 + 0.28 * sunFacing),
+      vec3(1.06)
+    );
 
-    // Crisp sunlit hemisphere with slight warm sun balance
-    vec3 dayTint = uIsLight > 0.5 ? vec3(1.03, 1.02, 0.99) : vec3(1.16, 1.15, 1.12);
-    vec3 dayColor = texel * dayTint;
+    // Rich midnight-indigo night hemisphere (keeps labels & geography softly legible)
+    vec3 nightColor = uIsLight > 0.5
+      ? pow(max(texel, vec3(0.001)), vec3(1.30)) * vec3(0.28, 0.36, 0.52)
+      : pow(max(texel, vec3(0.001)), vec3(1.45)) * vec3(0.16, 0.23, 0.39);
 
     vec3 color = mix(nightColor, dayColor, dayFactor);
 
-    // Subtle warm golden-amber twilight scatter right along the day/night terminator
-    float twilightStrength = uIsLight > 0.5 ? 0.09 : 0.14;
-    color += vec3(0.96, 0.52, 0.22) * twilight * twilightStrength;
+    // Vivid golden-amber twilight scatter right along the day/night terminator
+    color += vec3(1.0, 0.48, 0.18) * twilight * 0.22;
 
-    // Subtle specular glint on sunlit ocean surfaces (dark/blue-dominant pixels)
-    float luma = dot(texel, vec3(0.299, 0.587, 0.114));
-    float oceanMask = uIsLight > 0.5
-      ? smoothstep(0.02, 0.12, texel.b - texel.r * 0.85)
-      : smoothstep(0.26, 0.10, luma);
+    // Crisp ocean specular glint on sunlit water
+    float oceanMask = smoothstep(0.02, 0.10, texel.b - texel.r * 0.85);
     vec3 H = normalize(L + V);
     float spec = pow(max(dot(N, H), 0.0), 30.0) * oceanMask * dayFactor;
-    color += vec3(0.92, 0.96, 1.0) * spec * 0.16;
+    color += vec3(0.94, 0.97, 1.0) * spec * 0.22;
 
-    // Gentle sunlit atmospheric limb scatter
+    // Luminous sunlit atmospheric Fresnel rim
     float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.4);
     float rimSun = 0.22 + 0.78 * smoothstep(-0.26, 0.35, ndotl);
-    color += vec3(0.32, 0.62, 1.0) * fresnel * rimSun * 0.28;
+    color += vec3(0.36, 0.68, 1.0) * fresnel * rimSun * 0.34;
 
     gl_FragColor = vec4(color, uOpacity);
   }
@@ -325,7 +339,6 @@ const ATMOSPHERE_FRAGMENT_SHADER = `
     vec3 V = normalize(cameraPosition - vWorldPos);
     vec3 L = normalize(uSunDir);
 
-    // BackSide shell: normal points outward, V points toward camera -> -dot(N, V) peaks softly around silhouette edge
     float edge = clamp(0.68 - dot(-N, V), 0.0, 1.0);
     float rim = pow(edge, 3.2);
     float ndotl = dot(N, L);
@@ -362,10 +375,91 @@ const MOON_FRAGMENT_SHADER = `
     vec3 L = normalize(uSunDir);
     float ndotl = dot(N, L);
     float lit = smoothstep(-0.08, 0.14, ndotl);
-    float shade = mix(0.08, 1.15, lit);
+    float shade = mix(0.08, 1.32, lit);
     vec3 color = albedo * shade;
-    // Slight cool earthshine on the unlit lunar limb
     color += vec3(0.04, 0.06, 0.10) * (1.0 - lit);
+    gl_FragColor = vec4(color, 1.0);
+  }
+`
+
+const ASTEROID_VERTEX_SHADER = `
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPos;
+  varying float vElev;
+
+  void main() {
+    vElev = length(position);
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vWorldPos = worldPos.xyz;
+    vWorldNormal = normalize(mat3(modelMatrix) * normal);
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+  }
+`
+
+const ASTEROID_FRAGMENT_SHADER = `
+  uniform vec3 uSunDir;
+  uniform vec3 uBaseColor;
+  uniform vec3 uRimColor;
+  uniform float uHighlight;
+  uniform float uMeanRadius;
+
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPos;
+  varying float vElev;
+
+  void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 L = normalize(uSunDir);
+    vec3 V = normalize(cameraPosition - vWorldPos);
+
+    // Subtle elevation darkening inside craters and mineral brightening on ridges
+    float elevFactor = clamp((vElev / max(0.001, uMeanRadius) - 0.84) / 0.34, 0.0, 1.0);
+    vec3 rockAlbedo = uBaseColor * mix(0.76, 1.18, elevFactor);
+
+    float ndotl = dot(N, L);
+    float lit = smoothstep(-0.18, 0.38, ndotl);
+    float diffuse = mix(0.24, 1.34, lit);
+    vec3 color = rockAlbedo * diffuse;
+
+    // Subtle cool space-rim readability + stronger accent rim when hovered/selected
+    float fresnel = pow(1.0 - max(dot(N, V), 0.0), 2.5);
+    vec3 rimTint = mix(vec3(0.68, 0.80, 0.96), uRimColor, clamp(uHighlight, 0.0, 1.0));
+    color += rimTint * fresnel * (0.28 + 0.62 * uHighlight);
+    color += uRimColor * (0.12 * uHighlight);
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+`
+
+const PINHEAD_VERTEX_SHADER = `
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vWorldPos = worldPos.xyz;
+    vWorldNormal = normalize(mat3(modelMatrix) * normal);
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+  }
+`
+
+const PINHEAD_FRAGMENT_SHADER = `
+  uniform vec3 uColor;
+  uniform vec3 uSunDir;
+
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(cameraPosition - vWorldPos);
+    vec3 L = normalize(mix(V, normalize(uSunDir), 0.45));
+    float ndotl = max(dot(N, L), 0.0);
+    vec3 H = normalize(L + V);
+    float spec = pow(max(dot(N, H), 0.0), 28.0);
+    float rim = pow(1.0 - max(dot(N, V), 0.0), 2.8);
+
+    vec3 color = uColor * (0.58 + 0.56 * ndotl) + vec3(1.0) * spec * 0.55 + uColor * rim * 0.25;
     gl_FragColor = vec4(color, 1.0);
   }
 `
@@ -396,35 +490,26 @@ const STAR_FRAGMENT_SHADER = `
 `
 
 // ---------------------------------------------------------------------------
-// Procedural Textures & Starfield / Curved Patch / Overlay Geometry Builders
+// Procedural Textures & Starfield / Asteroid / Patch / Overlay Builders
 // ---------------------------------------------------------------------------
 
-function paintProceduralBaseMap(canvas: HTMLCanvasElement, isLight: boolean): void {
+function paintProceduralBaseMap(canvas: HTMLCanvasElement): void {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   const w = canvas.width
   const h = canvas.height
 
-  // Deep ocean vertical gradient (polar subtle tint -> equatorial ocean)
+  // Bright sunlit Earth ocean blue + crisp polar caps (day/night shader handles night shadow)
   const grad = ctx.createLinearGradient(0, 0, 0, h)
-  if (isLight) {
-    grad.addColorStop(0, '#D9E4EC')
-    grad.addColorStop(0.08, '#9FC5DF')
-    grad.addColorStop(0.5, '#86B6D8')
-    grad.addColorStop(0.92, '#9FC5DF')
-    grad.addColorStop(1, '#DCE5ED')
-  } else {
-    grad.addColorStop(0, '#1B2535')
-    grad.addColorStop(0.08, '#141D2B')
-    grad.addColorStop(0.5, '#121B29')
-    grad.addColorStop(0.92, '#141D2B')
-    grad.addColorStop(1, '#1B2535')
-  }
+  grad.addColorStop(0, '#DCE8F2')
+  grad.addColorStop(0.06, '#5D9BD1')
+  grad.addColorStop(0.5, '#2D74B8')
+  grad.addColorStop(0.94, '#5D9BD1')
+  grad.addColorStop(1, '#DCE8F2')
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, w, h)
 
-  // Subtle equirectangular lat/lon graticule so the globe looks sharp on frame 1 even offline
-  ctx.strokeStyle = isLight ? 'rgba(30, 58, 95, 0.13)' : 'rgba(148, 178, 218, 0.12)'
+  ctx.strokeStyle = 'rgba(220, 238, 255, 0.18)'
   ctx.lineWidth = 1
   for (let lon = -150; lon <= 180; lon += 30) {
     const x = ((lon + 180) / 360) * w
@@ -440,18 +525,13 @@ function paintProceduralBaseMap(canvas: HTMLCanvasElement, isLight: boolean): vo
     ctx.lineTo(w, y)
     ctx.stroke()
   }
-  // Slightly stronger equator line
-  ctx.strokeStyle = isLight ? 'rgba(30, 58, 95, 0.22)' : 'rgba(148, 178, 218, 0.2)'
+  ctx.strokeStyle = 'rgba(220, 238, 255, 0.28)'
   ctx.beginPath()
   ctx.moveTo(0, h / 2)
   ctx.lineTo(w, h / 2)
   ctx.stroke()
 }
 
-/**
- * Composites a Web Mercator slippy tile `(z, tx, ty)` onto an equirectangular canvas
- * using exact row-wise Web Mercator -> Equirectangular inverse projection.
- */
 function compositeMercatorTileOntoEquirect(
   ctx: CanvasRenderingContext2D,
   img: HTMLImageElement,
@@ -463,7 +543,7 @@ function compositeMercatorTileOntoEquirect(
 ): void {
   const n = 1 << z
   const dstX = (tx / n) * canvasW
-  const dstW = canvasW / n + 0.5 // tiny overlap prevents sub-pixel seam lines
+  const dstW = canvasW / n + 0.5
 
   const latNorth = mercYNormToLat(ty / n)
   const latSouth = mercYNormToLat((ty + 1) / n)
@@ -517,11 +597,9 @@ function createLunarSurfaceTexture(): THREE.CanvasTexture {
   const ctx = canvas.getContext('2d')
   if (ctx) {
     const rand = mulberry32(4201969)
-    // Dusty highland base
     ctx.fillStyle = '#B7B5B0'
     ctx.fillRect(0, 0, w, h)
 
-    // Broad dark basaltic maria basins
     for (let i = 0; i < 18; i++) {
       const mx = rand() * w
       const my = (0.18 + rand() * 0.64) * h
@@ -536,7 +614,6 @@ function createLunarSurfaceTexture(): THREE.CanvasTexture {
       ctx.fill()
     }
 
-    // Fine impact craters (dark floor + subtle bright rim)
     for (let i = 0; i < 160; i++) {
       const cx = rand() * w
       const cy = rand() * h
@@ -560,6 +637,91 @@ function createLunarSurfaceTexture(): THREE.CanvasTexture {
   return tex
 }
 
+/**
+ * Generates a unique, watertight faceted cratered 3D rocky asteroid geometry
+ * deterministically from `spec.seed` & `spec.rockRadius`.
+ */
+function createAsteroidRockGeometry(spec: TopicAsteroidSpec): THREE.BufferGeometry {
+  const geo = new THREE.IcosahedronGeometry(spec.rockRadius, 2)
+  const posAttr = geo.attributes.position as THREE.BufferAttribute
+  const rand = mulberry32(spec.seed ^ 0x51f2a9c3)
+
+  // Distinct triaxial potato/boulder proportions per topic
+  const scaleX = 0.82 + rand() * 0.44
+  const scaleY = 0.76 + rand() * 0.36
+  const scaleZ = 0.82 + rand() * 0.42
+
+  // Layered 3D trig-noise phase offsets
+  const p1 = rand() * Math.PI * 2
+  const p2 = rand() * Math.PI * 2
+  const p3 = rand() * Math.PI * 2
+  const p4 = rand() * Math.PI * 2
+
+  // 5 deterministic impact craters on the rock surface
+  const craters: Array<{ x: number; y: number; z: number; cosHalf: number; depth: number }> = []
+  for (let c = 0; c < 5; c++) {
+    const u = rand() * 2 - 1
+    const az = rand() * Math.PI * 2
+    const s = Math.sqrt(Math.max(0, 1 - u * u))
+    craters.push({
+      x: s * Math.cos(az),
+      y: u,
+      z: s * Math.sin(az),
+      cosHalf: 0.74 + rand() * 0.16,
+      depth: 0.1 + rand() * 0.1,
+    })
+  }
+
+  for (let i = 0; i < posAttr.count; i++) {
+    const vx = posAttr.getX(i)
+    const vy = posAttr.getY(i)
+    const vz = posAttr.getZ(i)
+    const len = Math.hypot(vx, vy, vz) || 1
+    const nx = vx / len
+    const ny = vy / len
+    const nz = vz / len
+
+    const ridge1 = Math.sin(nx * 3.1 + p1) * Math.cos(ny * 2.9 + p2) * Math.sin(nz * 3.3 + p3)
+    const ridge2 = Math.cos((nx + ny) * 5.2 + p4) * Math.sin((ny - nz) * 4.7 + p1)
+    let rFactor = 1.0 + ridge1 * 0.15 + ridge2 * 0.065
+
+    // Apply crater bowls with subtle raised rims
+    for (const cr of craters) {
+      const d = nx * cr.x + ny * cr.y + nz * cr.z
+      if (d > cr.cosHalf) {
+        const t = (d - cr.cosHalf) / (1 - cr.cosHalf) // 0 at rim, 1 at center
+        rFactor -= cr.depth * t * t
+      } else if (d > cr.cosHalf - 0.09) {
+        const rimT = 1 - (cr.cosHalf - d) / 0.09
+        rFactor += cr.depth * 0.18 * rimT * rimT
+      }
+    }
+
+    const r = spec.rockRadius * clamp(rFactor, 0.72, 1.24)
+    posAttr.setXYZ(i, nx * r * scaleX, ny * r * scaleY, nz * r * scaleZ)
+  }
+
+  posAttr.needsUpdate = true
+  geo.computeVertexNormals()
+  return geo
+}
+
+function createAsteroidOrbitLoopGeometry(spec: TopicAsteroidSpec): THREE.BufferGeometry {
+  const segments = 96
+  const positions = new Float32Array(segments * 3)
+  const fullPeriodSec = (Math.PI * 2) / Math.max(1e-6, spec.angularSpeedRadPerSec)
+  for (let i = 0; i < segments; i++) {
+    const t = (i / segments) * fullPeriodSec
+    const [x, y, z] = computeAsteroidWorldPosition(spec, t)
+    positions[i * 3] = x
+    positions[i * 3 + 1] = y
+    positions[i * 3 + 2] = z
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  return geo
+}
+
 function createStarfieldPoints(pixelRatio: number): {
   points: THREE.Points
   geometry: THREE.BufferGeometry
@@ -573,17 +735,16 @@ function createStarfieldPoints(pixelRatio: number): {
   const sizes = new Float32Array(total)
 
   const rand = mulberry32(9021042)
-  // Milky Way galactic band tilted ~62 degrees from Earth's equator
   const tilt = 62 * DEG2RAD
   const cosTilt = Math.cos(tilt)
   const sinTilt = Math.sin(tilt)
 
   const spectralColors = [
-    new THREE.Color('#CFE4FF'), // O/B blue-white
-    new THREE.Color('#EEF4FF'), // A white-blue
-    new THREE.Color('#FFFFFF'), // F pure white
-    new THREE.Color('#FFF4DE'), // G warm solar cream
-    new THREE.Color('#FFD9A0'), // K warm gold
+    new THREE.Color('#CFE4FF'),
+    new THREE.Color('#EEF4FF'),
+    new THREE.Color('#FFFFFF'),
+    new THREE.Color('#FFF4DE'),
+    new THREE.Color('#FFD9A0'),
   ]
 
   for (let i = 0; i < starCount; i++) {
@@ -593,7 +754,6 @@ function createStarfieldPoints(pixelRatio: number): {
     let z: number
 
     if (isBand) {
-      // Concentrated Gaussian band around tilted galactic plane
       const az = rand() * Math.PI * 2
       const u1 = Math.max(1e-6, rand())
       const u2 = rand()
@@ -602,12 +762,10 @@ function createStarfieldPoints(pixelRatio: number): {
       const gx = Math.cos(lat) * Math.cos(az)
       const gy = Math.sin(lat)
       const gz = Math.cos(lat) * Math.sin(az)
-      // Tilt around X axis
       x = gx
       y = gy * cosTilt - gz * sinTilt
       z = gy * sinTilt + gz * cosTilt
     } else {
-      // Uniform isotropic sphere
       const u = rand() * 2 - 1
       const az = rand() * Math.PI * 2
       const s = Math.sqrt(Math.max(0, 1 - u * u))
@@ -616,7 +774,7 @@ function createStarfieldPoints(pixelRatio: number): {
       z = s * Math.sin(az)
     }
 
-    const r = 42 + rand() * 5
+    const r = 70 + rand() * 60
     positions[i * 3] = x * r
     positions[i * 3 + 1] = y * r
     positions[i * 3 + 2] = z * r
@@ -635,7 +793,6 @@ function createStarfieldPoints(pixelRatio: number): {
     sizes[i] = basePx * Math.min(2, pixelRatio)
   }
 
-  // 4 subtle planetary glints on the ecliptic (Venus, Mars, Jupiter, Saturn)
   const planets: Array<{ lat: number; lon: number; color: string; size: number }> = [
     { lat: 14, lon: -42, color: '#FFF7DF', size: 4.8 },
     { lat: -11, lon: 118, color: '#FFBA8C', size: 4.2 },
@@ -646,9 +803,9 @@ function createStarfieldPoints(pixelRatio: number): {
     const idx = starCount + p
     const pl = planets[p]
     const [px, py, pz] = latLonToUnitVec3(pl.lat, pl.lon)
-    positions[idx * 3] = px * 40
-    positions[idx * 3 + 1] = py * 40
-    positions[idx * 3 + 2] = pz * 40
+    positions[idx * 3] = px * 68
+    positions[idx * 3 + 1] = py * 68
+    positions[idx * 3 + 2] = pz * 68
     const col = new THREE.Color(pl.color)
     colors[idx * 3] = col.r
     colors[idx * 3 + 1] = col.g
@@ -675,9 +832,6 @@ function createStarfieldPoints(pixelRatio: number): {
   return { points, geometry, material }
 }
 
-/**
- * Builds a curved spherical patch matching exact Web Mercator tile `(z, tx, ty)` coordinates.
- */
 function createMercatorPatchGeometry(z: number, tx: number, ty: number): THREE.BufferGeometry {
   const n = 1 << z
   const seg = z <= 4 ? 10 : z <= 6 ? 6 : 4
@@ -690,11 +844,11 @@ function createMercatorPatchGeometry(z: number, tx: number, ty: number): THREE.B
   let vi = 0
   let ui = 0
   for (let iv = 0; iv <= seg; iv++) {
-    const v = iv / seg // v=0 south, v=1 north
+    const v = iv / seg
     const mercY = (ty + (1 - v)) / n
     const lat = mercYNormToLat(mercY)
     for (let iu = 0; iu <= seg; iu++) {
-      const u = iu / seg // u=0 west, u=1 east
+      const u = iu / seg
       const lon = ((tx + u) / n) * 360 - 180
       const [nx, ny, nz] = latLonToUnitVec3(lat, lon)
       positions[vi] = nx * PATCH_RADIUS
@@ -717,7 +871,6 @@ function createMercatorPatchGeometry(z: number, tx: number, ty: number): THREE.B
       const i10 = i00 + 1
       const i01 = i00 + stride
       const i11 = i01 + 1
-      // Outward-facing CCW winding: East x North = Outward Normal
       indices.push(i00, i10, i11)
       indices.push(i00, i11, i01)
     }
@@ -731,9 +884,6 @@ function createMercatorPatchGeometry(z: number, tx: number, ty: number): THREE.B
   return geometry
 }
 
-/**
- * Appends curved border line segments for a lat/lon bounding box onto `out` float array.
- */
 function pushCurvedRectSegments(
   out: number[],
   latMin: number,
@@ -764,15 +914,12 @@ function pushCurvedRectSegments(
     }
   }
 
-  pushArc(cLatMin, lonMin, cLatMin, lonMax) // South edge
-  pushArc(cLatMin, lonMax, cLatMax, lonMax) // East edge
-  pushArc(cLatMax, lonMax, cLatMax, lonMin) // North edge
-  pushArc(cLatMax, lonMin, cLatMin, lonMin) // West edge
+  pushArc(cLatMin, lonMin, cLatMin, lonMax)
+  pushArc(cLatMin, lonMax, cLatMax, lonMax)
+  pushArc(cLatMax, lonMax, cLatMax, lonMin)
+  pushArc(cLatMax, lonMin, cLatMin, lonMin)
 }
 
-/**
- * Builds a curved filled spherical mesh for one or more lat/lon boxes.
- */
 function buildCurvedRectFillGeometry(
   boxes: Array<{ latMin: number; latMax: number; lonMin: number; lonMax: number }>,
   radius: number,
@@ -866,7 +1013,7 @@ function disposeObject3D(obj: THREE.Object3D | null): void {
 }
 
 // ---------------------------------------------------------------------------
-// Per-Geohash Upward-Queued Speech Bubbles Types
+// Internal Types for Bubbles, Pins, Asteroids, Patches & Camera
 // ---------------------------------------------------------------------------
 
 interface QueuedGlobeBubble {
@@ -881,11 +1028,61 @@ interface QueuedGlobeBubble {
 }
 
 interface GlobeBubbleStackRender {
-  geohash: string
+  geohash: string // canonical channelKey ('9q8y' or 'topic:nostr')
+  displayTag: string // '#9q8y' or '#nostr'
+  isTopic: boolean
   center: GeoCoords
   bubbles: QueuedGlobeBubble[]
   latestTsMs: number
   isFocused: boolean
+}
+
+interface EarthPinRenderItem {
+  geohash: string
+  center: GeoCoords
+  unreadCount: number
+  mentionCount: number
+  isActive: boolean
+  isSelected: boolean
+}
+
+interface EarthPinRuntimeEntry {
+  channelKey: string
+  root: THREE.Group
+  normal: THREE.Vector3
+  headTipY: number
+  hitMesh: THREE.Mesh
+}
+
+interface TopicAsteroidRenderItem {
+  channelKey: string
+  slug: string
+  spec: TopicAsteroidSpec
+  isPinned: boolean
+  isLive: boolean
+  isActive: boolean
+  isSelected: boolean
+  peerCount: number
+  messageCount: number
+  unreadCount: number
+  mentionCount: number
+}
+
+interface AsteroidRuntimeEntry {
+  channelKey: string
+  slug: string
+  spec: TopicAsteroidSpec
+  root: THREE.Group
+  rockMesh: THREE.Mesh
+  rockMaterial: THREE.ShaderMaterial
+  hitMesh: THREE.Mesh
+  orbitLine: THREE.LineLoop | null
+  orbitMaterial: THREE.LineBasicMaterial | null
+  spinAxis: THREE.Vector3
+  orbitElapsedSec: number
+  worldPos: THREE.Vector3
+  isPinned: boolean
+  isLive: boolean
 }
 
 interface PatchTileCacheEntry {
@@ -917,7 +1114,7 @@ interface CameraState {
 }
 
 // ---------------------------------------------------------------------------
-// Main 3D Three.js Earth Globe Component
+// Main 3D Three.js Earth Globe + Push-Pins + Topic Asteroid Belt Component
 // ---------------------------------------------------------------------------
 
 export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalGeohashMapProps>(
@@ -932,10 +1129,17 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       showPulse,
       showBubbles = true,
       pulseRooms,
+      pinnedChannels,
+      topicRooms,
+      extraTopicKeys,
+      activeChannelKey,
+      selectedChannelKey,
       userCoords,
       isTeleported,
       onSelectGeohash,
       onTuneGeohash,
+      onSelectChannel,
+      onTuneChannel,
       onViewportInfoChange,
       className = '',
     },
@@ -949,18 +1153,30 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     const [viewportTick, setViewportTick] = useState(0)
     const [bubbleStacks, setBubbleStacks] = useState<GlobeBubbleStackRender[]>([])
 
+    const effectiveActiveKey = (activeChannelKey ?? activeGeohash ?? '').trim().toLowerCase()
+    const effectiveSelectedKey =
+      (selectedChannelKey !== undefined ? selectedChannelKey : selectedGeohash)
+        ?.trim()
+        .toLowerCase() || null
+
     const safeActiveGeohash =
       activeGeohash && !isTopicChannel(activeGeohash) && isValidGeohash(activeGeohash)
-        ? activeGeohash
+        ? normalizeGeohash(activeGeohash)
         : '9q8y'
     const safeSelectedGeohash =
       selectedGeohash && !isTopicChannel(selectedGeohash) && isValidGeohash(selectedGeohash)
-        ? selectedGeohash
-        : null
+        ? normalizeGeohash(selectedGeohash)
+        : effectiveSelectedKey &&
+            !isTopicChannel(effectiveSelectedKey) &&
+            isValidGeohash(effectiveSelectedKey)
+          ? normalizeGeohash(effectiveSelectedKey)
+          : null
 
     // Keep fresh callbacks & reactive props in refs for rAF & Three.js event listeners
     const onSelectRef = useRef(onSelectGeohash)
     const onTuneRef = useRef(onTuneGeohash)
+    const onSelectChannelRef = useRef(onSelectChannel)
+    const onTuneChannelRef = useRef(onTuneChannel)
     const onViewportInfoRef = useRef(onViewportInfoChange)
     const precisionModeRef = useRef(precisionMode)
     const modeRef = useRef(mode)
@@ -968,6 +1184,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     const prevActiveRef = useRef(safeActiveGeohash)
     const activeGeohashRef = useRef(safeActiveGeohash)
     const selectedGeohashRef = useRef(safeSelectedGeohash)
+    const activeChannelKeyRef = useRef(effectiveActiveKey)
+    const selectedChannelKeyRef = useRef(effectiveSelectedKey)
     const showSubZonesRef = useRef(showSubZones)
     const showPulseRef = useRef(showPulse)
     const showBubblesRef = useRef(showBubbles)
@@ -976,12 +1194,16 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     useEffect(() => {
       onSelectRef.current = onSelectGeohash
       onTuneRef.current = onTuneGeohash
+      onSelectChannelRef.current = onSelectChannel
+      onTuneChannelRef.current = onTuneChannel
       onViewportInfoRef.current = onViewportInfoChange
       precisionModeRef.current = precisionMode
       modeRef.current = mode
       themeRef.current = theme
       activeGeohashRef.current = safeActiveGeohash
       selectedGeohashRef.current = safeSelectedGeohash
+      activeChannelKeyRef.current = effectiveActiveKey
+      selectedChannelKeyRef.current = effectiveSelectedKey
       showSubZonesRef.current = showSubZones
       showPulseRef.current = showPulse
       showBubblesRef.current = showBubbles
@@ -989,24 +1211,44 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     }, [
       onSelectGeohash,
       onTuneGeohash,
+      onSelectChannel,
+      onTuneChannel,
       onViewportInfoChange,
       precisionMode,
       mode,
       theme,
       safeActiveGeohash,
       safeSelectedGeohash,
+      effectiveActiveKey,
+      effectiveSelectedKey,
       showSubZones,
       showPulse,
       showBubbles,
       userCoords,
     ])
 
-    // Scene & Three.js runtime refs (initialized once to active cell)
+    const emitSelectChannel = useCallback((channelKey: string) => {
+      if (onSelectChannelRef.current) {
+        onSelectChannelRef.current(channelKey)
+      } else if (!isTopicChannel(channelKey) && isValidGeohash(channelKey)) {
+        onSelectRef.current(channelKey)
+      }
+    }, [])
+
+    const emitTuneChannel = useCallback((channelKey: string) => {
+      if (onTuneChannelRef.current) {
+        onTuneChannelRef.current(channelKey)
+      } else if (onTuneRef.current) {
+        onTuneRef.current(channelKey)
+      }
+    }, [])
+
+    // Initial wide camera framing in expanded mode so Earth, push-pins, & orbiting asteroids are immediately visible
     const initialCamCenter = decodeCenter(safeActiveGeohash)
     const initialCamZoom = clamp(
       mode === 'compact'
         ? Math.max(2, getZoomForPrecision(safeActiveGeohash.length) - 1)
-        : Math.min(getZoomForPrecision(safeActiveGeohash.length), 5.2),
+        : Math.min(getZoomForPrecision(safeActiveGeohash.length), 2.15),
       MIN_VIRTUAL_ZOOM,
       MAX_VIRTUAL_ZOOM,
     )
@@ -1044,25 +1286,36 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       focusGroup: THREE.Group
       hoverGroup: THREE.Group
       gpsGroup: THREE.Group
+      pinGroup: THREE.Group
+      asteroidGroup: THREE.Group
+      asteroidOrbitGroup: THREE.Group
       tileKind: 'dark' | 'light'
       baseLoadGen: number
       hoveredGeohash: string | null
+      hoveredAsteroidKey: string | null
+      orbitClockSec: number
       scheduleViewportEmit: () => void
       reloadBaseTiles: (kind: 'dark' | 'light') => void
       updatePatchTiles: () => void
       updateHoverMesh: (gh: string | null) => void
     } | null>(null)
 
+    // Runtime 3D maps for pins & orbiting asteroids (mutated in-place inside rAF)
+    const pinEntriesRef = useRef<Map<string, EarthPinRuntimeEntry>>(new Map())
+    const asteroidEntriesRef = useRef<Map<string, AsteroidRuntimeEntry>>(new Map())
+
     // Projected DOM overlay refs (updated directly in rAF for zero-re-render 60fps positioning)
     const bubbleStackElsRef = useRef<Map<string, HTMLDivElement>>(new Map())
     const beaconElsRef = useRef<Map<string, HTMLButtonElement>>(new Map())
+    const pinChipElsRef = useRef<Map<string, HTMLButtonElement>>(new Map())
+    const asteroidChipElsRef = useRef<Map<string, HTMLButtonElement>>(new Map())
     const activePillElRef = useRef<HTMLDivElement | null>(null)
     const selectedPillElRef = useRef<HTMLDivElement | null>(null)
     const gpsBeaconElRef = useRef<HTMLDivElement | null>(null)
     const bubbleStacksRef = useRef<GlobeBubbleStackRender[]>([])
     const visiblePulseRoomsRef = useRef<PulseRoom[]>([])
 
-    // Queue state for per-geohash upward-sliding speech bubbles
+    // Per-channel queue state for upward-sliding speech bubbles (Earth geohashes + Topic asteroids)
     const bubbleQueuesRef = useRef<Map<string, QueuedGlobeBubble[]>>(new Map())
     const evictedBubbleKeysRef = useRef<Map<string, Set<string>>>(new Map())
     const seededRoomsRef = useRef<Set<string>>(new Set())
@@ -1076,6 +1329,99 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           : [],
       [showPulse, pulseRooms, mode],
     )
+
+    const validTopicRooms = useMemo(() => {
+      if (!showPulse) return []
+      const byKey = new Map<string, PulseRoom>()
+      for (const r of topicRooms ?? []) {
+        if (!isTopicChannel(r.geohash)) continue
+        const key = makeTopicChannelKey(r.geohash)
+        if (key && !byKey.has(key)) byKey.set(key, { ...r, geohash: key })
+      }
+      // Also pick up any topic rooms passed via pulseRooms
+      for (const r of pulseRooms) {
+        if (!isTopicChannel(r.geohash)) continue
+        const key = makeTopicChannelKey(r.geohash)
+        if (key && !byKey.has(key)) byKey.set(key, { ...r, geohash: key })
+      }
+      return Array.from(byKey.values()).slice(0, 32)
+    }, [showPulse, topicRooms, pulseRooms])
+
+    const pinnedEarthItems = useMemo<EarthPinRenderItem[]>(() => {
+      if (!pinnedChannels || pinnedChannels.length === 0) return []
+      const seen = new Set<string>()
+      const out: EarthPinRenderItem[] = []
+      for (const pin of pinnedChannels) {
+        if (isTopicChannel(pin.geohash) || !isValidGeohash(pin.geohash)) continue
+        const gh = normalizeGeohash(pin.geohash)
+        if (seen.has(gh)) continue
+        seen.add(gh)
+        out.push({
+          geohash: gh,
+          center: decodeCenter(gh),
+          unreadCount: pin.unreadCount || 0,
+          mentionCount: pin.mentionCount || 0,
+          isActive: gh === effectiveActiveKey,
+          isSelected: gh === effectiveSelectedKey,
+        })
+      }
+      return out
+    }, [pinnedChannels, effectiveActiveKey, effectiveSelectedKey])
+
+    const topicAsteroidItems = useMemo<TopicAsteroidRenderItem[]>(() => {
+      const pinnedMap = new Map<string, PinnedChannel>()
+      for (const p of pinnedChannels ?? []) {
+        if (!isTopicChannel(p.geohash)) continue
+        const key = makeTopicChannelKey(p.geohash)
+        if (key) pinnedMap.set(key, p)
+      }
+
+      const liveMap = new Map<string, PulseRoom>()
+      for (const r of validTopicRooms) {
+        liveMap.set(r.geohash, r)
+      }
+
+      const orderedKeys: string[] = []
+      const seen = new Set<string>()
+      const addKey = (raw: string | null | undefined) => {
+        if (!raw || !isTopicChannel(raw)) return
+        const key = makeTopicChannelKey(raw)
+        if (!key || seen.has(key)) return
+        seen.add(key)
+        orderedKeys.push(key)
+      }
+
+      for (const key of pinnedMap.keys()) addKey(key)
+      for (const key of liveMap.keys()) addKey(key)
+      addKey(effectiveActiveKey)
+      addKey(effectiveSelectedKey)
+      for (const raw of extraTopicKeys ?? []) addKey(raw)
+
+      return orderedKeys.map((channelKey) => {
+        const spec = computeTopicAsteroidSpec(channelKey)
+        const pin = pinnedMap.get(channelKey)
+        const live = liveMap.get(channelKey)
+        return {
+          channelKey,
+          slug: spec.slug,
+          spec,
+          isPinned: Boolean(pin),
+          isLive: Boolean(live),
+          isActive: channelKey === effectiveActiveKey,
+          isSelected: channelKey === effectiveSelectedKey,
+          peerCount: live?.peerCount ?? 0,
+          messageCount: live?.messageCount ?? 0,
+          unreadCount: pin?.unreadCount ?? 0,
+          mentionCount: pin?.mentionCount ?? 0,
+        }
+      })
+    }, [
+      pinnedChannels,
+      validTopicRooms,
+      effectiveActiveKey,
+      effectiveSelectedKey,
+      extraTopicKeys,
+    ])
 
     useEffect(() => {
       visiblePulseRoomsRef.current = validPulseRooms
@@ -1091,22 +1437,35 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       return candidate && candidate.length < 8 ? candidate : null
     }, [showSubZones, safeSelectedGeohash, safeActiveGeohash])
 
+    const allBubbleSourceRooms = useMemo(
+      () => [...validPulseRooms, ...validTopicRooms],
+      [validPulseRooms, validTopicRooms],
+    )
+    const allBubbleSourceRoomsRef = useRef<PulseRoom[]>(allBubbleSourceRooms)
+    useEffect(() => {
+      allBubbleSourceRoomsRef.current = allBubbleSourceRooms
+    }, [allBubbleSourceRooms])
+
     const buildRenderStacks = useCallback(
       (rooms: PulseRoom[]): GlobeBubbleStackRender[] => {
-        const roomByGh = new Map<string, PulseRoom>()
-        for (const r of rooms) roomByGh.set(r.geohash, r)
+        const roomByKey = new Map<string, PulseRoom>()
+        for (const r of rooms) roomByKey.set(r.geohash, r)
 
         const out: GlobeBubbleStackRender[] = []
         const queues = bubbleQueuesRef.current
-        for (const [gh, list] of queues.entries()) {
+        for (const [key, list] of queues.entries()) {
           if (list.length === 0) continue
-          const room = roomByGh.get(gh)
+          const room = roomByKey.get(key)
           if (!room) continue
-          if (subZoneParent === gh) continue
+          const isTopic = isTopicChannel(key)
+          if (!isTopic && subZoneParent === key) continue
           const latest = list[list.length - 1]
-          const isFocused = gh === safeActiveGeohash || gh === safeSelectedGeohash
+          const isFocused = key === effectiveActiveKey || key === effectiveSelectedKey
+          const slug = isTopic ? getTopicSlug(key) : null
           out.push({
-            geohash: gh,
+            geohash: key,
+            displayTag: slug ? `#${slug}` : `#${key}`,
+            isTopic,
             center: room.center,
             bubbles: list.map((b) => ({ ...b })),
             latestTsMs: latest.tsMs,
@@ -1114,58 +1473,54 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           })
         }
 
-        // Priority: selected -> active -> newest activity
         out.sort((a, b) => {
-          const aSel = a.geohash === safeSelectedGeohash ? 1 : 0
-          const bSel = b.geohash === safeSelectedGeohash ? 1 : 0
+          const aSel = a.geohash === effectiveSelectedKey ? 1 : 0
+          const bSel = b.geohash === effectiveSelectedKey ? 1 : 0
           if (aSel !== bSel) return bSel - aSel
-          const aAct = a.geohash === safeActiveGeohash ? 1 : 0
-          const bAct = b.geohash === safeActiveGeohash ? 1 : 0
+          const aAct = a.geohash === effectiveActiveKey ? 1 : 0
+          const bAct = b.geohash === effectiveActiveKey ? 1 : 0
           if (aAct !== bAct) return bAct - aAct
           return b.latestTsMs - a.latestTsMs
         })
         return out
       },
-      [safeActiveGeohash, safeSelectedGeohash, subZoneParent],
+      [effectiveActiveKey, effectiveSelectedKey, subZoneParent],
     )
 
-    // Sync per-geohash speech bubble queues whenever pulseRooms / visibility changes
+    // Sync per-channel speech bubble queues (both Earth geohashes AND Topic asteroids)
     useEffect(() => {
       const queues = bubbleQueuesRef.current
       const evictedMap = evictedBubbleKeysRef.current
       const seeded = seededRoomsRef.current
 
-      if (!showPulse || !showBubbles || validPulseRooms.length === 0) {
-        if (queues.size > 0) {
-          queues.clear()
-        }
+      if (!showPulse || !showBubbles || allBubbleSourceRooms.length === 0) {
+        if (queues.size > 0) queues.clear()
         setBubbleStacks([])
         return
       }
 
       const now = Date.now()
-      const liveSet = new Set(validPulseRooms.map((r) => r.geohash))
+      const liveSet = new Set(allBubbleSourceRooms.map((r) => r.geohash))
 
-      // Prune rooms no longer in pulseRooms
-      for (const gh of Array.from(queues.keys())) {
-        if (!liveSet.has(gh)) {
-          queues.delete(gh)
-          seeded.delete(gh)
-          evictedMap.delete(gh)
+      for (const key of Array.from(queues.keys())) {
+        if (!liveSet.has(key)) {
+          queues.delete(key)
+          seeded.delete(key)
+          evictedMap.delete(key)
         }
       }
 
-      for (const room of validPulseRooms) {
-        const gh = room.geohash
+      for (const room of allBubbleSourceRooms) {
+        const key = room.geohash
         const incoming: Array<{ key: string; sender: string; snippet: string; tsMs: number }> = []
 
         if (room.recentMessages && room.recentMessages.length > 0) {
           for (const msg of room.recentMessages) {
             const snippet = formatBubbleSnippet(msg.preview)
             if (!snippet) continue
-            const key = msg.id || `${msg.tsMs}:${snippet}`
+            const msgKey = msg.id || `${msg.tsMs}:${snippet}`
             incoming.push({
-              key,
+              key: msgKey,
               sender: formatBubbleSender(msg.sender),
               snippet,
               tsMs: msg.tsMs,
@@ -1175,9 +1530,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           const snippet = formatBubbleSnippet(room.lastPreview)
           if (snippet) {
             const tsMs = room.lastMessageAt ?? room.lastActivityAt
-            const key = room.lastMessageId || `${tsMs}:${snippet}`
+            const msgKey = room.lastMessageId || `${tsMs}:${snippet}`
             incoming.push({
-              key,
+              key: msgKey,
               sender: formatBubbleSender(room.lastSender),
               snippet,
               tsMs,
@@ -1186,20 +1541,18 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         }
 
         if (incoming.length === 0) continue
-
-        // Ensure strict oldest -> newest ordering
         incoming.sort((a, b) => a.tsMs - b.tsMs)
         const cappedIncoming = incoming.slice(-MAX_BUBBLES_PER_GEOHASH)
 
-        let evicted = evictedMap.get(gh)
+        let evicted = evictedMap.get(key)
         if (!evicted) {
           evicted = new Set<string>()
-          evictedMap.set(gh, evicted)
+          evictedMap.set(key, evicted)
         }
 
-        let queue = queues.get(gh)
-        if (!seeded.has(gh) || !queue) {
-          seeded.add(gh)
+        let queue = queues.get(key)
+        if (!seeded.has(key) || !queue) {
+          seeded.add(key)
           queue = []
           const latest = cappedIncoming[cappedIncoming.length - 1]
           const freshBurst = now - latest.tsMs < BUBBLE_DEMOTE_LIFETIME_MS
@@ -1209,7 +1562,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               const isLast = i === cappedIncoming.length - 1
               queue.push({
                 key: item.key,
-                geohash: gh,
+                geohash: key,
                 sender: item.sender,
                 snippet: item.snippet,
                 tsMs: item.tsMs,
@@ -1224,7 +1577,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             }
             queue.push({
               key: latest.key,
-              geohash: gh,
+              geohash: key,
               sender: latest.sender,
               snippet: latest.snippet,
               tsMs: latest.tsMs,
@@ -1233,7 +1586,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               fadeStartedAtMs: null,
             })
           }
-          queues.set(gh, queue)
+          queues.set(key, queue)
           continue
         }
 
@@ -1243,7 +1596,6 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         )
 
         if (newlyArrived.length > 0) {
-          // Demote all previously-latest bubbles now that newer message(s) arrived
           for (const existing of queue) {
             if (existing.demotedAtMs === null) {
               existing.demotedAtMs = now
@@ -1254,7 +1606,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             const isNewest = i === newlyArrived.length - 1
             queue.push({
               key: item.key,
-              geohash: gh,
+              geohash: key,
               sender: item.sender,
               snippet: item.snippet,
               tsMs: item.tsMs,
@@ -1263,23 +1615,21 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               fadeStartedAtMs: null,
             })
           }
-          // Enforce strict max 4 bubbles per geohash queue
           while (queue.length > MAX_BUBBLES_PER_GEOHASH) {
             const dropped = queue.shift()
             if (dropped) evicted.add(dropped.key)
           }
-          // Cap evicted key history per room
           if (evicted.size > 64) {
             const keep = Array.from(evicted).slice(-32)
-            evictedMap.set(gh, new Set(keep))
+            evictedMap.set(key, new Set(keep))
           }
         }
       }
 
-      setBubbleStacks(buildRenderStacks(validPulseRooms))
-    }, [showPulse, showBubbles, validPulseRooms, buildRenderStacks])
+      setBubbleStacks(buildRenderStacks(allBubbleSourceRooms))
+    }, [showPulse, showBubbles, allBubbleSourceRooms, buildRenderStacks])
 
-    // 5s post-demotion fadeout & eviction ticker (runs only when demoted bubbles exist)
+    // 5s post-demotion fadeout & eviction ticker
     const hasDemotedBubbles = useMemo(
       () => bubbleStacks.some((s) => s.bubbles.some((b) => b.demotedAtMs !== null)),
       [bubbleStacks],
@@ -1293,11 +1643,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         const evictedMap = evictedBubbleKeysRef.current
         let mutated = false
 
-        for (const [gh, queue] of queues.entries()) {
-          let evicted = evictedMap.get(gh)
+        for (const [key, queue] of queues.entries()) {
+          let evicted = evictedMap.get(key)
           if (!evicted) {
             evicted = new Set<string>()
-            evictedMap.set(gh, evicted)
+            evictedMap.set(key, evicted)
           }
           for (let i = queue.length - 1; i >= 0; i--) {
             const b = queue[i]
@@ -1319,7 +1669,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         }
 
         if (mutated) {
-          setBubbleStacks(buildRenderStacks(visiblePulseRoomsRef.current))
+          setBubbleStacks(buildRenderStacks(allBubbleSourceRoomsRef.current))
         }
       }, 220)
 
@@ -1370,6 +1720,30 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       [startFlyTo],
     )
 
+    const flyToTopicInternal = useCallback(
+      (topicChannelKey: string, options?: { animate?: boolean }) => {
+        const canonical = makeTopicChannelKey(topicChannelKey)
+        if (!canonical) return
+        const liveEntry = asteroidEntriesRef.current.get(canonical)
+        let wx: number
+        let wy: number
+        let wz: number
+        if (liveEntry) {
+          wx = liveEntry.worldPos.x
+          wy = liveEntry.worldPos.y
+          wz = liveEntry.worldPos.z
+        } else {
+          const spec = computeTopicAsteroidSpec(canonical)
+          const elapsed = sceneRefs.current?.orbitClockSec ?? 0
+          ;[wx, wy, wz] = computeAsteroidWorldPosition(spec, elapsed)
+        }
+        const dir = unitVec3ToLatLon(new THREE.Vector3(wx, wy, wz))
+        // Frame the asteroid nicely in the foreground with Earth visible behind/beside it
+        startFlyTo(clamp(dir.lat, -74, 74), dir.lon, 1.72, options?.animate !== false)
+      },
+      [startFlyTo],
+    )
+
     useImperativeHandle(
       ref,
       () => ({
@@ -1390,18 +1764,25 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         flyToGeohash(geohash: string, options?: { animate?: boolean; zoom?: number }) {
           flyToCellInternal(geohash, options)
         },
+        flyToTopic(topicChannelKey: string, options?: { animate?: boolean }) {
+          flyToTopicInternal(topicChannelKey, options)
+        },
         flyToCoords(lat: number, lon: number, zoom = 10.5) {
           startFlyTo(lat, lon, zoom, true)
         },
         fitWorld() {
           const cam = cameraStateRef.current
-          startFlyTo(18, wrapLongitude(cam.lon), 2.0, true)
+          startFlyTo(18, wrapLongitude(cam.lon), 0.85, true)
+        },
+        fitAsteroids() {
+          const cam = cameraStateRef.current
+          startFlyTo(16, wrapLongitude(cam.lon), 0.25, true)
         },
         getZoom() {
           return cameraStateRef.current.zoom
         },
       }),
-      [flyToCellInternal, startFlyTo],
+      [flyToCellInternal, flyToTopicInternal, startFlyTo],
     )
 
     // -----------------------------------------------------------------------
@@ -1437,21 +1818,19 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const scene = new THREE.Scene()
       scene.background = new THREE.Color(palette.spaceBg)
 
-      const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, initW / initH, 0.01, 140)
+      const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, initW / initH, 0.01, 240)
       camera.up.set(0, 1, 0)
 
-      // Live Astronomical Positions (Sun & Moon)
+      // Live Astronomical Positions (Sun & Real Moon — 100% pure, untouched)
       const sunDir = new THREE.Vector3(1, 0.25, 0.2).normalize()
       const initSun = computeSubsolarPoint(new Date())
       sunDir.set(...latLonToUnitVec3(initSun.lat, initSun.lon)).normalize()
 
-      // 1A. Procedural GPU Starfield Skybox (~2,400 stars + Milky Way band + 4 planetary glints)
       const starfield = createStarfieldPoints(dpr)
       scene.add(starfield.points)
 
-      // 1B. Real-Time Sun (photosphere + additive radial corona sprite)
       const sunGroup = new THREE.Group()
-      const sunCoreGeo = new THREE.SphereGeometry(0.42, 24, 16)
+      const sunCoreGeo = new THREE.SphereGeometry(0.88, 24, 16)
       const sunCoreMat = new THREE.MeshBasicMaterial({ color: '#FFF7E0' })
       const sunCoreMesh = new THREE.Mesh(sunCoreGeo, sunCoreMat)
       sunGroup.add(sunCoreMesh)
@@ -1464,12 +1843,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         depthWrite: false,
       })
       const sunCoronaSprite = new THREE.Sprite(sunCoronaMat)
-      sunCoronaSprite.scale.set(4.1, 4.1, 1)
+      sunCoronaSprite.scale.set(8.6, 8.6, 1)
       sunGroup.add(sunCoronaSprite)
-      sunGroup.position.copy(sunDir).multiplyScalar(18)
+      sunGroup.position.copy(sunDir).multiplyScalar(38)
       scene.add(sunGroup)
 
-      // 1C. Real-Time Moon (cratered procedural canvas + same uSunDir phase shader!)
+      // Pure Real-Time Sun-Lit Moon (zero topic markers on Moon)
       const moonTex = createLunarSurfaceTexture()
       const moonGeo = new THREE.SphereGeometry(0.145, 32, 24)
       const moonMaterial = new THREE.ShaderMaterial({
@@ -1485,12 +1864,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       moonMesh.position.set(...latLonToUnitVec3(initMoon.lat, initMoon.lon)).multiplyScalar(4.2)
       scene.add(moonMesh)
 
-      // 1D. Earth Base Equirectangular Texture (procedural frame-1 ocean + progressive z=2 Esri tiles)
+      // Earth Base Equirectangular Texture (bright daylight Esri Topo for all themes)
       const baseCanvas = document.createElement('canvas')
       baseCanvas.width = 1024
       baseCanvas.height = 512
       const initialTileKind: 'dark' | 'light' = themeRef.current === 'daylight' ? 'light' : 'dark'
-      paintProceduralBaseMap(baseCanvas, initialTileKind === 'light')
+      paintProceduralBaseMap(baseCanvas)
 
       const baseTexture = new THREE.CanvasTexture(baseCanvas)
       baseTexture.colorSpace = THREE.SRGBColorSpace
@@ -1512,7 +1891,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       earthMesh.renderOrder = 1
       scene.add(earthMesh)
 
-      // 1E. Thin Additive Outer Atmosphere Shell (BackSide Fresnel glow)
+      // Outer Atmosphere Shell
       const atmosphereGeo = new THREE.SphereGeometry(1.032, 48, 32)
       const atmosphereMaterial = new THREE.ShaderMaterial({
         vertexShader: ATMOSPHERE_VERTEX_SHADER,
@@ -1529,7 +1908,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       atmosphereMesh.renderOrder = 3
       scene.add(atmosphereMesh)
 
-      // 1F. Layered Scene Groups
+      // Layered Scene Groups (Earth overlays + 3D Push-Pins + Orbiting Topic Asteroid Belt)
       const patchGroup = new THREE.Group()
       const gridGroup = new THREE.Group()
       const subZoneGroup = new THREE.Group()
@@ -1537,9 +1916,25 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const focusGroup = new THREE.Group()
       const hoverGroup = new THREE.Group()
       const gpsGroup = new THREE.Group()
-      scene.add(patchGroup, gridGroup, subZoneGroup, pulseGroup, focusGroup, hoverGroup, gpsGroup)
+      const pinGroup = new THREE.Group()
+      const asteroidOrbitGroup = new THREE.Group()
+      const asteroidGroup = new THREE.Group()
+      scene.add(
+        patchGroup,
+        gridGroup,
+        subZoneGroup,
+        pulseGroup,
+        focusGroup,
+        hoverGroup,
+        gpsGroup,
+        pinGroup,
+        asteroidOrbitGroup,
+        asteroidGroup,
+      )
 
       const patchCache = new Map<string, PatchTileCacheEntry>()
+      const pinEntries = pinEntriesRef.current
+      const asteroidEntries = asteroidEntriesRef.current
       let baseLoadGen = 0
       let isDisposed = false
       let viewportDebounceTimer: number | null = null
@@ -1566,38 +1961,19 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         }, VIEWPORT_DEBOUNCE_MS)
       }
 
-      // Progressive z=2 (4x4) Esri Base World Tile Loader onto Equirectangular Canvas
       const reloadBaseTiles = (kind: 'dark' | 'light') => {
         baseLoadGen += 1
         const gen = baseLoadGen
         const isLight = kind === 'light'
-        paintProceduralBaseMap(baseCanvas, isLight)
+        paintProceduralBaseMap(baseCanvas)
         baseTexture.needsUpdate = true
         earthMaterial.uniforms.uIsLight.value = isLight ? 1.0 : 0.0
-
-        // Evict opposite-theme patch tiles
-        for (const [k, entry] of patchCache.entries()) {
-          if (entry.kind !== kind) {
-            patchGroup.remove(entry.mesh)
-            entry.geometry.dispose()
-            entry.material.dispose()
-            entry.texture.dispose()
-            patchCache.delete(k)
-          }
-        }
-        lastPatchKeySig = ''
 
         const ctx = baseCanvas.getContext('2d')
         if (!ctx) return
 
-        const baseTemplate = isLight ? ESRI_TOPO_URL : ESRI_DARK_BASE_URL
         const z = 2
         const n = 1 << z
-        const baseLoaded: boolean[][] = Array.from({ length: n }, () => Array(n).fill(false))
-        const refImages: (HTMLImageElement | null)[][] = Array.from({ length: n }, () =>
-          Array(n).fill(null),
-        )
-
         for (let ty = 0; ty < n; ty++) {
           for (let tx = 0; tx < n; tx++) {
             const img = new Image()
@@ -1605,49 +1981,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             img.onload = () => {
               if (isDisposed || gen !== baseLoadGen) return
               compositeMercatorTileOntoEquirect(ctx, img, z, tx, ty, baseCanvas.width, baseCanvas.height)
-              baseLoaded[ty][tx] = true
-              const pendingRef = refImages[ty][tx]
-              if (pendingRef) {
-                compositeMercatorTileOntoEquirect(
-                  ctx,
-                  pendingRef,
-                  z,
-                  tx,
-                  ty,
-                  baseCanvas.width,
-                  baseCanvas.height,
-                )
-              }
               baseTexture.needsUpdate = true
             }
-            img.src = tileUrl(baseTemplate, z, tx, ty)
-
-            if (!isLight) {
-              const refImg = new Image()
-              refImg.crossOrigin = 'anonymous'
-              refImg.onload = () => {
-                if (isDisposed || gen !== baseLoadGen) return
-                refImages[ty][tx] = refImg
-                if (baseLoaded[ty][tx]) {
-                  compositeMercatorTileOntoEquirect(
-                    ctx,
-                    refImg,
-                    z,
-                    tx,
-                    ty,
-                    baseCanvas.width,
-                    baseCanvas.height,
-                  )
-                  baseTexture.needsUpdate = true
-                }
-              }
-              refImg.src = tileUrl(ESRI_DARK_REF_URL, z, tx, ty)
-            }
+            img.src = tileUrl(ESRI_TOPO_URL, z, tx, ty)
           }
         }
       }
 
-      // Dynamic High-Resolution Curved Spherical Patch Tiles (z = 3..12)
       const updatePatchTiles = () => {
         if (isDisposed) return
         const cam = cameraStateRef.current
@@ -1690,17 +2030,16 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         }
         desired.sort((a, b) => a.dist2 - b.dist2)
         const chosen = desired.slice(0, MAX_VISIBLE_PATCH_TILES)
-        const sig = `${currentKind}:${tileZ}:${chosen.map((c) => `${c.tx},${c.ty}`).join('|')}`
+        const sig = `topo:${tileZ}:${chosen.map((c) => `${c.tx},${c.ty}`).join('|')}`
         if (sig === lastPatchKeySig) return
         lastPatchKeySig = sig
 
         const nowMs = Date.now()
         const activeKeys = new Set<string>()
         const isLight = currentKind === 'light'
-        const baseTemplate = isLight ? ESRI_TOPO_URL : ESRI_DARK_BASE_URL
 
         for (const { tx, ty } of chosen) {
-          const key = `${currentKind}:${tileZ}:${tx}:${ty}`
+          const key = `topo:${tileZ}:${tx}:${ty}`
           activeKeys.add(key)
 
           let entry = patchCache.get(key)
@@ -1737,7 +2076,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               z: tileZ,
               tx,
               ty,
-              kind: currentKind,
+              kind: 'light',
               mesh,
               geometry,
               material,
@@ -1749,9 +2088,6 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             patchCache.set(key, entry)
 
             const localEntry = entry
-            let baseDone = false
-            let pendingRef: HTMLImageElement | null = null
-
             const img = new Image()
             img.crossOrigin = 'anonymous'
             img.onload = () => {
@@ -1760,41 +2096,24 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               if (!ctx) return
               ctx.clearRect(0, 0, 256, 256)
               ctx.drawImage(img, 0, 0, 256, 256)
-              baseDone = true
-              if (pendingRef) {
-                ctx.drawImage(pendingRef, 0, 0, 256, 256)
-              }
               localEntry.texture.needsUpdate = true
               localEntry.loaded = true
-              if (lastPatchKeySig.includes(`${tx},${ty}`) && lastPatchKeySig.startsWith(`${currentKind}:${tileZ}:`)) {
+              if (
+                lastPatchKeySig.includes(`${tx},${ty}`) &&
+                lastPatchKeySig.startsWith(`topo:${tileZ}:`)
+              ) {
                 localEntry.mesh.visible = true
               }
             }
-            img.src = tileUrl(baseTemplate, tileZ, tx, ty)
-
-            if (!isLight) {
-              const refImg = new Image()
-              refImg.crossOrigin = 'anonymous'
-              refImg.onload = () => {
-                if (isDisposed || !patchCache.has(key)) return
-                pendingRef = refImg
-                if (baseDone) {
-                  const ctx = localEntry.canvas.getContext('2d')
-                  if (ctx) {
-                    ctx.drawImage(refImg, 0, 0, 256, 256)
-                    localEntry.texture.needsUpdate = true
-                  }
-                }
-              }
-              refImg.src = tileUrl(ESRI_DARK_REF_URL, tileZ, tx, ty)
-            }
+            img.src = tileUrl(ESRI_TOPO_URL, tileZ, tx, ty)
+          } else {
+            entry.material.uniforms.uIsLight.value = isLight ? 1.0 : 0.0
           }
 
           entry.lastUsedMs = nowMs
           entry.mesh.visible = entry.loaded
         }
 
-        // Hide inactive patch tiles and evict oldest LRU entries beyond MAX_CACHED_PATCH_TILES
         for (const [k, entry] of patchCache.entries()) {
           if (!activeKeys.has(k)) {
             entry.mesh.visible = false
@@ -1817,7 +2136,6 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         }
       }
 
-      // Hover cell curved highlight on Earth
       const updateHoverMesh = (gh: string | null) => {
         while (hoverGroup.children.length > 0) {
           const ch = hoverGroup.children[0]
@@ -1879,9 +2197,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         focusGroup,
         hoverGroup,
         gpsGroup,
+        pinGroup,
+        asteroidGroup,
+        asteroidOrbitGroup,
         tileKind: initialTileKind,
         baseLoadGen,
         hoveredGeohash: null,
+        hoveredAsteroidKey: null,
+        orbitClockSec: 0,
         scheduleViewportEmit,
         reloadBaseTiles,
         updatePatchTiles,
@@ -1890,13 +2213,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       reloadBaseTiles(initialTileKind)
 
-      // Refresh Sun & Moon live astronomical coordinates every 30s
+      // Refresh live Sun & Moon astronomical positions every 30s (+ sync uSunDir on asteroids & pins)
       const syncCelestialBodies = () => {
         const now = new Date()
         const sun = computeSubsolarPoint(now)
         const moon = computeSublunarPoint(now)
         sunDir.set(...latLonToUnitVec3(sun.lat, sun.lon)).normalize()
-        sunGroup.position.copy(sunDir).multiplyScalar(18)
+        sunGroup.position.copy(sunDir).multiplyScalar(38)
         earthMaterial.uniforms.uSunDir.value.copy(sunDir)
         atmosphereMaterial.uniforms.uSunDir.value.copy(sunDir)
         moonMaterial.uniforms.uSunDir.value.copy(sunDir)
@@ -1904,11 +2227,21 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         for (const entry of patchCache.values()) {
           entry.material.uniforms.uSunDir.value.copy(sunDir)
         }
+        for (const entry of asteroidEntries.values()) {
+          entry.rockMaterial.uniforms.uSunDir.value.copy(sunDir)
+        }
+        pinGroup.traverse((child) => {
+          const m = (child as THREE.Mesh).material as THREE.ShaderMaterial | undefined
+          if (m && m.uniforms?.uSunDir) {
+            m.uniforms.uSunDir.value.copy(sunDir)
+          }
+        })
       }
       const sunTimer = window.setInterval(syncCelestialBodies, SUN_REFRESH_INTERVAL_MS)
 
       // ---------------------------------------------------------------------
-      // Pointer, Touch Pinch-Zoom, Wheel Zoom & Raycast Interaction Controller
+      // Pointer, Touch Pinch-Zoom, Wheel Zoom & Priority Raycast Controller
+      // Priority: 1) 3D Asteroids  2) 3D Earth Push-Pins  3) Earth Surface
       // ---------------------------------------------------------------------
       const canvas = renderer.domElement
       const raycaster = new THREE.Raycaster()
@@ -1933,15 +2266,80 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         typeof window !== 'undefined' &&
         Boolean(window.matchMedia?.('(hover: none)').matches)
 
-      const raycastEarthLatLon = (clientX: number, clientY: number): { lat: number; lon: number } | null => {
+      type SceneHitResult =
+        | { kind: 'asteroid'; channelKey: string; slug: string }
+        | { kind: 'pin'; channelKey: string }
+        | { kind: 'earth'; lat: number; lon: number }
+        | null
+
+      const raycastScene = (clientX: number, clientY: number): SceneHitResult => {
         const rect = canvas.getBoundingClientRect()
         if (rect.width <= 0 || rect.height <= 0) return null
         ndcPointer.x = ((clientX - rect.left) / rect.width) * 2 - 1
         ndcPointer.y = -((clientY - rect.top) / rect.height) * 2 + 1
         raycaster.setFromCamera(ndcPointer, camera)
-        const hits = raycaster.intersectObject(earthMesh, false)
-        if (hits.length === 0) return null
-        return unitVec3ToLatLon(hits[0].point)
+
+        const camPosTuple: [number, number, number] = [
+          camera.position.x,
+          camera.position.y,
+          camera.position.z,
+        ]
+
+        // 1. 3D Topic Asteroids (filter out asteroids hidden behind Earth's limb)
+        if (asteroidEntries.size > 0) {
+          const hitTargets: THREE.Object3D[] = []
+          for (const entry of asteroidEntries.values()) {
+            const p: [number, number, number] = [
+              entry.worldPos.x,
+              entry.worldPos.y,
+              entry.worldPos.z,
+            ]
+            if (!isPointOccludedByEarth(camPosTuple, p, EARTH_RADIUS)) {
+              hitTargets.push(entry.hitMesh)
+            }
+          }
+          if (hitTargets.length > 0) {
+            const hits = raycaster.intersectObjects(hitTargets, false)
+            if (hits.length > 0) {
+              const ud = hits[0].object.userData as { channelKey?: string; slug?: string }
+              if (ud.channelKey) {
+                return {
+                  kind: 'asteroid',
+                  channelKey: ud.channelKey,
+                  slug: ud.slug || getTopicSlug(ud.channelKey) || ud.channelKey,
+                }
+              }
+            }
+          }
+        }
+
+        // 2. 3D Earth Push-Pins (only front-facing hemisphere)
+        if (pinEntries.size > 0) {
+          const camDirNorm = camera.position.clone().normalize()
+          const pinTargets: THREE.Object3D[] = []
+          for (const entry of pinEntries.values()) {
+            if (entry.normal.dot(camDirNorm) >= 0.1) {
+              pinTargets.push(entry.hitMesh)
+            }
+          }
+          if (pinTargets.length > 0) {
+            const hits = raycaster.intersectObjects(pinTargets, false)
+            if (hits.length > 0) {
+              const ud = hits[0].object.userData as { channelKey?: string }
+              if (ud.channelKey) {
+                return { kind: 'pin', channelKey: ud.channelKey }
+              }
+            }
+          }
+        }
+
+        // 3. Earth Globe Surface
+        const earthHits = raycaster.intersectObject(earthMesh, false)
+        if (earthHits.length > 0) {
+          const { lat, lon } = unitVec3ToLatLon(earthHits[0].point)
+          return { kind: 'earth', lat, lon }
+        }
+        return null
       }
 
       const degPerPixel = (): number => {
@@ -1980,7 +2378,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           cam.dragging = true
           wrap.classList.add('is-dragging')
           dragPrimaryId = null
-          dragMovedPx = 999 // cancel single-tap click
+          dragMovedPx = 999
           const pts = Array.from(activePointers.values())
           lastPinchDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y)
           lastPinchMidX = (pts[0].x + pts[1].x) / 2
@@ -2039,36 +2437,65 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           cam.lon += dLon
           cam.targetLat = cam.lat
           cam.targetLon = cam.lon
-          // Track velocity for smooth release inertia
           cam.velLat = cam.velLat * 0.45 + dLat * 36 * 0.55
           cam.velLon = cam.velLon * 0.45 + dLon * 36 * 0.55
           scheduleViewportEmit()
           return
         }
 
-        // Desktop hover readout + curved hover cell highlight
+        // Desktop hover readout + curved hover highlight / asteroid highlight
         if (!isTouchOnly && e.pointerType === 'mouse' && activePointers.size === 0) {
-          const hit = raycastEarthLatLon(e.clientX, e.clientY)
+          const hit = raycastScene(e.clientX, e.clientY)
+          const sr = sceneRefs.current
+          if (!sr) return
+
           if (!hit) {
-            if (sceneRefs.current && sceneRefs.current.hoveredGeohash !== null) {
-              sceneRefs.current.hoveredGeohash = null
+            if (sr.hoveredGeohash !== null) {
+              sr.hoveredGeohash = null
               updateHoverMesh(null)
-              setHoverHud(null)
             }
+            sr.hoveredAsteroidKey = null
+            canvas.style.cursor = ''
+            setHoverHud(null)
             return
           }
+
+          if (hit.kind === 'asteroid') {
+            if (sr.hoveredGeohash !== null) {
+              sr.hoveredGeohash = null
+              updateHoverMesh(null)
+            }
+            sr.hoveredAsteroidKey = hit.channelKey
+            canvas.style.cursor = 'pointer'
+            setHoverHud({ geohash: hit.slug, coords: 'Topic Asteroid' })
+            return
+          }
+
+          sr.hoveredAsteroidKey = null
+
+          if (hit.kind === 'pin') {
+            if (sr.hoveredGeohash !== hit.channelKey) {
+              sr.hoveredGeohash = hit.channelKey
+              updateHoverMesh(hit.channelKey)
+            }
+            canvas.style.cursor = 'pointer'
+            setHoverHud({ geohash: hit.channelKey, coords: 'Pinned' })
+            return
+          }
+
+          canvas.style.cursor = ''
           const p =
             precisionModeRef.current === 'auto'
               ? getRecommendedPrecisionForZoom(cam.zoom)
               : precisionModeRef.current
           const gh = encodeGeohash(hit.lat, hit.lon, p)
-          if (sceneRefs.current && sceneRefs.current.hoveredGeohash !== gh) {
-            sceneRefs.current.hoveredGeohash = gh
+          if (sr.hoveredGeohash !== gh) {
+            sr.hoveredGeohash = gh
             updateHoverMesh(gh)
           }
           setHoverHud({
             geohash: gh,
-            coords: formatCoords(hit),
+            coords: formatCoords({ lat: hit.lat, lon: hit.lon }),
           })
         }
       }
@@ -2108,27 +2535,38 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           if (wasClick) {
             cam.velLat = 0
             cam.velLon = 0
-            const hit = raycastEarthLatLon(e.clientX, e.clientY)
+            const hit = raycastScene(e.clientX, e.clientY)
             if (hit) {
-              const p =
-                precisionModeRef.current === 'auto'
-                  ? getRecommendedPrecisionForZoom(cam.zoom)
-                  : precisionModeRef.current
-              const gh = encodeGeohash(hit.lat, hit.lon, p)
               const nowMs = performance.now()
               const isTouchDoubleTap =
                 e.pointerType !== 'mouse' &&
                 nowMs - lastTapMs < 320 &&
                 Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY) < 22
 
-              if (isTouchDoubleTap && modeRef.current === 'expanded' && onTuneRef.current) {
+              const resolvedKey =
+                hit.kind === 'asteroid'
+                  ? hit.channelKey
+                  : hit.kind === 'pin'
+                    ? hit.channelKey
+                    : encodeGeohash(
+                        hit.lat,
+                        hit.lon,
+                        precisionModeRef.current === 'auto'
+                          ? getRecommendedPrecisionForZoom(cam.zoom)
+                          : precisionModeRef.current,
+                      )
+
+              if (isTouchDoubleTap && modeRef.current === 'expanded') {
                 lastTapMs = 0
-                onTuneRef.current(gh)
+                emitTuneChannel(resolvedKey)
               } else {
                 lastTapMs = nowMs
                 lastTapX = e.clientX
                 lastTapY = e.clientY
-                onSelectRef.current(gh)
+                emitSelectChannel(resolvedKey)
+                if (hit.kind === 'asteroid') {
+                  flyToTopicInternal(hit.channelKey, { animate: true })
+                }
               }
             }
           } else {
@@ -2138,23 +2576,31 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       }
 
       const onDoubleClick = (e: MouseEvent) => {
-        if (modeRef.current !== 'expanded' || !onTuneRef.current) return
-        const hit = raycastEarthLatLon(e.clientX, e.clientY)
+        if (modeRef.current !== 'expanded') return
+        const hit = raycastScene(e.clientX, e.clientY)
         if (!hit) return
+        if (hit.kind === 'asteroid' || hit.kind === 'pin') {
+          emitTuneChannel(hit.channelKey)
+          return
+        }
         const cam = cameraStateRef.current
         const p =
           precisionModeRef.current === 'auto'
             ? getRecommendedPrecisionForZoom(cam.zoom)
             : precisionModeRef.current
         const gh = encodeGeohash(hit.lat, hit.lon, p)
-        onTuneRef.current(gh)
+        emitTuneChannel(gh)
       }
 
       const onPointerLeave = () => {
-        if (sceneRefs.current && sceneRefs.current.hoveredGeohash !== null) {
-          sceneRefs.current.hoveredGeohash = null
-          updateHoverMesh(null)
+        if (sceneRefs.current) {
+          if (sceneRefs.current.hoveredGeohash !== null) {
+            sceneRefs.current.hoveredGeohash = null
+            updateHoverMesh(null)
+          }
+          sceneRefs.current.hoveredAsteroidKey = null
         }
+        canvas.style.cursor = ''
         setHoverHud(null)
       }
 
@@ -2208,7 +2654,6 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       canvas.addEventListener('gesturechange', preventGesture, { passive: false })
       canvas.addEventListener('webglcontextlost', onContextLost, false)
 
-      // ResizeObserver
       let lastW = initW
       let lastH = initH
       const ro = new ResizeObserver(() => {
@@ -2225,13 +2670,31 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       ro.observe(wrap)
 
       // ---------------------------------------------------------------------
-      // Main 60fps rAF Loop: Damped Camera + Patch LOD + 3D->2D DOM Projection
+      // Main 60fps rAF Loop: Camera + Pin Scaling + Orbiting Asteroids + Projection
       // ---------------------------------------------------------------------
       const tmpVec = new THREE.Vector3()
       const camDir = new THREE.Vector3()
       let lastFrameMs = performance.now()
       let lastPatchCheckMs = 0
       let rafId = 0
+
+      const projectWorldVecToScreen = (
+        worldVec: THREE.Vector3,
+        viewW: number,
+        viewH: number,
+      ): { x: number; y: number; visible: boolean } => {
+        tmpVec.copy(worldVec)
+        tmpVec.project(camera)
+        if (tmpVec.z > 1 || tmpVec.z < -1) {
+          return { x: 0, y: 0, visible: false }
+        }
+        const x = (tmpVec.x * 0.5 + 0.5) * viewW
+        const y = (-tmpVec.y * 0.5 + 0.5) * viewH
+        if (x < -160 || x > viewW + 160 || y < -160 || y > viewH + 160) {
+          return { x, y, visible: false }
+        }
+        return { x, y, visible: true }
+      }
 
       const projectPointToScreen = (
         lat: number,
@@ -2240,22 +2703,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         viewH: number,
       ): { x: number; y: number; visible: boolean } => {
         const [ux, uy, uz] = latLonToUnitVec3(lat, lon)
-        // True 3D horizon occlusion: hide points on or near the back hemisphere of Earth
         const facing = ux * camDir.x + uy * camDir.y + uz * camDir.z
         if (facing < 0.14) {
           return { x: 0, y: 0, visible: false }
         }
         tmpVec.set(ux * FOCUS_LINE_RADIUS, uy * FOCUS_LINE_RADIUS, uz * FOCUS_LINE_RADIUS)
-        tmpVec.project(camera)
-        if (tmpVec.z > 1 || tmpVec.z < -1) {
-          return { x: 0, y: 0, visible: false }
-        }
-        const x = (tmpVec.x * 0.5 + 0.5) * viewW
-        const y = (-tmpVec.y * 0.5 + 0.5) * viewH
-        if (x < -140 || x > viewW + 140 || y < -140 || y > viewH + 140) {
-          return { x, y, visible: false }
-        }
-        return { x, y, visible: true }
+        return projectWorldVecToScreen(tmpVec, viewW, viewH)
       }
 
       const hideEl = (el: HTMLElement) => {
@@ -2271,7 +2724,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         el: HTMLElement,
         x: number,
         y: number,
-        anchor: 'center' | 'bottom-center' = 'center',
+        anchor: 'center' | 'bottom-center' | 'top-center' = 'center',
       ) => {
         if (el.dataset.vis !== '1') {
           el.dataset.vis = '1'
@@ -2279,10 +2732,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           el.style.opacity = '1'
           el.style.pointerEvents = ''
         }
-        el.style.transform =
-          anchor === 'bottom-center'
-            ? `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`
-            : `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -50%)`
+        if (anchor === 'bottom-center') {
+          el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`
+        } else if (anchor === 'top-center') {
+          el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, 0)`
+        } else {
+          el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -50%)`
+        }
       }
 
       const tick = (nowMs: number) => {
@@ -2291,6 +2747,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
         const dt = clamp((nowMs - lastFrameMs) / 1000, 0.004, 0.064)
         lastFrameMs = nowMs
+
+        const sr = sceneRefs.current
+        if (sr) sr.orbitClockSec += dt
 
         const cam = cameraStateRef.current
         let cameraMoved = false
@@ -2327,7 +2786,6 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           cameraMoved = true
         }
 
-        // Update Three.js perspective camera position & dynamic near plane (zero z-fighting at P8!)
         const dist = zoomToDistance(cam.zoom)
         const nextNear = clamp((dist - EARTH_RADIUS) * 0.16, 0.0003, 0.08)
         if (Math.abs(camera.near - nextNear) > 0.0001) {
@@ -2338,8 +2796,53 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         camera.position.set(cx * dist, cy * dist, cz * dist)
         camera.lookAt(0, 0, 0)
         camDir.set(cx, cy, cz).normalize()
+        const camPosTuple: [number, number, number] = [
+          camera.position.x,
+          camera.position.y,
+          camera.position.z,
+        ]
 
-        // Throttled regional high-res patch tile check
+        // Dynamically scale Earth 3D Push-Pins proportionally to altitude
+        const pinScale = clamp((dist - EARTH_RADIUS) * 0.044, 0.0024, 0.095)
+        for (const entry of pinEntries.values()) {
+          entry.root.scale.setScalar(pinScale)
+        }
+
+        // Advance gentle orbital drift & rocky tumble for every 3D Topic Asteroid
+        const hoveredAst = sr?.hoveredAsteroidKey ?? null
+        const activeKey = activeChannelKeyRef.current
+        const selectedKey = selectedChannelKeyRef.current
+        for (const entry of asteroidEntries.values()) {
+          const isSteady =
+            entry.channelKey === hoveredAst || entry.channelKey === selectedKey
+          if (!isSteady) {
+            entry.orbitElapsedSec += dt
+          }
+          const [ax, ay, az] = computeAsteroidWorldPosition(entry.spec, entry.orbitElapsedSec)
+          entry.worldPos.set(ax, ay, az)
+          entry.root.position.set(ax, ay, az)
+          entry.rockMesh.rotateOnAxis(entry.spinAxis, entry.spec.spinSpeed * dt)
+
+          const isHighlighted =
+            entry.channelKey === selectedKey || entry.channelKey === activeKey
+          const isHovered = entry.channelKey === hoveredAst
+          entry.rockMaterial.uniforms.uHighlight.value = isHighlighted
+            ? 1.0
+            : isHovered
+              ? 0.65
+              : entry.isPinned
+                ? 0.22
+                : 0.0
+
+          if (entry.orbitMaterial) {
+            entry.orbitMaterial.opacity = isHighlighted || isHovered
+              ? 0.38
+              : entry.isPinned || entry.isLive
+                ? 0.075
+                : 0.03
+          }
+        }
+
         if (nowMs - lastPatchCheckMs > 160 || cameraMoved) {
           if (nowMs - lastPatchCheckMs > 160) {
             lastPatchCheckMs = nowMs
@@ -2355,7 +2858,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         const isCompact = modeRef.current === 'compact'
         const isNarrow = viewW < 640
 
-        // 1. Active & Selected Geohash Pill Badges
+        // 1. Active & Selected Geohash Pill Badges (suppressed if a Pinned Push-Pin chip owns that exact geohash)
         const subParent = showSubZonesRef.current
           ? selectedGeohashRef.current || activeGeohashRef.current
           : null
@@ -2364,7 +2867,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         const activeEl = activePillElRef.current
         if (activeEl) {
           const gh = activeGeohashRef.current
-          if (gh && activeSubParent !== gh) {
+          const isTopicActive = isTopicChannel(activeChannelKeyRef.current)
+          const hasPinHere = pinEntries.has(gh)
+          if (gh && !isTopicActive && !hasPinHere && activeSubParent !== gh) {
             const c = decodeCenter(gh)
             const p = projectPointToScreen(c.lat, c.lon, viewW, viewH)
             if (p.visible) showElAt(activeEl, p.x, p.y)
@@ -2377,7 +2882,17 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         const selEl = selectedPillElRef.current
         if (selEl) {
           const gh = selectedGeohashRef.current
-          if (gh && gh !== activeGeohashRef.current && activeSubParent !== gh) {
+          const isTopicSelected = Boolean(
+            selectedChannelKeyRef.current && isTopicChannel(selectedChannelKeyRef.current),
+          )
+          const hasPinHere = gh ? pinEntries.has(gh) : false
+          if (
+            gh &&
+            !isTopicSelected &&
+            !hasPinHere &&
+            gh !== activeGeohashRef.current &&
+            activeSubParent !== gh
+          ) {
             const c = decodeCenter(gh)
             const p = projectPointToScreen(c.lat, c.lon, viewW, viewH)
             if (p.visible) showElAt(selEl, p.x, p.y)
@@ -2400,9 +2915,65 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
         }
 
-        // 3. Upward-Queued Speech Bubble Stacks (with lightweight screen-space de-cluttering)
+        // 3. Projected Earth 3D Push-Pin Chips (anchored cleanly right above each 3D pinhead tip)
+        const tipVec = new THREE.Vector3()
+        for (const [gh, entry] of pinEntries.entries()) {
+          const chipEl = pinChipElsRef.current.get(gh)
+          if (!chipEl) continue
+          if (entry.normal.dot(camDir) < 0.14 || activeSubParent === gh) {
+            hideEl(chipEl)
+            continue
+          }
+          tipVec
+            .copy(entry.normal)
+            .multiplyScalar(EARTH_RADIUS + 0.0008 + entry.headTipY * pinScale)
+          const p = projectWorldVecToScreen(tipVec, viewW, viewH)
+          if (!p.visible) {
+            hideEl(chipEl)
+            continue
+          }
+          showElAt(chipEl, p.x, p.y - 6, 'bottom-center')
+        }
+
+        // 4. Projected Topic Asteroid Chips (occluded cleanly only when behind Earth's limb)
+        const visibleAsteroidScreen = new Map<string, { x: number; y: number }>()
+        for (const [key, entry] of asteroidEntries.entries()) {
+          const chipEl = asteroidChipElsRef.current.get(key)
+          const posArr: [number, number, number] = [
+            entry.worldPos.x,
+            entry.worldPos.y,
+            entry.worldPos.z,
+          ]
+          const occluded = isPointOccludedByEarth(camPosTuple, posArr, EARTH_RADIUS)
+          if (occluded) {
+            if (chipEl) hideEl(chipEl)
+            continue
+          }
+          const p = projectWorldVecToScreen(entry.worldPos, viewW, viewH)
+          if (!p.visible) {
+            if (chipEl) hideEl(chipEl)
+            continue
+          }
+          visibleAsteroidScreen.set(key, { x: p.x, y: p.y })
+          if (chipEl) {
+            // Keep chips clean in narrow viewports by hiding distant unpinned/non-selected starter rocks if zoomed deep onto Earth
+            const hideInDeepEarthZoom =
+              dist < 1.35 &&
+              !entry.isPinned &&
+              !entry.isLive &&
+              key !== selectedKey &&
+              key !== activeKey
+            if (hideInDeepEarthZoom) {
+              hideEl(chipEl)
+            } else {
+              showElAt(chipEl, p.x, p.y + 13, 'top-center')
+            }
+          }
+        }
+
+        // 5. Upward-Queued Speech Bubble Stacks (Earth Rooms AND Orbiting Topic Asteroids!)
         const placedBubbleBoxes: Array<{ l: number; r: number; t: number; b: number }> = []
-        const visibleBubbleGhs = new Set<string>()
+        const visibleBubbleKeys = new Set<string>()
         const maxStacks = isCompact ? 3 : isNarrow ? 5 : 10
         const stackW = isNarrow ? 142 : 162
         const marginTop = !isCompact && viewH >= 440 ? (isNarrow ? 76 : 68) : 12
@@ -2413,18 +2984,31 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         for (const stack of stacks) {
           const el = bubbleStackElsRef.current.get(stack.geohash)
           if (!el) continue
-          if (!showPulseRef.current || !showBubblesRef.current || visibleBubbleGhs.size >= maxStacks) {
+          if (
+            !showPulseRef.current ||
+            !showBubblesRef.current ||
+            visibleBubbleKeys.size >= maxStacks
+          ) {
             hideEl(el)
             continue
           }
-          const p = projectPointToScreen(stack.center.lat, stack.center.lon, viewW, viewH)
+
+          let p: { x: number; y: number; visible: boolean }
+          if (stack.isTopic) {
+            const astPt = visibleAsteroidScreen.get(stack.geohash)
+            p = astPt ? { x: astPt.x, y: astPt.y, visible: true } : { x: 0, y: 0, visible: false }
+          } else {
+            p = projectPointToScreen(stack.center.lat, stack.center.lon, viewW, viewH)
+          }
+
           if (!p.visible) {
             hideEl(el)
             continue
           }
 
           const approxH = Math.min(200, stack.bubbles.length * 46)
-          const tailOffset = stack.isFocused ? 22 : 14
+          const hasPin = !stack.isTopic && pinEntries.has(stack.geohash)
+          const tailOffset = stack.isTopic ? 18 : hasPin ? 38 : stack.isFocused ? 22 : 14
           const box = {
             l: p.x - stackW / 2,
             r: p.x + stackW / 2,
@@ -2448,16 +3032,20 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
 
           placedBubbleBoxes.push(box)
-          visibleBubbleGhs.add(stack.geohash)
+          visibleBubbleKeys.add(stack.geohash)
           showElAt(el, p.x, p.y - tailOffset, 'bottom-center')
         }
 
-        // 4. Live Pulse Sonar Beacons
+        // 6. Live Pulse Surface Sonar Beacons (Earth rooms without a 3D push-pin)
         const rooms = visiblePulseRoomsRef.current
         for (const room of rooms) {
           const el = beaconElsRef.current.get(room.geohash)
           if (!el) continue
-          if (!showPulseRef.current || activeSubParent === room.geohash) {
+          if (
+            !showPulseRef.current ||
+            activeSubParent === room.geohash ||
+            pinEntries.has(room.geohash)
+          ) {
             hideEl(el)
             continue
           }
@@ -2493,7 +3081,6 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         canvas.removeEventListener('gesturechange', preventGesture)
         canvas.removeEventListener('webglcontextlost', onContextLost)
 
-        // Clean GPU memory disposal
         starfield.geometry.dispose()
         starfield.material.dispose()
         sunCoreGeo.dispose()
@@ -2515,12 +3102,17 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           entry.texture.dispose()
         }
         patchCache.clear()
+        pinEntries.clear()
+        asteroidEntries.clear()
         disposeObject3D(gridGroup)
         disposeObject3D(subZoneGroup)
         disposeObject3D(pulseGroup)
         disposeObject3D(focusGroup)
         disposeObject3D(hoverGroup)
         disposeObject3D(gpsGroup)
+        disposeObject3D(pinGroup)
+        disposeObject3D(asteroidOrbitGroup)
+        disposeObject3D(asteroidGroup)
 
         renderer.dispose()
         if (canvas.parentElement === wrap) {
@@ -2529,10 +3121,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         sceneRefs.current = null
       }
       // Intentionally mount once per component instance
-    }, [])
+    }, [emitSelectChannel, emitTuneChannel, flyToTopicInternal])
 
     // -----------------------------------------------------------------------
-    // 2. React to Theme Switches (Space Backdrop + Dark/Topo Earth Basemap)
+    // 2. React to Theme Switches
     // -----------------------------------------------------------------------
     useEffect(() => {
       const sr = sceneRefs.current
@@ -2543,8 +3135,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const nextKind: 'dark' | 'light' = theme === 'daylight' ? 'light' : 'dark'
       if (sr.tileKind !== nextKind) {
         sr.tileKind = nextKind
-        sr.reloadBaseTiles(nextKind)
-        sr.updatePatchTiles()
+        const isLightVal = nextKind === 'light' ? 1.0 : 0.0
+        sr.earthMaterial.uniforms.uIsLight.value = isLightVal
+        for (const entry of sr.patchCache.values()) {
+          entry.material.uniforms.uIsLight.value = isLightVal
+        }
       }
     }, [theme])
 
@@ -2554,8 +3149,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     useEffect(() => {
       if (prevActiveRef.current === safeActiveGeohash) return
       prevActiveRef.current = safeActiveGeohash
+      if (isTopicChannel(effectiveActiveKey)) return
       flyToCellInternal(safeActiveGeohash, { animate: true })
-    }, [safeActiveGeohash, flyToCellInternal])
+    }, [safeActiveGeohash, effectiveActiveKey, flyToCellInternal])
 
     // -----------------------------------------------------------------------
     // 4. Emit Effective Precision Whenever precisionMode Changes
@@ -2798,13 +3394,17 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         group.add(lines)
       }
 
-      if (safeActiveGeohash) {
+      if (safeActiveGeohash && !isTopicChannel(effectiveActiveKey)) {
         addFocusCell(safeActiveGeohash, pal.accent, 0.16)
       }
-      if (safeSelectedGeohash && safeSelectedGeohash !== safeActiveGeohash) {
+      if (
+        safeSelectedGeohash &&
+        safeSelectedGeohash !== safeActiveGeohash &&
+        !(effectiveSelectedKey && isTopicChannel(effectiveSelectedKey))
+      ) {
         addFocusCell(safeSelectedGeohash, pal.accentSecondary, 0.15)
       }
-    }, [safeActiveGeohash, safeSelectedGeohash, theme])
+    }, [safeActiveGeohash, safeSelectedGeohash, effectiveActiveKey, effectiveSelectedKey, theme])
 
     // -----------------------------------------------------------------------
     // 9. Render Orbital Great-Circle Teleport Vector Arc When Teleported
@@ -2818,7 +3418,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         group.remove(ch)
         disposeObject3D(ch)
       }
-      if (!userCoords || !isTeleported || !safeActiveGeohash) return
+      if (!userCoords || !isTeleported || !safeActiveGeohash || isTopicChannel(effectiveActiveKey)) {
+        return
+      }
 
       const activeCenter = decodeCenter(safeActiveGeohash)
       const pal = readCanvasPalette(hostRef.current, theme)
@@ -2832,12 +3434,267 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const line = new THREE.Line(arcGeo, arcMat)
       line.renderOrder = 7
       group.add(line)
-    }, [userCoords, isTeleported, safeActiveGeohash, theme])
+    }, [userCoords, isTeleported, safeActiveGeohash, effectiveActiveKey, theme])
 
-    // Sync bubble & beacon ref callbacks cleanly
-    const setBubbleStackEl = useCallback((gh: string, node: HTMLDivElement | null) => {
-      if (node) bubbleStackElsRef.current.set(gh, node)
-      else bubbleStackElsRef.current.delete(gh)
+    // -----------------------------------------------------------------------
+    // 10. Build Physical Sculpted 3D Earth Push-Pins for Pinned Geohashes
+    // -----------------------------------------------------------------------
+    useEffect(() => {
+      const sr = sceneRefs.current
+      if (!sr) return
+      const group = sr.pinGroup
+      while (group.children.length > 0) {
+        const ch = group.children[0]
+        group.remove(ch)
+        disposeObject3D(ch)
+      }
+      pinEntriesRef.current.clear()
+
+      if (pinnedEarthItems.length === 0) return
+
+      const pal = readCanvasPalette(hostRef.current, theme)
+      const dist = zoomToDistance(cameraStateRef.current.zoom)
+      const initPinScale = clamp((dist - EARTH_RADIUS) * 0.044, 0.0024, 0.095)
+
+      for (const item of pinnedEarthItems) {
+        const normal = latLonToVec3(item.center.lat, item.center.lon, 1).normalize()
+        const root = new THREE.Group()
+        root.position.copy(normal).multiplyScalar(EARTH_RADIUS + 0.0008)
+        root.quaternion.setFromUnitVectors(UP_Y, normal)
+        root.scale.setScalar(initPinScale)
+
+        const headHex = item.isActive || item.isSelected ? pal.accent : '#EF4444'
+        const hasUnread = item.unreadCount > 0 || item.mentionCount > 0
+        const ud = { channelKey: item.geohash, hitKind: 'pin' }
+
+        // 1. Base contact glow ring flush on Earth
+        const ringGeo = new THREE.RingGeometry(0.16, 0.36, 24)
+        ringGeo.rotateX(-Math.PI / 2)
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: new THREE.Color(headHex),
+          transparent: true,
+          opacity: 0.72,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const ringMesh = new THREE.Mesh(ringGeo, ringMat)
+        ringMesh.position.y = 0.02
+        ringMesh.userData = ud
+        ringMesh.renderOrder = 8
+        root.add(ringMesh)
+
+        // 2. Metallic tapered pin shaft
+        const shaftGeo = new THREE.CylinderGeometry(0.055, 0.022, 1.25, 10)
+        const shaftMat = new THREE.MeshBasicMaterial({ color: '#E2E8F0' })
+        const shaftMesh = new THREE.Mesh(shaftGeo, shaftMat)
+        shaftMesh.position.y = 0.64
+        shaftMesh.userData = ud
+        shaftMesh.renderOrder = 9
+        root.add(shaftMesh)
+
+        // 3. Glossy 3D spherical pinhead (custom lit specular shader)
+        const headGeo = new THREE.SphereGeometry(0.32, 18, 14)
+        const headMat = new THREE.ShaderMaterial({
+          vertexShader: PINHEAD_VERTEX_SHADER,
+          fragmentShader: PINHEAD_FRAGMENT_SHADER,
+          uniforms: {
+            uColor: { value: new THREE.Color(headHex) },
+            uSunDir: { value: sr.sunDir.clone() },
+          },
+        })
+        const headMesh = new THREE.Mesh(headGeo, headMat)
+        headMesh.position.y = 1.38
+        headMesh.userData = ud
+        headMesh.renderOrder = 10
+        root.add(headMesh)
+
+        // 4. Subtle warm halo ring around pinhead when unread / mentions exist
+        if (hasUnread) {
+          const haloGeo = new THREE.TorusGeometry(0.43, 0.045, 8, 24)
+          haloGeo.rotateX(Math.PI / 2)
+          const haloMat = new THREE.MeshBasicMaterial({
+            color: item.mentionCount > 0 ? '#F59E0B' : '#FB7185',
+            transparent: true,
+            opacity: 0.9,
+          })
+          const haloMesh = new THREE.Mesh(haloGeo, haloMat)
+          haloMesh.position.y = 1.38
+          haloMesh.userData = ud
+          haloMesh.renderOrder = 10
+          root.add(haloMesh)
+        }
+
+        // 5. Generous invisible hit-sphere for easy mobile/desktop tapping
+        const hitGeo = new THREE.SphereGeometry(0.72, 10, 8)
+        const hitMat = new THREE.MeshBasicMaterial({
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+        })
+        const hitMesh = new THREE.Mesh(hitGeo, hitMat)
+        hitMesh.position.y = 1.22
+        hitMesh.userData = ud
+        root.add(hitMesh)
+
+        group.add(root)
+        pinEntriesRef.current.set(item.geohash, {
+          channelKey: item.geohash,
+          root,
+          normal,
+          headTipY: 1.74,
+          hitMesh,
+        })
+      }
+    }, [pinnedEarthItems, theme])
+
+    // -----------------------------------------------------------------------
+    // 11. Build Orbiting Procedural 3D Topic Asteroids + Orbital Track Rings
+    // -----------------------------------------------------------------------
+    useEffect(() => {
+      const sr = sceneRefs.current
+      if (!sr) return
+
+      // Preserve smooth continuous orbit elapsed timestamps across prop updates
+      const prevElapsedByKey = new Map<string, number>()
+      for (const [key, entry] of asteroidEntriesRef.current.entries()) {
+        prevElapsedByKey.set(key, entry.orbitElapsedSec)
+      }
+
+      const group = sr.asteroidGroup
+      const orbitGroup = sr.asteroidOrbitGroup
+      while (group.children.length > 0) {
+        const ch = group.children[0]
+        group.remove(ch)
+        disposeObject3D(ch)
+      }
+      while (orbitGroup.children.length > 0) {
+        const ch = orbitGroup.children[0]
+        orbitGroup.remove(ch)
+        disposeObject3D(ch)
+      }
+      asteroidEntriesRef.current.clear()
+
+      if (topicAsteroidItems.length === 0) return
+
+      const pal = readCanvasPalette(hostRef.current, theme)
+      const rimColor = new THREE.Color(pal.accentSecondary)
+      const pinAccent = new THREE.Color('#EF4444')
+      const activeAccent = new THREE.Color(pal.accent)
+
+      for (const item of topicAsteroidItems) {
+        const { spec } = item
+        const elapsed = prevElapsedByKey.get(item.channelKey) ?? sr.orbitClockSec
+        const [wx, wy, wz] = computeAsteroidWorldPosition(spec, elapsed)
+        const ud = { channelKey: item.channelKey, slug: item.slug, hitKind: 'asteroid' }
+
+        const root = new THREE.Group()
+        root.position.set(wx, wy, wz)
+
+        // Faceted cratered procedural 3D asteroid rock
+        const rockGeo = createAsteroidRockGeometry(spec)
+        const rockMaterial = new THREE.ShaderMaterial({
+          vertexShader: ASTEROID_VERTEX_SHADER,
+          fragmentShader: ASTEROID_FRAGMENT_SHADER,
+          uniforms: {
+            uSunDir: { value: sr.sunDir.clone() },
+            uBaseColor: { value: new THREE.Color(spec.baseColorHex) },
+            uRimColor: {
+              value: item.isActive || item.isSelected ? activeAccent.clone() : rimColor.clone(),
+            },
+            uHighlight: {
+              value: item.isActive || item.isSelected ? 1.0 : item.isPinned ? 0.22 : 0.0,
+            },
+            uMeanRadius: { value: spec.rockRadius },
+          },
+        })
+        const rockMesh = new THREE.Mesh(rockGeo, rockMaterial)
+        rockMesh.userData = ud
+        rockMesh.renderOrder = 9
+        root.add(rockMesh)
+
+        // Miniature glowing 3D pin/beacon planted right onto pinned topic asteroids
+        if (item.isPinned) {
+          const pinStemH = spec.rockRadius * 0.72
+          const stemGeo = new THREE.CylinderGeometry(
+            spec.rockRadius * 0.07,
+            spec.rockRadius * 0.04,
+            pinStemH,
+            8,
+          )
+          const stemMat = new THREE.MeshBasicMaterial({ color: '#E2E8F0' })
+          const stemMesh = new THREE.Mesh(stemGeo, stemMat)
+          stemMesh.position.y = spec.rockRadius * 0.92 + pinStemH * 0.45
+          stemMesh.userData = ud
+          stemMesh.renderOrder = 10
+          root.add(stemMesh)
+
+          const beaconGeo = new THREE.SphereGeometry(spec.rockRadius * 0.26, 12, 10)
+          const beaconMat = new THREE.ShaderMaterial({
+            vertexShader: PINHEAD_VERTEX_SHADER,
+            fragmentShader: PINHEAD_FRAGMENT_SHADER,
+            uniforms: {
+              uColor: {
+                value: item.isActive || item.isSelected ? activeAccent.clone() : pinAccent.clone(),
+              },
+              uSunDir: { value: sr.sunDir.clone() },
+            },
+          })
+          const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat)
+          beaconMesh.position.y = spec.rockRadius * 0.92 + pinStemH + spec.rockRadius * 0.16
+          beaconMesh.userData = ud
+          beaconMesh.renderOrder = 10
+          root.add(beaconMesh)
+        }
+
+        // Invisible larger hit-sphere (1.9x rockRadius) for effortless mobile & desktop tapping
+        const hitGeo = new THREE.SphereGeometry(spec.rockRadius * 1.95, 10, 8)
+        const hitMat = new THREE.MeshBasicMaterial({
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+        })
+        const hitMesh = new THREE.Mesh(hitGeo, hitMat)
+        hitMesh.userData = ud
+        root.add(hitMesh)
+
+        group.add(root)
+
+        // Delicate orbital track ring (subtle for pinned/live, highlighted for active/selected/hovered)
+        const orbitGeo = createAsteroidOrbitLoopGeometry(spec)
+        const isHighlighted = item.isActive || item.isSelected
+        const orbitMaterial = new THREE.LineBasicMaterial({
+          color: isHighlighted ? activeAccent : rimColor,
+          transparent: true,
+          opacity: isHighlighted ? 0.38 : item.isPinned || item.isLive ? 0.075 : 0.03,
+          depthWrite: false,
+        })
+        const orbitLine = new THREE.LineLoop(orbitGeo, orbitMaterial)
+        orbitLine.renderOrder = 2
+        orbitGroup.add(orbitLine)
+
+        asteroidEntriesRef.current.set(item.channelKey, {
+          channelKey: item.channelKey,
+          slug: item.slug,
+          spec,
+          root,
+          rockMesh,
+          rockMaterial,
+          hitMesh,
+          orbitLine,
+          orbitMaterial,
+          spinAxis: new THREE.Vector3(...spec.spinAxis).normalize(),
+          orbitElapsedSec: elapsed,
+          worldPos: new THREE.Vector3(wx, wy, wz),
+          isPinned: item.isPinned,
+          isLive: item.isLive,
+        })
+      }
+    }, [topicAsteroidItems, theme])
+
+    // Ref callbacks for projected DOM layers
+    const setBubbleStackEl = useCallback((key: string, node: HTMLDivElement | null) => {
+      if (node) bubbleStackElsRef.current.set(key, node)
+      else bubbleStackElsRef.current.delete(key)
     }, [])
 
     const setBeaconEl = useCallback((gh: string, node: HTMLButtonElement | null) => {
@@ -2845,8 +3702,18 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       else beaconElsRef.current.delete(gh)
     }, [])
 
+    const setPinChipEl = useCallback((gh: string, node: HTMLButtonElement | null) => {
+      if (node) pinChipElsRef.current.set(gh, node)
+      else pinChipElsRef.current.delete(gh)
+    }, [])
+
+    const setAsteroidChipEl = useCallback((key: string, node: HTMLButtonElement | null) => {
+      if (node) asteroidChipElsRef.current.set(key, node)
+      else asteroidChipElsRef.current.delete(key)
+    }, [])
+
     const nowMsForRecent = Date.now()
-    const placedBubbleGeohashSet = useMemo(
+    const placedBubbleKeySet = useMemo(
       () => new Set(bubbleStacks.map((s) => s.geohash)),
       [bubbleStacks],
     )
@@ -2857,7 +3724,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         className={`ag-radar-map-host ag-radar-map-${mode} ${className}`}
         data-map-theme={theme}
       >
-        {/* Three.js WebGL 3D Earth Globe Canvas Container */}
+        {/* Three.js WebGL 3D Earth Globe + Topic Asteroid Belt Canvas */}
         <div
           ref={canvasWrapRef}
           className="ag-globe-canvas-wrap"
@@ -2877,7 +3744,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           </div>
         )}
 
-        {/* Projected 3D -> 2D Interactive Overlay Layer (Horizon-Occluded in rAF) */}
+        {/* Projected 3D -> 2D Interactive Overlay Layer (Horizon & Earth-Limb Occluded in rAF) */}
         {!webglError && (
           <div className="ag-globe-bubble-layer" aria-hidden={false}>
             {/* Live Pulse Surface Sonar Beacons */}
@@ -2885,7 +3752,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               validPulseRooms.map((room) => {
                 const isFocused =
                   room.geohash === safeActiveGeohash || room.geohash === safeSelectedGeohash
-                const hasBubble = showBubbles && placedBubbleGeohashSet.has(room.geohash)
+                const hasBubble = showBubbles && placedBubbleKeySet.has(room.geohash)
                 const showPill = !isFocused && !hasBubble && mode === 'expanded' && room.peerCount >= 2
                 const countTag = room.peerCount > 0 ? `${room.peerCount}p` : `${room.messageCount}m`
                 return (
@@ -2913,12 +3780,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation()
-                      onSelectRef.current(room.geohash)
+                      emitSelectChannel(room.geohash)
                     }}
                     onDoubleClick={(e) => {
                       e.stopPropagation()
                       if (modeRef.current === 'expanded') {
-                        onTuneRef.current?.(room.geohash)
+                        emitTuneChannel(room.geohash)
                       }
                     }}
                   >
@@ -2929,7 +3796,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                         borderRadius: '999px',
                         backgroundColor: 'var(--accent)',
                         border: '2px solid var(--bg-canvas)',
-                        boxShadow: '0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 10px var(--accent)',
+                        boxShadow:
+                          '0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 10px var(--accent)',
                         flexShrink: 0,
                       }}
                     />
@@ -2955,6 +3823,87 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                   </button>
                 )
               })}
+
+            {/* Pinned Earth Geohash Push-Pin Chips (Anchored Above 3D Pinhead Tips) */}
+            {pinnedEarthItems.map((item) => {
+              const badgeCount = item.mentionCount > 0 ? item.mentionCount : item.unreadCount
+              return (
+                <button
+                  key={item.geohash}
+                  ref={(node) => setPinChipEl(item.geohash, node)}
+                  type="button"
+                  className={`ag-globe-pin-chip${item.isActive ? ' is-active' : ''}${item.isSelected ? ' is-selected' : ''}${badgeCount > 0 ? ' has-unread' : ''}`}
+                  style={{ visibility: 'hidden', opacity: 0 }}
+                  title={`Pinned #${item.geohash} — click to inspect, double-click to join`}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    emitSelectChannel(item.geohash)
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation()
+                    emitTuneChannel(item.geohash)
+                  }}
+                >
+                  <span className="ag-globe-pin-dot" aria-hidden="true" />
+                  <span className="ag-globe-pin-label mono">#{item.geohash}</span>
+                  {badgeCount > 0 && (
+                    <span
+                      className={`ag-globe-pin-badge mono${item.mentionCount > 0 ? ' is-mention' : ''}`}
+                    >
+                      {item.mentionCount > 0 ? `@${item.mentionCount}` : badgeCount > 99 ? '99+' : badgeCount}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+
+            {/* Orbiting Topic Asteroid Chips (`kind: 23333`) */}
+            {topicAsteroidItems.map((item) => {
+              const badgeCount = item.mentionCount > 0 ? item.mentionCount : item.unreadCount
+              return (
+                <button
+                  key={item.channelKey}
+                  ref={(node) => setAsteroidChipEl(item.channelKey, node)}
+                  type="button"
+                  className={`ag-globe-asteroid-chip${item.isPinned ? ' is-pinned' : ''}${item.isLive ? ' is-live' : ''}${item.isActive ? ' is-active' : ''}${item.isSelected ? ' is-selected' : ''}${badgeCount > 0 ? ' has-unread' : ''}`}
+                  style={{ visibility: 'hidden', opacity: 0 }}
+                  title={`#${item.slug} · Topic Asteroid — click to focus, double-click to join`}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    emitSelectChannel(item.channelKey)
+                    flyToTopicInternal(item.channelKey, { animate: true })
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation()
+                    emitTuneChannel(item.channelKey)
+                  }}
+                >
+                  {item.isPinned ? (
+                    <span className="ag-globe-asteroid-pin" aria-hidden="true">
+                      <Pin size={10} />
+                    </span>
+                  ) : (
+                    <span
+                      className={`ag-globe-asteroid-dot${item.isLive ? ' is-live' : ''}`}
+                      aria-hidden="true"
+                    />
+                  )}
+                  <span className="ag-globe-asteroid-slug mono">#{item.slug}</span>
+                  {item.isLive && item.peerCount > 0 && (
+                    <span className="ag-globe-asteroid-peers mono">{item.peerCount}p</span>
+                  )}
+                  {badgeCount > 0 && (
+                    <span
+                      className={`ag-globe-asteroid-badge mono${item.mentionCount > 0 ? ' is-mention' : ''}`}
+                    >
+                      {item.mentionCount > 0 ? `@${item.mentionCount}` : badgeCount > 99 ? '99+' : badgeCount}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
 
             {/* Active Tuned Geohash Pill */}
             <div
@@ -3049,20 +3998,21 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                     borderRadius: '999px',
                     backgroundColor: 'var(--status-ok, #22c55e)',
                     border: '2px solid #ffffff',
-                    boxShadow: '0 0 0 4px rgba(34, 197, 94, 0.32), 0 0 10px rgba(34, 197, 94, 0.72)',
+                    boxShadow:
+                      '0 0 0 4px rgba(34, 197, 94, 0.32), 0 0 10px rgba(34, 197, 94, 0.72)',
                   }}
                 />
               </div>
             )}
 
-            {/* Upward-Queued Speech Bubbles (Max 4 Per Geohash, Bottom = Latest, 5s Post-Demotion Fadeout) */}
+            {/* Upward-Queued Speech Bubbles (Earth Geohashes & Orbiting Topic Asteroids — Max 4 / 5s Fadeout) */}
             {showPulse &&
               showBubbles &&
               bubbleStacks.map((stack) => (
                 <div
                   key={stack.geohash}
                   ref={(node) => setBubbleStackEl(stack.geohash, node)}
-                  className={`ag-globe-bubble-stack${stack.isFocused ? ' is-focused' : ''}`}
+                  className={`ag-globe-bubble-stack${stack.isTopic ? ' is-topic' : ''}${stack.isFocused ? ' is-focused' : ''}`}
                   style={{ visibility: 'hidden', opacity: 0 }}
                 >
                   {stack.bubbles.map((bubble, idx) => {
@@ -3075,21 +4025,24 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                         role="button"
                         tabIndex={0}
                         className={`ag-globe-bubble${isLatest ? ' is-latest' : ' is-older'}${isDemoted ? ' is-demoted' : ''}${bubble.fadingOut ? ' is-fading' : ''}${isRecent ? ' is-recent' : ''}${stack.isFocused ? ' is-focused' : ''}`}
-                        title={`#${stack.geohash} — ${bubble.sender}: ${bubble.snippet}`}
+                        title={`${stack.displayTag} — ${bubble.sender}: ${bubble.snippet}`}
                         onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation()
-                          onSelectRef.current(stack.geohash)
+                          emitSelectChannel(stack.geohash)
+                          if (stack.isTopic) {
+                            flyToTopicInternal(stack.geohash, { animate: true })
+                          }
                         }}
                         onDoubleClick={(e) => {
                           e.stopPropagation()
-                          onTuneRef.current?.(stack.geohash)
+                          emitTuneChannel(stack.geohash)
                         }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault()
                             e.stopPropagation()
-                            onSelectRef.current(stack.geohash)
+                            emitSelectChannel(stack.geohash)
                           }
                         }}
                       >
@@ -3099,7 +4052,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                           />
                           <span className="ag-globe-bubble-sender">{bubble.sender}</span>
                           {isLatest && (
-                            <span className="ag-globe-bubble-tag mono">#{stack.geohash}</span>
+                            <span className="ag-globe-bubble-tag mono">{stack.displayTag}</span>
                           )}
                         </div>
                         <div className="ag-globe-bubble-body">{bubble.snippet}</div>
@@ -3135,7 +4088,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           </div>
         )}
 
-        {/* Desktop Hover Coordinate & Live Geohash Readout */}
+        {/* Desktop Hover Coordinate / Pin / Topic Asteroid Readout */}
         {hoverHud && !webglError && (
           <div className="ag-radar-hover-hud mono" aria-hidden="true">
             <span className="ag-radar-hud-accent">#{hoverHud.geohash}</span>

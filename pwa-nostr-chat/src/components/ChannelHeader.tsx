@@ -2,11 +2,11 @@ import React, { useEffect, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
   ArrowLeft,
+  Globe,
   Hash,
   Info,
   Languages,
   Lock,
-  Map as MapIcon,
   PanelLeft,
   Phone,
   Search,
@@ -35,6 +35,7 @@ export interface ChannelHeaderProps {
   onOpenTrustedSettings: () => void
   onToggleSearch: () => void
   onExpandRadar: () => void
+  onBackToGlobe?: () => void
   onFocusActiveCall?: () => void
   onOpenZap?: (target: ZapTarget) => void
 }
@@ -53,6 +54,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   onOpenTrustedSettings,
   onToggleSearch,
   onExpandRadar,
+  onBackToGlobe,
   onFocusActiveCall,
   onOpenZap,
 }) => {
@@ -186,24 +188,39 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
           <button
             type="button"
             className="ag-circle-btn ag-mobile-back-btn ag-mobile-only"
-            onClick={onMobileBack}
-            aria-label="Back to conversations"
+            onClick={!isDm && !isServer ? (onBackToGlobe ?? onMobileBack) : onMobileBack}
+            title={!isDm && !isServer ? 'Back to Globe' : 'Back to conversations'}
+            aria-label={!isDm && !isServer ? 'Back to Globe' : 'Back to conversations'}
           >
             <ArrowLeft size={20} />
             {hasOtherUnread && <span className="ag-back-unread-dot" aria-hidden="true" />}
           </button>
 
-          {/* Desktop Expand Sidebar Button (only shown if collapsed with Cmd+B) */}
-          {sidebarCollapsed && (
+          {/* Desktop Back-to-Globe (Bitchat) or Expand Sidebar Button (People/Groups) */}
+          {!isDm && !isServer ? (
             <button
               type="button"
-              className="ag-circle-btn ag-desktop-only"
-              onClick={onToggleSidebar}
-              title="Show conversations (Cmd+B)"
-              aria-label="Show conversations"
+              className="ag-header-globe-back-btn ag-desktop-only"
+              onClick={onBackToGlobe ?? onExpandRadar}
+              title="Back to Bitchat Globe"
+              aria-label="Back to Globe"
             >
-              <PanelLeft size={18} />
+              <ArrowLeft size={15} />
+              <Globe size={15} />
+              <span>Globe</span>
             </button>
+          ) : (
+            sidebarCollapsed && (
+              <button
+                type="button"
+                className="ag-circle-btn ag-desktop-only"
+                onClick={onToggleSidebar}
+                title="Show conversations (Cmd+B)"
+                aria-label="Show conversations"
+              >
+                <PanelLeft size={18} />
+              </button>
+            )
           )}
 
           {/* Clickable Chat Identity Area -> Opens RoomInfoSheet */}
@@ -305,7 +322,12 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                       )}
                     </span>
                     {isTopicBitchat && (
-                      <span className="ag-header-topic-pill ag-hide-xs">Topic</span>
+                      <span
+                        className="ag-header-topic-pill ag-hide-xs"
+                        title="Orbiting Topic Asteroid"
+                      >
+                        Topic
+                      </span>
                     )}
                   </div>
                   <div className="ag-header-sub truncate">
@@ -534,16 +556,6 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 aria-pressed={translatorEnabled}
               >
                 <Languages size={17} />
-              </button>
-
-              <button
-                type="button"
-                className="ag-circle-btn ag-mobile-only"
-                onClick={onExpandRadar}
-                title="Open Map"
-                aria-label="Open Map"
-              >
-                <MapIcon size={18} />
               </button>
 
               <button

@@ -53,6 +53,7 @@ export interface UseMobileSwipeDrawersOptions {
   leftOpen: boolean
   rightOpen: boolean
   disabled: boolean
+  leftDisabled?: boolean
   onLeftOpenChange: (open: boolean) => void
   onRightOpenChange: (open: boolean) => void
 }
@@ -123,13 +124,16 @@ export function useMobileSwipeDrawers(
     optionsRef.current = options
   }, [options])
 
-  // Cancel any in-flight gesture cleanly if swipe becomes disabled (e.g. modal or call opens)
+  // Cancel any in-flight gesture cleanly if swipe becomes disabled (e.g. modal, globe, or call opens)
   useEffect(() => {
     if (options.disabled && sessionRef.current) {
       sessionRef.current = null
       setDrag(null)
+    } else if (options.leftDisabled && sessionRef.current?.activeDrawer === 'left') {
+      sessionRef.current = null
+      setDrag(null)
     }
-  }, [options.disabled])
+  }, [options.disabled, options.leftDisabled])
 
   useEffect(() => {
     const container = bindRef.current
@@ -208,6 +212,10 @@ export function useMobileSwipeDrawers(
         if (absX >= HORIZONTAL_SLOP_PX && absX > absY * HORIZONTAL_RATIO) {
           if (!opts.leftOpen && !opts.rightOpen) {
             if (dx > 0) {
+              if (opts.leftDisabled) {
+                session.lock = 'vertical'
+                return
+              }
               session.activeDrawer = 'left'
               session.mode = 'opening'
             } else if (dx < 0) {
@@ -218,7 +226,7 @@ export function useMobileSwipeDrawers(
               return
             }
           } else if (opts.leftOpen) {
-            if (dx < 0) {
+            if (dx < 0 && !opts.leftDisabled) {
               session.activeDrawer = 'left'
               session.mode = 'closing'
             } else {
@@ -302,16 +310,22 @@ export function useMobileSwipeDrawers(
             session.progress >= OPEN_PROGRESS_THRESHOLD ||
             effectiveVelocity >= FLING_VELOCITY_PX_MS
           if (shouldOpen) {
-            if (session.activeDrawer === 'left') opts.onLeftOpenChange(true)
-            else opts.onRightOpenChange(true)
+            if (session.activeDrawer === 'left') {
+              if (!opts.leftDisabled) opts.onLeftOpenChange(true)
+            } else {
+              opts.onRightOpenChange(true)
+            }
           }
         } else {
           const shouldClose =
             session.progress <= CLOSE_PROGRESS_THRESHOLD ||
             effectiveVelocity <= -FLING_VELOCITY_PX_MS
           if (shouldClose) {
-            if (session.activeDrawer === 'left') opts.onLeftOpenChange(false)
-            else opts.onRightOpenChange(false)
+            if (session.activeDrawer === 'left') {
+              if (!opts.leftDisabled) opts.onLeftOpenChange(false)
+            } else {
+              opts.onRightOpenChange(false)
+            }
           }
         }
       }
@@ -337,9 +351,15 @@ export function useMobileSwipeDrawers(
     }
   }, [])
 
-  const isSwipingLeft = !options.disabled && drag?.drawer === 'left'
+  const isSwipingLeft = !options.disabled && !options.leftDisabled && drag?.drawer === 'left'
   const isSwipingRight = !options.disabled && drag?.drawer === 'right'
-  const leftProgress = isSwipingLeft ? drag.progress : options.leftOpen ? 1 : 0
+  const leftProgress = options.leftDisabled
+    ? 0
+    : isSwipingLeft
+      ? drag.progress
+      : options.leftOpen
+        ? 1
+        : 0
   const rightProgress = isSwipingRight ? drag.progress : options.rightOpen ? 1 : 0
 
   return {

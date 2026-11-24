@@ -28,6 +28,7 @@ import type { ServerHubTab } from './ServerHubModal'
 import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { SettingsTab } from './SettingsModal'
 import { AgnostrLogo } from './AgnostrLogo'
+import { AvatarImg } from './AvatarImg'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu'
 
 export type ActiveWorkspace = 'chat' | 'agora' | 'mail' | 'wallet'
@@ -199,6 +200,12 @@ export const AppRail: React.FC<AppRailProps> = ({
   const mailUnread = engine.amail.unreadInboxCount
   const walletSats = engine.wallet.totalBalanceSats
   const activeCall = engine.calls.activeCall
+  const otherProfilesUnread = engine.profiles.otherProfilesUnreadCount
+  const profileTooltipLabel = `${engine.identity.nickname} · Profiles & Identity`
+  const profileTooltipSub =
+    otherProfilesUnread > 0
+      ? `${otherProfilesUnread} unread on other profile${otherProfilesUnread === 1 ? '' : 's'}`
+      : undefined
 
   const openServerMenu = (e: React.MouseEvent, server: ServerSummary) => {
     hideTooltip()
@@ -387,12 +394,11 @@ export const AppRail: React.FC<AppRailProps> = ({
             className={`ag-rail-app-tile ag-rail-bitchat ${isBitchatActive ? 'active' : ''} ${bitchatUnread > 0 || bitchatMentions > 0 ? 'has-unread' : ''}`}
             onClick={() => {
               onPlaySound?.('click')
-              if (workspace !== 'chat') onSelectWorkspace('chat')
               onSelectChatTab('bitchat')
             }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Bitchat')}
+            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Bitchat', '3D Globe')}
             onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'Bitchat')}
+            onFocus={(e) => showTooltip(e.currentTarget, 'Bitchat', '3D Globe')}
             onBlur={hideTooltip}
             aria-label="Bitchat"
             aria-current={isBitchatActive ? 'page' : undefined}
@@ -872,11 +878,11 @@ export const AppRail: React.FC<AppRailProps> = ({
               onPlaySound?.('click')
               onOpenMap()
             }}
-            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Radar Map')}
+            onMouseEnter={(e) => showTooltip(e.currentTarget, 'Bitchat Globe')}
             onMouseLeave={hideTooltip}
-            onFocus={(e) => showTooltip(e.currentTarget, 'Radar Map')}
+            onFocus={(e) => showTooltip(e.currentTarget, 'Bitchat Globe')}
             onBlur={hideTooltip}
-            aria-label="Radar Map"
+            aria-label="Bitchat Globe"
             aria-pressed={mapActive}
           >
             <MapIcon size={17} strokeWidth={mapActive ? 2.1 : 1.8} />
@@ -941,6 +947,39 @@ export const AppRail: React.FC<AppRailProps> = ({
             </button>
           </div>
         )}
+
+        <div className="ag-rail-slot">
+          <button
+            type="button"
+            className={`ag-rail-profile-btn ${settingsActive ? 'active' : ''}`}
+            onClick={() => {
+              onPlaySound?.('click')
+              onOpenSettings('profile')
+            }}
+            onMouseEnter={(e) =>
+              showTooltip(e.currentTarget, profileTooltipLabel, profileTooltipSub)
+            }
+            onMouseLeave={hideTooltip}
+            onFocus={(e) =>
+              showTooltip(e.currentTarget, profileTooltipLabel, profileTooltipSub)
+            }
+            onBlur={hideTooltip}
+            aria-label={profileTooltipLabel}
+          >
+            <AvatarImg
+              pubkey={engine.identity.masterPubkey}
+              pictureUrl={engine.getProfilePicture(engine.identity.masterPubkey)}
+              width={30}
+              height={30}
+              className="ag-rail-profile-img"
+            />
+            {otherProfilesUnread > 0 && (
+              <span className="ag-rail-badge ping tabular">
+                {formatBadgeCount(otherProfilesUnread)}
+              </span>
+            )}
+          </button>
+        </div>
       </div>
 
       {tooltip &&
