@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import {
+  Globe,
   Landmark,
   Mail,
   Map as MapIcon,
@@ -9,7 +10,6 @@ import {
   Settings,
   Users,
   Wallet,
-  Waves,
   X,
 } from 'lucide-react'
 import { useBackHandler } from '../hooks/useBackNavigation'
@@ -139,7 +139,7 @@ export const SuiteLauncher: React.FC<SuiteLauncherProps> = ({
       active: isBitchatActive,
       badgeCount: bitchatMentions > 0 ? bitchatMentions : bitchatUnread > 0 ? bitchatUnread : undefined,
       badgeKind: bitchatMentions > 0 ? 'ping' : bitchatUnread > 0 ? 'unread' : undefined,
-      icon: <Waves size={19} strokeWidth={isBitchatActive ? 2.15 : 1.85} />,
+      icon: <Globe size={19} strokeWidth={isBitchatActive ? 2.15 : 1.85} />,
       onSelect: onSelectBitchat,
     },
     {

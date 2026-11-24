@@ -124,8 +124,8 @@
 .ag-globe-bubble {
   position: relative;
   width: max-content;
-  min-width: 88px;
-  max-width: 168px;
+  min-width: 96px;
+  max-width: 204px;
   padding: 4.5px 8px;
   border-radius: 10px;
   background-color: color-mix(in srgb, var(--bg-surface) 92%, transparent);
@@ -246,6 +246,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ag-globe-bubble-age {
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 .ag-globe-bubble-tag,
@@ -376,8 +385,8 @@
 .ag-globe-pin-chip.is-active,
 .ag-globe-pin-chip.is-selected {
   z-index: 15;
-  border-color: var(--accent);
-  box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, var(--accent) 32%, transparent);
+  border-color: #ef4444;
+  box-shadow: var(--shadow-md), 0 0 0 1.5px rgba(239, 68, 68, 0.42);
 }
 
 .ag-globe-pin-dot {
@@ -385,14 +394,14 @@
   height: 6px;
   border-radius: var(--radius-full);
   background-color: #ef4444;
-  box-shadow: 0 0 6px rgba(239, 68, 68, 0.72);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.78);
   flex-shrink: 0;
 }
 
 .ag-globe-pin-chip.is-active .ag-globe-pin-dot,
 .ag-globe-pin-chip.is-selected .ag-globe-pin-dot {
-  background-color: var(--accent);
-  box-shadow: 0 0 6px var(--accent);
+  background-color: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.92);
 }
 
 .ag-globe-asteroid-chip {
@@ -433,7 +442,7 @@
 }
 
 .ag-globe-asteroid-chip.is-pinned {
-  border-color: rgba(245, 166, 35, 0.56);
+  border-color: rgba(239, 68, 68, 0.58);
 }
 
 .ag-globe-asteroid-chip.is-active,
@@ -442,6 +451,12 @@
   background-color: rgba(28, 34, 58, 0.96);
   border-color: #a78bfa;
   box-shadow: 0 4px 16px rgba(2, 6, 23, 0.58), 0 0 0 1.5px rgba(167, 139, 250, 0.48);
+}
+
+.ag-globe-asteroid-chip.is-pinned.is-active,
+.ag-globe-asteroid-chip.is-pinned.is-selected {
+  border-color: #ef4444;
+  box-shadow: 0 4px 16px rgba(2, 6, 23, 0.58), 0 0 0 1.5px rgba(239, 68, 68, 0.42);
 }
 
 .ag-globe-asteroid-dot {
@@ -458,7 +473,7 @@
 }
 
 .ag-globe-asteroid-pin {
-  color: #f5a623;
+  color: #ef4444;
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
@@ -472,20 +487,152 @@
 
 .ag-globe-chip-badge,
 .ag-globe-pin-badge,
-.ag-globe-asteroid-badge {
+.ag-globe-asteroid-badge,
+.ag-globe-body-badge,
+.ag-globe-body-pin-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 2px;
   min-width: 15px;
   height: 15px;
   padding: 0 4px;
   border-radius: var(--radius-full);
-  background-color: var(--status-danger);
+  background-color: #ef4444;
   color: #ffffff;
   font-size: 9.5px;
   font-weight: 700;
   line-height: 1;
   flex-shrink: 0;
+}
+
+/* Projected 3D Solar System Planet, Moon & Sun Space Chips */
+.ag-globe-body-chip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 9;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2.5px 8px 2.5px 6px;
+  border-radius: var(--radius-full);
+  background-color: color-mix(in srgb, var(--bg-surface) 84%, #060b16);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid color-mix(in srgb, var(--border-default) 82%, rgba(255, 255, 255, 0.16));
+  box-shadow: 0 3px 12px rgba(2, 6, 23, 0.48);
+  color: var(--text-primary);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+  will-change: transform;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-globe-body-chip:hover,
+.ag-globe-body-chip:focus-visible {
+  z-index: 20;
+  background-color: var(--bg-elevated);
+  border-color: var(--accent);
+  color: var(--text-primary);
+  box-shadow: 0 4px 16px rgba(2, 6, 23, 0.56), 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
+  outline: none;
+}
+
+.ag-globe-body-chip.is-moon {
+  padding: 2px 6.5px 2px 5px;
+  font-size: 10px;
+  gap: 4px;
+}
+
+.ag-globe-body-chip.is-sun {
+  border-color: rgba(251, 191, 36, 0.48);
+  color: #fef3c7;
+}
+
+.ag-globe-body-chip.is-sun:hover {
+  border-color: #fbbf24;
+  box-shadow: 0 4px 16px rgba(245, 158, 11, 0.32);
+}
+
+.ag-globe-body-chip.is-parent {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border-default));
+}
+
+.ag-globe-body-chip.has-pins {
+  border-color: rgba(239, 68, 68, 0.54);
+}
+
+.ag-globe-body-chip.has-pins:hover {
+  border-color: #ef4444;
+  box-shadow: 0 4px 16px rgba(2, 6, 23, 0.56), 0 0 0 1px rgba(239, 68, 68, 0.42);
+}
+
+.ag-globe-body-dot {
+  width: 6.5px;
+  height: 6.5px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.35);
+  flex-shrink: 0;
+}
+
+.ag-globe-body-name {
+  white-space: nowrap;
+}
+
+.ag-globe-body-pins {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4.5px;
+  height: 15px;
+  border-radius: var(--radius-full);
+  background-color: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.55);
+  color: #fca5a5;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+[data-theme='daylight'] .ag-globe-body-chip,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-body-chip {
+  background-color: rgba(255, 255, 255, 0.92);
+  border-color: rgba(15, 23, 42, 0.18);
+  color: #0f172a;
+  box-shadow: 0 3px 12px rgba(15, 23, 42, 0.22);
+}
+
+[data-theme='daylight'] .ag-globe-body-chip:hover,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-body-chip:hover {
+  background-color: #ffffff;
+  border-color: var(--accent);
+  color: #0f172a;
+}
+
+[data-theme='daylight'] .ag-globe-body-chip.is-sun,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-body-chip.is-sun {
+  border-color: rgba(217, 119, 6, 0.45);
+  color: #92400e;
+}
+
+[data-theme='daylight'] .ag-globe-body-pins,
+.ag-radar-map-host[data-map-theme='daylight'] .ag-globe-body-pins {
+  background-color: rgba(239, 68, 68, 0.12);
+  border-color: rgba(220, 38, 38, 0.42);
+  color: #dc2626;
 }
 
 [data-theme='daylight'] .ag-globe-pin-chip,
@@ -525,8 +672,8 @@
 
 @media (max-width: 639px) {
   .ag-globe-bubble {
-    min-width: 78px;
-    max-width: 136px;
+    min-width: 84px;
+    max-width: 162px;
     padding: 3.5px 6.5px;
   }
 
@@ -1036,6 +1183,253 @@
   color: #6d28d9;
 }
 
+.ag-radar-pin-icon-red {
+  color: #ef4444;
+  flex-shrink: 0;
+}
+
+.ag-radar-pop-tab-pinned.active {
+  color: #ef4444;
+  background-color: color-mix(in srgb, #ef4444 12%, var(--bg-surface));
+  border-color: color-mix(in srgb, #ef4444 44%, var(--border-default));
+}
+
+/* World / Solar System Pill & Navigator Popover */
+.ag-radar-world-pill {
+  gap: 0.36rem;
+}
+
+.ag-radar-world-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.35);
+}
+
+.ag-radar-world-dot-md {
+  width: 9px;
+  height: 9px;
+}
+
+.ag-radar-world-name {
+  white-space: nowrap;
+}
+
+.ag-radar-world-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+  padding: 1px 6px 1px 4.5px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.3;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ag-radar-solar-popover {
+  width: min(320px, calc(100% - 76px));
+  max-height: 58dvh;
+}
+
+.ag-radar-solar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.45rem 0.45rem 0.2rem;
+  flex-shrink: 0;
+}
+
+.ag-radar-solar-overview-btn,
+.ag-radar-solar-back-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  width: 100%;
+  padding: 0.44rem 0.58rem;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-radar-solar-overview-btn {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+}
+
+.ag-radar-solar-overview-btn:hover {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+
+.ag-radar-solar-sun-icon {
+  color: #f59e0b;
+  flex-shrink: 0;
+}
+
+.ag-radar-solar-hint {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ag-radar-solar-back-btn {
+  background-color: var(--accent-soft);
+  border: 1px solid var(--border-accent);
+  color: var(--accent);
+}
+
+.ag-radar-solar-back-btn:hover {
+  background-color: color-mix(in srgb, var(--accent) 22%, var(--bg-surface));
+}
+
+.ag-radar-moon-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.1rem 0.12rem 0.28rem;
+}
+
+.ag-radar-moon-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  height: 28px;
+  padding: 0 0.56rem 0 0.46rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-radar-moon-chip:hover,
+.ag-radar-moon-chip.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+
+.ag-radar-planet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.44rem 0.52rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-radar-planet-row:hover,
+.ag-radar-planet-row.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-radar-planet-row-main {
+  display: flex;
+  align-items: center;
+  gap: 0.46rem;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+
+.ag-radar-planet-dot {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  box-shadow: inset -2px -2px 3px rgba(0, 0, 0, 0.35), inset 1px 1px 2px rgba(255, 255, 255, 0.35);
+}
+
+.ag-radar-planet-dot.has-rings::after {
+  content: '';
+  position: absolute;
+  left: -3px;
+  right: -3px;
+  top: 50%;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 50%;
+  border: 1px solid rgba(250, 232, 180, 0.72);
+  transform: rotate(-18deg);
+  pointer-events: none;
+}
+
+.ag-radar-planet-name {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-radar-planet-row.active .ag-radar-planet-name {
+  color: var(--accent);
+}
+
+.ag-radar-planet-row-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-radar-planet-moons {
+  white-space: nowrap;
+}
+
+.ag-radar-solar-pin-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 18px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background-color: color-mix(in srgb, #ef4444 16%, var(--bg-elevated));
+  border: 1px solid color-mix(in srgb, #ef4444 46%, transparent);
+  color: #ef4444;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+[data-theme='daylight'] .ag-radar-solar-pin-badge {
+  background-color: rgba(239, 68, 68, 0.11);
+  border-color: rgba(220, 38, 38, 0.38);
+  color: #dc2626;
+}
+
 .ag-radar-pin-btn {
   height: 36px;
   padding: 0 0.7rem;
@@ -1044,13 +1438,15 @@
   flex-shrink: 0;
 }
 
-.ag-radar-pin-btn.is-pinned {
+.ag-radar-pin-btn.is-pinned,
+.ag-radar-pin-btn.pinned {
   color: #ef4444;
-  border-color: color-mix(in srgb, #ef4444 46%, var(--border-default));
+  border-color: color-mix(in srgb, #ef4444 50%, var(--border-default));
   background-color: color-mix(in srgb, #ef4444 12%, var(--bg-surface));
 }
 
-.ag-radar-pin-btn.is-pinned:hover {
+.ag-radar-pin-btn.is-pinned:hover,
+.ag-radar-pin-btn.pinned:hover {
   border-color: #ef4444;
   background-color: color-mix(in srgb, #ef4444 18%, var(--bg-surface));
 }
@@ -1414,26 +1810,48 @@
   .ag-radar-hover-hud {
     display: none;
   }
+
+  .ag-radar-solar-popover {
+    width: calc(100% - 20px);
+    max-height: calc(var(--ag-vvh, 100dvh) * 0.52);
+  }
 }
 
-@media (max-width: 520px) {
+@media (max-width: 580px) {
+  .ag-radar-top-row {
+    gap: 0.3rem;
+  }
+
   .ag-radar-bubble-toggle-label,
-  .ag-radar-pill-label {
+  .ag-radar-pill-label,
+  .ag-radar-live-word {
     display: none;
+  }
+
+  .ag-radar-top-pill {
+    padding: 0 0.46rem;
+    gap: 0.26rem;
+  }
+
+  .ag-radar-world-pill {
+    padding: 0 0.5rem;
+    gap: 0.26rem;
+  }
+
+  .ag-radar-world-pill .ag-radar-world-dot {
+    display: none;
+  }
+
+  .ag-radar-world-name {
+    max-width: 62px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .ag-radar-bubbles-pill {
-    min-width: 40px;
-    padding: 0 0.55rem;
+    min-width: 38px;
+    padding: 0 0.46rem;
     justify-content: center;
-  }
-
-  .ag-radar-asteroids-pill {
-    padding: 0 0.56rem;
-  }
-
-  .ag-radar-live-word {
-    display: none;
   }
 }
 

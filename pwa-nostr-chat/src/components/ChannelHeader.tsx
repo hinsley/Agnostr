@@ -12,12 +12,16 @@ import {
   Search,
   ShieldCheck,
   Users,
-  Waves,
   Zap,
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol'
 import type { ZapTarget } from '../types/wallet'
-import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel'
+import {
+  formatBitchatChannelLabel,
+  getChannelBodyName,
+  isTopicChannel,
+  parseCelestialChannelKey,
+} from '../lib/bitchatChannel'
 import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import { AvatarImg } from './AvatarImg'
 
@@ -112,6 +116,15 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     isServer && !inThisServerCall && serverCallCount >= engine.calls.maxParticipants
   const activeGeoKey = engine.activeGeohash.toLowerCase()
   const isTopicBitchat = !isDm && !isServer && isTopicChannel(engine.activeGeohash)
+  const celestialInfo = !isDm && !isServer ? parseCelestialChannelKey(engine.activeGeohash) : null
+  const isNonEarthCelestial = Boolean(celestialInfo && celestialInfo.bodyId !== 'earth')
+  const celestialBodyName = isNonEarthCelestial ? getChannelBodyName(engine.activeGeohash) : null
+  const celestialLandmark =
+    isNonEarthCelestial &&
+    engine.cell.nearestCity &&
+    engine.cell.nearestCity !== celestialBodyName
+      ? engine.cell.nearestCity
+      : null
   const bitchatLabel = formatBitchatChannelLabel(engine.activeGeohash)
   const geoCallCount = !isDm && !isServer ? engine.calls.getGeoCallCount(activeGeoKey) : 0
   const inThisGeoCall = Boolean(
@@ -174,11 +187,18 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     void engine.calls.joinGeoCall(engine.activeGeohash, 'audio')
   }
 
+  const baseGeoOnlineText = engine.presence.isUncertainCount
+    ? isNonEarthCelestial
+      ? 'High-precision sector'
+      : 'Local area'
+    : `${engine.presence.onlineCount} online`
   const onlineSubtitle = isTopicBitchat
     ? 'Topic'
-    : engine.presence.isUncertainCount
-      ? 'Local area'
-      : `${engine.presence.onlineCount} online`
+    : isNonEarthCelestial
+      ? celestialLandmark
+        ? `${celestialLandmark} · ${baseGeoOnlineText}`
+        : baseGeoOnlineText
+      : baseGeoOnlineText
 
   return (
     <header className="ag-header">
@@ -311,15 +331,20 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                   className={`ag-header-avatar ${isTopicBitchat ? 'topic' : 'bitchat'}`}
                   aria-hidden="true"
                 >
-                  {isTopicBitchat ? <Hash size={18} /> : <Waves size={18} />}
+                  {isTopicBitchat ? <Hash size={18} /> : <Globe size={18} />}
                 </div>
                 <div className="ag-header-text">
                   <div className="ag-header-title-row">
                     <span className="ag-header-title truncate">
                       <span className="mono">{bitchatLabel}</span>
-                      {!isTopicBitchat && engine.cell.nearestCity && (
-                        <span className="ag-header-city"> · {engine.cell.nearestCity}</span>
-                      )}
+                      {!isTopicBitchat &&
+                        (isNonEarthCelestial
+                          ? celestialBodyName && (
+                              <span className="ag-header-city"> · {celestialBodyName}</span>
+                            )
+                          : engine.cell.nearestCity && (
+                              <span className="ag-header-city"> · {engine.cell.nearestCity}</span>
+                            ))}
                     </span>
                     {isTopicBitchat && (
                       <span

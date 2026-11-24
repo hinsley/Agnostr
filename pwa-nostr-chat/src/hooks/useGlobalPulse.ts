@@ -14,7 +14,8 @@ import {
 } from '../lib/bitchatProtocol.ts'
 import { decodeCenter, findNearestCityLabel } from '../lib/geohash.ts'
 import { PULSE_RELAYS } from '../lib/geoRelays.ts'
-import { TOPIC_CHANNEL_PREFIX } from '../lib/bitchatChannel.ts'
+import { parseCelestialChannelKey, TOPIC_CHANNEL_PREFIX } from '../lib/bitchatChannel.ts'
+import { findNearestCelestialLandmark, getBodyDef } from '../lib/solarSystem.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 
 const PULSE_WINDOW_MS = 15 * 60 * 1000
@@ -233,15 +234,34 @@ export function useGlobalPulse(
         lastActivityAt: initialMs,
       }
     } else {
-      const center = decodeCenter(roomKey)
-      room = {
-        geohash: roomKey,
-        center,
-        precision: roomKey.length,
-        nearestCity: findNearestCityLabel(center.lat, center.lon, roomKey),
-        messages: [],
-        peers: new Map(),
-        lastActivityAt: initialMs,
+      const celestial = parseCelestialChannelKey(roomKey)
+      if (celestial) {
+        const { bodyId, geohash } = celestial
+        const center = decodeCenter(geohash)
+        room = {
+          geohash: roomKey,
+          center,
+          precision: geohash.length,
+          nearestCity:
+            bodyId === 'earth'
+              ? findNearestCityLabel(center.lat, center.lon, geohash)
+              : (findNearestCelestialLandmark(bodyId, center.lat, center.lon) ??
+                  getBodyDef(bodyId).name),
+          messages: [],
+          peers: new Map(),
+          lastActivityAt: initialMs,
+        }
+      } else {
+        const center = decodeCenter(roomKey)
+        room = {
+          geohash: roomKey,
+          center,
+          precision: roomKey.length,
+          nearestCity: findNearestCityLabel(center.lat, center.lon, roomKey),
+          messages: [],
+          peers: new Map(),
+          lastActivityAt: initialMs,
+        }
       }
     }
     roomsRef.current.set(roomKey, room)

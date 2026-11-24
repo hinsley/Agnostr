@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  ArrowLeft,
   Check,
   Crosshair,
   Globe,
@@ -15,26 +16,40 @@ import {
   PinOff,
   Plus,
   Search,
-  Waves,
+  Sun,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, PinnedChannel, PulseRoom } from '../types/protocol.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import {
   buildGeohashCell,
+  decodeCenter,
   encodeGeohash,
   formatCoords,
   getZoomForPrecision,
-  isValidGeohash,
 } from '../lib/geohash.ts'
 import {
   POPULAR_TOPIC_CHANNELS,
+  getChannelBodyId,
+  getChannelRawGeohash,
   getTopicSlug,
   isTopicChannel,
+  makeCelestialChannelKey,
   makeTopicChannelKey,
   normalizeTopicSlug,
+  parseCelestialChannelKey,
   parseQuickTuneInput,
 } from '../lib/bitchatChannel.ts'
+import {
+  GEOHASHABLE_BODY_IDS,
+  PLANET_BODY_IDS,
+  SOLAR_BODIES,
+  findNearestCelestialLandmark,
+  getBodyDef,
+  getMoonsOfBody,
+  isGeohashableBodyId,
+  type GeohashableBodyId,
+} from '../lib/solarSystem.ts'
 import {
   TacticalGeohashMap,
   type PrecisionSelection,
@@ -53,7 +68,7 @@ export interface ExpandedRadarModalProps {
   embedded?: boolean
 }
 
-type GlobePopover = 'asteroids' | 'pulse' | null
+type GlobePopover = 'world' | 'asteroids' | 'pulse' | null
 type PulsePopoverTab = 'live' | 'pinned'
 
 function formatPulseAge(tsMs: number): string {
@@ -76,6 +91,27 @@ function formatInspectSnippet(preview: string): string {
   return `${cleaned.slice(0, 71).trimEnd()}…`
 }
 
+function resolveBodyNameQuery(raw: string): GeohashableBodyId | 'sun' | null {
+  const cleaned = raw.trim().replace(/^#/, '').trim().toLowerCase()
+  if (!cleaned) return null
+  if (cleaned === 'sun' || cleaned === 'sol' || cleaned === 'solar system') return 'sun'
+  if (cleaned === 'luna' || cleaned === 'the moon') return 'moon'
+  if (isGeohashableBodyId(cleaned)) return cleaned
+  for (const id of GEOHASHABLE_BODY_IDS) {
+    if (SOLAR_BODIES[id].name.toLowerCase() === cleaned) return id
+  }
+  return null
+}
+
+function getDefaultBodyRawGeohash(bodyId: GeohashableBodyId, fallbackEarthGeo: string): string {
+  if (bodyId === 'earth') return fallbackEarthGeo
+  const firstLandmark = getBodyDef(bodyId).landmarks[0]
+  if (firstLandmark) {
+    return encodeGeohash(firstLandmark.lat, firstLandmark.lon, 4)
+  }
+  return 's000'
+}
+
 export function ExpandedRadarModal({
   open,
   engine,
@@ -85,22 +121,32 @@ export function ExpandedRadarModal({
   inShell = false,
   embedded = false,
 }: ExpandedRadarModalProps) {
-  const { activeGeohash, location, pulseRooms, pinnedChannels, unreadCounts, mentionCounts, settings } =
-    engine
+  const {
+    activeGeohash,
+    location,
+    pulseRooms,
+    pinnedChannels,
+    unreadCounts,
+    mentionCounts,
+    settings,
+  } = engine
   const mapRef = useRef<TacticalGeohashMapHandle | null>(null)
 
-  const safeActiveGeo =
-    activeGeohash && !isTopicChannel(activeGeohash) && isValidGeohash(activeGeohash)
-      ? activeGeohash
+  const activeParsed = useMemo(() => parseCelestialChannelKey(activeGeohash), [activeGeohash])
+  const initialBodyId: GeohashableBodyId = activeParsed?.bodyId ?? 'earth'
+
+  const safeActiveEarthGeo =
+    activeParsed?.bodyId === 'earth'
+      ? activeParsed.geohash
       : location.localGeohashes[4] || '9q8y'
 
   const initialChannelKey =
-    activeGeohash && (isTopicChannel(activeGeohash) || isValidGeohash(activeGeohash))
+    activeGeohash && (isTopicChannel(activeGeohash) || activeParsed !== null)
       ? activeGeohash
-      : safeActiveGeo
+      : safeActiveEarthGeo
 
-  const geoPulseRooms = useMemo(
-    () => pulseRooms.filter((r) => !isTopicChannel(r.geohash) && isValidGeohash(r.geohash)),
+  const celestialPulseRooms = useMemo(
+    () => pulseRooms.filter((r) => parseCelestialChannelKey(r.geohash) !== null),
     [pulseRooms],
   )
 
@@ -109,8 +155,17 @@ export function ExpandedRadarModal({
     [pulseRooms],
   )
 
-  const pinnedGeohashes = useMemo(
-    () => pinnedChannels.filter((p) => !isTopicChannel(p.geohash) && isValidGeohash(p.geohash)),
+  const pinnedEarth = useMemo(
+    () => pinnedChannels.filter((p) => getChannelBodyId(p.geohash) === 'earth'),
+    [pinnedChannels],
+  )
+
+  const pinnedWorlds = useMemo(
+    () =>
+      pinnedChannels.filter((p) => {
+        const bodyId = getChannelBodyId(p.geohash)
+        return bodyId !== null && bodyId !== 'earth'
+      }),
     [pinnedChannels],
   )
 
@@ -119,6 +174,17 @@ export function ExpandedRadarModal({
     [pinnedChannels],
   )
 
+  const pinCountByBody = useMemo(() => {
+    const counts: Partial<Record<GeohashableBodyId, number>> = {}
+    for (const pin of pinnedChannels) {
+      const bodyId = getChannelBodyId(pin.geohash)
+      if (!bodyId) continue
+      counts[bodyId] = (counts[bodyId] ?? 0) + 1
+    }
+    return counts
+  }, [pinnedChannels])
+
+  const [focusedBodyId, setFocusedBodyId] = useState<GeohashableBodyId>(initialBodyId)
   const [selectedChannel, setSelectedChannel] = useState<string>(initialChannelKey)
   const [precisionMode, setPrecisionMode] = useState<PrecisionSelection>('auto')
   const [showSubZones, setShowSubZones] = useState(false)
@@ -130,15 +196,16 @@ export function ExpandedRadarModal({
   const [topicJumpDraft, setTopicJumpDraft] = useState('')
   const [topicJumpError, setTopicJumpError] = useState<string | null>(null)
 
-  // Reset inspection focus when modal opens or active channel changes
+  // Reset inspection & focused body when modal opens or active channel changes
   useEffect(() => {
     if (!open) return
+    setFocusedBodyId(initialBodyId)
     setSelectedChannel(initialChannelKey)
     setPrecisionMode('auto')
     setActivePopover(null)
     setSearchError(null)
     setTopicJumpError(null)
-  }, [open, initialChannelKey])
+  }, [open, initialBodyId, initialChannelKey])
 
   // Escape closes open popovers first; closes modal ONLY when not embedded
   useEffect(() => {
@@ -157,17 +224,69 @@ export function ExpandedRadarModal({
     return () => window.removeEventListener('keydown', onKey)
   }, [open, activePopover, embedded, onClose])
 
+  const focusedBodyDef = getBodyDef(focusedBodyId)
+  const focusedParentBody =
+    focusedBodyDef.kind === 'moon' &&
+    focusedBodyDef.parentId &&
+    isGeohashableBodyId(focusedBodyDef.parentId)
+      ? getBodyDef(focusedBodyDef.parentId)
+      : null
+  const moonsHostBodyId: GeohashableBodyId =
+    focusedParentBody && isGeohashableBodyId(focusedParentBody.id)
+      ? focusedParentBody.id
+      : focusedBodyId
+  const moonsHostBodyDef = getBodyDef(moonsHostBodyId)
+  const activeMoons = useMemo(() => getMoonsOfBody(moonsHostBodyId), [moonsHostBodyId])
+
   const isSelectedTopic = isTopicChannel(selectedChannel)
   const selectedTopicSlug = isSelectedTopic ? (getTopicSlug(selectedChannel) ?? '') : null
-
-  const inspectedHash =
-    !isSelectedTopic && isValidGeohash(selectedChannel) ? selectedChannel : safeActiveGeo
-  const localFullGeohash = location.localGeohashes[8] || location.localGeohashes[7]
-
-  const inspectedCell = useMemo(
-    () => buildGeohashCell(inspectedHash, localFullGeohash),
-    [inspectedHash, localFullGeohash],
+  const selectedCelestial = useMemo(
+    () => (isSelectedTopic ? null : parseCelestialChannelKey(selectedChannel)),
+    [isSelectedTopic, selectedChannel],
   )
+
+  const selectedBodyId: GeohashableBodyId = selectedCelestial?.bodyId ?? focusedBodyId
+  const selectedBodyDef = getBodyDef(selectedBodyId)
+  const isSelectedNonEarth = !isSelectedTopic && selectedBodyId !== 'earth'
+
+  const inspectedRawHash =
+    selectedCelestial?.geohash ?? getDefaultBodyRawGeohash(focusedBodyId, safeActiveEarthGeo)
+  const localFullGeohash =
+    location.localGeohashes[9] || location.localGeohashes[8] || location.localGeohashes[7]
+
+  const inspectedEarthCell = useMemo(
+    () =>
+      buildGeohashCell(
+        selectedBodyId === 'earth' ? inspectedRawHash : safeActiveEarthGeo,
+        localFullGeohash,
+      ),
+    [selectedBodyId, inspectedRawHash, safeActiveEarthGeo, localFullGeohash],
+  )
+
+  const selectedNonEarthMeta = useMemo(() => {
+    if (!isSelectedNonEarth) return null
+    const center = decodeCenter(inspectedRawHash)
+    const landmark = findNearestCelestialLandmark(selectedBodyId, center.lat, center.lon)
+    return {
+      bodyId: selectedBodyId,
+      bodyName: selectedBodyDef.name,
+      geohash: inspectedRawHash,
+      precision: inspectedRawHash.length,
+      center,
+      landmark,
+      subtitle: `${selectedBodyDef.name} · ${landmark ?? formatCoords(center)}`,
+    }
+  }, [isSelectedNonEarth, inspectedRawHash, selectedBodyId, selectedBodyDef.name])
+
+  const inspectedPrecision = isSelectedNonEarth
+    ? inspectedRawHash.length
+    : inspectedEarthCell.precision
+
+  const activeRawGeoForFocusedBody = useMemo(() => {
+    if (activeParsed?.bodyId === focusedBodyId) return activeParsed.geohash
+    if (focusedBodyId === 'earth') return safeActiveEarthGeo
+    return inspectedRawHash
+  }, [activeParsed, focusedBodyId, safeActiveEarthGeo, inspectedRawHash])
 
   const extraTopicKeys = useMemo(() => {
     const keys = new Set<string>()
@@ -201,23 +320,35 @@ export function ExpandedRadarModal({
     return set.size
   }, [extraTopicKeys, pinnedTopics, topicPulseRooms])
 
-  const totalLiveCount = geoPulseRooms.length + topicPulseRooms.length
+  const totalLiveCount = celestialPulseRooms.length + topicPulseRooms.length
 
   const matchingPulse: PulseRoom | null = useMemo(() => {
     if (isSelectedTopic) {
       const targetKey = selectedChannel.toLowerCase()
       return topicPulseRooms.find((r) => r.geohash.toLowerCase() === targetKey) ?? null
     }
-    const exact = geoPulseRooms.find((r) => r.geohash === inspectedCell.geohash)
+    const targetBodyId = selectedCelestial?.bodyId ?? focusedBodyId
+    const targetRaw = inspectedRawHash
+    const sameWorldRooms = celestialPulseRooms.filter(
+      (r) => getChannelBodyId(r.geohash) === targetBodyId,
+    )
+    const exact = sameWorldRooms.find((r) => getChannelRawGeohash(r.geohash) === targetRaw)
     if (exact) return exact
     return (
-      geoPulseRooms.find(
-        (r) =>
-          r.geohash.startsWith(inspectedCell.geohash) ||
-          inspectedCell.geohash.startsWith(r.geohash),
-      ) ?? null
+      sameWorldRooms.find((r) => {
+        const raw = getChannelRawGeohash(r.geohash)
+        return raw !== null && (raw.startsWith(targetRaw) || targetRaw.startsWith(raw))
+      }) ?? null
     )
-  }, [isSelectedTopic, selectedChannel, topicPulseRooms, geoPulseRooms, inspectedCell.geohash])
+  }, [
+    isSelectedTopic,
+    selectedChannel,
+    topicPulseRooms,
+    selectedCelestial,
+    focusedBodyId,
+    inspectedRawHash,
+    celestialPulseRooms,
+  ])
 
   const matchingPulseSnippet = useMemo(
     () => (matchingPulse?.lastPreview ? formatInspectSnippet(matchingPulse.lastPreview) : ''),
@@ -232,22 +363,86 @@ export function ExpandedRadarModal({
     )
   }, [selectedTopicSlug])
 
+  const pickDefaultChannelForBody = useCallback(
+    (bodyId: GeohashableBodyId, explicitRawGh?: string): string => {
+      if (explicitRawGh) {
+        const explicitKey = makeCelestialChannelKey(bodyId, explicitRawGh)
+        if (explicitKey) return explicitKey
+      }
+      if (getChannelBodyId(selectedChannel) === bodyId) return selectedChannel
+      if (getChannelBodyId(activeGeohash) === bodyId) return activeGeohash
+      const bodyPin = pinnedChannels.find((p) => getChannelBodyId(p.geohash) === bodyId)
+      if (bodyPin) return bodyPin.geohash
+      const bodyLive = celestialPulseRooms.find((r) => getChannelBodyId(r.geohash) === bodyId)
+      if (bodyLive) return bodyLive.geohash
+      const fallbackRaw = getDefaultBodyRawGeohash(bodyId, safeActiveEarthGeo)
+      return makeCelestialChannelKey(bodyId, fallbackRaw) ?? safeActiveEarthGeo
+    },
+    [selectedChannel, activeGeohash, pinnedChannels, celestialPulseRooms, safeActiveEarthGeo],
+  )
+
+  const handleFocusBody = useCallback(
+    (bodyId: GeohashableBodyId, options?: { geohash?: string; animate?: boolean }) => {
+      const targetChannel = pickDefaultChannelForBody(bodyId, options?.geohash)
+      setFocusedBodyId(bodyId)
+      setSelectedChannel(targetChannel)
+      setPrecisionMode('auto')
+      setActivePopover(null)
+      setSearchError(null)
+      setTopicJumpError(null)
+      onPlaySound?.('click')
+      mapRef.current?.focusBody(bodyId, {
+        geohash: options?.geohash,
+        animate: options?.animate ?? true,
+      })
+    },
+    [pickDefaultChannelForBody, onPlaySound],
+  )
+
+  const handleGlobeFocusBodyChange = useCallback(
+    (bodyId: GeohashableBodyId) => {
+      setFocusedBodyId(bodyId)
+      setSelectedChannel((prev) =>
+        getChannelBodyId(prev) === bodyId ? prev : pickDefaultChannelForBody(bodyId),
+      )
+      setPrecisionMode('auto')
+      setActivePopover(null)
+      setSearchError(null)
+      setTopicJumpError(null)
+      onPlaySound?.('click')
+    },
+    [pickDefaultChannelForBody, onPlaySound],
+  )
+
   const handleSelectChannel = useCallback(
     (channelKey: string) => {
       setSelectedChannel(channelKey)
+      const bodyId = getChannelBodyId(channelKey)
+      if (bodyId && bodyId !== focusedBodyId) {
+        setFocusedBodyId(bodyId)
+      }
       setSearchError(null)
       onPlaySound?.('click')
     },
-    [onPlaySound],
+    [focusedBodyId, onPlaySound],
   )
 
   const handleSelectZone = useCallback(
     (gh: string) => {
-      setSelectedChannel(gh)
+      const parsed = parseCelestialChannelKey(gh)
+      if (parsed && gh.includes(':')) {
+        setSelectedChannel(makeCelestialChannelKey(parsed.bodyId, parsed.geohash) ?? gh)
+        if (parsed.bodyId !== focusedBodyId) {
+          setFocusedBodyId(parsed.bodyId)
+        }
+      } else {
+        const canonical = makeCelestialChannelKey(focusedBodyId, gh) ?? gh
+        setSelectedChannel(canonical)
+      }
       setSearchError(null)
       onPlaySound?.('click')
     },
-    [onPlaySound],
+    [focusedBodyId, onPlaySound],
   )
 
   const handleTuneAndClose = useCallback(
@@ -261,19 +456,47 @@ export function ExpandedRadarModal({
     [onTuneChannel, onPlaySound, embedded, onClose],
   )
 
+  const handleTuneGeohash = useCallback(
+    (gh: string) => {
+      if (gh.includes(':') || isTopicChannel(gh)) {
+        handleTuneAndClose(gh)
+        return
+      }
+      const canonical = makeCelestialChannelKey(focusedBodyId, gh) ?? gh
+      handleTuneAndClose(canonical)
+    },
+    [focusedBodyId, handleTuneAndClose],
+  )
+
   if (!open) return null
 
   const flyToAnyChannel = (channelKey: string) => {
-    setSelectedChannel(channelKey)
     setActivePopover(null)
     setSearchError(null)
     setTopicJumpError(null)
     onPlaySound?.('click')
+
     if (isTopicChannel(channelKey)) {
+      setSelectedChannel(channelKey)
+      if (focusedBodyId !== 'earth') {
+        setFocusedBodyId('earth')
+        mapRef.current?.focusBody('earth', { animate: false })
+      }
       mapRef.current?.flyToTopic(channelKey, { animate: true })
+      return
+    }
+
+    const parsed = parseCelestialChannelKey(channelKey)
+    if (!parsed) return
+    const canonical = makeCelestialChannelKey(parsed.bodyId, parsed.geohash) ?? channelKey
+    setSelectedChannel(canonical)
+    setPrecisionMode('auto')
+
+    if (parsed.bodyId !== focusedBodyId) {
+      setFocusedBodyId(parsed.bodyId)
+      mapRef.current?.focusBody(parsed.bodyId, { geohash: parsed.geohash, animate: true })
     } else {
-      setPrecisionMode('auto')
-      mapRef.current?.flyToGeohash(channelKey, { animate: true })
+      mapRef.current?.flyToGeohash(canonical, { animate: true })
     }
   }
 
@@ -282,6 +505,36 @@ export function ExpandedRadarModal({
     const raw = searchDraft.trim()
     if (!raw) return
 
+    // 1. Direct planet / moon / solar system name match
+    const bodyMatch = resolveBodyNameQuery(raw)
+    if (bodyMatch === 'sun') {
+      setSearchDraft('')
+      setSearchError(null)
+      setActivePopover(null)
+      onPlaySound?.('click')
+      mapRef.current?.fitSolarSystem()
+      return
+    }
+    if (bodyMatch) {
+      setSearchDraft('')
+      handleFocusBody(bodyMatch, { animate: true })
+      return
+    }
+
+    // 2. Direct celestial geohash match (`#mars:s000`, `europa:9q8y`)
+    if (raw.includes(':')) {
+      const parsedCelestial = parseCelestialChannelKey(raw.replace(/^#/, ''))
+      if (parsedCelestial) {
+        const key = makeCelestialChannelKey(parsedCelestial.bodyId, parsedCelestial.geohash)
+        if (key) {
+          setSearchDraft('')
+          flyToAnyChannel(key)
+          return
+        }
+      }
+    }
+
+    // 3. Explicit or known Topic Asteroid
     const explicitTopic = /^#?topic:/i.test(raw) || raw.startsWith('/')
     const strippedSlug = normalizeTopicSlug(raw)
     const matchesKnownTopic = Boolean(strippedSlug && knownTopicSlugs.has(strippedSlug))
@@ -295,9 +548,10 @@ export function ExpandedRadarModal({
       }
     }
 
+    // 4. Earth geohash / city / coordinates or topic fallback
     const resolved = parseQuickTuneInput(raw, 'geo')
     if (!resolved) {
-      setSearchError('Enter a valid #geohash, city, or #topic')
+      setSearchError('Enter a #geohash, planet, city, or #topic')
       return
     }
     setSearchDraft('')
@@ -318,33 +572,55 @@ export function ExpandedRadarModal({
   }
 
   const handleZoomOutPrecision = () => {
-    if (isSelectedTopic || inspectedCell.precision <= 1) return
-    const parent = inspectedCell.geohash.slice(0, -1)
-    const nextP = parent.length as PrecisionSelection
+    if (isSelectedTopic || inspectedPrecision <= 1) return
+    const parentRaw = inspectedRawHash.slice(0, -1)
+    const targetBodyId = selectedBodyId
+    const parentKey = makeCelestialChannelKey(targetBodyId, parentRaw)
+    if (!parentKey) return
+
+    const nextP = parentRaw.length as PrecisionSelection
     setPrecisionMode(nextP)
-    setSelectedChannel(parent)
+    setSelectedChannel(parentKey)
     onPlaySound?.('click')
-    mapRef.current?.flyToGeohash(parent, {
-      animate: true,
-      zoom: getZoomForPrecision(parent.length),
-    })
+    if (targetBodyId !== focusedBodyId) {
+      setFocusedBodyId(targetBodyId)
+      mapRef.current?.focusBody(targetBodyId, { geohash: parentRaw, animate: true })
+    } else {
+      mapRef.current?.flyToGeohash(parentKey, {
+        animate: true,
+        zoom: getZoomForPrecision(parentRaw.length),
+      })
+    }
   }
 
   const handleSubdivideZoomIn = () => {
-    if (isSelectedTopic || inspectedCell.precision >= 8) return
-    const nextP = inspectedCell.precision + 1
-    const localChild = location.localGeohashes[nextP]
-    const target =
-      localChild && localChild.startsWith(inspectedCell.geohash)
+    if (isSelectedTopic || inspectedPrecision >= 9) return
+    const nextP = inspectedPrecision + 1
+    const targetBodyId = selectedBodyId
+    const center =
+      targetBodyId === 'earth'
+        ? inspectedEarthCell.center
+        : decodeCenter(inspectedRawHash)
+    const localChild = targetBodyId === 'earth' ? location.localGeohashes[nextP] : null
+    const targetRaw =
+      localChild && localChild.startsWith(inspectedRawHash)
         ? localChild
-        : encodeGeohash(inspectedCell.center.lat, inspectedCell.center.lon, nextP)
+        : encodeGeohash(center.lat, center.lon, nextP)
+    const targetKey = makeCelestialChannelKey(targetBodyId, targetRaw)
+    if (!targetKey) return
+
     setPrecisionMode(nextP as PrecisionSelection)
-    setSelectedChannel(target)
+    setSelectedChannel(targetKey)
     onPlaySound?.('click')
-    mapRef.current?.flyToGeohash(target, {
-      animate: true,
-      zoom: getZoomForPrecision(nextP),
-    })
+    if (targetBodyId !== focusedBodyId) {
+      setFocusedBodyId(targetBodyId)
+      mapRef.current?.focusBody(targetBodyId, { geohash: targetRaw, animate: true })
+    } else {
+      mapRef.current?.flyToGeohash(targetKey, {
+        animate: true,
+        zoom: getZoomForPrecision(nextP),
+      })
+    }
   }
 
   const handleLocateMe = async () => {
@@ -355,7 +631,12 @@ export function ExpandedRadarModal({
       setPrecisionMode('auto')
       setActivePopover(null)
       onPlaySound?.('tune')
-      mapRef.current?.flyToGeohash(gh, { animate: true })
+      if (focusedBodyId !== 'earth') {
+        setFocusedBodyId('earth')
+        mapRef.current?.focusBody('earth', { geohash: gh, animate: true })
+      } else {
+        mapRef.current?.flyToGeohash(gh, { animate: true })
+      }
     }
   }
 
@@ -367,11 +648,20 @@ export function ExpandedRadarModal({
     mapRef.current?.fitWorld()
   }
 
+  const handleToggleWorldPopover = () => {
+    onPlaySound?.('click')
+    setActivePopover((prev) => (prev === 'world' ? null : 'world'))
+  }
+
   const handleToggleAsteroidsPopover = () => {
     onPlaySound?.('click')
     setActivePopover((prev) => {
       const next = prev === 'asteroids' ? null : 'asteroids'
       if (next === 'asteroids') {
+        if (focusedBodyId !== 'earth') {
+          setFocusedBodyId('earth')
+          mapRef.current?.focusBody('earth', { animate: false })
+        }
         mapRef.current?.fitAsteroids()
       }
       return next
@@ -390,7 +680,11 @@ export function ExpandedRadarModal({
     onPlaySound?.('click')
     const label = isSelectedTopic
       ? `#${selectedTopicSlug}`
-      : (inspectedCell.nearestCity ?? undefined)
+      : selectedNonEarthMeta
+        ? selectedNonEarthMeta.landmark
+          ? `${selectedNonEarthMeta.bodyName} · ${selectedNonEarthMeta.landmark}`
+          : selectedNonEarthMeta.bodyName
+        : (inspectedEarthCell.nearestCity ?? undefined)
     engine.togglePinChannel(selectedChannel, label)
   }
 
@@ -415,8 +709,25 @@ export function ExpandedRadarModal({
   const renderPinnedRow = (pin: PinnedChannel) => {
     const isPinTopic = isTopicChannel(pin.geohash)
     const slug = isPinTopic ? getTopicSlug(pin.geohash) : null
+    const parsedPin = isPinTopic ? null : parseCelestialChannelKey(pin.geohash)
+    const pinBodyDef =
+      parsedPin && parsedPin.bodyId !== 'earth' ? getBodyDef(parsedPin.bodyId) : null
     const badgeCount = getUnreadBadgeCount(pin.geohash)
     const isSel = pin.geohash.toLowerCase() === selectedChannel.toLowerCase()
+
+    let subLabel = pin.label?.replace(/^#/, '').trim() ?? ''
+    if (pinBodyDef) {
+      const prefix = `${pinBodyDef.name} · `
+      if (subLabel.toLowerCase() === pinBodyDef.name.toLowerCase()) {
+        subLabel = ''
+      } else if (subLabel.startsWith(prefix)) {
+        subLabel = subLabel.slice(prefix.length)
+      } else if (!subLabel && parsedPin) {
+        const center = decodeCenter(parsedPin.geohash)
+        subLabel = findNearestCelestialLandmark(parsedPin.bodyId, center.lat, center.lon) ?? ''
+      }
+    }
+
     return (
       <div
         key={pin.geohash}
@@ -427,18 +738,22 @@ export function ExpandedRadarModal({
           className="ag-radar-pin-list-main"
           onClick={() => flyToAnyChannel(pin.geohash)}
         >
-          {isPinTopic ? (
-            <Orbit size={12} className="ag-radar-hud-topic" aria-hidden="true" />
-          ) : (
-            <MapPin size={12} className="ag-radar-hud-accent" aria-hidden="true" />
-          )}
+          <Pin size={12} className="ag-radar-pin-icon-red" aria-hidden="true" />
           <span className={`${isPinTopic ? 'ag-radar-hud-topic' : 'ag-radar-hud-accent'} mono`}>
             #{isPinTopic ? slug : pin.geohash}
           </span>
-          {pin.label && (
-            <span className="ag-radar-pin-list-sub truncate">
-              {pin.label.replace(/^#/, '')}
+          {pinBodyDef && (
+            <span className="ag-radar-world-badge">
+              <span
+                className="ag-radar-world-dot"
+                style={{ backgroundColor: pinBodyDef.palette.primary }}
+                aria-hidden="true"
+              />
+              <span>{pinBodyDef.name}</span>
             </span>
+          )}
+          {subLabel && (
+            <span className="ag-radar-pin-list-sub truncate">{subLabel}</span>
           )}
           {badgeCount > 0 && (
             <span className="ag-radar-item-unread tabular">
@@ -464,18 +779,20 @@ export function ExpandedRadarModal({
 
   const stageContent = (
     <>
-      {/* Full-bleed 3D Earth + Topic Asteroids Globe */}
+      {/* Full-bleed 3D Solar System, Planets, Moons & Topic Asteroids Globe */}
       <TacticalGeohashMap
         ref={mapRef}
         mode="expanded"
         theme={settings.theme}
-        activeGeohash={safeActiveGeo}
-        selectedGeohash={inspectedHash}
+        focusedBodyId={focusedBodyId}
+        onFocusBodyChange={handleGlobeFocusBodyChange}
+        activeGeohash={activeRawGeoForFocusedBody}
+        selectedGeohash={inspectedRawHash}
         precisionMode={precisionMode}
         showSubZones={showSubZones}
         showPulse={true}
         showBubbles={showBubbles}
-        pulseRooms={geoPulseRooms}
+        pulseRooms={celestialPulseRooms}
         pinnedChannels={pinnedChannels}
         topicRooms={topicPulseRooms}
         extraTopicKeys={extraTopicKeys}
@@ -484,7 +801,7 @@ export function ExpandedRadarModal({
         userCoords={location.coords}
         isTeleported={engine.isTeleported}
         onSelectGeohash={handleSelectZone}
-        onTuneGeohash={handleTuneAndClose}
+        onTuneGeohash={handleTuneGeohash}
         onSelectChannel={handleSelectChannel}
         onTuneChannel={handleTuneAndClose}
       />
@@ -497,19 +814,19 @@ export function ExpandedRadarModal({
             <input
               type="text"
               className="ag-radar-search-input mono"
-              placeholder="#geohash, city, or #topic…"
+              placeholder="#geohash, planet, city, or #topic…"
               value={searchDraft}
               onChange={(e) => {
                 setSearchDraft(e.target.value)
                 if (searchError) setSearchError(null)
               }}
-              aria-label="Search geohash, city, or topic on globe"
+              aria-label="Search geohash, planet, city, or topic"
             />
             {searchDraft && (
               <button
                 type="submit"
                 className="ag-radar-search-go mono"
-                aria-label="Fly to location or topic"
+                aria-label="Fly to world, location, or topic"
               >
                 GO
               </button>
@@ -518,14 +835,37 @@ export function ExpandedRadarModal({
 
           <button
             type="button"
+            className={`ag-radar-top-pill ag-radar-world-pill mono ${
+              activePopover === 'world' ? 'active' : ''
+            }`}
+            onClick={handleToggleWorldPopover}
+            aria-expanded={activePopover === 'world'}
+            aria-label={`Solar System navigator, currently focused on ${focusedBodyDef.name}`}
+            title={`Focused on ${focusedBodyDef.name} — explore planets & moons`}
+          >
+            <span
+              className="ag-radar-world-dot"
+              style={{ backgroundColor: focusedBodyDef.palette.primary }}
+              aria-hidden="true"
+            />
+            <Orbit size={13} aria-hidden="true" />
+            <span className="ag-radar-world-name">{focusedBodyDef.name}</span>
+          </button>
+
+          <button
+            type="button"
             className={`ag-radar-top-pill ag-radar-asteroids-pill mono ${
               activePopover === 'asteroids' ? 'active' : ''
             }`}
             onClick={handleToggleAsteroidsPopover}
             aria-expanded={activePopover === 'asteroids'}
-            title="Orbiting Topic Asteroids (kind: 23333)"
+            title={
+              focusedBodyId === 'earth'
+                ? 'Orbiting Topic Asteroids (kind: 23333)'
+                : 'Return to Earth & view Topic Asteroids (kind: 23333)'
+            }
           >
-            <Orbit size={13} aria-hidden="true" />
+            <Hash size={13} aria-hidden="true" />
             <span className="ag-radar-pill-label">Asteroids</span>
             <span className="ag-radar-pill-count tabular">{allTopicCount}</span>
           </button>
@@ -535,7 +875,7 @@ export function ExpandedRadarModal({
             className={`ag-radar-top-pill mono ${activePopover === 'pulse' ? 'active' : ''}`}
             onClick={handleTogglePulsePopover}
             aria-expanded={activePopover === 'pulse'}
-            title="Browse live channels and pinned places"
+            title="Browse live and pinned Bitchat channels"
           >
             <span className="ag-led ag-led-ok ag-led-pulse" />
             <span>
@@ -579,6 +919,158 @@ export function ExpandedRadarModal({
         )}
       </div>
 
+      {/* Solar System & Moons Focus Navigator Popover */}
+      {activePopover === 'world' && (
+        <div
+          className="ag-radar-pulse-popover ag-radar-solar-popover"
+          role="region"
+          aria-label="Solar System navigator"
+        >
+          <div className="ag-radar-pulse-pop-head">
+            <span className="ag-panel-card-title">
+              <Orbit size={12} />
+              <span>SOLAR SYSTEM</span>
+            </span>
+            <button
+              type="button"
+              className="ag-icon-btn-xs"
+              onClick={() => setActivePopover(null)}
+              aria-label="Close solar system navigator"
+            >
+              <X size={12} />
+            </button>
+          </div>
+
+          <div className="ag-radar-solar-actions">
+            <button
+              type="button"
+              className="ag-radar-solar-overview-btn"
+              onClick={() => {
+                onPlaySound?.('click')
+                setActivePopover(null)
+                mapRef.current?.fitSolarSystem()
+              }}
+            >
+              <Sun size={13} className="ag-radar-solar-sun-icon" aria-hidden="true" />
+              <span>Solar System Overview</span>
+              <span className="ag-radar-solar-hint mono">9 worlds</span>
+            </button>
+
+            {focusedParentBody && isGeohashableBodyId(focusedParentBody.id) && (
+              <button
+                type="button"
+                className="ag-radar-solar-back-btn"
+                onClick={() => handleFocusBody(focusedParentBody.id as GeohashableBodyId)}
+              >
+                <ArrowLeft size={13} aria-hidden="true" />
+                <span
+                  className="ag-radar-world-dot"
+                  style={{ backgroundColor: focusedParentBody.palette.primary }}
+                  aria-hidden="true"
+                />
+                <span>Back to {focusedParentBody.name}</span>
+              </button>
+            )}
+          </div>
+
+          <div className="ag-radar-pulse-pop-list">
+            {activeMoons.length > 0 && (
+              <>
+                <span className="ag-radar-pop-kicker">
+                  Moons of {moonsHostBodyDef.name}
+                </span>
+                <div className="ag-radar-moon-chips">
+                  {activeMoons.map((moon) => {
+                    if (!isGeohashableBodyId(moon.id)) return null
+                    const moonId = moon.id
+                    const moonPins = pinCountByBody[moonId] ?? 0
+                    const isCurrentMoon = moonId === focusedBodyId
+                    return (
+                      <button
+                        key={moonId}
+                        type="button"
+                        className={`ag-radar-moon-chip${isCurrentMoon ? ' active' : ''}`}
+                        onClick={() => handleFocusBody(moonId)}
+                      >
+                        <span
+                          className="ag-radar-world-dot"
+                          style={{ backgroundColor: moon.palette.primary }}
+                          aria-hidden="true"
+                        />
+                        <span>{moon.name}</span>
+                        {moonPins > 0 && (
+                          <span
+                            className="ag-radar-solar-pin-badge mono tabular"
+                            title={`${moonPins} pinned ${moonPins === 1 ? 'channel' : 'channels'} on ${moon.name}`}
+                          >
+                            <Pin size={9} aria-hidden="true" />
+                            <span>{moonPins}</span>
+                          </span>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+
+            <span className="ag-radar-pop-kicker">All Planets</span>
+            {PLANET_BODY_IDS.map((planetId) => {
+              const planet = SOLAR_BODIES[planetId]
+              const moons = getMoonsOfBody(planetId)
+              const directPins = pinCountByBody[planetId] ?? 0
+              const moonPins = moons.reduce(
+                (acc, m) =>
+                  acc + (isGeohashableBodyId(m.id) ? (pinCountByBody[m.id] ?? 0) : 0),
+                0,
+              )
+              const totalPlanetPins = directPins + moonPins
+              const isCurrentPlanet = focusedBodyId === planetId
+              const isParentOfCurrentMoon = focusedParentBody?.id === planetId
+
+              return (
+                <button
+                  key={planetId}
+                  type="button"
+                  className={`ag-radar-planet-row${isCurrentPlanet ? ' active' : ''}`}
+                  onClick={() => handleFocusBody(planetId)}
+                >
+                  <div className="ag-radar-planet-row-main">
+                    <span
+                      className={`ag-radar-planet-dot${planet.rings ? ' has-rings' : ''}`}
+                      style={{ backgroundColor: planet.palette.primary }}
+                      aria-hidden="true"
+                    />
+                    <span className="ag-radar-planet-name">{planet.name}</span>
+                    {isParentOfCurrentMoon && (
+                      <span className="ag-radar-pin-list-sub">
+                        · {focusedBodyDef.name}
+                      </span>
+                    )}
+                  </div>
+                  <div className="ag-radar-planet-row-meta mono">
+                    {moons.length > 0 && (
+                      <span className="ag-radar-planet-moons">
+                        {moons.length} {moons.length === 1 ? 'moon' : 'moons'}
+                      </span>
+                    )}
+                    {totalPlanetPins > 0 && (
+                      <span
+                        className="ag-radar-solar-pin-badge tabular"
+                        title={`${totalPlanetPins} pinned ${totalPlanetPins === 1 ? 'channel' : 'channels'}`}
+                      >
+                        <Pin size={9} aria-hidden="true" />
+                        <span>{totalPlanetPins}</span>
+                      </span>
+                    )}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Topic Asteroids Quick-Fly Popover */}
       {activePopover === 'asteroids' && (
         <div
@@ -588,7 +1080,7 @@ export function ExpandedRadarModal({
         >
           <div className="ag-radar-pulse-pop-head">
             <span className="ag-panel-card-title">
-              <Orbit size={12} />
+              <Hash size={12} />
               <span>TOPIC ASTEROIDS</span>
             </span>
             <button
@@ -652,7 +1144,7 @@ export function ExpandedRadarModal({
                       onClick={() => flyToAnyChannel(room.geohash)}
                     >
                       <div className="ag-radar-pulse-item-main">
-                        <Orbit size={12} className="ag-radar-hud-topic" aria-hidden="true" />
+                        <Hash size={12} className="ag-radar-hud-topic" aria-hidden="true" />
                         <span className="ag-radar-hud-topic mono">#{slug}</span>
                       </div>
                       <div className="ag-radar-pulse-item-meta mono">
@@ -696,7 +1188,7 @@ export function ExpandedRadarModal({
         </div>
       )}
 
-      {/* Live & Pinned Channels Quick-Fly Popover */}
+      {/* Restored 2-Tab Live | Pinned Channels Quick-Fly Popover */}
       {activePopover === 'pulse' && (
         <div
           className="ag-radar-pulse-popover"
@@ -712,17 +1204,19 @@ export function ExpandedRadarModal({
                 className={`ag-radar-pop-tab${pulseTab === 'live' ? ' active' : ''}`}
                 onClick={() => setPulseTab('live')}
               >
-                <Waves size={11} />
+                <Globe size={11} />
                 <span>Live ({totalLiveCount})</span>
               </button>
               <button
                 type="button"
                 role="tab"
                 aria-selected={pulseTab === 'pinned'}
-                className={`ag-radar-pop-tab${pulseTab === 'pinned' ? ' active' : ''}`}
+                className={`ag-radar-pop-tab ag-radar-pop-tab-pinned${
+                  pulseTab === 'pinned' ? ' active' : ''
+                }`}
                 onClick={() => setPulseTab('pinned')}
               >
-                <Pin size={11} />
+                <Pin size={11} className="ag-radar-pin-icon-red" />
                 <span>Pinned ({pinnedChannels.length})</span>
               </button>
             </div>
@@ -739,34 +1233,50 @@ export function ExpandedRadarModal({
           {pulseTab === 'live' ? (
             totalLiveCount === 0 ? (
               <p className="ag-field-hint" style={{ padding: '0.6rem' }}>
-                Listening across global relays for active Earth geohashes and topic asteroids…
+                Listening across global relays for active Earth, planetary, and topic asteroid
+                channels…
               </p>
             ) : (
               <div className="ag-radar-pulse-pop-list">
-                {geoPulseRooms.slice(0, 16).map((room) => (
-                  <button
-                    key={room.geohash}
-                    type="button"
-                    className={`ag-radar-pulse-item ${
-                      room.geohash === selectedChannel ? 'active' : ''
-                    }`}
-                    onClick={() => flyToAnyChannel(room.geohash)}
-                  >
-                    <div className="ag-radar-pulse-item-main">
-                      <span className="ag-radar-hud-accent mono">#{room.geohash}</span>
-                      <span className="truncate">
-                        {room.nearestCity || formatCoords(room.center)}
-                      </span>
-                    </div>
-                    <div className="ag-radar-pulse-item-meta mono">
-                      <span>
-                        {room.peerCount} {room.peerCount === 1 ? 'peer' : 'peers'}
-                      </span>
-                      <span>·</span>
-                      <span>{formatPulseAge(room.lastActivityAt)}</span>
-                    </div>
-                  </button>
-                ))}
+                {celestialPulseRooms.slice(0, 18).map((room) => {
+                  const parsed = parseCelestialChannelKey(room.geohash)
+                  const roomBodyDef =
+                    parsed && parsed.bodyId !== 'earth' ? getBodyDef(parsed.bodyId) : null
+                  return (
+                    <button
+                      key={room.geohash}
+                      type="button"
+                      className={`ag-radar-pulse-item ${
+                        room.geohash.toLowerCase() === selectedChannel.toLowerCase() ? 'active' : ''
+                      }`}
+                      onClick={() => flyToAnyChannel(room.geohash)}
+                    >
+                      <div className="ag-radar-pulse-item-main">
+                        <span className="ag-radar-hud-accent mono">#{room.geohash}</span>
+                        {roomBodyDef && (
+                          <span className="ag-radar-world-badge">
+                            <span
+                              className="ag-radar-world-dot"
+                              style={{ backgroundColor: roomBodyDef.palette.primary }}
+                              aria-hidden="true"
+                            />
+                            <span>{roomBodyDef.name}</span>
+                          </span>
+                        )}
+                        <span className="truncate">
+                          {room.nearestCity || formatCoords(room.center)}
+                        </span>
+                      </div>
+                      <div className="ag-radar-pulse-item-meta mono">
+                        <span>
+                          {room.peerCount} {room.peerCount === 1 ? 'peer' : 'peers'}
+                        </span>
+                        <span>·</span>
+                        <span>{formatPulseAge(room.lastActivityAt)}</span>
+                      </div>
+                    </button>
+                  )
+                })}
                 {topicPulseRooms.slice(0, 12).map((room) => {
                   const slug = getTopicSlug(room.geohash) ?? room.geohash
                   return (
@@ -779,7 +1289,7 @@ export function ExpandedRadarModal({
                       onClick={() => flyToAnyChannel(room.geohash)}
                     >
                       <div className="ag-radar-pulse-item-main">
-                        <Orbit size={12} className="ag-radar-hud-topic" aria-hidden="true" />
+                        <Hash size={12} className="ag-radar-hud-topic" aria-hidden="true" />
                         <span className="ag-radar-hud-topic mono">#{slug}</span>
                         <span className="ag-radar-pin-list-sub">Asteroid</span>
                       </div>
@@ -797,15 +1307,21 @@ export function ExpandedRadarModal({
             )
           ) : pinnedChannels.length === 0 ? (
             <p className="ag-field-hint" style={{ padding: '0.6rem' }}>
-              No pinned channels yet. Select any Earth geohash or orbiting Topic Asteroid and tap
-              Pin to plant a 3D marker on the globe.
+              No pinned channels yet. Select any Earth, planet, moon, or orbiting Topic Asteroid
+              channel and tap Pin to plant a red 3D marker.
             </p>
           ) : (
             <div className="ag-radar-pulse-pop-list">
-              {pinnedGeohashes.length > 0 && (
+              {pinnedEarth.length > 0 && (
                 <>
                   <span className="ag-radar-pop-kicker">Pinned on Earth</span>
-                  {pinnedGeohashes.map(renderPinnedRow)}
+                  {pinnedEarth.map(renderPinnedRow)}
+                </>
+              )}
+              {pinnedWorlds.length > 0 && (
+                <>
+                  <span className="ag-radar-pop-kicker">Pinned Worlds</span>
+                  {pinnedWorlds.map(renderPinnedRow)}
                 </>
               )}
               {pinnedTopics.length > 0 && (
@@ -826,8 +1342,8 @@ export function ExpandedRadarModal({
           className={`ag-radar-fab ${location.status === 'ready' ? 'gps-ready' : ''}`}
           onClick={() => void handleLocateMe()}
           disabled={location.status === 'locating'}
-          title="Locate Me"
-          aria-label="Locate Me"
+          title="Locate Me on Earth"
+          aria-label="Locate Me on Earth"
         >
           {location.status === 'locating' ? (
             <Loader2 size={17} className="ag-spin" />
@@ -840,8 +1356,8 @@ export function ExpandedRadarModal({
           type="button"
           className="ag-radar-fab"
           onClick={handleWorldView}
-          title="World View"
-          aria-label="World View"
+          title={focusedBodyId === 'earth' ? 'World View' : `${focusedBodyDef.name} Overview`}
+          aria-label={focusedBodyId === 'earth' ? 'World View' : `${focusedBodyDef.name} Overview`}
         >
           <Globe size={17} />
         </button>
@@ -888,7 +1404,7 @@ export function ExpandedRadarModal({
         </div>
       </div>
 
-      {/* Compact Bottom Selected-Channel Card (Earth Geohash OR Orbiting Topic Asteroid) */}
+      {/* Compact Bottom Selected-Channel Card (Earth, Planets & Moons, or Topic Asteroids) */}
       <div className="ag-radar-bottom-card">
         <div className="ag-radar-bottom-info">
           <div className="ag-radar-inspect-title">
@@ -900,12 +1416,26 @@ export function ExpandedRadarModal({
                 </span>
                 <span className="ag-radar-topic-chip">Asteroid</span>
               </>
+            ) : selectedNonEarthMeta ? (
+              <>
+                <span
+                  className="ag-radar-world-dot ag-radar-world-dot-md"
+                  style={{ backgroundColor: selectedBodyDef.palette.primary }}
+                  aria-hidden="true"
+                />
+                <span className="ag-radar-inspect-hash mono">
+                  #{selectedNonEarthMeta.bodyId}:{selectedNonEarthMeta.geohash}
+                </span>
+                <span className="ag-radar-inspect-city truncate">
+                  {selectedNonEarthMeta.subtitle}
+                </span>
+              </>
             ) : (
               <>
                 <MapPin size={14} className="ag-radar-hud-accent" aria-hidden="true" />
-                <span className="ag-radar-inspect-hash mono">#{inspectedCell.geohash}</span>
+                <span className="ag-radar-inspect-hash mono">#{inspectedEarthCell.geohash}</span>
                 <span className="ag-radar-inspect-city truncate">
-                  {inspectedCell.nearestCity ?? 'Open Coordinates'}
+                  {inspectedEarthCell.nearestCity ?? 'Open Coordinates'}
                 </span>
               </>
             )}
@@ -949,7 +1479,7 @@ export function ExpandedRadarModal({
                 type="button"
                 className="ag-radar-prec-step-btn"
                 onClick={handleZoomOutPrecision}
-                disabled={inspectedCell.precision <= 1}
+                disabled={inspectedPrecision <= 1}
                 title="Broader precision (P−1)"
                 aria-label="Decrease geohash precision"
               >
@@ -957,15 +1487,15 @@ export function ExpandedRadarModal({
               </button>
               <span
                 className="ag-radar-prec-step-val mono"
-                title={`Precision P${inspectedCell.precision}`}
+                title={`Precision P${inspectedPrecision}`}
               >
-                P{inspectedCell.precision}
+                P{inspectedPrecision}
               </span>
               <button
                 type="button"
                 className="ag-radar-prec-step-btn"
                 onClick={handleSubdivideZoomIn}
-                disabled={inspectedCell.precision >= 8}
+                disabled={inspectedPrecision >= 9}
                 title="Finer precision (P+1)"
                 aria-label="Increase geohash precision"
               >
@@ -976,12 +1506,18 @@ export function ExpandedRadarModal({
 
           <button
             type="button"
-            className={`ag-btn ag-btn-secondary ag-radar-pin-btn${isSelectedPinned ? ' is-pinned' : ''}`}
+            className={`ag-btn ag-btn-secondary ag-radar-pin-btn${
+              isSelectedPinned ? ' is-pinned pinned' : ''
+            }`}
             onClick={handleTogglePinSelected}
             aria-pressed={isSelectedPinned}
             title={isSelectedPinned ? 'Unpin from Globe' : 'Pin to Globe'}
           >
-            {isSelectedPinned ? <PinOff size={14} /> : <Pin size={14} />}
+            {isSelectedPinned ? (
+              <PinOff size={14} className="ag-radar-pin-icon-red" />
+            ) : (
+              <Pin size={14} className="ag-radar-pin-icon-red" />
+            )}
             <span>{isSelectedPinned ? 'Pinned' : 'Pin'}</span>
           </button>
 
@@ -993,7 +1529,7 @@ export function ExpandedRadarModal({
             {isAlreadyActive ? (
               embedded ? (
                 <>
-                  <Waves size={14} />
+                  <Globe size={14} />
                   <span>Open Chat</span>
                 </>
               ) : (
@@ -1004,7 +1540,7 @@ export function ExpandedRadarModal({
               )
             ) : (
               <>
-                <Waves size={14} />
+                <Globe size={14} />
                 <span>Tune In</span>
               </>
             )}

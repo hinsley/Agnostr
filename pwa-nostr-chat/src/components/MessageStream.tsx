@@ -5,6 +5,7 @@ import {
   ArrowDown,
   Ban,
   Crosshair,
+  Globe,
   Hash,
   Languages,
   Loader2,
@@ -13,7 +14,6 @@ import {
   Server,
   ShieldCheck,
   UserPlus,
-  Waves,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine, GeoMessage, PeerInfo } from '../types/protocol'
@@ -32,7 +32,12 @@ import type { LightboxImagePayload } from './ImageLightboxModal'
 import { AvatarImg } from './AvatarImg'
 import { MessageItem } from './MessageItem'
 import { doesContentMentionUser } from '../lib/bitchatProtocol'
-import { formatBitchatChannelLabel, isTopicChannel } from '../lib/bitchatChannel'
+import {
+  formatBitchatChannelLabel,
+  getChannelBodyName,
+  isTopicChannel,
+  parseCelestialChannelKey,
+} from '../lib/bitchatChannel'
 import { isStuckMediaPlaceholder } from '../lib/storage'
 import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import { formatHandle } from '../utils/identicon'
@@ -1782,34 +1787,63 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
               (() => {
                 const activeIsTopic = isTopicChannel(engine.activeGeohash)
                 const activeBitchatLabel = formatBitchatChannelLabel(engine.activeGeohash)
+                const activeCelestial = !activeIsTopic
+                  ? parseCelestialChannelKey(engine.activeGeohash)
+                  : null
+                const isNonEarthCelestial = Boolean(
+                  activeCelestial && activeCelestial.bodyId !== 'earth'
+                )
+                const celestialBodyName = isNonEarthCelestial
+                  ? getChannelBodyName(engine.activeGeohash)
+                  : null
+                const celestialLandmark =
+                  isNonEarthCelestial &&
+                  engine.cell.nearestCity &&
+                  engine.cell.nearestCity !== celestialBodyName
+                    ? engine.cell.nearestCity
+                    : null
+                const titleLocation = activeIsTopic
+                  ? null
+                  : isNonEarthCelestial
+                    ? celestialBodyName
+                    : engine.cell.nearestCity
+                const emptySubtitle = activeIsTopic
+                  ? 'Live topic channel — say hello to start chatting.'
+                  : isNonEarthCelestial
+                    ? celestialLandmark
+                      ? `${celestialLandmark}, ${celestialBodyName} — say hello to start chatting.`
+                      : `Live channel on ${celestialBodyName ?? 'this world'} — say hello to start chatting.`
+                    : 'Say hello to start chatting with people nearby.'
                 return (
               <div className="ag-empty-stage">
                 <div className="ag-empty-bitchat-icon" aria-hidden="true">
-                  {activeIsTopic ? <Hash size={26} /> : <Waves size={26} />}
+                  {activeIsTopic ? <Hash size={26} /> : <Globe size={26} />}
                 </div>
 
                 <div className="ag-empty-copy">
                   <h2 className="ag-empty-title">
                     <span className="mono">{activeBitchatLabel}</span>
-                    {!activeIsTopic && engine.cell.nearestCity ? ` · ${engine.cell.nearestCity}` : ''}
+                    {titleLocation ? ` · ${titleLocation}` : ''}
                   </h2>
-                  <p className="ag-empty-sub">
-                    {activeIsTopic
-                      ? 'Live topic channel — say hello to start chatting.'
-                      : 'Say hello to start chatting with people nearby.'}
-                  </p>
+                  <p className="ag-empty-sub">{emptySubtitle}</p>
                 </div>
 
                 {!activeIsTopic && (
                   <div className="ag-empty-actions">
-                    <button type="button" className="ag-cta-btn primary" onClick={onLocateMe}>
-                      <Crosshair size={15} />
-                      <span>Locate Me</span>
-                    </button>
+                    {!isNonEarthCelestial && (
+                      <button type="button" className="ag-cta-btn primary" onClick={onLocateMe}>
+                        <Crosshair size={15} />
+                        <span>Locate Me</span>
+                      </button>
+                    )}
 
-                    <button type="button" className="ag-cta-btn" onClick={onExpandRadar}>
+                    <button
+                      type="button"
+                      className={`ag-cta-btn ${isNonEarthCelestial ? 'primary' : ''}`}
+                      onClick={onExpandRadar}
+                    >
                       <MapIcon size={15} />
-                      <span>Open Map</span>
+                      <span>{isNonEarthCelestial ? 'Open Globe' : 'Open Map'}</span>
                     </button>
                   </div>
                 )}

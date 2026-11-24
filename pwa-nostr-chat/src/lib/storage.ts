@@ -90,6 +90,7 @@ const KEYS = {
   geoDirectory: `${PREFIX}geo_directory`,
   msgIndex: `${PREFIX}msg_index`,
   msgChannel: (gh: string) => `${PREFIX}msgs:${gh}`,
+  agoraHiddenTrendingTopics: 'agnostr:v1:agora_hidden_trending_topics',
 } as const
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -1634,6 +1635,38 @@ export function saveDeviceSyncState(state: PersistedDeviceSyncState): void {
 
 export function clearDeviceSyncState(): void {
   safeRemove(KEYS.deviceSyncState)
+}
+
+const MAX_HIDDEN_TRENDING_TOPICS = 200
+
+function normalizeHiddenTrendingTopicsList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const clean = item.trim().replace(/^#+/, '').toLowerCase()
+    if (!clean || clean.length > 48 || seen.has(clean)) continue
+    seen.add(clean)
+    out.push(clean)
+    if (out.length >= MAX_HIDDEN_TRENDING_TOPICS) break
+  }
+  return out
+}
+
+export function loadHiddenTrendingTopics(): string[] {
+  const raw = safeGet(KEYS.agoraHiddenTrendingTopics)
+  if (!raw) return []
+  try {
+    return normalizeHiddenTrendingTopicsList(JSON.parse(raw))
+  } catch {
+    return []
+  }
+}
+
+export function saveHiddenTrendingTopics(tags: string[]): void {
+  const clean = normalizeHiddenTrendingTopicsList(tags)
+  safeSet(KEYS.agoraHiddenTrendingTopics, JSON.stringify(clean))
 }
 
 export function panicWipeStorage(): void {

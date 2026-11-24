@@ -7,14 +7,17 @@ import type {
   ReplyReference,
   VoiceMemoAttachment,
 } from '../types/protocol.ts'
-import { isValidGeohash, normalizeGeohash } from './geohash.ts'
+import { normalizeGeohash } from './geohash.ts'
 import { bytesToHex, formatDisplayHandle } from './identity.ts'
 import { isOffMainThreadWorkerSupported, mineNip13OffMainThread } from './offMainThread.ts'
 import {
   getTopicSlug,
+  isCelestialNonEarthChannel,
   isTopicChannel,
+  makeCelestialChannelKey,
   normalizeBitchatChannelKey,
   normalizeTopicSlug,
+  parseCelestialChannelKey,
   TOPIC_CHANNEL_PREFIX,
 } from './bitchatChannel.ts'
 
@@ -142,8 +145,25 @@ export function hasTagPair(tags: string[][], name: string, value: string): boole
 export function extractGeohashTag(tags: string[][]): string | null {
   const raw = getTagValue(tags, 'g')
   if (!raw) return null
-  const normalized = normalizeGeohash(raw)
-  return isValidGeohash(normalized) ? normalized : null
+  const parsed = parseCelestialChannelKey(raw)
+  if (!parsed) return null
+  return makeCelestialChannelKey(parsed.bodyId, parsed.geohash)
+}
+
+function buildCelestialGeohashTags(rawGeohash: string): string[][] {
+  const parsed = parseCelestialChannelKey(rawGeohash)
+  if (parsed) {
+    const canonical = makeCelestialChannelKey(parsed.bodyId, parsed.geohash)
+    if (canonical) {
+      return parsed.bodyId === 'earth'
+        ? [['g', canonical]]
+        : [
+            ['g', canonical],
+            ['body', parsed.bodyId],
+          ]
+    }
+  }
+  return [['g', normalizeGeohash(rawGeohash)]]
 }
 
 /**
@@ -609,13 +629,12 @@ export function buildGeohashChatTemplate(opts: {
   broadcastClientTag?: boolean
   lightningAddress?: string | null
 }): EventTemplate {
-  const gh = normalizeGeohash(opts.geohash)
-  const tags: string[][] = [['g', gh]]
+  const tags: string[][] = buildCelestialGeohashTags(opts.geohash)
   const cleanNick = opts.nickname.trim()
   if (cleanNick) {
     tags.push(['n', cleanNick])
   }
-  if (opts.isTeleported) {
+  if (opts.isTeleported && !isCelestialNonEarthChannel(opts.geohash)) {
     tags.push(['t', 'teleport'])
   }
   if (opts.broadcastClientTag) {
@@ -693,8 +712,8 @@ export function buildPresenceTemplate(
   geohash: string,
   broadcastClientTag = false
 ): EventTemplate {
-  // Per docs/GeohashPresenceSpec.md: empty content, ["g", geohash], optional NIP-89 client tag, NO nickname tag
-  const tags: string[][] = [['g', normalizeGeohash(geohash)]]
+  // Per docs/GeohashPresenceSpec.md: empty content, ["g", geohash] (+ ["body", id] for non-Earth), optional NIP-89 client tag, NO nickname tag
+  const tags: string[][] = buildCelestialGeohashTags(geohash)
   if (broadcastClientTag) {
     tags.push(['client', AGNOSTR_CLIENT_TAG])
   }
@@ -722,7 +741,7 @@ export function buildReactionTemplate(opts: {
         ['k', String(KIND_NAMED_BITCHAT_CHAT)],
       ]
     : [
-        ['g', normalizeGeohash(opts.geohash)],
+        ...buildCelestialGeohashTags(opts.geohash),
         ['e', opts.targetEventId],
         ['p', opts.targetPubkey.toLowerCase()],
       ]
@@ -746,7 +765,7 @@ export function buildLocationNoteTemplate(opts: {
 }): EventTemplate {
   const now = Math.floor(Date.now() / 1000)
   const ttl = opts.ttlSeconds ?? 24 * 60 * 60
-  const tags: string[][] = [['g', normalizeGeohash(opts.geohash)]]
+  const tags: string[][] = buildCelestialGeohashTags(opts.geohash)
   const cleanNick = opts.nickname.trim()
   if (cleanNick) tags.push(['n', cleanNick])
   tags.push(['expiration', String(now + ttl)])
@@ -774,7 +793,8 @@ export function parseGeohashChatEvent(
 ): GeoMessage | null {
   if (event.kind !== KIND_GEOHASH_CHAT) return null
   const gh = extractGeohashTag(event.tags)
-  if (!gh || gh !== normalizeGeohash(expectedGeohash)) return null
+  const expected = normalizeBitchatChannelKey(expectedGeohash) ?? normalizeGeohash(expectedGeohash)
+  if (!gh || gh !== expected) return null
 
   const content = (event.content ?? '').trim()
   // Ignore empty teleport probe pings (matches Bitchat NostrInboundPipeline.swift L287-292)
@@ -934,7 +954,8 @@ export function parseReactionEvent(
     channelKey = `${TOPIC_CHANNEL_PREFIX}${slug}`
   } else {
     const gh = extractGeohashTag(event.tags)
-    if (!gh || gh !== normalizeGeohash(expectedGeohash)) return null
+    const expected = normalizeBitchatChannelKey(expectedGeohash) ?? normalizeGeohash(expectedGeohash)
+    if (!gh || gh !== expected) return null
     channelKey = gh
   }
   const targetEventId = getTagValue(event.tags, 'e')
@@ -957,7 +978,8 @@ export function parseLocationNoteEvent(
 ): LocationNote | null {
   if (event.kind !== KIND_LOCATION_NOTE) return null
   const gh = extractGeohashTag(event.tags)
-  if (!gh || gh !== normalizeGeohash(expectedGeohash)) return null
+  const expected = normalizeBitchatChannelKey(expectedGeohash) ?? normalizeGeohash(expectedGeohash)
+  if (!gh || gh !== expected) return null
   const content = (event.content ?? '').trim()
   if (!content) return null
 

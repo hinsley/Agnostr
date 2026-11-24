@@ -580,6 +580,69 @@
   flex-direction: column;
 }
 
+/* Mobile Pull-to-Refresh Indicator (0px at rest, 60fps finger tracking, spring collapse) */
+.ag-agora-ptr {
+  flex: 0 0 auto;
+  width: 100%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  user-select: none;
+  transition: height 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.ag-agora-ptr.is-dragging {
+  transition: none;
+}
+
+.ag-agora-ptr-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  max-width: calc(100% - 24px);
+  height: 32px;
+  padding: 0 0.85rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
+  will-change: transform, opacity;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-ptr.is-ready .ag-agora-ptr-pill,
+.ag-agora-ptr.is-refreshing .ag-agora-ptr-pill {
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-subtle));
+  color: var(--accent);
+}
+
+.ag-agora-ptr-icon {
+  flex-shrink: 0;
+  color: currentColor;
+}
+
+.ag-agora-ptr-icon.ag-spin {
+  animation: ag-agora-rotate 0.85s linear infinite;
+}
+
+.ag-agora-ptr-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* --------------------------------------------------------------------------
    Avatars
    -------------------------------------------------------------------------- */
@@ -1426,6 +1489,368 @@
   display: block;
 }
 
+.ag-agora-media-video.is-compact {
+  max-height: 220px;
+  border-radius: var(--radius-sm);
+}
+
+.ag-agora-quote-video-wrap {
+  margin-top: 0.28rem;
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Universal Fail-Closed Image Safety Shields & Trust-Gated Video Cards
+   -------------------------------------------------------------------------- */
+.ag-agora-media-reveal-hit {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  background: transparent;
+}
+
+.ag-agora-revealed-wrap {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ag-agora-revealed-wrap.variant-banner,
+.ag-agora-revealed-wrap.variant-upload {
+  height: 100%;
+}
+
+.ag-agora-revealed-wrap.variant-upload img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-agora-shield-hide-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  height: 26px;
+  padding: 0 0.6rem;
+  border-radius: var(--radius-full);
+  background-color: color-mix(in srgb, var(--bg-canvas) 82%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-agora-shield-hide-btn:hover {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-accent);
+}
+
+.ag-agora-img-scanning {
+  width: 100%;
+  min-height: 148px;
+  padding: 1rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  background: linear-gradient(
+    110deg,
+    var(--bg-surface) 25%,
+    color-mix(in srgb, var(--bg-elevated) 85%, var(--accent-soft)) 50%,
+    var(--bg-surface) 75%
+  );
+  background-size: 220% 100%;
+  animation: ag-agora-shimmer 1.5s ease-in-out infinite;
+}
+
+.ag-agora-img-scanning.variant-quote,
+.ag-agora-img-scanning.variant-thumb {
+  min-height: 112px;
+  border-radius: var(--radius-sm);
+}
+
+.ag-agora-img-scanning.variant-banner {
+  min-height: 100%;
+  height: 100%;
+  padding: 0.65rem;
+}
+
+.ag-agora-img-scanning.variant-upload {
+  min-height: 100%;
+  height: 100%;
+  padding: 0.35rem;
+  font-size: 10.5px;
+}
+
+.ag-agora-img-scanning.is-compact {
+  min-height: 104px;
+}
+
+.ag-agora-img-scanning-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes ag-agora-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.ag-agora-img-shield {
+  width: 100%;
+  min-height: 148px;
+  padding: 1rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.36rem;
+  text-align: center;
+  background-color: var(--bg-surface);
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.ag-agora-img-shield.variant-quote {
+  margin-top: 0.2rem;
+  min-height: 108px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-agora-img-shield.variant-thumb {
+  min-height: 112px;
+}
+
+.ag-agora-img-shield.variant-banner {
+  min-height: 100%;
+  height: 100%;
+  padding: 0.6rem 0.85rem;
+}
+
+.ag-agora-img-shield.variant-upload {
+  min-height: 100%;
+  height: 100%;
+  padding: 0.4rem;
+  font-size: 10.5px;
+}
+
+.ag-agora-img-shield.is-compact {
+  min-height: 110px;
+  padding: 0.75rem 0.75rem;
+}
+
+.ag-agora-img-shield.is-illegal {
+  background-color: color-mix(in srgb, var(--status-danger) 10%, var(--bg-surface));
+  color: var(--status-danger);
+}
+
+.ag-agora-img-shield.is-nsfw {
+  background-color: color-mix(in srgb, var(--status-warn) 10%, var(--bg-surface));
+  color: var(--text-primary);
+}
+
+.ag-agora-img-shield.is-nsfw > svg {
+  color: var(--status-warn);
+}
+
+.ag-agora-img-shield.is-error > svg {
+  color: var(--text-muted);
+}
+
+.ag-agora-img-shield-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.ag-agora-img-shield.is-illegal .ag-agora-img-shield-title {
+  color: var(--status-danger);
+}
+
+.ag-agora-img-shield-sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+.ag-agora-video-shield {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.ag-agora-video-shield.is-compact {
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-agora-video-thumb-wrap {
+  position: relative;
+  width: 100%;
+  max-height: 220px;
+  overflow: hidden;
+  background-color: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-agora-video-thumb-wrap > img,
+.ag-agora-video-thumb-wrap .ag-agora-revealed-wrap img {
+  width: 100%;
+  max-height: 220px;
+  object-fit: cover;
+  display: block;
+  filter: brightness(0.84);
+}
+
+.ag-agora-video-lock-badge {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  height: 36px;
+  padding: 0 0.85rem;
+  border-radius: var(--radius-full);
+  background-color: color-mix(in srgb, var(--bg-canvas) 78%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in srgb, var(--border-default) 85%, transparent);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+}
+
+.ag-agora-video-shield-body {
+  padding: 0.78rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.ag-agora-video-shield.is-compact .ag-agora-video-shield-body {
+  padding: 0.62rem 0.72rem;
+}
+
+.ag-agora-video-shield-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  color: var(--status-warn);
+  min-width: 0;
+}
+
+.ag-agora-video-shield-head svg {
+  flex-shrink: 0;
+}
+
+.ag-agora-video-shield-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.25;
+}
+
+.ag-agora-video-shield-sub {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.ag-agora-shield-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.42rem;
+  margin-top: 0.2rem;
+}
+
+.ag-agora-shield-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.34rem;
+  height: 30px;
+  padding: 0 0.72rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  max-width: 100%;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-shield-btn:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--border-accent);
+}
+
+.ag-agora-shield-btn.primary {
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-default));
+  color: var(--accent);
+}
+
+.ag-agora-shield-btn.primary:hover {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+.ag-agora-shield-btn.danger {
+  color: var(--status-danger);
+  border-color: color-mix(in srgb, var(--status-danger) 35%, var(--border-default));
+}
+
+.ag-agora-shield-btn.danger:hover {
+  background-color: color-mix(in srgb, var(--status-danger) 14%, var(--bg-elevated));
+  border-color: var(--status-danger);
+}
+
+.ag-agora-shield-btn span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Focused Note Full Timestamp & Engagement Stats Row */
 .ag-agora-focused-meta {
   display: flex;
@@ -2007,6 +2432,14 @@
   min-width: 0;
 }
 
+.ag-agora-disc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
 .ag-agora-disc-title {
   margin: 0;
   font-size: 13px;
@@ -2015,16 +2448,102 @@
   display: flex;
   align-items: center;
   gap: 0.4rem;
+  min-width: 0;
 }
 
 .ag-agora-disc-title svg {
   color: var(--accent);
 }
 
+.ag-agora-hidden-trends-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 22px;
+  padding: 0 0.48rem;
+  border-radius: var(--radius-full);
+  background-color: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-hidden-trends-toggle:hover,
+.ag-agora-hidden-trends-toggle.active {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
 .ag-agora-tag-cloud {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
+}
+
+.ag-agora-trend-item-wrap {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-agora-trend-item-wrap:hover,
+.ag-agora-trend-item-wrap.active {
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
+.ag-agora-trend-item-wrap .ag-agora-tag-chip {
+  background-color: transparent;
+  border: none;
+  padding: 0.24rem 0.24rem 0.24rem 0.56rem;
+  min-width: 0;
+}
+
+.ag-agora-trend-item-wrap .ag-agora-tag-chip:hover,
+.ag-agora-trend-item-wrap .ag-agora-tag-chip.active {
+  background-color: transparent;
+  border-color: transparent;
+}
+
+.ag-agora-trend-hide-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 2px;
+  border-radius: var(--radius-full);
+  color: var(--text-muted);
+  opacity: 0.62;
+  flex-shrink: 0;
+  transition:
+    opacity var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-trend-item-wrap:hover .ag-agora-trend-hide-btn,
+.ag-agora-trend-item-wrap:focus-within .ag-agora-trend-hide-btn,
+.ag-agora-trend-hide-btn:focus-visible {
+  opacity: 1;
+}
+
+.ag-agora-trend-hide-btn:hover {
+  background-color: color-mix(in srgb, var(--status-danger) 14%, transparent);
+  color: var(--status-danger);
 }
 
 .ag-agora-tag-chip {
@@ -2055,6 +2574,69 @@
   font-size: 10.5px;
   color: var(--text-muted);
   font-weight: 500;
+}
+
+.ag-agora-hidden-trends {
+  margin-top: 0.45rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+}
+
+.ag-agora-hidden-trends-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.ag-agora-hidden-trends-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ag-agora-hidden-trends-clear {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 0.1rem 0.3rem;
+  border-radius: var(--radius-sm);
+}
+
+.ag-agora-hidden-trends-clear:hover {
+  background-color: var(--accent-soft);
+}
+
+.ag-agora-hidden-trends-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.ag-agora-hidden-trend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-canvas);
+  border: 1px dashed var(--border-default);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-hidden-trend-chip:hover {
+  background-color: var(--accent-soft);
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  color: var(--accent);
 }
 
 .ag-agora-voice-list {
@@ -2613,5 +3195,11 @@
   .ag-agora-modal {
     border-radius: var(--radius-xl);
     max-height: calc(100% - 0.5rem);
+  }
+
+  .ag-agora-trend-hide-btn {
+    opacity: 0.88;
+    width: 24px;
+    height: 24px;
   }
 }

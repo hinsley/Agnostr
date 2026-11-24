@@ -64,6 +64,7 @@ import { verifyEventCached } from '../lib/bitchatProtocol.ts'
 import { normalizeRelayUrl } from '../lib/geoRelays.ts'
 import { encodeNpubSafe, type IdentityManager } from '../lib/identity.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
+import { loadHiddenTrendingTopics, saveHiddenTrendingTopics } from '../lib/storage.ts'
 import { normalizeLightningAddress } from '../lib/zaps.ts'
 
 export const AGORA_PROFILES_STORAGE_KEY = 'agnostr:v2:agora_profiles'
@@ -495,6 +496,13 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
   const [globalItems, setGlobalItems] = useState<AgoraFeedItem[]>([])
   const [trendingCandidates, setTrendingCandidates] = useState<AgoraNote[]>([])
   const [pendingNewCount, setPendingNewCount] = useState(0)
+  const [hiddenTrendingTopics, setHiddenTrendingTopics] = useState<string[]>(() =>
+    loadHiddenTrendingTopics()
+  )
+  const hiddenTrendingSet = useMemo(
+    () => new Set(hiddenTrendingTopics.map((t) => t.toLowerCase())),
+    [hiddenTrendingTopics]
+  )
 
   // Normalized caches
   const [profilesByPubkey, setProfilesByPubkey] = useState<Record<string, AgoraProfile>>(() =>
@@ -2960,21 +2968,53 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     ]
   )
 
-  // Live computed Trending Hashtags (top 10)
+  const hideTrendingTopic = useCallback((tag: string) => {
+    const clean = normalizeHashtag(tag) ?? tag.trim().replace(/^#+/, '').toLowerCase()
+    if (!clean) return
+    setHiddenTrendingTopics((prev) => {
+      if (prev.includes(clean)) return prev
+      const next = [clean, ...prev].slice(0, 200)
+      saveHiddenTrendingTopics(next)
+      return next
+    })
+  }, [])
+
+  const unhideTrendingTopic = useCallback((tag: string) => {
+    const clean = normalizeHashtag(tag) ?? tag.trim().replace(/^#+/, '').toLowerCase()
+    if (!clean) return
+    setHiddenTrendingTopics((prev) => {
+      const next = prev.filter((item) => item !== clean)
+      if (next.length === prev.length) return prev
+      saveHiddenTrendingTopics(next)
+      return next
+    })
+  }, [])
+
+  const clearHiddenTrendingTopics = useCallback(() => {
+    setHiddenTrendingTopics((prev) => {
+      if (prev.length === 0) return prev
+      saveHiddenTrendingTopics([])
+      return []
+    })
+  }, [])
+
+  // Live computed Trending Hashtags (top 10, excluding user-hidden topics)
   const trendingHashtags = useMemo<AgoraTrendingHashtag[]>(() => {
     const counts = new Map<string, number>()
     for (const note of Object.values(notesById)) {
       if (blockedSet.has(note.pubkey)) continue
       for (const tag of note.hashtags) {
-        if (tag.length < 2 || tag.length > 32 || /^\d+$/.test(tag)) continue
-        counts.set(tag, (counts.get(tag) ?? 0) + 1)
+        const slug = tag.trim().replace(/^#+/, '').toLowerCase()
+        if (slug.length < 2 || slug.length > 32 || /^\d+$/.test(slug)) continue
+        if (hiddenTrendingSet.has(slug)) continue
+        counts.set(slug, (counts.get(slug) ?? 0) + 1)
       }
     }
     return Array.from(counts.entries())
       .map(([tag, count]) => ({ tag, count }))
       .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
       .slice(0, 10)
-  }, [notesById, blockedSet])
+  }, [notesById, blockedSet, hiddenTrendingSet])
 
   // Live computed Suggested Voices (active unfollowed authors with rich profiles)
   const suggestedProfiles = useMemo<AgoraProfile[]>(() => {
@@ -3073,6 +3113,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       localStorage.removeItem(AGORA_PROFILES_STORAGE_KEY)
       localStorage.removeItem(AGORA_BOOKMARKS_STORAGE_KEY)
       localStorage.removeItem(AGORA_NOTIF_READ_AT_STORAGE_KEY)
+      localStorage.removeItem('agnostr:v1:agora_hidden_trending_topics')
     } catch {
       // Ignore storage errors
     }
@@ -3085,6 +3126,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     setGlobalItems([])
     setTrendingCandidates([])
     setPendingNewCount(0)
+    setHiddenTrendingTopics([])
     setProfilesByPubkey({})
     setNotesById({})
     setStatsByNoteId({})
@@ -3217,6 +3259,10 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       selectHashtag,
       clearSearch,
       trendingHashtags,
+      hiddenTrendingTopics,
+      hideTrendingTopic,
+      unhideTrendingTopic,
+      clearHiddenTrendingTopics,
       suggestedProfiles,
 
       publishing,
@@ -3282,6 +3328,10 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       selectHashtag,
       clearSearch,
       trendingHashtags,
+      hiddenTrendingTopics,
+      hideTrendingTopic,
+      unhideTrendingTopic,
+      clearHiddenTrendingTopics,
       suggestedProfiles,
       publishing,
       uploadingMedia,

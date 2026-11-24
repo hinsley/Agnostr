@@ -80,7 +80,9 @@ import {
   normalizeRelayUrl,
   PULSE_RELAYS,
   selectRelaysForGeohash,
+  type ChannelRelaySelection,
   type GeoRelayEntry,
+  type SelectedRelayMeta,
 } from '../lib/geoRelays.ts'
 import {
   decodePubkeyInput,
@@ -106,15 +108,19 @@ import {
 } from '../lib/profileVault.ts'
 import {
   formatBitchatChannelHash,
+  getChannelRawGeohash,
   getTopicSlug,
+  isCelestialNonEarthChannel,
   isTopicChannel,
   isValidBitchatChannelKey,
   makeTopicChannelKey,
   normalizeBitchatChannelKey,
+  parseCelestialChannelKey,
   parseQuickTuneInput,
   parseBitchatChannelHash,
   TOPIC_CHANNEL_PREFIX,
 } from '../lib/bitchatChannel.ts'
+import { findNearestCelestialLandmark, getBodyDef } from '../lib/solarSystem.ts'
 import { RelayPool } from '../lib/relayPool.ts'
 import {
   KeyedFifoQueue,
@@ -295,6 +301,82 @@ function readInitialGeohash(): string {
   return loadActiveGeohash()
 }
 
+function buildCelestialRelaySelection(
+  directory: readonly GeoRelayEntry[],
+  customRelays: readonly string[]
+): ChannelRelaySelection {
+  const metaMap = new Map<string, SelectedRelayMeta>()
+  const coreDmSet = new Set<string>(CORE_DM_RELAYS)
+
+  const addRole = (
+    url: string,
+    role: 'core' | 'pulse' | 'custom',
+    coords?: { lat: number; lon: number },
+    supportsDm = false
+  ) => {
+    const existing = metaMap.get(url)
+    if (existing) {
+      if (!existing.roles.includes(role)) existing.roles.push(role)
+      if (coords && existing.lat === undefined) {
+        existing.lat = coords.lat
+        existing.lon = coords.lon
+      }
+      if (supportsDm) existing.supportsDm = true
+    } else {
+      metaMap.set(url, {
+        url,
+        roles: [role],
+        lat: coords?.lat,
+        lon: coords?.lon,
+        supportsDm: supportsDm || coreDmSet.has(url),
+      })
+    }
+  }
+
+  const channelSet = new Set<string>()
+  const dmSet = new Set<string>()
+  const pulseSet = new Set<string>()
+
+  for (const url of PULSE_RELAYS) {
+    channelSet.add(url)
+    pulseSet.add(url)
+    const dirEntry = directory.find((d) => d.url === url)
+    addRole(
+      url,
+      'pulse',
+      dirEntry ? { lat: dirEntry.lat, lon: dirEntry.lon } : undefined,
+      coreDmSet.has(url)
+    )
+  }
+
+  for (const url of CORE_DM_RELAYS) {
+    channelSet.add(url)
+    dmSet.add(url)
+    const dirEntry = directory.find((d) => d.url === url)
+    addRole(
+      url,
+      'core',
+      dirEntry ? { lat: dirEntry.lat, lon: dirEntry.lon } : undefined,
+      true
+    )
+  }
+
+  for (const raw of customRelays) {
+    const url = normalizeRelayUrl(raw)
+    if (!url) continue
+    channelSet.add(url)
+    dmSet.add(url)
+    addRole(url, 'custom', undefined, true)
+  }
+
+  return {
+    channelRelays: Array.from(channelSet),
+    dmRelays: Array.from(dmSet),
+    pulseRelays: Array.from(pulseSet),
+    allMetadata: metaMap,
+  }
+}
+
 export function useAgnostrEngine(): AgnostrEngine {
   // Cold-boot storage sweep BEFORE any channel/DM/server state hydrates from localStorage
   const bootScrubbedCountRef = useRef<number | null>(null)
@@ -372,10 +454,34 @@ export function useAgnostrEngine(): AgnostrEngine {
   // Geolocation
   const { location, localFullGeohash, locateMe: rawLocateMe, resetLocation } = useLocation(activeGeohash)
 
-  const cell = useMemo(
-    () => buildGeohashCell(activeGeohash, localFullGeohash),
-    [activeGeohash, localFullGeohash]
+  const activeCelestial = useMemo(
+    () => parseCelestialChannelKey(activeGeohash),
+    [activeGeohash]
   )
+  const isNonEarthCelestial = Boolean(activeCelestial && activeCelestial.bodyId !== 'earth')
+  const effectiveIsTeleported = isNonEarthCelestial ? false : location.isTeleported
+  const effectiveLocation = useMemo(
+    () => (isNonEarthCelestial ? { ...location, isTeleported: false } : location),
+    [isNonEarthCelestial, location]
+  )
+
+  const cell = useMemo(() => {
+    const rawGh = getChannelRawGeohash(activeGeohash)
+    if (activeCelestial && activeCelestial.bodyId !== 'earth') {
+      const baseCell = buildGeohashCell(activeCelestial.geohash)
+      const landmark =
+        findNearestCelestialLandmark(
+          activeCelestial.bodyId,
+          baseCell.center.lat,
+          baseCell.center.lon
+        ) ?? getBodyDef(activeCelestial.bodyId).name
+      return {
+        ...baseCell,
+        nearestCity: landmark,
+      }
+    }
+    return buildGeohashCell(rawGh ?? activeGeohash, localFullGeohash)
+  }, [activeGeohash, activeCelestial, localFullGeohash])
 
   const identity = useMemo(
     () => identityManager.getState(activeGeohash),
@@ -482,8 +588,11 @@ export function useAgnostrEngine(): AgnostrEngine {
   }, [])
 
   const relaySelection = useMemo(
-    () => selectRelaysForGeohash(activeGeohash, geoDirectory, customRelays, 5),
-    [activeGeohash, geoDirectory, customRelays]
+    () =>
+      isNonEarthCelestial
+        ? buildCelestialRelaySelection(geoDirectory, customRelays)
+        : selectRelaysForGeohash(activeGeohash, geoDirectory, customRelays, 5),
+    [isNonEarthCelestial, activeGeohash, geoDirectory, customRelays]
   )
 
   // Channel-scoped messages, peers, and location notes (tagged by channelKey so rapid channel switches
@@ -1392,7 +1501,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       pubkey: identity.activePubkey,
       seenAtSec: Math.floor(Date.now() / 1000),
       nickname: identity.nickname,
-      isTeleported: location.isTeleported,
+      isTeleported: effectiveIsTeleported,
       clientName: settings.broadcastClientTag ? AGNOSTR_CLIENT_TAG : undefined,
       isAgnostrClient: settings.broadcastClientTag,
     })
@@ -1401,7 +1510,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     activeGeohash,
     identity.activePubkey,
     identity.nickname,
-    location.isTeleported,
+    effectiveIsTeleported,
     settings.broadcastClientTag,
     presenceTracker,
     refreshPeers,
@@ -1970,15 +2079,15 @@ export function useAgnostrEngine(): AgnostrEngine {
       if (normalized) set.add(normalized)
     }
     const geoChannels: string[] = []
-    let hasTopic = false
+    let hasGlobalBroadcast = false
     for (const ch of watchedChannels) {
-      if (isTopicChannel(ch)) {
-        hasTopic = true
+      if (isTopicChannel(ch) || isCelestialNonEarthChannel(ch)) {
+        hasGlobalBroadcast = true
       } else {
         geoChannels.push(ch)
       }
     }
-    if (hasTopic) {
+    if (hasGlobalBroadcast) {
       for (const url of PULSE_RELAYS.slice(0, 2)) {
         set.add(url)
       }
@@ -1989,7 +2098,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         set.add(url)
       }
     }
-    if (hasTopic) {
+    if (hasGlobalBroadcast) {
       for (const url of PULSE_RELAYS.slice(2, 7)) {
         set.add(url)
       }
@@ -2246,7 +2355,10 @@ export function useAgnostrEngine(): AgnostrEngine {
   // Privacy-safe kind 20001 presence heartbeat (strictly precision <= 5 per GeohashPresenceSpec.md)
   useEffect(() => {
     if (!pool) return
-    if (!canBroadcastPresenceForGeohash(activeGeohash, settings.presenceEnabled)) return
+    const rawPresenceKey = isTopicChannel(activeGeohash)
+      ? activeGeohash
+      : (getChannelRawGeohash(activeGeohash) ?? activeGeohash)
+    if (!canBroadcastPresenceForGeohash(rawPresenceKey, settings.presenceEnabled)) return
     // Don't prompt NIP-07 extension popups on background heartbeats
     if (identityManager.getSignMode() === 'extension') return
 
@@ -3146,15 +3258,16 @@ export function useAgnostrEngine(): AgnostrEngine {
     }
   }, [pool, identityManager])
 
-  const presence = useMemo(
-    () =>
-      presenceTracker.getSummary(
-        activeGeohash,
-        peers,
-        settings.presenceEnabled && identity.signMode !== 'extension'
-      ),
-    [presenceTracker, activeGeohash, peers, settings.presenceEnabled, identity.signMode]
-  )
+  const presence = useMemo(() => {
+    const rawPresenceKey = isTopicChannel(activeGeohash)
+      ? activeGeohash
+      : (getChannelRawGeohash(activeGeohash) ?? activeGeohash)
+    return presenceTracker.getSummary(
+      rawPresenceKey,
+      peers,
+      settings.presenceEnabled && identity.signMode !== 'extension'
+    )
+  }, [presenceTracker, activeGeohash, peers, settings.presenceEnabled, identity.signMode])
 
   // Channel navigation & pins
   useEffect(() => {
@@ -3307,10 +3420,11 @@ export function useAgnostrEngine(): AgnostrEngine {
       const gh = activeGeohashRef.current
       const targetRelays = [...relaySelectionRef.current.channelRelays]
       const isTopic = isTopicChannel(gh)
+      const isNonEarth = isCelestialNonEarthChannel(gh)
       const nick = identityManager.getNickname()
       const activeKey = identityManager.getKeyMaterialForGeohash(gh)
       const replyTarget = replyOverride !== undefined ? replyOverride : replyingToRef.current
-      const isTeleported = location.isTeleported
+      const isTeleported = isTopic || isNonEarth ? false : location.isTeleported
       const broadcastClientTag = settings.broadcastClientTag
       const lightningAddr = zapsEngine.lightningAddress
       const powEnabled = settings.powEnabled
@@ -4436,9 +4550,10 @@ export function useAgnostrEngine(): AgnostrEngine {
       }
 
       const isTopic = isTopicChannel(gh)
+      const isNonEarth = isCelestialNonEarthChannel(gh)
       const nick = identityManager.getNickname()
       const activeKey = identityManager.getKeyMaterialForGeohash(gh)
-      const isTeleported = location.isTeleported
+      const isTeleported = isTopic || isNonEarth ? false : location.isTeleported
       const broadcastClientTag = settings.broadcastClientTag
       const lightningAddr = zapsEngine.lightningAddress
       const powEnabled = settings.powEnabled
@@ -4963,9 +5078,10 @@ export function useAgnostrEngine(): AgnostrEngine {
       }
 
       const isTopic = isTopicChannel(gh)
+      const isNonEarth = isCelestialNonEarthChannel(gh)
       const nick = identityManager.getNickname()
       const activeKey = identityManager.getKeyMaterialForGeohash(gh)
-      const isTeleported = location.isTeleported
+      const isTeleported = isTopic || isNonEarth ? false : location.isTeleported
       const broadcastClientTag = settings.broadcastClientTag
       const lightningAddr = zapsEngine.lightningAddress
       const powEnabled = settings.powEnabled
@@ -5699,8 +5815,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     activeView,
     activeGeohash,
     cell,
-    isTeleported: location.isTeleported,
-    location,
+    isTeleported: effectiveIsTeleported,
+    location: effectiveLocation,
     quickCities: QUICK_CITIES,
 
     messages: visibleMessages,

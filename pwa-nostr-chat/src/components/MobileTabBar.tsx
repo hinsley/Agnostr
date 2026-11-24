@@ -1,5 +1,13 @@
-import React from 'react'
-import { Landmark, LayoutGrid, MessageCircle, Users, Waves } from 'lucide-react'
+import React, { useEffect, useRef } from 'react'
+import {
+  Globe,
+  Landmark,
+  Mail,
+  MessageCircle,
+  Settings,
+  Users,
+  Wallet,
+} from 'lucide-react'
 import type { ActiveWorkspace } from './AppRail'
 import type { ListTab } from './ConversationList'
 
@@ -13,12 +21,12 @@ export interface MobileTabBarProps {
   serverUnread: number
   serverMentions?: number
   mailUnread?: number
-  suiteOpen?: boolean
-  mapActive?: boolean
   settingsActive?: boolean
   onSelectAgora: () => void
   onSelectTab: (tab: ListTab) => void
-  onToggleSuite: () => void
+  onSelectMail: () => void
+  onSelectWallet: () => void
+  onOpenSettings: () => void
 }
 
 function formatBadgeCount(count: number): string {
@@ -35,26 +43,66 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
   serverUnread,
   serverMentions = 0,
   mailUnread = 0,
-  suiteOpen = false,
-  mapActive = false,
   settingsActive = false,
   onSelectAgora,
   onSelectTab,
-  onToggleSuite,
+  onSelectMail,
+  onSelectWallet,
+  onOpenSettings,
 }) => {
-  const isAgoraActive = workspace === 'agora'
-  const isBitchatActive = workspace === 'chat' && activeTab === 'bitchat'
-  const isDmsActive = workspace === 'chat' && activeTab === 'dms'
-  const isGroupsActive = workspace === 'chat' && activeTab === 'servers'
-  const isAppsActive = Boolean(
-    suiteOpen || workspace === 'mail' || workspace === 'wallet' || mapActive || settingsActive
-  )
+  const navRef = useRef<HTMLElement | null>(null)
+  const hasMountedRef = useRef(false)
+
+  const isAgoraActive = !settingsActive && workspace === 'agora'
+  const isBitchatActive = !settingsActive && workspace === 'chat' && activeTab === 'bitchat'
+  const isDmsActive = !settingsActive && workspace === 'chat' && activeTab === 'dms'
+  const isGroupsActive = !settingsActive && workspace === 'chat' && activeTab === 'servers'
+  const isMailActive = !settingsActive && workspace === 'mail'
+  const isWalletActive = !settingsActive && workspace === 'wallet'
+  const isSettingsActive = Boolean(settingsActive)
+
+  const activeKey = isSettingsActive
+    ? 'settings'
+    : isAgoraActive
+      ? 'agora'
+      : isMailActive
+        ? 'mail'
+        : isWalletActive
+          ? 'wallet'
+          : isDmsActive
+            ? 'dms'
+            : isGroupsActive
+              ? 'servers'
+              : 'bitchat'
+
+  useEffect(() => {
+    const nav = navRef.current
+    if (!nav) return
+    const activeBtn = nav.querySelector<HTMLElement>(`[data-mtab-id="${activeKey}"]`)
+    if (!activeBtn) return
+    try {
+      activeBtn.scrollIntoView({
+        behavior: hasMountedRef.current ? 'smooth' : 'auto',
+        inline: 'nearest',
+        block: 'nearest',
+      })
+    } catch {
+      // Ignore scrollIntoView option errors on older WebViews
+    }
+    hasMountedRef.current = true
+  }, [activeKey])
 
   return (
-    <nav className="ag-mobile-tabbar" aria-label="Primary navigation">
+    <nav
+      ref={navRef}
+      className="ag-mobile-tabbar"
+      data-no-swipe="true"
+      aria-label="Primary navigation"
+    >
       {/* 1. Agora */}
       <button
         type="button"
+        data-mtab-id="agora"
         className={`ag-mtab-btn ${isAgoraActive ? 'active' : ''}`}
         onClick={onSelectAgora}
         aria-current={isAgoraActive ? 'page' : undefined}
@@ -77,12 +125,13 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
       {/* 2. Bitchat */}
       <button
         type="button"
+        data-mtab-id="bitchat"
         className={`ag-mtab-btn ${isBitchatActive ? 'active' : ''}`}
         onClick={() => onSelectTab('bitchat')}
         aria-current={isBitchatActive ? 'page' : undefined}
       >
         <span className="ag-mtab-icon-wrap">
-          <Waves size={19} strokeWidth={isBitchatActive ? 2.15 : 1.75} />
+          <Globe size={19} strokeWidth={isBitchatActive ? 2.15 : 1.75} />
           {bitchatMentions > 0 ? (
             <span
               className="ag-mtab-badge ping tabular"
@@ -105,6 +154,7 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
       {/* 3. People */}
       <button
         type="button"
+        data-mtab-id="dms"
         className={`ag-mtab-btn dm ${isDmsActive ? 'active' : ''}`}
         onClick={() => onSelectTab('dms')}
         aria-current={isDmsActive ? 'page' : undefined}
@@ -126,6 +176,7 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
       {/* 4. Groups */}
       <button
         type="button"
+        data-mtab-id="servers"
         className={`ag-mtab-btn ${isGroupsActive ? 'active' : ''}`}
         onClick={() => onSelectTab('servers')}
         aria-current={isGroupsActive ? 'page' : undefined}
@@ -151,17 +202,17 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
         <span className="ag-mtab-label">Groups</span>
       </button>
 
-      {/* 5. Apps (Suite Launcher Sheet) */}
+      {/* 5. Agmail */}
       <button
         type="button"
-        className={`ag-mtab-btn ${isAppsActive ? 'active' : ''}`}
-        onClick={onToggleSuite}
-        aria-haspopup="dialog"
-        aria-expanded={suiteOpen}
-        aria-label={mailUnread > 0 ? `Apps (${mailUnread} unread Agmail)` : 'Apps'}
+        data-mtab-id="mail"
+        className={`ag-mtab-btn ${isMailActive ? 'active' : ''}`}
+        onClick={onSelectMail}
+        aria-current={isMailActive ? 'page' : undefined}
+        aria-label={mailUnread > 0 ? `Agmail (${mailUnread} unread)` : 'Agmail'}
       >
         <span className="ag-mtab-icon-wrap">
-          <LayoutGrid size={19} strokeWidth={isAppsActive ? 2.15 : 1.75} />
+          <Mail size={19} strokeWidth={isMailActive ? 2.15 : 1.75} />
           {mailUnread > 0 && (
             <span
               className="ag-mtab-badge ping tabular"
@@ -171,7 +222,37 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
             </span>
           )}
         </span>
-        <span className="ag-mtab-label">Apps</span>
+        <span className="ag-mtab-label">Agmail</span>
+      </button>
+
+      {/* 6. Agwallet */}
+      <button
+        type="button"
+        data-mtab-id="wallet"
+        className={`ag-mtab-btn ${isWalletActive ? 'active' : ''}`}
+        onClick={onSelectWallet}
+        aria-current={isWalletActive ? 'page' : undefined}
+        aria-label="Agwallet"
+      >
+        <span className="ag-mtab-icon-wrap">
+          <Wallet size={19} strokeWidth={isWalletActive ? 2.15 : 1.75} />
+        </span>
+        <span className="ag-mtab-label">Agwallet</span>
+      </button>
+
+      {/* 7. Settings */}
+      <button
+        type="button"
+        data-mtab-id="settings"
+        className={`ag-mtab-btn ${isSettingsActive ? 'active' : ''}`}
+        onClick={onOpenSettings}
+        aria-current={isSettingsActive ? 'page' : undefined}
+        aria-label="Settings"
+      >
+        <span className="ag-mtab-icon-wrap">
+          <Settings size={19} strokeWidth={isSettingsActive ? 2.15 : 1.75} />
+        </span>
+        <span className="ag-mtab-label">Settings</span>
       </button>
     </nav>
   )

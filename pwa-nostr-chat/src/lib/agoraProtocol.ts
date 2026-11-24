@@ -388,6 +388,7 @@ function parseImetaTags(tags: string[][]): AgoraMediaItem[] {
     let mime: string | undefined
     let alt: string | undefined
     let dim: string | undefined
+    let thumb: string | undefined
 
     for (let i = 1; i < tag.length; i += 1) {
       const entry = tag[i]
@@ -401,13 +402,28 @@ function parseImetaTags(tags: string[][]): AgoraMediaItem[] {
       else if (key === 'm') mime = val.split(';')[0].trim().toLowerCase()
       else if (key === 'alt') alt = val.slice(0, 280)
       else if (key === 'dim' && /^\d{1,5}x\d{1,5}$/i.test(val)) dim = val.toLowerCase()
+      else if (key === 'thumb' || key === 'poster' || key === 'image') {
+        const cleanThumb = sanitizeHttpUrl(val)
+        if (cleanThumb && cleanThumb.toLowerCase().startsWith('https://')) {
+          if (key === 'thumb' || key === 'poster' || !thumb) {
+            thumb = cleanThumb
+          }
+        }
+      }
     }
 
     if (!url || seen.has(url)) continue
     const kind = detectMediaKindFromUrl(url, mime)
     if (!kind) continue
     seen.add(url)
-    out.push({ url, kind, mime, alt, dim })
+    out.push({
+      url,
+      kind,
+      mime,
+      alt,
+      dim,
+      ...(thumb && thumb !== url ? { thumb } : {}),
+    })
     if (out.length >= 8) break
   }
 

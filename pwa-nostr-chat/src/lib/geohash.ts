@@ -261,12 +261,14 @@ export function getPrecisionInfo(precision: number): PrecisionInfo {
       return { precision: 6, level: 'neighborhood', label: 'Neighborhood', approxSizeLabel: '~1.2 km', allowsPresence: false }
     case 7:
       return { precision: 7, level: 'block', label: 'Block', approxSizeLabel: '~153 m', allowsPresence: false }
+    case 8:
+      return { precision: 8, level: 'building', label: 'Building', approxSizeLabel: '~38 m', allowsPresence: false }
     default:
       return {
-        precision: Math.max(8, precision),
+        precision: Math.max(9, precision),
         level: 'building',
-        label: 'Building',
-        approxSizeLabel: precision >= 9 ? '~5 m' : '~38 m',
+        label: 'Spot',
+        approxSizeLabel: '~4.8 m',
         allowsPresence: false,
       }
   }
@@ -363,10 +365,10 @@ export function getPrefixChain(geohash: string, localFullGeohash?: string): GeoP
   const gh = normalizeGeohash(geohash)
   if (!gh) return []
 
-  // If user's physical GPS geohash is inside this cell, allow one-click zoom deeper up to precision 7
+  // If user's physical GPS geohash is inside this cell, allow one-click zoom deeper up to precision 9
   const target =
     localFullGeohash && localFullGeohash.startsWith(gh) && localFullGeohash.length > gh.length
-      ? localFullGeohash.slice(0, Math.min(7, localFullGeohash.length))
+      ? localFullGeohash.slice(0, Math.min(9, localFullGeohash.length))
       : gh
 
   const steps: GeoPrefixStep[] = []
@@ -580,16 +582,17 @@ export function getRecommendedPrecisionForZoom(zoom: number): number {
   if (z <= 6) return 3
   if (z <= 9) return 4
   if (z <= 11) return 5
-  if (z <= 14) return 6
-  if (z <= 16) return 7
-  return 8
+  if (z <= 13) return 6
+  if (z <= 15) return 7
+  if (z <= 17) return 8
+  return 9
 }
 
 /**
  * Appropriate map zoom level to frame a geohash cell of the given precision.
  */
 export function getZoomForPrecision(precision: number): number {
-  const p = Math.max(1, Math.min(8, Math.floor(precision)))
+  const p = Math.max(1, Math.min(9, Math.floor(precision)))
   switch (p) {
     case 1:
       return 2
@@ -604,9 +607,11 @@ export function getZoomForPrecision(precision: number): number {
     case 6:
       return 13
     case 7:
-      return 15
+      return 15.2
+    case 8:
+      return 17.2
     default:
-      return 17
+      return 19.2
   }
 }
 

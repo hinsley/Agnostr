@@ -19,6 +19,7 @@ import {
   Copy,
   Download,
   FileText,
+  Globe,
   Hash,
   HeadphoneOff,
   Headphones,
@@ -2143,7 +2144,7 @@ export function CallStage({
                 title={`Return to ${geoTag ?? activeCall.title}`}
               >
                 <span className="ag-badge ag-badge-accent mono">
-                  {isTopicCall ? <Hash size={9} /> : <Waves size={9} />}
+                  {isTopicCall ? <Hash size={9} /> : <Globe size={9} />}
                   <span>{geoTag ?? activeCall.title}</span>
                 </span>
                 <span className="ag-badge ag-badge-muted ag-hide-xs">
@@ -2568,7 +2569,7 @@ export function CallStage({
           {isGeoCall ? (
             <>
               <span className="ag-badge ag-badge-accent mono">
-                {isTopicCall ? <Hash size={10} /> : <Waves size={10} />}
+                {isTopicCall ? <Hash size={10} /> : <Globe size={10} />}
                 <span>{geoTag ?? activeCall.title}</span>
               </span>
               <span className="ag-call-title truncate ag-hide-xs">

@@ -10,15 +10,25 @@
   width: var(--rail-w, 68px);
   flex: 0 0 var(--rail-w, 68px);
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
   padding: calc(8px + env(safe-area-inset-top, 0px)) 0 max(8px, env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  overscroll-behavior-y: contain;
   background-color: var(--bg-canvas);
   border-right: 1px solid var(--border-subtle);
   z-index: 22;
   user-select: none;
+}
+
+.ag-app-rail::-webkit-scrollbar {
+  display: none;
 }
 
 .ag-rail-brand-slot {
@@ -27,64 +37,20 @@
 
 .ag-rail-brand {
   position: relative;
-  width: 48px;
+  width: 44px;
   height: 36px;
   border-radius: 11px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
   background-color: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
-  transition:
-    background-color var(--dur-fast) ease,
-    border-color var(--dur-fast) ease,
-    color var(--dur-fast) ease,
-    box-shadow var(--dur-fast) ease,
-    transform 80ms ease;
-}
-
-.ag-rail-brand:hover {
-  background-color: var(--bg-elevated);
-  border-color: var(--border-accent);
-  color: var(--text-primary);
-}
-
-.ag-rail-brand.active {
-  background-color: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--text-primary);
-  box-shadow: var(--accent-glow);
-}
-
-.ag-rail-brand:active {
-  transform: scale(0.95);
-}
-
-.ag-rail-brand:focus-visible {
-  outline: none;
-  box-shadow: var(--accent-glow);
 }
 
 .ag-rail-brand-mark {
   display: block;
   flex-shrink: 0;
-}
-
-.ag-rail-brand-grid {
-  color: var(--text-muted);
-  opacity: 0.82;
-  flex-shrink: 0;
-  transition:
-    color var(--dur-fast) ease,
-    opacity var(--dur-fast) ease;
-}
-
-.ag-rail-brand:hover .ag-rail-brand-grid,
-.ag-rail-brand.active .ag-rail-brand-grid {
-  color: var(--accent);
-  opacity: 1;
 }
 
 .ag-rail-group {
@@ -105,26 +71,17 @@
 }
 
 .ag-rail-servers {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
   width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 7px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
   padding: 6px 0 8px;
 }
 
 .ag-rail-servers.is-reordering {
   touch-action: none;
-}
-
-.ag-rail-servers::-webkit-scrollbar {
-  display: none;
 }
 
 .ag-rail-slot {
@@ -446,9 +403,10 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-ok) 30%, transparent);
 }
 
-/* Bottom Utility Stack (Map, Search, Settings, Install) */
+/* Bottom Utility Stack (Map, Search, Settings, Install, Profile) */
 .ag-rail-bottom {
   flex-shrink: 0;
+  margin-top: auto;
   width: 100%;
   display: flex;
   flex-direction: column;

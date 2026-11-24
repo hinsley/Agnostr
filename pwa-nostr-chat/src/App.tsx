@@ -53,8 +53,8 @@ import {
   registerInternalAgoraLinkHandler,
   UntrustedLinkModal,
 } from './components/UntrustedLinkModal'
-import SuiteLauncher from './components/SuiteLauncher'
 import ConversationList, { type ListTab } from './components/ConversationList'
+import BitchatChannelDrawer from './components/BitchatChannelDrawer'
 import UserListPane from './components/UserListPane'
 import MobileTabBar from './components/MobileTabBar'
 import ChannelHeader from './components/ChannelHeader'
@@ -150,7 +150,6 @@ export function App() {
   const isBitchatWorkspace = workspace === 'chat' && listTab === 'bitchat'
   const isBitchatGlobe = isBitchatWorkspace && bitchatView === 'globe'
   const isBitchatRoom = isBitchatWorkspace && bitchatView === 'room'
-  const [suiteLauncherOpen, setSuiteLauncherOpen] = useState(false)
   const [agoraInitialCompose, setAgoraInitialCompose] = useState(false)
   const [selectedServerId, setSelectedServerId] = useState<string | null>(
     () => engine.servers.activeServer?.id ?? engine.servers.joinedServers[0]?.id ?? null
@@ -369,7 +368,6 @@ export function App() {
 
   const handleReturnToActiveCall = useCallback(() => {
     if (!activeCall) return
-    setSuiteLauncherOpen(false)
     setWorkspace('chat')
     setAmailState({ section: 'inbox', composeTo: null })
     setWalletIntent(undefined)
@@ -428,7 +426,6 @@ export function App() {
         setWorkspace('mail')
         setAmailState({ section: 'inbox', composeTo: null })
       } else if (payload.category.startsWith('agora-')) {
-        setSuiteLauncherOpen(false)
         setWorkspace('agora')
         setAmailState({ section: 'inbox', composeTo: null })
         engine.agora.activate()
@@ -707,7 +704,6 @@ export function App() {
       setWorkspace('chat')
       setListTab('bitchat')
       setBitchatView('globe')
-      setSuiteLauncherOpen(false)
       setAgoraInitialCompose(false)
       setSelectedServerId(null)
       setServerSettingsState({ serverId: null, tab: 'overview' })
@@ -846,9 +842,6 @@ export function App() {
         } else if (lightboxImage) {
           e.stopImmediatePropagation()
           setLightboxImage(null)
-        } else if (suiteLauncherOpen) {
-          e.stopImmediatePropagation()
-          setSuiteLauncherOpen(false)
         } else if (settingsState.open) {
           setSettingsState((prev) => ({ ...prev, open: false }))
         } else if (serverSettingsState.serverId) {
@@ -885,7 +878,6 @@ export function App() {
     qrShareTarget,
     cmdkOpen,
     lightboxImage,
-    suiteLauncherOpen,
     settingsState.open,
     serverSettingsState.serverId,
     serverHubState.open,
@@ -918,17 +910,11 @@ export function App() {
     setWorkspace('chat')
   }, [])
 
-  const handleToggleSuiteLauncher = useCallback(() => {
-    setSuiteLauncherOpen((v) => !v)
-  }, [])
-
   const handleOpenCommandPalette = useCallback(() => {
-    setSuiteLauncherOpen(false)
     setCmdkOpen(true)
   }, [])
 
   const handleSelectAgora = useCallback((opts?: { compose?: boolean }) => {
-    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -945,6 +931,7 @@ export function App() {
 
   const handleBackToBitchatGlobe = useCallback(() => {
     setBitchatView('globe')
+    setMobileScreen('chat')
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
     setSearchOpen(false)
@@ -953,7 +940,6 @@ export function App() {
   }, [])
 
   const handleSelectBitchat = useCallback(() => {
-    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -974,7 +960,6 @@ export function App() {
   }, [engine])
 
   const handleSelectPeople = useCallback(() => {
-    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -992,7 +977,6 @@ export function App() {
   }, [isMobileViewport])
 
   const handleSelectGroups = useCallback(() => {
-    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -1026,7 +1010,6 @@ export function App() {
   }, [engine.servers, engine.activeView, selectedServerId, isMobileViewport])
 
   const handleSelectWorkspace = useCallback((next: ActiveWorkspace) => {
-    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -1055,7 +1038,6 @@ export function App() {
         handleSelectGroups()
         return
       }
-      setSuiteLauncherOpen(false)
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setMobileUserListOpen(false)
@@ -1073,7 +1055,6 @@ export function App() {
     (serverId: string) => {
       engine.servers.selectServer(serverId)
       bitchatAudio.play('tune')
-      setSuiteLauncherOpen(false)
       setRadarExpanded(false)
       setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
       setMobileUserListOpen(false)
@@ -1092,7 +1073,6 @@ export function App() {
   )
 
   const handleOpenAmail = useCallback((section: AmailInitialSection = 'inbox') => {
-    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -1105,7 +1085,6 @@ export function App() {
   }, [])
 
   const handleOpenAmailCompose = useCallback((pubkey: string, nickname?: string) => {
-    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -1118,7 +1097,6 @@ export function App() {
   }, [])
 
   const handleOpenSettings = useCallback((tab?: SettingsTab) => {
-    setSuiteLauncherOpen(false)
     setRadarExpanded(false)
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
@@ -1169,7 +1147,6 @@ export function App() {
   const swipeDisabled =
     !isMobileViewport ||
     workspace !== 'chat' ||
-    suiteLauncherOpen ||
     Boolean(engine.pendingTrustRequest) ||
     Boolean(pendingDeleteDm) ||
     Boolean(noteEditorPeer) ||
@@ -1194,10 +1171,10 @@ export function App() {
     isSwipingLeft,
     isSwipingRight,
   } = useMobileSwipeDrawers({
-    leftOpen: !isBitchatWorkspace && mobileScreen === 'list',
+    leftOpen: !isBitchatGlobe && mobileScreen === 'list',
     rightOpen: mobileUserListOpen,
     disabled: swipeDisabled || roomInfoOpen || isBitchatGlobe,
-    leftDisabled: isBitchatWorkspace,
+    leftDisabled: isBitchatGlobe,
     onLeftOpenChange: handleLeftDrawerOpenChange,
     onRightOpenChange: handleRightDrawerOpenChange,
   })
@@ -1222,7 +1199,6 @@ export function App() {
         handleSelectBitchat()
         return
       }
-      setSuiteLauncherOpen(false)
       setWorkspace('chat')
       setAmailState({ section: 'inbox', composeTo: null })
       setWalletIntent(undefined)
@@ -1269,10 +1245,6 @@ export function App() {
     }
     if (cmdkOpen) {
       setCmdkOpen(false)
-      return true
-    }
-    if (suiteLauncherOpen) {
-      setSuiteLauncherOpen(false)
       return true
     }
     if (inspectedPeer) {
@@ -1328,6 +1300,10 @@ export function App() {
       setSearchQuery('')
       return true
     }
+    if (isBitchatRoom && isMobileViewport && mobileScreen === 'list') {
+      setMobileScreen('chat')
+      return true
+    }
     if (isBitchatRoom) {
       handleBackToBitchatGlobe()
       return true
@@ -1349,7 +1325,6 @@ export function App() {
     qrShareTarget,
     lightboxImage,
     cmdkOpen,
-    suiteLauncherOpen,
     inspectedPeer,
     serverSettingsState.serverId,
     serverHubState.open,
@@ -1425,7 +1400,6 @@ export function App() {
     qrScannerOpen ||
     Boolean(zapTarget) ||
     workspace !== 'chat' ||
-    suiteLauncherOpen ||
     Boolean(qrShareTarget) ||
     Boolean(lightboxImage) ||
     cmdkOpen ||
@@ -1439,6 +1413,7 @@ export function App() {
     mobileUserListOpen ||
     roomInfoOpen ||
     searchOpen ||
+    (isBitchatRoom && isMobileViewport && mobileScreen === 'list') ||
     (isBitchatWorkspace ? bitchatView === 'room' : isMobileViewport && mobileScreen === 'chat')
 
   useEffect(() => {
@@ -1463,7 +1438,6 @@ export function App() {
       const ok = engine.tuneBitchatChannel(resolved?.key ?? channelInput)
       if (ok) {
         bitchatAudio.play('tune')
-        setSuiteLauncherOpen(false)
         setWorkspace('chat')
         setAmailState({ section: 'inbox', composeTo: null })
         setWalletIntent(undefined)
@@ -1525,7 +1499,6 @@ export function App() {
   }, [])
 
   const handleOpenWallet = useCallback((intent?: WalletInitialIntent) => {
-    setSuiteLauncherOpen(false)
     setZapTarget(null)
     setInspectedPeer(null)
     setAmailState({ section: 'inbox', composeTo: null })
@@ -1537,7 +1510,7 @@ export function App() {
     setWorkspace('wallet')
   }, [])
 
-  // Global Agnostr Suite keyboard shortcuts (Alt+0..Alt+6 when not typing in an input)
+  // Global Agnostr Suite keyboard shortcuts (Alt+1..Alt+6 when not typing in an input)
   useEffect(() => {
     const onSuiteShortcut = (e: KeyboardEvent) => {
       if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return
@@ -1552,11 +1525,7 @@ export function App() {
         return
       }
       const digit = e.code.startsWith('Digit') ? e.code.slice(5) : e.key
-      if (digit === '0') {
-        e.preventDefault()
-        bitchatAudio.play('click')
-        setSuiteLauncherOpen((v) => !v)
-      } else if (digit === '1') {
+      if (digit === '1') {
         e.preventDefault()
         bitchatAudio.play('click')
         handleSelectAgora()
@@ -1839,7 +1808,6 @@ export function App() {
       }
       const key = parseBitchatChannelHash(window.location.hash)
       if (!key) return
-      setSuiteLauncherOpen(false)
       setWorkspace('chat')
       setAmailState({ section: 'inbox', composeTo: null })
       setWalletIntent(undefined)
@@ -1870,7 +1838,6 @@ export function App() {
     (pubkey: string, nickname?: string) => {
       engine.openDmThread(pubkey, nickname)
       bitchatAudio.play('click')
-      setSuiteLauncherOpen(false)
       setWorkspace('chat')
       setAmailState({ section: 'inbox', composeTo: null })
       setWalletIntent(undefined)
@@ -2259,8 +2226,6 @@ export function App() {
             settingsActive={settingsState.open}
             pwa={pwa}
             agoraUnread={engine.agora.unreadNotificationCount}
-            suiteLauncherOpen={suiteLauncherOpen}
-            onToggleSuiteLauncher={handleToggleSuiteLauncher}
             onSelectWorkspace={handleSelectWorkspace}
             onSelectChatTab={handleSelectChatTab}
             onSelectGroups={handleSelectGroups}
@@ -2340,7 +2305,42 @@ export function App() {
           </div>
         ) : (
           <>
-            {!isBitchatWorkspace && (
+            {isBitchatWorkspace ? (
+              isMobileViewport && (
+                <>
+                  {/* Dimmed Interactive Scrim behind Mobile Bitchat Channel Overview Drawer */}
+                  <div
+                    className={`ag-drawer-scrim ${mobileScreen === 'list' ? 'active' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+                    onClick={() => setMobileScreen('chat')}
+                    aria-hidden="true"
+                  />
+
+                  {/* Mobile-Only Bitchat Channel Overview + Bottom Multi-Profile Drawer */}
+                  <div
+                    className={`ag-conv-col ${mobileScreen === 'list' ? 'open' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+                    aria-hidden={mobileScreen === 'chat' && !isSwipingLeft ? true : undefined}
+                  >
+                    <BitchatChannelDrawer
+                      engine={engine}
+                      isMobileViewport={isMobileViewport}
+                      pwa={pwa}
+                      onClose={() => setMobileScreen('chat')}
+                      onBackToGlobe={handleBackToBitchatGlobe}
+                      onTuneChannel={handleTuneChannel}
+                      onOpenRoomInfo={handleOpenRoomInfo}
+                      onOpenSettings={handleOpenSettings}
+                      onOpenOwnAgoraProfile={() => {
+                        setMobileScreen('chat')
+                        handleSelectWorkspace('agora')
+                        engine.agora.openProfile(engine.identity.masterPubkey)
+                      }}
+                      onOpenInstall={handleOpenInstall}
+                      onPlaySound={playSound}
+                    />
+                  </div>
+                </>
+              )
+            ) : (
               <>
                 {/* Dimmed Interactive Scrim behind Mobile Left Slide-Over Sidebar */}
                 <div
@@ -2659,7 +2659,7 @@ export function App() {
           </Suspense>
         )}
 
-        {/* Mobile In-Shell Map & Settings Overlays (Sit above Always-Present 5-Tab Bottom Bar) */}
+        {/* Mobile In-Shell Map & Settings Overlays (Sit above Always-Present Pannable Bottom Bar) */}
         {isMobileViewport && radarExpanded && (
           <Suspense fallback={null}>
             <ExpandedRadarModal
@@ -2690,7 +2690,7 @@ export function App() {
         )}
       </div>
 
-      {/* Always-Present 5-Tab Native Mobile Bottom Tab Bar (< 868px, Flex Flow) */}
+      {/* Always-Present Pannable All-Apps Mobile Bottom Tab Bar (< 868px, Flex Flow) */}
       <MobileTabBar
         workspace={workspace}
         activeTab={mobileNavActiveTab}
@@ -2701,47 +2701,24 @@ export function App() {
         serverUnread={engine.servers.totalServerUnread}
         serverMentions={engine.servers.totalServerMentions}
         mailUnread={engine.amail.unreadInboxCount}
-        suiteOpen={suiteLauncherOpen}
-        mapActive={radarExpanded}
         settingsActive={settingsState.open}
         onSelectAgora={() => {
           bitchatAudio.play('click')
           handleSelectAgora()
         }}
         onSelectTab={handleMobileSelectTab}
-        onToggleSuite={() => {
+        onSelectMail={() => {
           bitchatAudio.play('click')
-          handleToggleSuiteLauncher()
+          handleOpenAmail('inbox')
         }}
-      />
-
-      {/* Unified Agnostr Suite Launcher (Desktop glass popover / Mobile glass bottom sheet) */}
-      <SuiteLauncher
-        open={suiteLauncherOpen}
-        variant={isMobileViewport ? 'sheet' : 'popover'}
-        workspace={workspace}
-        listTab={listTab}
-        mapActive={isBitchatGlobe || radarExpanded}
-        settingsActive={settingsState.open}
-        agoraUnread={engine.agora.unreadNotificationCount}
-        bitchatUnread={engine.totalGeoUnread}
-        bitchatMentions={engine.totalGeoMentions}
-        dmUnread={engine.totalDmUnread}
-        serverUnread={engine.servers.totalServerUnread}
-        serverMentions={engine.servers.totalServerMentions}
-        mailUnread={engine.amail.unreadInboxCount}
-        walletSats={engine.wallet.totalBalanceSats}
-        onClose={() => setSuiteLauncherOpen(false)}
-        onSelectAgora={() => handleSelectAgora()}
-        onSelectBitchat={handleSelectBitchat}
-        onSelectPeople={handleSelectPeople}
-        onSelectGroups={handleSelectGroups}
-        onSelectMail={() => handleOpenAmail('inbox')}
-        onSelectWallet={() => handleOpenWallet({ tab: 'overview' })}
-        onOpenMap={handleExpandRadar}
-        onOpenSearch={handleOpenCommandPalette}
-        onOpenSettings={() => handleOpenSettings()}
-        onPlaySound={playSound}
+        onSelectWallet={() => {
+          bitchatAudio.play('click')
+          handleOpenWallet({ tab: 'overview' })
+        }}
+        onOpenSettings={() => {
+          bitchatAudio.play('click')
+          handleOpenSettings()
+        }}
       />
 
       {/* Desktop Unified Calm Settings Modal (Lazy loaded on open) */}

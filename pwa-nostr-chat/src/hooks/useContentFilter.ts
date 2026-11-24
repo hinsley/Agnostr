@@ -28,9 +28,11 @@ import {
   saveFilterVerdicts,
 } from '../lib/storage.ts'
 
-const MAX_FLAGGED_REVEAL_BLOBS = 12
+const MAX_FLAGGED_REVEAL_BLOBS = 24
 const MAX_IN_MEMORY_VERDICTS = 250
-const MAX_SAFE_OBJECT_URLS = 120
+const MAX_SAFE_OBJECT_URLS = 240
+const MAX_EXTERNAL_IMAGE_BYTES = 16 * 1024 * 1024
+const EXTERNAL_IMAGE_FETCH_TIMEOUT_MS = 20_000
 
 export interface UseContentFilterOptions {
   ownPubkeys: Set<string>
@@ -118,6 +120,150 @@ async function decryptBlobWithHexKey(
     toStrictArrayBuffer(cipherBytes)
   )
   return new Blob([plainBuf], { type: mime || 'image/webp' })
+}
+
+function parseSafeHttpsImageUrl(raw: string): string | null {
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  if (!trimmed || trimmed.length > 2048) return null
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol.toLowerCase() !== 'https:') return null
+    if (!parsed.hostname) return null
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
+
+function detectRasterImageMimeFromBytes(bytes: Uint8Array): string | null {
+  if (bytes.byteLength < 4) return null
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  // PNG: 89 50 4E 47
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return 'image/png'
+  }
+  // GIF: GIF8
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) {
+    return 'image/gif'
+  }
+  // WebP: RIFF....WEBP
+  if (
+    bytes.byteLength >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'image/webp'
+  }
+  // BMP: BM
+  if (bytes[0] === 0x42 && bytes[1] === 0x4d) return 'image/bmp'
+  // AVIF / HEIF: ....ftyp
+  if (
+    bytes.byteLength >= 12 &&
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  ) {
+    return 'image/avif'
+  }
+  // ICO: 00 00 01 00
+  if (bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01 && bytes[3] === 0x00) {
+    return 'image/x-icon'
+  }
+  return null
+}
+
+async function fetchExternalImageBlob(safeHttpsUrl: string): Promise<Blob> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => {
+    controller.abort()
+  }, EXTERNAL_IMAGE_FETCH_TIMEOUT_MS)
+
+  try {
+    const res = await fetch(safeHttpsUrl, {
+      mode: 'cors',
+      credentials: 'omit',
+      signal: controller.signal,
+    })
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`)
+    }
+
+    const declaredLength = Number.parseInt(res.headers.get('content-length') ?? '', 10)
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_EXTERNAL_IMAGE_BYTES) {
+      throw new Error('Image exceeds 16 MB safety limit.')
+    }
+
+    const rawMime = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+    if (rawMime === 'image/svg+xml') {
+      throw new Error('SVG images are not supported for safety screening.')
+    }
+    if (
+      rawMime &&
+      !rawMime.startsWith('image/') &&
+      rawMime !== 'application/octet-stream' &&
+      rawMime !== 'binary/octet-stream'
+    ) {
+      throw new Error('URL did not return image bytes.')
+    }
+
+    let bytes: Uint8Array
+    if (res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader()
+      const chunks: Uint8Array[] = []
+      let total = 0
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (!value || value.byteLength === 0) continue
+          total += value.byteLength
+          if (total > MAX_EXTERNAL_IMAGE_BYTES) {
+            await reader.cancel().catch(() => {})
+            throw new Error('Image exceeds 16 MB safety limit.')
+          }
+          chunks.push(value)
+        }
+      } finally {
+        reader.releaseLock()
+      }
+      bytes = new Uint8Array(total)
+      let offset = 0
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+    } else {
+      const rawBlob = await res.blob()
+      if (rawBlob.size > MAX_EXTERNAL_IMAGE_BYTES) {
+        throw new Error('Image exceeds 16 MB safety limit.')
+      }
+      bytes = new Uint8Array(await rawBlob.arrayBuffer())
+    }
+
+    if (bytes.byteLength === 0) {
+      throw new Error('Empty image response.')
+    }
+
+    const detectedMime = detectRasterImageMimeFromBytes(bytes)
+    const isDeclaredRasterImage = rawMime.startsWith('image/') && rawMime !== 'image/svg+xml'
+    if (!isDeclaredRasterImage && !detectedMime) {
+      throw new Error('Response bytes are not a supported raster image.')
+    }
+
+    const finalMime = detectedMime ?? (isDeclaredRasterImage ? rawMime : 'image/jpeg')
+    return new Blob([toStrictArrayBuffer(bytes)], { type: finalMime })
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }
 
 export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEngine {
@@ -889,6 +1035,173 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     ]
   )
 
+  const screenExternalImageUrl = useCallback(
+    async (
+      cacheKey: string,
+      url: string,
+      senderPubkey: string,
+      options?: ScreenContentOptions
+    ): Promise<ContentFilterVerdict> => {
+      const pk = senderPubkey.trim().toLowerCase()
+      if (pk && blockedSetRef.current.has(pk)) {
+        return {
+          status: 'flagged',
+          safe: false,
+          flagged: true,
+          categories: [],
+          reason: 'Sender is muted / blocked',
+          checkedAt: Date.now(),
+        }
+      }
+
+      const safeHttpsUrl = parseSafeHttpsImageUrl(url)
+      if (!safeHttpsUrl) {
+        const invalidVerdict: ContentFilterVerdict = {
+          status: 'error',
+          safe: false,
+          flagged: false,
+          categories: [],
+          error: 'Unable to verify image safety',
+          checkedAt: Date.now(),
+        }
+        upsertVerdict(cacheKey, invalidVerdict, false)
+        return invalidVerdict
+      }
+
+      const skipCache = Boolean(options?.skipCache)
+      const existing = verdictsRef.current[cacheKey]
+      if (!skipCache) {
+        if (existing?.status === 'safe' && safeObjectUrlsRef.current.has(cacheKey)) {
+          return existing
+        }
+        if (existing?.status === 'flagged') {
+          return existing
+        }
+        const inflight = inflightScreenRef.current.get(cacheKey)
+        if (inflight) return await inflight
+      }
+
+      const fpAtStart = rulesFingerprintRef.current
+      const rules = getRulesPayload()
+
+      if (skipCache || !existing || existing.status !== 'safe') {
+        upsertVerdict(
+          cacheKey,
+          {
+            status: modelStatusRef.current === 'ready' ? 'scanning' : 'downloading',
+            safe: false,
+            flagged: false,
+            categories: [],
+            checkedAt: Date.now(),
+          },
+          false
+        )
+      }
+
+      const task = (async (): Promise<ContentFilterVerdict> => {
+        try {
+          // 1. Fetch raw image bytes in-memory ONLY (never mounted into DOM <img>)
+          const blob = await fetchExternalImageBlob(safeHttpsUrl)
+
+          if (pk && blockedSetRef.current.has(pk)) {
+            return {
+              status: 'flagged',
+              safe: false,
+              flagged: true,
+              categories: [],
+              reason: 'Sender is muted / blocked',
+              checkedAt: Date.now(),
+            }
+          }
+
+          // 2. If a valid persisted 'safe' verdict matches current rules, reveal cleanly without re-running model
+          if (
+            !skipCache &&
+            existing?.status === 'safe' &&
+            existing.safe &&
+            !existing.flagged &&
+            rulesFingerprintRef.current === fpAtStart
+          ) {
+            storeSafeObjectUrl(cacheKey, blob, pk || undefined)
+            return existing
+          }
+
+          // 3. Always run on-device safety classifier in Web Worker BEFORE any objectUrl is created
+          cancelInFlightRef.current = false
+          const requestId = `cf-ext-${++reqSeqRef.current}`
+          const res = await postWorkerRequest({
+            type: 'screen',
+            requestId,
+            blob,
+            rules,
+          })
+          if (res.type !== 'result') {
+            throw new Error('Unexpected response from content filter worker.')
+          }
+
+          const finalVerdict: ContentFilterVerdict = {
+            status: res.flagged ? 'flagged' : 'safe',
+            safe: res.safe && !res.flagged,
+            flagged: res.flagged,
+            categories: res.categories,
+            reason: res.reason,
+            scores: res.scores,
+            checkedAt: Date.now(),
+          }
+
+          if (rulesFingerprintRef.current === fpAtStart && !(pk && blockedSetRef.current.has(pk))) {
+            if (finalVerdict.safe && !finalVerdict.flagged) {
+              storeSafeObjectUrl(cacheKey, blob, pk || undefined)
+            } else if (finalVerdict.flagged && !finalVerdict.categories.includes('illegal')) {
+              // Hold raw blob ONLY for non-illegal flags so explicit user Reveal works cleanly
+              storeFlaggedBlobForReveal(cacheKey, blob, pk || undefined)
+            }
+            upsertVerdict(cacheKey, finalVerdict, !skipCache)
+          }
+          return finalVerdict
+        } catch {
+          if (cancelInFlightRef.current) {
+            return {
+              status: 'idle',
+              safe: false,
+              flagged: false,
+              categories: [],
+              checkedAt: Date.now(),
+            }
+          }
+          const errorVerdict: ContentFilterVerdict = {
+            status: 'error',
+            safe: false,
+            flagged: false,
+            categories: [],
+            error: 'Unable to verify image safety',
+            checkedAt: Date.now(),
+          }
+          if (rulesFingerprintRef.current === fpAtStart) {
+            upsertVerdict(cacheKey, errorVerdict, false)
+          }
+          return errorVerdict
+        } finally {
+          if (!skipCache) {
+            inflightScreenRef.current.delete(cacheKey)
+          }
+        }
+      })()
+
+      if (!skipCache) {
+        inflightScreenRef.current.set(cacheKey, task)
+      }
+      return await task
+    },
+    [
+      getRulesPayload,
+      upsertVerdict,
+      storeSafeObjectUrl,
+      storeFlaggedBlobForReveal,
+      postWorkerRequest,
+    ]
+  )
+
   const getVerdict = useCallback((cacheKey: string): ContentFilterVerdict | null => {
     return verdictsRef.current[cacheKey] ?? null
   }, [])
@@ -1016,6 +1329,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       verdicts,
       getVerdict,
       screenImageAttachment,
+      screenExternalImageUrl,
       screenImageBlob,
       getSafeImageObjectUrl,
       revealFlaggedImage,
@@ -1042,6 +1356,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
       verdicts,
       getVerdict,
       screenImageAttachment,
+      screenExternalImageUrl,
       screenImageBlob,
       getSafeImageObjectUrl,
       revealFlaggedImage,

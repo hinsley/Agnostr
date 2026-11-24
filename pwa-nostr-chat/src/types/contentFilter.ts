@@ -102,6 +102,14 @@ export interface ContentFilterEngine {
     opts?: ScreenImageAttachmentOptions
   ) => Promise<ContentFilterVerdict>
 
+  /** Fetches an external HTTPS image URL in-memory only, always runs on-device safety screening in worker, and exposes objectUrl ONLY if safe */
+  screenExternalImageUrl: (
+    cacheKey: string,
+    url: string,
+    senderPubkey: string,
+    opts?: ScreenContentOptions
+  ) => Promise<ContentFilterVerdict>
+
   /** Screens an in-memory image Blob (Settings test file or live call video frame snapshot) */
   screenImageBlob: (
     cacheKey: string,

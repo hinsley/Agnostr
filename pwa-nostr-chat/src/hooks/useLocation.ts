@@ -3,7 +3,7 @@ import type { LocationState } from '../types/protocol.ts'
 import { encodeGeohash, normalizeGeohash } from '../lib/geohash.ts'
 import { isTopicChannel } from '../lib/bitchatChannel.ts'
 
-const PRECISIONS = [1, 2, 3, 4, 5, 6, 7, 8] as const
+const PRECISIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const
 
 export function useLocation(activeGeohash: string) {
   const [status, setStatus] = useState<LocationState['status']>('idle')
@@ -21,7 +21,7 @@ export function useLocation(activeGeohash: string) {
   }, [coords])
 
   const isTeleported = useMemo(() => {
-    if (isTopicChannel(activeGeohash)) return false
+    if (activeGeohash.includes(':') || isTopicChannel(activeGeohash)) return false
     const gh = normalizeGeohash(activeGeohash)
     if (!coords) return true
     const expected = encodeGeohash(coords.lat, coords.lon, gh.length)
@@ -88,7 +88,7 @@ export function useLocation(activeGeohash: string) {
 
   return {
     location,
-    localFullGeohash: localGeohashes[8],
+    localFullGeohash: localGeohashes[9],
     locateMe,
     resetLocation,
   }

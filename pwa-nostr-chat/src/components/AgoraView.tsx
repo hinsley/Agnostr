@@ -14,6 +14,8 @@ import {
   Check,
   Compass,
   Copy,
+  Eye,
+  EyeOff,
   Flame,
   Globe,
   Hash,
@@ -23,18 +25,21 @@ import {
   Languages,
   Link2,
   Loader2,
+  Lock,
   Mail,
   Menu,
   MessageCircle,
   MoreHorizontal,
   PenLine,
   PenSquare,
+  Play,
   Quote,
   RefreshCw,
   Repeat2,
   Search,
   Share2,
   ShieldAlert,
+  ShieldCheck,
   Trash2,
   Upload,
   User,
@@ -79,7 +84,6 @@ import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import { useMobileSwipeDrawers } from '../hooks/useMobileSwipeDrawers.ts'
 import { identiconDataUrl, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
-import { AvatarImg } from './AvatarImg.tsx'
 import type { LightboxImagePayload } from './ImageLightboxModal.tsx'
 import {
   requestUntrustedLinkOpen,
@@ -197,6 +201,55 @@ async function copyTextSafe(text: string): Promise<boolean> {
 const MAX_AGORA_CONCURRENT_TRANSLATIONS = 3
 const MAX_AGORA_TRANSLATE_NOTES = 40
 
+const PTR_PULL_THRESHOLD = 54
+const PTR_MAX_PULL_PX = 88
+const PTR_REFRESH_HOLD_PX = 48
+const PTR_REFRESH_HOLD_MS = 550
+const PTR_EXCLUDED_SELECTOR = [
+  'input',
+  'textarea',
+  'select',
+  'button',
+  '[contenteditable="true"]',
+  '[contenteditable=""]',
+  '[data-no-swipe="true"]',
+].join(', ')
+
+function findPtrTouchById(list: TouchList, id: number): Touch | null {
+  for (let i = 0; i < list.length; i += 1) {
+    const t = list.item(i)
+    if (t && t.identifier === id) return t
+  }
+  return null
+}
+
+function shouldIgnorePtrTarget(target: EventTarget | null, stream: HTMLElement): boolean {
+  let node: Element | null =
+    target instanceof Element
+      ? target
+      : target instanceof Node
+        ? target.parentElement
+        : null
+
+  while (node) {
+    if (node.matches(PTR_EXCLUDED_SELECTOR)) {
+      return true
+    }
+    if ((node as HTMLElement).isContentEditable) {
+      return true
+    }
+    if (node !== stream && node.scrollWidth > node.clientWidth + 4) {
+      const overflowX = window.getComputedStyle(node).overflowX
+      if (overflowX === 'auto' || overflowX === 'scroll') {
+        return true
+      }
+    }
+    if (node === stream) break
+    node = node.parentElement
+  }
+  return false
+}
+
 function extractTranslatableAgoraText(note: AgoraNote): string | null {
   if (!note.content || !note.content.trim()) return null
   const tokens = tokenizeAgoraContent(note.content, note.media)
@@ -261,29 +314,632 @@ function agoraShowOriginalKey(noteId: string, myLanguage: string, sourceLanguage
 }
 
 /* --------------------------------------------------------------------------
-   Safe Avatar with Identicon Fallback (Zero broken images)
+   Universal Fail-Closed Screened Image & Trust-Gated Video Components
+   (NEVER renders raw external <img src="https://..."> in Agora; videos from
+   untrusted senders mount ZERO <video> and fetch ZERO video bytes)
+   -------------------------------------------------------------------------- */
+function makeAgoraImageCacheKey(senderPubkey: string, safeHttpsUrl: string): string {
+  const pk = senderPubkey.trim().toLowerCase() || 'anon'
+  return `agora-img:${pk}:${safeHttpsUrl}`
+}
+
+function isSafeHttpsUrl(raw: string | null | undefined): raw is string {
+  return Boolean(raw && raw.startsWith('https://'))
+}
+
+interface AgoraScreenedImageProps {
+  engine: AgnostrEngine
+  url: string | undefined | null
+  senderPubkey: string
+  variant: 'media' | 'quote' | 'banner' | 'avatar' | 'thumb' | 'upload'
+  alt?: string
+  className?: string
+  avatarSize?: 'xs' | 'sm' | 'md' | 'lg'
+  avatarFallbackPubkey?: string
+  caption?: string
+  allowReveal?: boolean
+  onOpenLightbox?: (verifiedBlobUrl: string) => void
+}
+
+const AgoraScreenedImage: React.FC<AgoraScreenedImageProps> = ({
+  engine,
+  url,
+  senderPubkey,
+  variant,
+  alt = '',
+  className,
+  avatarSize = 'md',
+  avatarFallbackPubkey,
+  caption,
+  allowReveal = true,
+  onOpenLightbox,
+}) => {
+  const { contentFilter } = engine
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  const avatarImgRef = useRef<HTMLImageElement | null>(null)
+  const autoRequestedKeyRef = useRef<string | null>(null)
+  const [inView, setInView] = useState<boolean>(
+    () => typeof IntersectionObserver === 'undefined'
+  )
+  const [revealedState, setRevealedState] = useState<{ key: string; url: string } | null>(null)
+
+  const sanitizedUrl = useMemo(() => sanitizeHttpUrl(url ?? undefined), [url])
+  const safeHttpsUrl = isSafeHttpsUrl(sanitizedUrl) ? sanitizedUrl : null
+  const cacheKey = safeHttpsUrl ? makeAgoraImageCacheKey(senderPubkey, safeHttpsUrl) : ''
+
+  const verdict = cacheKey ? contentFilter.getVerdict(cacheKey) : null
+  const safeBlobUrl =
+    cacheKey && verdict?.status === 'safe' ? contentFilter.getSafeImageObjectUrl(cacheKey) : null
+  const revealedUrl = revealedState && revealedState.key === cacheKey ? revealedState.url : null
+  const isIllegal = Boolean(verdict?.categories.includes('illegal'))
+  const isNsfw = Boolean(verdict?.categories.includes('nsfw'))
+
+  const identicon = useMemo(
+    () =>
+      variant === 'avatar'
+        ? identiconDataUrl(avatarFallbackPubkey || senderPubkey || 'anon')
+        : '',
+    [avatarFallbackPubkey, senderPubkey, variant]
+  )
+
+  // Observe viewport entry to screen lazily without flooding offscreen feed history
+  useEffect(() => {
+    if (inView || !safeHttpsUrl) return
+    const el = variant === 'avatar' ? avatarImgRef.current : hostRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setInView(true)
+          io.disconnect()
+        }
+      },
+      { rootMargin: '180px' }
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [inView, safeHttpsUrl, variant])
+
+  // Trigger on-device safety screening as soon as visible (or rehydrate blob URL for safe cache)
+  useEffect(() => {
+    if (!inView || !safeHttpsUrl || !cacheKey) return
+    const needsAutoScreen = !verdict || verdict.status === 'idle'
+    const needsSafeRehydrate = verdict?.status === 'safe' && !safeBlobUrl
+    if (!needsAutoScreen && !needsSafeRehydrate) return
+    if (autoRequestedKeyRef.current === cacheKey) return
+    autoRequestedKeyRef.current = cacheKey
+    void contentFilter.screenExternalImageUrl(cacheKey, safeHttpsUrl, senderPubkey, {
+      caption,
+    })
+  }, [inView, safeHttpsUrl, cacheKey, verdict, safeBlobUrl, contentFilter, senderPubkey, caption])
+
+  const handleRetry = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!safeHttpsUrl || !cacheKey) return
+    autoRequestedKeyRef.current = cacheKey
+    void contentFilter.screenExternalImageUrl(cacheKey, safeHttpsUrl, senderPubkey, {
+      caption,
+      skipCache: true,
+    })
+  }
+
+  const handleReveal = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!cacheKey || isIllegal) return
+    const blobUrl = contentFilter.revealFlaggedImage(cacheKey)
+    if (blobUrl) {
+      setRevealedState({ key: cacheKey, url: blobUrl })
+    }
+  }
+
+  const handleHide = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setRevealedState(null)
+  }
+
+  // Variant 1: Avatar — silently shows geometric identicon until cleared SAFE
+  if (variant === 'avatar') {
+    const avatarClasses = [
+      'ag-agora-avatar',
+      `ag-agora-avatar-${avatarSize}`,
+      className ?? '',
+    ]
+      .filter(Boolean)
+      .join(' ')
+    const displaySrc = verdict?.status === 'safe' && safeBlobUrl ? safeBlobUrl : identicon
+    return (
+      <img
+        ref={avatarImgRef}
+        src={displaySrc}
+        alt={alt}
+        className={avatarClasses}
+        loading="lazy"
+      />
+    )
+  }
+
+  // Variant 2: Profile Banner — empty backdrop when no HTTPS banner URL
+  if (variant === 'banner' && !safeHttpsUrl) {
+    return null
+  }
+
+  // Missing or non-HTTPS URL for media/quote/thumb/upload -> fail closed
+  if (!safeHttpsUrl) {
+    return (
+      <div
+        ref={hostRef}
+        className={`ag-agora-img-shield is-error variant-${variant}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <AlertCircle size={15} aria-hidden="true" />
+        <span className="ag-agora-img-shield-title">Unable to verify image safety</span>
+      </div>
+    )
+  }
+
+  // Cleared SAFE -> render verified in-memory blob: URL ONLY
+  if (verdict?.status === 'safe' && safeBlobUrl) {
+    if (variant === 'media' && onOpenLightbox) {
+      return (
+        <button
+          type="button"
+          className="ag-agora-media-cell"
+          onClick={(e) => {
+            e.stopPropagation()
+            onOpenLightbox(safeBlobUrl)
+          }}
+          aria-label={alt || 'Open image preview'}
+        >
+          <img src={safeBlobUrl} alt={alt || 'Attached image'} className={className} />
+        </button>
+      )
+    }
+    return <img src={safeBlobUrl} alt={alt} className={className} />
+  }
+
+  // Explicitly revealed non-illegal NSFW image -> render verified blob: URL + Hide pill
+  if (verdict?.status === 'flagged' && !isIllegal && revealedUrl) {
+    if (variant === 'media' && onOpenLightbox) {
+      return (
+        <div className="ag-agora-media-cell is-revealed" onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className="ag-agora-media-reveal-hit"
+            onClick={(e) => {
+              e.stopPropagation()
+              onOpenLightbox(revealedUrl)
+            }}
+            aria-label={alt || 'Open revealed image preview'}
+          >
+            <img src={revealedUrl} alt={alt || 'Revealed image'} className={className} />
+          </button>
+          <button
+            type="button"
+            className="ag-agora-shield-hide-btn"
+            onClick={handleHide}
+            aria-label="Hide flagged image"
+          >
+            <EyeOff size={12} aria-hidden="true" />
+            <span>Hide</span>
+          </button>
+        </div>
+      )
+    }
+    return (
+      <div
+        className={`ag-agora-revealed-wrap variant-${variant}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <img src={revealedUrl} alt={alt} className={className} />
+        <button
+          type="button"
+          className="ag-agora-shield-hide-btn"
+          onClick={handleHide}
+          aria-label="Hide flagged image"
+        >
+          <EyeOff size={11} aria-hidden="true" />
+          <span>Hide</span>
+        </button>
+      </div>
+    )
+  }
+
+  // Flagged ILLEGAL / GORE -> PERMANENTLY BLOCKED & NON-REVEALABLE
+  if (verdict?.status === 'flagged' && isIllegal) {
+    return (
+      <div
+        ref={hostRef}
+        className={`ag-agora-img-shield is-illegal variant-${variant}`}
+        role="region"
+        aria-label="Blocked by Safety Filter: Illegal or graphic violence"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <ShieldAlert size={16} aria-hidden="true" />
+        <span className="ag-agora-img-shield-title">Blocked by Safety Filter</span>
+        <span className="ag-agora-img-shield-sub">Illegal / Gore</span>
+      </div>
+    )
+  }
+
+  // Flagged NSFW (non-illegal) or blocked sender -> veiled shield (Reveal only for NSFW)
+  if (verdict?.status === 'flagged') {
+    const canReveal = allowReveal && isNsfw
+    return (
+      <div
+        ref={hostRef}
+        className={`ag-agora-img-shield is-nsfw variant-${variant}`}
+        role="region"
+        aria-label={canReveal ? 'Hidden by Safety Filter: NSFW' : 'Blocked by Safety Filter'}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <EyeOff size={16} aria-hidden="true" />
+        <span className="ag-agora-img-shield-title">
+          {canReveal ? 'Hidden by Safety Filter' : 'Blocked by Safety Filter'}
+        </span>
+        <span className="ag-agora-img-shield-sub">
+          {canReveal ? 'NSFW' : verdict.reason || 'Restricted'}
+        </span>
+        {canReveal && (
+          <div className="ag-agora-shield-actions">
+            <button type="button" className="ag-agora-shield-btn" onClick={handleReveal}>
+              <Eye size={12} aria-hidden="true" />
+              <span>Reveal</span>
+            </button>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Error (CORS / network / decode failure) -> fail closed with Retry (NEVER raw external <img>)
+  if (verdict?.status === 'error') {
+    return (
+      <div
+        ref={hostRef}
+        className={`ag-agora-img-shield is-error variant-${variant}`}
+        role="region"
+        aria-label="Unable to verify image safety"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <AlertCircle size={15} aria-hidden="true" />
+        <span className="ag-agora-img-shield-title">Unable to verify image safety</span>
+        <div className="ag-agora-shield-actions">
+          <button type="button" className="ag-agora-shield-btn" onClick={handleRetry}>
+            <RefreshCw size={12} aria-hidden="true" />
+            <span>Retry</span>
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // Idle / Downloading / Scanning -> fail-closed calm shimmer
+  const scanningCopy =
+    contentFilter.modelStatus === 'downloading' ? 'Loading safety filter…' : 'Scanning image…'
+  return (
+    <div
+      ref={hostRef}
+      className={`ag-agora-img-scanning variant-${variant}`}
+      role="status"
+      aria-live="polite"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <Loader2 size={15} className="ag-agora-spin" aria-hidden="true" />
+      <span className="ag-agora-img-scanning-label">{scanningCopy}</span>
+    </div>
+  )
+}
+
+interface AgoraTrustGatedVideoProps {
+  engine: AgnostrEngine
+  item: AgoraMediaItem
+  senderPubkey: string
+  authorName: string
+  isOwn: boolean
+  compact?: boolean
+  onPlaySound?: (cue: SoundCue) => void
+}
+
+const AgoraTrustGatedVideo: React.FC<AgoraTrustGatedVideoProps> = ({
+  engine,
+  item,
+  senderPubkey,
+  authorName,
+  isOwn,
+  compact = false,
+  onPlaySound,
+}) => {
+  const { contentFilter } = engine
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  const autoRequestedKeyRef = useRef<string | null>(null)
+  const [inView, setInView] = useState<boolean>(
+    () => typeof IntersectionObserver === 'undefined'
+  )
+  const [revealedThumb, setRevealedThumb] = useState<{ key: string; url: string } | null>(null)
+
+  const isSenderTrusted = isOwn || engine.isTrusted(senderPubkey)
+  const sanitizedVideoUrl = useMemo(() => sanitizeHttpUrl(item.url), [item.url])
+  const safeVideoUrl = isSafeHttpsUrl(sanitizedVideoUrl) ? sanitizedVideoUrl : null
+  const sanitizedThumbUrl = useMemo(() => sanitizeHttpUrl(item.thumb), [item.thumb])
+  const safeThumbUrl = isSafeHttpsUrl(sanitizedThumbUrl) ? sanitizedThumbUrl : null
+  const thumbCacheKey = safeThumbUrl ? makeAgoraImageCacheKey(senderPubkey, safeThumbUrl) : ''
+
+  const thumbVerdict = thumbCacheKey ? contentFilter.getVerdict(thumbCacheKey) : null
+  const safeThumbBlobUrl =
+    thumbCacheKey && thumbVerdict?.status === 'safe'
+      ? contentFilter.getSafeImageObjectUrl(thumbCacheKey)
+      : null
+  const revealedThumbUrl =
+    revealedThumb && revealedThumb.key === thumbCacheKey ? revealedThumb.url : null
+  const thumbIsIllegal = Boolean(thumbVerdict?.categories.includes('illegal'))
+  const thumbIsNsfw = Boolean(thumbVerdict?.categories.includes('nsfw'))
+
+  // Observe viewport entry for trusted-video thumbnail screening
+  useEffect(() => {
+    if (inView || !isSenderTrusted || !safeThumbUrl) return
+    const el = hostRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setInView(true)
+          io.disconnect()
+        }
+      },
+      { rootMargin: '180px' }
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [inView, isSenderTrusted, safeThumbUrl])
+
+  // Screen trusted video thumbnail BEFORE revealing thumbnail or mounting <video>
+  useEffect(() => {
+    if (!isSenderTrusted || !inView || !safeThumbUrl || !thumbCacheKey) return
+    const needsAutoScreen = !thumbVerdict || thumbVerdict.status === 'idle'
+    const needsSafeRehydrate = thumbVerdict?.status === 'safe' && !safeThumbBlobUrl
+    if (!needsAutoScreen && !needsSafeRehydrate) return
+    if (autoRequestedKeyRef.current === thumbCacheKey) return
+    autoRequestedKeyRef.current = thumbCacheKey
+    void contentFilter.screenExternalImageUrl(thumbCacheKey, safeThumbUrl, senderPubkey, {
+      caption: item.alt,
+    })
+  }, [
+    isSenderTrusted,
+    inView,
+    safeThumbUrl,
+    thumbCacheKey,
+    thumbVerdict,
+    safeThumbBlobUrl,
+    contentFilter,
+    senderPubkey,
+    item.alt,
+  ])
+
+  // 1. UNTRUSTED SENDER -> ZERO <video> mounted and ZERO video bytes fetched!
+  if (!isSenderTrusted) {
+    const thumbIsSafeVisible = thumbVerdict?.status === 'safe' && Boolean(safeThumbBlobUrl)
+    return (
+      <div
+        className={`ag-agora-video-shield${compact ? ' is-compact' : ''}`}
+        role="region"
+        aria-label={`Video blocked from untrusted sender ${authorName}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {safeThumbUrl && (
+          <div className="ag-agora-video-thumb-wrap">
+            <AgoraScreenedImage
+              engine={engine}
+              url={safeThumbUrl}
+              senderPubkey={senderPubkey}
+              variant="thumb"
+              alt={item.alt || 'Video thumbnail'}
+              caption={item.alt}
+            />
+            {thumbIsSafeVisible && (
+              <span className="ag-agora-video-lock-badge" aria-hidden="true">
+                <Lock size={13} />
+                <Play size={12} />
+              </span>
+            )}
+          </div>
+        )}
+        <div className="ag-agora-video-shield-body">
+          <div className="ag-agora-video-shield-head">
+            <ShieldAlert size={15} aria-hidden="true" />
+            <span className="ag-agora-video-shield-title">Video · Untrusted Sender</span>
+          </div>
+          <p className="ag-agora-video-shield-sub">
+            Blocked until you trust @{authorName} (zero video bytes fetched)
+          </p>
+          <div className="ag-agora-shield-actions">
+            <button
+              type="button"
+              className="ag-agora-shield-btn primary"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPlaySound?.('click')
+                engine.trustPubkey(senderPubkey, authorName)
+              }}
+            >
+              <ShieldCheck size={13} aria-hidden="true" />
+              <span>Trust @{authorName}</span>
+            </button>
+            <button
+              type="button"
+              className="ag-agora-shield-btn danger"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPlaySound?.('click')
+                engine.toggleBlockPeer(senderPubkey, authorName)
+              }}
+            >
+              <Ban size={13} aria-hidden="true" />
+              <span>Block</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // 2. TRUSTED SENDER with thumbnail -> gate video playback behind thumbnail safety verdict
+  if (safeThumbUrl) {
+    if (thumbVerdict?.status === 'flagged' && thumbIsIllegal) {
+      return (
+        <div
+          ref={hostRef}
+          className={`ag-agora-img-shield is-illegal variant-media${compact ? ' is-compact' : ''}`}
+          role="region"
+          aria-label="Video blocked by Safety Filter: Illegal or graphic violence"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ShieldAlert size={16} aria-hidden="true" />
+          <span className="ag-agora-img-shield-title">Blocked by Safety Filter</span>
+          <span className="ag-agora-img-shield-sub">Illegal / Gore</span>
+        </div>
+      )
+    }
+
+    if (thumbVerdict?.status === 'flagged' && !revealedThumbUrl) {
+      return (
+        <div
+          ref={hostRef}
+          className={`ag-agora-img-shield is-nsfw variant-media${compact ? ' is-compact' : ''}`}
+          role="region"
+          aria-label="Video hidden by Safety Filter: NSFW"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <EyeOff size={16} aria-hidden="true" />
+          <span className="ag-agora-img-shield-title">
+            {thumbIsNsfw ? 'Hidden by Safety Filter' : 'Blocked by Safety Filter'}
+          </span>
+          <span className="ag-agora-img-shield-sub">
+            {thumbIsNsfw ? 'NSFW' : thumbVerdict.reason || 'Restricted'}
+          </span>
+          {thumbIsNsfw && (
+            <div className="ag-agora-shield-actions">
+              <button
+                type="button"
+                className="ag-agora-shield-btn"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  const blobUrl = contentFilter.revealFlaggedImage(thumbCacheKey)
+                  if (blobUrl) {
+                    setRevealedThumb({ key: thumbCacheKey, url: blobUrl })
+                  }
+                }}
+              >
+                <Eye size={12} aria-hidden="true" />
+                <span>Reveal</span>
+              </button>
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    if (thumbVerdict?.status === 'error') {
+      return (
+        <div
+          ref={hostRef}
+          className={`ag-agora-img-shield is-error variant-media${compact ? ' is-compact' : ''}`}
+          role="region"
+          aria-label="Unable to verify video thumbnail safety"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <AlertCircle size={15} aria-hidden="true" />
+          <span className="ag-agora-img-shield-title">Unable to verify image safety</span>
+          <div className="ag-agora-shield-actions">
+            <button
+              type="button"
+              className="ag-agora-shield-btn"
+              onClick={(e) => {
+                e.stopPropagation()
+                autoRequestedKeyRef.current = thumbCacheKey
+                void contentFilter.screenExternalImageUrl(
+                  thumbCacheKey,
+                  safeThumbUrl,
+                  senderPubkey,
+                  { caption: item.alt, skipCache: true }
+                )
+              }}
+            >
+              <RefreshCw size={12} aria-hidden="true" />
+              <span>Retry</span>
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    const verifiedPosterUrl = safeThumbBlobUrl ?? revealedThumbUrl
+    if (!verifiedPosterUrl) {
+      const scanningCopy =
+        contentFilter.modelStatus === 'downloading'
+          ? 'Loading safety filter…'
+          : 'Scanning image…'
+      return (
+        <div
+          ref={hostRef}
+          className={`ag-agora-img-scanning variant-media${compact ? ' is-compact' : ''}`}
+          role="status"
+          aria-live="polite"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Loader2 size={15} className="ag-agora-spin" aria-hidden="true" />
+          <span className="ag-agora-img-scanning-label">{scanningCopy}</span>
+        </div>
+      )
+    }
+
+    if (!safeVideoUrl) return null
+    return (
+      <video
+        src={safeVideoUrl}
+        poster={verifiedPosterUrl}
+        controls
+        playsInline
+        preload="metadata"
+        className={`ag-agora-media-video${compact ? ' is-compact' : ''}`}
+      />
+    )
+  }
+
+  // 3. TRUSTED SENDER without thumbnail -> render native <video>
+  if (!safeVideoUrl) return null
+  return (
+    <video
+      src={safeVideoUrl}
+      controls
+      playsInline
+      preload="metadata"
+      className={`ag-agora-media-video${compact ? ' is-compact' : ''}`}
+    />
+  )
+}
+
+/* --------------------------------------------------------------------------
+   Screened Avatar with Deterministic Geometric Identicon Fallback
    -------------------------------------------------------------------------- */
 const AgoraAvatar: React.FC<{
+  engine: AgnostrEngine
   pubkey: string
   picture?: string
   size?: 'xs' | 'sm' | 'md' | 'lg'
   alt?: string
-}> = ({ pubkey, picture, size = 'md', alt = '' }) => {
-  const [failedSrc, setFailedSrc] = useState<string | null>(null)
-  const safeSrc = useMemo(() => sanitizeHttpUrl(picture), [picture])
-  const fallback = useMemo(() => identiconDataUrl(pubkey || 'anon'), [pubkey])
-  const showPicture = Boolean(safeSrc) && failedSrc !== safeSrc
-
+  className?: string
+}> = ({ engine, pubkey, picture, size = 'md', alt = '', className }) => {
   return (
-    <img
-      src={showPicture ? safeSrc : fallback}
+    <AgoraScreenedImage
+      engine={engine}
+      url={picture}
+      senderPubkey={pubkey}
+      avatarFallbackPubkey={pubkey}
+      variant="avatar"
+      avatarSize={size}
       alt={alt}
-      className={`ag-agora-avatar ag-agora-avatar-${size}`}
-      loading="lazy"
-      referrerPolicy="no-referrer"
-      onError={() => {
-        if (safeSrc) setFailedSrc(safeSrc)
-      }}
+      className={className}
+      allowReveal={false}
     />
   )
 }
@@ -405,6 +1061,7 @@ const AgoraComposerBox: React.FC<AgoraComposerBoxProps> = ({
   return (
     <div className={`ag-agora-composer${inModal ? ' in-modal' : ''}`}>
       <AgoraAvatar
+        engine={engine}
         pubkey={agora.myPubkey}
         picture={agora.myProfile?.picture}
         size="md"
@@ -466,7 +1123,13 @@ const AgoraComposerBox: React.FC<AgoraComposerBoxProps> = ({
                 {item.kind === 'video' ? (
                   <video src={item.url} muted playsInline preload="metadata" />
                 ) : (
-                  <img src={item.url} alt={item.alt || 'Uploaded media'} />
+                  <AgoraScreenedImage
+                    engine={engine}
+                    url={item.url}
+                    senderPubkey={agora.myPubkey}
+                    variant="upload"
+                    alt={item.alt || 'Uploaded media'}
+                  />
                 )}
                 <button
                   type="button"
@@ -485,6 +1148,7 @@ const AgoraComposerBox: React.FC<AgoraComposerBoxProps> = ({
           <div className="ag-agora-quote-card" style={{ cursor: 'default' }}>
             <div className="ag-agora-quote-head">
               <AgoraAvatar
+                engine={engine}
                 pubkey={quoteTarget.pubkey}
                 picture={quoteAuthorProfile?.picture}
                 size="xs"
@@ -677,7 +1341,9 @@ const AgoraQuotedNoteCard: React.FC<{
   }
 
   const authorName = getProfileDisplayName(profile, note.pubkey)
+  const isQuotedOwn = note.pubkey.toLowerCase() === agora.myPubkey.toLowerCase()
   const firstImg = note.media.find((m) => m.kind === 'image')
+  const firstVideo = !firstImg ? note.media.find((m) => m.kind === 'video') : undefined
   const hasVisibleText = displayTokens.some((t) => t.type !== 'quote')
 
   return (
@@ -698,7 +1364,13 @@ const AgoraQuotedNoteCard: React.FC<{
       }}
     >
       <div className="ag-agora-quote-head">
-        <AgoraAvatar pubkey={note.pubkey} picture={profile?.picture} size="xs" alt={authorName} />
+        <AgoraAvatar
+          engine={engine}
+          pubkey={note.pubkey}
+          picture={profile?.picture}
+          size="xs"
+          alt={authorName}
+        />
         <span className="ag-agora-quote-author">{authorName}</span>
         <span className="ag-agora-dot-sep">·</span>
         <span className="ag-agora-time tabular">{formatRelativeSeconds(note.createdAt)}</span>
@@ -846,13 +1518,27 @@ const AgoraQuotedNoteCard: React.FC<{
         </div>
       )}
       {firstImg && (
-        <img
-          src={firstImg.url}
+        <AgoraScreenedImage
+          engine={engine}
+          url={firstImg.url}
+          senderPubkey={note.pubkey}
+          variant="quote"
           alt={firstImg.alt || 'Quoted media'}
+          caption={firstImg.alt}
           className="ag-agora-quote-thumb"
-          loading="lazy"
-          referrerPolicy="no-referrer"
         />
+      )}
+      {firstVideo && (
+        <div className="ag-agora-quote-video-wrap" onClick={(e) => e.stopPropagation()}>
+          <AgoraTrustGatedVideo
+            engine={engine}
+            item={firstVideo}
+            senderPubkey={note.pubkey}
+            authorName={authorName}
+            isOwn={isQuotedOwn}
+            compact={true}
+          />
+        </div>
       )}
     </div>
   )
@@ -1056,11 +1742,11 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
     }
   }
 
-  const handleOpenMediaLightbox = (item: AgoraMediaItem) => {
-    if (!onOpenLightbox || item.kind !== 'image') return
+  const handleOpenMediaLightbox = (item: AgoraMediaItem, verifiedBlobUrl: string) => {
+    if (!onOpenLightbox || item.kind !== 'image' || !verifiedBlobUrl) return
     const { width, height } = parseDimTuple(item.dim)
     onOpenLightbox({
-      blobUrl: item.url,
+      blobUrl: verifiedBlobUrl,
       image: {
         url: item.url,
         mime: item.mime || 'image/jpeg',
@@ -1129,6 +1815,7 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
             aria-label={`View ${authorName}'s profile`}
           >
             <AgoraAvatar
+              engine={engine}
               pubkey={note.pubkey}
               picture={authorProfile?.picture}
               size="md"
@@ -1473,29 +2160,28 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                 >
                   {mediaSlice.map((item) =>
                     item.kind === 'video' ? (
-                      <video
+                      <AgoraTrustGatedVideo
                         key={item.url}
-                        src={item.url}
-                        controls
-                        playsInline
-                        preload="metadata"
-                        className="ag-agora-media-video"
+                        engine={engine}
+                        item={item}
+                        senderPubkey={note.pubkey}
+                        authorName={authorName}
+                        isOwn={isSelf}
+                        onPlaySound={onPlaySound}
                       />
                     ) : (
-                      <button
+                      <AgoraScreenedImage
                         key={item.url}
-                        type="button"
-                        className="ag-agora-media-cell"
-                        onClick={() => handleOpenMediaLightbox(item)}
-                        aria-label={item.alt || 'Open image preview'}
-                      >
-                        <img
-                          src={item.url}
-                          alt={item.alt || 'Attached image'}
-                          loading="lazy"
-                          referrerPolicy="no-referrer"
-                        />
-                      </button>
+                        engine={engine}
+                        url={item.url}
+                        senderPubkey={note.pubkey}
+                        variant="media"
+                        alt={item.alt || 'Attached image'}
+                        caption={item.alt || undefined}
+                        onOpenLightbox={(verifiedBlobUrl) =>
+                          handleOpenMediaLightbox(item, verifiedBlobUrl)
+                        }
+                      />
                     )
                   )}
                 </div>
@@ -1934,11 +2620,11 @@ const EditProfileModal: React.FC<{
                   }
                   title={picture.trim() ? 'Change or remove photo' : 'Upload profile photo'}
                 >
-                  <AvatarImg
+                  <AgoraAvatar
+                    engine={engine}
                     pubkey={agora.myPubkey}
-                    pictureUrl={picture}
-                    width={72}
-                    height={72}
+                    picture={picture}
+                    size="lg"
                     className="ag-agora-edit-avatar-img"
                     alt="Avatar preview"
                   />
@@ -2168,12 +2854,13 @@ const EditProfileModal: React.FC<{
    Voice / Suggested Profile Compact Row
    -------------------------------------------------------------------------- */
 const AgoraVoiceRow: React.FC<{
+  engine: AgnostrEngine
   profile: AgoraProfile
   isSelf: boolean
   following: boolean
   onOpenProfile: (pubkey: string) => void
   onToggleFollow: (pubkey: string) => void
-}> = ({ profile, isSelf, following, onOpenProfile, onToggleFollow }) => {
+}> = ({ engine, profile, isSelf, following, onOpenProfile, onToggleFollow }) => {
   const name = getProfileDisplayName(profile, profile.pubkey)
   const bio = profile.about?.trim() || formatNip05Display(profile.nip05) || shortPubkey(profile.npub, 8, 4)
 
@@ -2184,7 +2871,13 @@ const AgoraVoiceRow: React.FC<{
         className="ag-agora-voice-main"
         onClick={() => onOpenProfile(profile.pubkey)}
       >
-        <AgoraAvatar pubkey={profile.pubkey} picture={profile.picture} size="sm" alt={name} />
+        <AgoraAvatar
+          engine={engine}
+          pubkey={profile.pubkey}
+          picture={profile.picture}
+          size="sm"
+          alt={name}
+        />
         <div className="ag-agora-voice-copy">
           <span className="ag-agora-voice-name truncate">{name}</span>
           <span className="ag-agora-voice-bio truncate">{bio}</span>
@@ -2224,13 +2917,17 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const [manualComposerModal, setManualComposerModal] = useState<ComposerModalState | null>(null)
   const [editProfileOpen, setEditProfileOpen] = useState(false)
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false)
+  const [hiddenTrendsOpen, setHiddenTrendsOpen] = useState(false)
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false)
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false)
   const [searchDraft, setSearchDraft] = useState(agora.searchQuery)
   const [revealedCwIds, setRevealedCwIds] = useState<Set<string>>(() => new Set())
   const [showOriginalKeys, setShowOriginalKeys] = useState<Set<string>>(() => new Set())
   const [copiedNpub, setCopiedNpub] = useState(false)
-  const [failedBannerUrl, setFailedBannerUrl] = useState<string | null>(null)
+  const [ptrPullPx, setPtrPullPx] = useState(0)
+  const [ptrDragging, setPtrDragging] = useState(false)
+  const [ptrRefreshing, setPtrRefreshing] = useState(false)
+  const ptrTimerRef = useRef<number | null>(null)
 
   // Activate lazy Agora subscriptions on mount
   useEffect(() => {
@@ -2273,7 +2970,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   } = useMobileSwipeDrawers({
     leftOpen: leftDrawerOpen,
     rightOpen: rightDrawerOpen,
-    disabled: Boolean(activeComposerModal) || editProfileOpen,
+    disabled: Boolean(activeComposerModal) || editProfileOpen || ptrDragging,
     onLeftOpenChange: handleLeftDrawerOpenChange,
     onRightOpenChange: handleRightDrawerOpenChange,
   })
@@ -2428,6 +3125,265 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const isMyProfileOpen =
     inProfile && agora.profileView?.pubkey.toLowerCase() === agora.myPubkey.toLowerCase()
 
+  const ptrEnabled =
+    isMobileViewport &&
+    !activeComposerModal &&
+    !editProfileOpen &&
+    !leftDrawerOpen &&
+    !rightDrawerOpen &&
+    !isSwipingLeftDrawer &&
+    !isSwipingRightDrawer
+
+  const ptrLatestRef = useRef({
+    enabled: ptrEnabled,
+    refreshing: ptrRefreshing,
+    pendingNewCount: agora.pendingNewCount,
+    inThread,
+    inProfile,
+    inNotifications,
+    threadNoteId: agora.thread?.focusedNoteId ?? null,
+    profilePubkey: agora.profileView?.pubkey ?? null,
+    activeHashtag: agora.activeHashtag,
+    searchQuery: agora.searchQuery,
+    agora,
+    onPlaySound,
+  })
+
+  useEffect(() => {
+    ptrLatestRef.current = {
+      enabled: ptrEnabled,
+      refreshing: ptrRefreshing,
+      pendingNewCount: agora.pendingNewCount,
+      inThread,
+      inProfile,
+      inNotifications,
+      threadNoteId: agora.thread?.focusedNoteId ?? null,
+      profilePubkey: agora.profileView?.pubkey ?? null,
+      activeHashtag: agora.activeHashtag,
+      searchQuery: agora.searchQuery,
+      agora,
+      onPlaySound,
+    }
+  }, [
+    ptrEnabled,
+    ptrRefreshing,
+    agora,
+    inThread,
+    inProfile,
+    inNotifications,
+    onPlaySound,
+  ])
+
+  useEffect(() => {
+    return () => {
+      if (ptrTimerRef.current !== null) {
+        window.clearTimeout(ptrTimerRef.current)
+        ptrTimerRef.current = null
+      }
+    }
+  }, [])
+
+  // Smooth single-finger mobile pull-to-refresh on the scrollable Agora stream
+  useEffect(() => {
+    if (!isMobileViewport) return
+    const stream = streamRef.current
+    if (!stream) return
+
+    interface PtrTouchSession {
+      touchId: number
+      startX: number
+      startY: number
+      lock: 'pending' | 'pull' | 'rejected'
+      pullPx: number
+      crossedThreshold: boolean
+    }
+
+    let session: PtrTouchSession | null = null
+
+    const abortPull = () => {
+      const wasPulling = session?.lock === 'pull'
+      session = null
+      if (wasPulling) {
+        setPtrDragging(false)
+        setPtrPullPx(0)
+      }
+    }
+
+    const onTouchStart = (e: TouchEvent) => {
+      const latest = ptrLatestRef.current
+      if (!latest.enabled || latest.refreshing) {
+        abortPull()
+        return
+      }
+      if (e.touches.length !== 1) {
+        abortPull()
+        return
+      }
+      if (stream.scrollTop > 1) {
+        session = null
+        return
+      }
+      if (shouldIgnorePtrTarget(e.target, stream)) {
+        session = null
+        return
+      }
+      const touch = e.touches.item(0)
+      if (!touch) return
+      session = {
+        touchId: touch.identifier,
+        startX: touch.clientX,
+        startY: touch.clientY,
+        lock: 'pending',
+        pullPx: 0,
+        crossedThreshold: false,
+      }
+    }
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!session) return
+      const latest = ptrLatestRef.current
+      if (!latest.enabled || latest.refreshing || e.touches.length !== 1) {
+        abortPull()
+        return
+      }
+      const touch = findPtrTouchById(e.touches, session.touchId)
+      if (!touch) {
+        abortPull()
+        return
+      }
+
+      const dx = touch.clientX - session.startX
+      const dy = touch.clientY - session.startY
+
+      if (session.lock === 'rejected') return
+
+      if (session.lock === 'pending') {
+        if (stream.scrollTop > 1) {
+          session.lock = 'rejected'
+          return
+        }
+        if (dy < -6) {
+          session.lock = 'rejected'
+          return
+        }
+        if (Math.abs(dx) > 8 && Math.abs(dx) >= Math.abs(dy) * 0.8) {
+          session.lock = 'rejected'
+          return
+        }
+        if (dy > 8 && Math.abs(dy) > Math.abs(dx) * 1.25) {
+          session.lock = 'pull'
+          setPtrDragging(true)
+        } else {
+          return
+        }
+      }
+
+      if (e.cancelable) {
+        e.preventDefault()
+      }
+
+      const nextPullPx =
+        dy <= 0 ? 0 : Math.min(PTR_MAX_PULL_PX, Math.pow(dy, 0.78) * 1.45)
+
+      if (nextPullPx >= PTR_PULL_THRESHOLD && !session.crossedThreshold) {
+        session.crossedThreshold = true
+        try {
+          navigator.vibrate?.(10)
+        } catch {
+          /* ignore haptic errors */
+        }
+      } else if (nextPullPx < PTR_PULL_THRESHOLD - 6 && session.crossedThreshold) {
+        session.crossedThreshold = false
+      }
+
+      if (Math.abs(nextPullPx - session.pullPx) >= 0.5 || nextPullPx === 0) {
+        session.pullPx = nextPullPx
+        setPtrPullPx(nextPullPx)
+      }
+    }
+
+    const onTouchEndOrCancel = (e: TouchEvent) => {
+      if (!session) return
+      const finished = session
+      session = null
+
+      if (finished.lock !== 'pull') return
+      setPtrDragging(false)
+
+      const latest = ptrLatestRef.current
+      const shouldRefresh =
+        e.type === 'touchend' &&
+        latest.enabled &&
+        !latest.refreshing &&
+        finished.pullPx >= PTR_PULL_THRESHOLD
+
+      if (!shouldRefresh) {
+        setPtrPullPx(0)
+        return
+      }
+
+      latest.onPlaySound?.('click')
+      setPtrRefreshing(true)
+      setPtrPullPx(PTR_REFRESH_HOLD_PX)
+
+      if (latest.pendingNewCount > 0) {
+        latest.agora.flushPendingNotes()
+      }
+      if (latest.inThread && latest.threadNoteId) {
+        latest.agora.openThread(latest.threadNoteId)
+      } else if (latest.inProfile && latest.profilePubkey) {
+        latest.agora.openProfile(latest.profilePubkey)
+        latest.agora.refresh()
+      } else if (latest.activeHashtag) {
+        latest.agora.selectHashtag(latest.activeHashtag)
+        latest.agora.refresh()
+      } else if (latest.searchQuery) {
+        void latest.agora.runSearch(latest.searchQuery)
+        latest.agora.refresh()
+      } else {
+        latest.agora.refresh()
+        if (latest.inNotifications) {
+          latest.agora.markNotificationsRead()
+        }
+      }
+
+      if (ptrTimerRef.current !== null) {
+        window.clearTimeout(ptrTimerRef.current)
+      }
+      ptrTimerRef.current = window.setTimeout(() => {
+        ptrTimerRef.current = null
+        setPtrRefreshing(false)
+        setPtrPullPx(0)
+      }, PTR_REFRESH_HOLD_MS)
+    }
+
+    stream.addEventListener('touchstart', onTouchStart, { passive: true })
+    stream.addEventListener('touchmove', onTouchMove, { passive: false })
+    stream.addEventListener('touchend', onTouchEndOrCancel, { passive: true })
+    stream.addEventListener('touchcancel', onTouchEndOrCancel, { passive: true })
+
+    return () => {
+      stream.removeEventListener('touchstart', onTouchStart)
+      stream.removeEventListener('touchmove', onTouchMove)
+      stream.removeEventListener('touchend', onTouchEndOrCancel)
+      stream.removeEventListener('touchcancel', onTouchEndOrCancel)
+    }
+  }, [isMobileViewport])
+
+  const effectivePtrHeight = ptrEnabled ? (ptrRefreshing ? PTR_REFRESH_HOLD_PX : ptrPullPx) : 0
+  const ptrReady = !ptrRefreshing && effectivePtrHeight >= PTR_PULL_THRESHOLD
+  const ptrProgress = Math.min(1, effectivePtrHeight / PTR_PULL_THRESHOLD)
+  const ptrActive = effectivePtrHeight > 2
+  const ptrLabel = ptrRefreshing
+    ? 'Refreshing…'
+    : ptrReady
+      ? agora.pendingNewCount > 0
+        ? `Release to load ${agora.pendingNewCount} new`
+        : 'Release to refresh'
+      : agora.pendingNewCount > 0
+        ? `Pull to load ${agora.pendingNewCount} new`
+        : 'Pull to refresh'
+
   const activeTabTitle = useMemo(() => {
     switch (agora.activeTab) {
       case 'following':
@@ -2455,7 +3411,6 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   )
   const profileTargetWebsite = sanitizeHttpUrl(profileTarget?.website, true)
   const profileTargetBanner = sanitizeHttpUrl(profileTarget?.banner)
-  const showProfileBannerImg = Boolean(profileTargetBanner) && failedBannerUrl !== profileTargetBanner
 
   const profileDisplayedNotes: AgoraNote[] = useMemo(() => {
     if (!agora.profileView) return []
@@ -2781,6 +3736,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
         </span>
 
         <AgoraAvatar
+          engine={engine}
           pubkey={notif.actorPubkey}
           picture={actorProfile?.picture}
           size="sm"
@@ -3012,6 +3968,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
               title="Open my Nostr profile"
             >
               <AgoraAvatar
+                engine={engine}
                 pubkey={agora.myPubkey}
                 picture={agora.myProfile?.picture}
                 size="sm"
@@ -3401,14 +4358,35 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
               {agora.trendingHashtags.length > 0 && (
                 <div className="ag-agora-tag-cloud">
                   {agora.trendingHashtags.slice(0, 8).map((item) => (
-                    <button
+                    <span
                       key={item.tag}
-                      type="button"
-                      className={`ag-agora-tag-chip${agora.activeHashtag === item.tag ? ' active' : ''}`}
-                      onClick={() => handleSelectHashtag(item.tag)}
+                      className={`ag-agora-trend-item-wrap${
+                        agora.activeHashtag === item.tag ? ' active' : ''
+                      }`}
                     >
-                      <span>#{item.tag}</span>
-                    </button>
+                      <button
+                        type="button"
+                        className={`ag-agora-tag-chip${
+                          agora.activeHashtag === item.tag ? ' active' : ''
+                        }`}
+                        onClick={() => handleSelectHashtag(item.tag)}
+                      >
+                        <span>#{item.tag}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-agora-trend-hide-btn"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onPlaySound?.('click')
+                          agora.hideTrendingTopic(item.tag)
+                        }}
+                        aria-label={`Hide #${item.tag} from trending`}
+                        title="Hide from trending"
+                      >
+                        <X size={11} aria-hidden="true" />
+                      </button>
+                    </span>
                   ))}
                 </div>
               )}
@@ -3417,6 +4395,40 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
 
           {/* Main Scrollable Stream Body */}
           <div className="ag-agora-stream" ref={streamRef}>
+            {isMobileViewport && (
+              <div
+                className={`ag-agora-ptr${ptrDragging ? ' is-dragging' : ''}${
+                  ptrReady ? ' is-ready' : ''
+                }${ptrRefreshing ? ' is-refreshing' : ''}`}
+                style={{ height: `${Math.round(effectivePtrHeight)}px` }}
+                aria-hidden={!ptrActive}
+                role={ptrRefreshing ? 'status' : undefined}
+                aria-live={ptrRefreshing ? 'polite' : undefined}
+              >
+                <div
+                  className="ag-agora-ptr-pill"
+                  style={{
+                    opacity: ptrRefreshing ? 1 : Math.min(1, ptrProgress * 1.15),
+                    transform: ptrRefreshing
+                      ? 'scale(1)'
+                      : `scale(${(0.88 + 0.12 * ptrProgress).toFixed(3)})`,
+                  }}
+                >
+                  <RefreshCw
+                    size={14}
+                    className={`ag-agora-ptr-icon${ptrRefreshing ? ' ag-spin ag-agora-spin' : ''}`}
+                    style={
+                      ptrRefreshing
+                        ? undefined
+                        : { transform: `rotate(${Math.round(ptrProgress * 270)}deg)` }
+                    }
+                    aria-hidden="true"
+                  />
+                  <span className="ag-agora-ptr-label">{ptrLabel}</span>
+                </div>
+              </div>
+            )}
+
             {/* ===== VIEW A: FULL THREAD VIEW ===== */}
             {inThread && agora.thread && (
               <>
@@ -3466,15 +4478,13 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
             {inProfile && agora.profileView && (
               <>
                 <div className="ag-agora-profile-banner">
-                  {showProfileBannerImg && (
-                    <img
-                      src={profileTargetBanner}
+                  {profileTargetBanner && (
+                    <AgoraScreenedImage
+                      engine={engine}
+                      url={profileTargetBanner}
+                      senderPubkey={agora.profileView.pubkey}
+                      variant="banner"
                       alt=""
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      onError={() => {
-                        if (profileTargetBanner) setFailedBannerUrl(profileTargetBanner)
-                      }}
                     />
                   )}
                 </div>
@@ -3493,6 +4503,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                         title="Change profile picture"
                       >
                         <AgoraAvatar
+                          engine={engine}
                           pubkey={agora.profileView.pubkey}
                           picture={profileTarget?.picture}
                           size="lg"
@@ -3504,6 +4515,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                       </button>
                     ) : (
                       <AgoraAvatar
+                        engine={engine}
                         pubkey={agora.profileView.pubkey}
                         picture={profileTarget?.picture}
                         size="lg"
@@ -3741,6 +4753,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                       {agora.searchProfiles.slice(0, 5).map((p) => (
                         <AgoraVoiceRow
                           key={p.pubkey}
+                          engine={engine}
                           profile={p}
                           isSelf={p.pubkey.toLowerCase() === agora.myPubkey.toLowerCase()}
                           following={agora.isFollowing(p.pubkey)}
@@ -3846,6 +4859,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                           {agora.suggestedProfiles.slice(0, 5).map((p) => (
                             <AgoraVoiceRow
                               key={p.pubkey}
+                              engine={engine}
                               profile={p}
                               isSelf={p.pubkey.toLowerCase() === agora.myPubkey.toLowerCase()}
                               following={agora.isFollowing(p.pubkey)}
@@ -3928,28 +4942,103 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
           {searchFormEl}
 
           <section className="ag-agora-disc-card" aria-label="Trending topics">
-            <h3 className="ag-agora-disc-title">
-              <Flame size={14} />
-              <span>Trending Topics</span>
-            </h3>
+            <div className="ag-agora-disc-head">
+              <h3 className="ag-agora-disc-title">
+                <Flame size={14} />
+                <span>Trending Topics</span>
+              </h3>
+              {agora.hiddenTrendingTopics.length > 0 && (
+                <button
+                  type="button"
+                  className={`ag-agora-hidden-trends-toggle${hiddenTrendsOpen ? ' active' : ''}`}
+                  onClick={() => {
+                    onPlaySound?.('click')
+                    setHiddenTrendsOpen((v) => !v)
+                  }}
+                  aria-expanded={hiddenTrendsOpen}
+                >
+                  <EyeOff size={11} aria-hidden="true" />
+                  <span className="tabular">Hidden ({agora.hiddenTrendingTopics.length})</span>
+                </button>
+              )}
+            </div>
             {agora.trendingHashtags.length > 0 ? (
               <div className="ag-agora-tag-cloud">
                 {agora.trendingHashtags.slice(0, 10).map((item) => (
-                  <button
+                  <span
                     key={item.tag}
-                    type="button"
-                    className={`ag-agora-tag-chip${agora.activeHashtag === item.tag ? ' active' : ''}`}
-                    onClick={() => handleSelectHashtag(item.tag)}
+                    className={`ag-agora-trend-item-wrap${
+                      agora.activeHashtag === item.tag ? ' active' : ''
+                    }`}
                   >
-                    <span>#{item.tag}</span>
-                    <span className="ag-agora-tag-chip-cnt tabular">{item.count}</span>
-                  </button>
+                    <button
+                      type="button"
+                      className={`ag-agora-tag-chip${
+                        agora.activeHashtag === item.tag ? ' active' : ''
+                      }`}
+                      onClick={() => handleSelectHashtag(item.tag)}
+                    >
+                      <span>#{item.tag}</span>
+                      <span className="ag-agora-tag-chip-cnt tabular">{item.count}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-agora-trend-hide-btn"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onPlaySound?.('click')
+                        agora.hideTrendingTopic(item.tag)
+                      }}
+                      aria-label={`Hide #${item.tag} from trending`}
+                      title="Hide from trending"
+                    >
+                      <X size={11} aria-hidden="true" />
+                    </button>
+                  </span>
                 ))}
               </div>
             ) : (
               <p className="ag-agora-empty-sub" style={{ fontSize: 12 }}>
-                Discovering active hashtags across social relays…
+                {agora.hiddenTrendingTopics.length > 0
+                  ? 'All active trending topics are currently hidden.'
+                  : 'Discovering active hashtags across social relays…'}
               </p>
+            )}
+            {hiddenTrendsOpen && agora.hiddenTrendingTopics.length > 0 && (
+              <div className="ag-agora-hidden-trends" aria-label="Hidden trending topics">
+                <div className="ag-agora-hidden-trends-head">
+                  <span className="ag-agora-hidden-trends-label">Tap a topic to restore</span>
+                  <button
+                    type="button"
+                    className="ag-agora-hidden-trends-clear"
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      agora.clearHiddenTrendingTopics()
+                      setHiddenTrendsOpen(false)
+                    }}
+                  >
+                    Restore all
+                  </button>
+                </div>
+                <div className="ag-agora-hidden-trends-list">
+                  {agora.hiddenTrendingTopics.map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      className="ag-agora-hidden-trend-chip"
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        agora.unhideTrendingTopic(tag)
+                      }}
+                      aria-label={`Restore #${tag} to trending`}
+                      title={`Restore #${tag}`}
+                    >
+                      <span>#{tag}</span>
+                      <RefreshCw size={10} aria-hidden="true" />
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
           </section>
 
@@ -3963,6 +5052,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                 {agora.suggestedProfiles.slice(0, 6).map((p) => (
                   <AgoraVoiceRow
                     key={p.pubkey}
+                    engine={engine}
                     profile={p}
                     isSelf={p.pubkey.toLowerCase() === agora.myPubkey.toLowerCase()}
                     following={agora.isFollowing(p.pubkey)}

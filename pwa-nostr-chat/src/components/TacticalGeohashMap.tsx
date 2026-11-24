@@ -15,20 +15,40 @@ import {
   normalizeGeohash,
   wrapLongitude,
 } from '../lib/geohash.ts'
-import { getTopicSlug, isTopicChannel, makeTopicChannelKey } from '../lib/bitchatChannel.ts'
 import {
-  computeSublunarPoint,
-  computeSubsolarPoint,
-  latLonToUnitVec3,
-} from '../lib/astronomy.ts'
+  getChannelBodyId,
+  getChannelRawGeohash,
+  getTopicSlug,
+  isTopicChannel,
+  makeCelestialChannelKey,
+  makeTopicChannelKey,
+  parseCelestialChannelKey,
+} from '../lib/bitchatChannel.ts'
+import { latLonToUnitVec3 } from '../lib/astronomy.ts'
 import {
   computeAsteroidWorldPosition,
   computeTopicAsteroidSpec,
   isPointOccludedByEarth,
   type TopicAsteroidSpec,
 } from '../lib/asteroids.ts'
+import {
+  PLANET_BODY_IDS,
+  SOLAR_BODIES,
+  computeSolarSystemSnapshot,
+  getBodyDef,
+  getMoonsOfBody,
+  samplePlanetOrbitPoints,
+  type CelestialBodyDef,
+  type CelestialBodyId,
+  type GeohashableBodyId,
+  type SolarSystemSnapshot,
+} from '../lib/solarSystem.ts'
+import {
+  createPlanetaryRingTexture,
+  getCelestialSurfaceTexture,
+} from '../lib/planetTextures.ts'
 
-export type PrecisionSelection = 'auto' | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
+export type PrecisionSelection = 'auto' | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
 export interface TacticalGeohashMapHandle {
   zoomIn: () => void
@@ -38,6 +58,8 @@ export interface TacticalGeohashMapHandle {
   flyToCoords: (lat: number, lon: number, zoom?: number) => void
   fitWorld: () => void
   fitAsteroids: () => void
+  focusBody: (bodyId: GeohashableBodyId, options?: { geohash?: string; animate?: boolean }) => void
+  fitSolarSystem: () => void
   getZoom: () => number
 }
 
@@ -56,6 +78,8 @@ export interface TacticalGeohashMapProps {
   extraTopicKeys?: string[]
   activeChannelKey?: string
   selectedChannelKey?: string | null
+  focusedBodyId?: GeohashableBodyId
+  onFocusBodyChange?: (bodyId: GeohashableBodyId) => void
   userCoords: GeoCoords | null
   isTeleported: boolean
   onSelectGeohash: (geohash: string) => void
@@ -70,17 +94,19 @@ const DEG2RAD = Math.PI / 180
 const RAD2DEG = 180 / Math.PI
 const MAX_MERCATOR_LAT = 85.05112878
 
-const MIN_VIRTUAL_ZOOM = -1.7 // distance ~ 15.8 at full solar-orbit pullback
-const MAX_VIRTUAL_ZOOM = 15.5
+const MIN_VIRTUAL_ZOOM = -6.8 // distance ~ 454 at max Solar System pullback (frames all 9 planets + Pluto)
+const MAX_VIRTUAL_ZOOM = 20.5 // alt ~ 31m at P9 (~4.8m spot)
 const MAX_ALTITUDE = 3.6 // distance = 4.6 at zoom 1
-const ALTITUDE_DECAY = 0.52325 // distance ~ 1.004 at zoom 14, ~ 1.0018 at zoom 15.5
+const DEEP_SPACE_DECAY = 0.62 // smooth exponential pull-back for zoom < 1 out past Pluto
 const CAMERA_FOV_DEG = 42
 
+// Zero radial parallax: all surface layers sit on exact unit sphere r = 1.0,
+// ordered strictly by WebGL renderOrder + polygonOffset + depthWrite: false!
 const EARTH_RADIUS = 1.0
-const PATCH_RADIUS = 1.00014
-const OVERLAY_FILL_RADIUS = 1.00045
-const OVERLAY_LINE_RADIUS = 1.00075
-const FOCUS_LINE_RADIUS = 1.00105
+const PATCH_RADIUS = 1.0
+const OVERLAY_FILL_RADIUS = 1.0
+const OVERLAY_LINE_RADIUS = 1.0
+const FOCUS_LINE_RADIUS = 1.0
 
 const ESRI_TOPO_URL =
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}'
@@ -161,7 +187,22 @@ function wrapDeltaLon(deltaDeg: number): number {
 
 function zoomToDistance(zoom: number): number {
   const z = clamp(zoom, MIN_VIRTUAL_ZOOM, MAX_VIRTUAL_ZOOM)
-  return EARTH_RADIUS + MAX_ALTITUDE * Math.exp(-ALTITUDE_DECAY * (z - 1))
+  if (z >= 1) {
+    // True 2x-per-zoom altitude decay: z=15 -> ~1.4km (P7), z=17 -> ~350m (P8), z=19 -> ~87m (P9), z=20.5 -> ~31m
+    return EARTH_RADIUS + MAX_ALTITUDE * Math.pow(2, 1 - z)
+  }
+  return EARTH_RADIUS + MAX_ALTITUDE * Math.exp(-DEEP_SPACE_DECAY * (z - 1))
+}
+
+/**
+ * Precision-based zoom-out LOD cap for surface activity dots & speech bubbles
+ * so high-precision neighborhood dots vanish cleanly when zooming far out.
+ */
+function getMaxVisibleSurfacePrecision(zoom: number): number {
+  if (zoom < -1.8) return 0
+  if (zoom < 0.1) return 2
+  if (zoom < 1.8) return 3
+  return 9
 }
 
 function latLonToVec3(latDeg: number, lonDeg: number, radius = EARTH_RADIUS): THREE.Vector3 {
@@ -219,9 +260,9 @@ function computeVisibleHalfAngleRad(distance: number, halfFovRad: number): numbe
   const sinAlpha = Math.sin(halfFovRad)
   const k = distance * sinAlpha
   if (k < 0.999) {
-    return Math.max(0.0005, Math.asin(k) - halfFovRad)
+    return Math.max(1e-7, Math.asin(k) - halfFovRad)
   }
-  return Math.acos(clamp(1 / Math.max(1.0001, distance), -1, 1))
+  return Math.acos(clamp(1 / Math.max(1.000001, distance), -1, 1))
 }
 
 /**
@@ -246,6 +287,16 @@ function formatBubbleSender(sender: string): string {
   return `${cleaned.slice(0, 10).trimEnd()}…`
 }
 
+function formatBubbleAge(tsMs: number, nowMs: number): string {
+  if (!Number.isFinite(tsMs) || tsMs <= 0) return 'just now'
+  const diffSec = Math.max(0, Math.floor((nowMs - tsMs) / 1000))
+  if (diffSec < 5) return 'just now'
+  if (diffSec < 60) return `${diffSec}s ago`
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`
+  return `${Math.floor(diffSec / 86400)}d ago`
+}
+
 // ---------------------------------------------------------------------------
 // GLSL Shaders: Earth Day/Night + Atmosphere + Moon + Asteroids + Push-Pins + Stars
 // ---------------------------------------------------------------------------
@@ -260,7 +311,8 @@ const EARTH_VERTEX_SHADER = `
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldPos = worldPos.xyz;
     vWorldNormal = normalize(mat3(modelMatrix) * normal);
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    // Use Three.js Float64-composed modelViewMatrix for sub-millimeter RTC precision at P7..P9
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `
 
@@ -330,6 +382,9 @@ const ATMOSPHERE_VERTEX_SHADER = `
 
 const ATMOSPHERE_FRAGMENT_SHADER = `
   uniform vec3 uSunDir;
+  uniform vec3 uHaloColor;
+  uniform float uIntensity;
+  uniform float uTwilightMix;
 
   varying vec3 vWorldNormal;
   varying vec3 vWorldPos;
@@ -345,40 +400,44 @@ const ATMOSPHERE_FRAGMENT_SHADER = `
     float sunSide = 0.24 + 0.76 * smoothstep(-0.32, 0.42, ndotl);
     float twilight = exp(-pow((ndotl + 0.04) / 0.22, 2.0));
 
-    vec3 haloColor = mix(vec3(0.28, 0.62, 1.0), vec3(0.98, 0.58, 0.28), twilight * 0.35);
-    float alpha = rim * sunSide * 0.62;
+    vec3 haloColor = mix(uHaloColor, vec3(0.98, 0.58, 0.28), twilight * uTwilightMix);
+    float alpha = rim * sunSide * uIntensity;
     gl_FragColor = vec4(haloColor * alpha, alpha);
   }
 `
 
-const MOON_VERTEX_SHADER = `
-  varying vec2 vUv;
-  varying vec3 vWorldNormal;
-
-  void main() {
-    vUv = uv;
-    vWorldNormal = normalize(mat3(modelMatrix) * normal);
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`
-
-const MOON_FRAGMENT_SHADER = `
+const PLANET_FRAGMENT_SHADER = `
   uniform sampler2D uMap;
   uniform vec3 uSunDir;
+  uniform vec3 uAtmoColor;
+  uniform float uAtmoStrength;
+  uniform float uOpacity;
 
   varying vec2 vUv;
   varying vec3 vWorldNormal;
+  varying vec3 vWorldPos;
 
   void main() {
-    vec3 albedo = texture2D(uMap, vUv).rgb;
+    vec3 texel = texture2D(uMap, vUv).rgb;
     vec3 N = normalize(vWorldNormal);
     vec3 L = normalize(uSunDir);
+    vec3 V = normalize(cameraPosition - vWorldPos);
+
     float ndotl = dot(N, L);
-    float lit = smoothstep(-0.08, 0.14, ndotl);
-    float shade = mix(0.08, 1.32, lit);
-    vec3 color = albedo * shade;
-    color += vec3(0.04, 0.06, 0.10) * (1.0 - lit);
-    gl_FragColor = vec4(color, 1.0);
+    float dayFactor = smoothstep(-0.14, 0.22, ndotl);
+    float sunFacing = pow(max(ndotl, 0.0), 0.65);
+
+    vec3 dayColor = min(texel * (0.94 + 0.34 * sunFacing), vec3(1.12));
+    vec3 nightColor = texel * vec3(0.11, 0.14, 0.22);
+    vec3 color = mix(nightColor, dayColor, dayFactor);
+
+    if (uAtmoStrength > 0.001) {
+      float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+      float rimSun = 0.24 + 0.76 * smoothstep(-0.24, 0.36, ndotl);
+      color += uAtmoColor * fresnel * rimSun * uAtmoStrength;
+    }
+
+    gl_FragColor = vec4(color, uOpacity);
   }
 `
 
@@ -588,53 +647,73 @@ function createSunCoronaTexture(): THREE.CanvasTexture {
   return tex
 }
 
-function createLunarSurfaceTexture(): THREE.CanvasTexture {
-  const w = 256
-  const h = 128
-  const canvas = document.createElement('canvas')
-  canvas.width = w
-  canvas.height = h
-  const ctx = canvas.getContext('2d')
-  if (ctx) {
-    const rand = mulberry32(4201969)
-    ctx.fillStyle = '#B7B5B0'
-    ctx.fillRect(0, 0, w, h)
-
-    for (let i = 0; i < 18; i++) {
-      const mx = rand() * w
-      const my = (0.18 + rand() * 0.64) * h
-      const mr = 10 + rand() * 26
-      const g = ctx.createRadialGradient(mx, my, mr * 0.15, mx, my, mr)
-      g.addColorStop(0, 'rgba(92, 92, 96, 0.52)')
-      g.addColorStop(0.7, 'rgba(110, 110, 114, 0.25)')
-      g.addColorStop(1, 'rgba(110, 110, 114, 0)')
-      ctx.fillStyle = g
-      ctx.beginPath()
-      ctx.arc(mx, my, mr, 0, Math.PI * 2)
-      ctx.fill()
-    }
-
-    for (let i = 0; i < 160; i++) {
-      const cx = rand() * w
-      const cy = rand() * h
-      const r = 1.2 + Math.pow(rand(), 2.2) * 8.5
-      ctx.fillStyle = `rgba(74, 74, 78, ${0.14 + rand() * 0.22})`
-      ctx.beginPath()
-      ctx.arc(cx, cy, r, 0, Math.PI * 2)
-      ctx.fill()
-
-      ctx.strokeStyle = `rgba(222, 220, 214, ${0.16 + rand() * 0.18})`
-      ctx.lineWidth = 0.8
-      ctx.beginPath()
-      ctx.arc(cx - r * 0.12, cy - r * 0.12, r * 0.94, 0, Math.PI * 2)
-      ctx.stroke()
-    }
+function createPlanetaryRingMesh(
+  innerRadius: number,
+  outerRadius: number,
+  color: string,
+  opacity: number,
+  tiltDeg: number,
+  segments = 96,
+): THREE.Mesh {
+  const geo = new THREE.RingGeometry(innerRadius, outerRadius, segments, 1)
+  const pos = geo.attributes.position as THREE.BufferAttribute
+  const uv = geo.attributes.uv as THREE.BufferAttribute
+  const span = Math.max(0.0001, outerRadius - innerRadius)
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i)
+    const y = pos.getY(i)
+    const r = Math.hypot(x, y)
+    const u = clamp((r - innerRadius) / span, 0, 1)
+    uv.setXY(i, u, 0.5)
   }
-  const tex = new THREE.CanvasTexture(canvas)
-  tex.wrapS = THREE.RepeatWrapping
-  tex.wrapT = THREE.ClampToEdgeWrapping
-  tex.needsUpdate = true
-  return tex
+  uv.needsUpdate = true
+  geo.rotateX(-Math.PI / 2)
+  if (tiltDeg !== 0) {
+    geo.rotateZ(tiltDeg * DEG2RAD)
+  }
+
+  const ringTex = createPlanetaryRingTexture(color)
+  const mat = new THREE.MeshBasicMaterial({
+    map: ringTex,
+    transparent: true,
+    opacity,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  })
+  const mesh = new THREE.Mesh(geo, mat)
+  mesh.renderOrder = 2
+  return mesh
+}
+
+function createMoonOrbitLoopGeometry(
+  centerPos: THREE.Vector3,
+  moonPos: THREE.Vector3,
+  segments = 72,
+): THREE.BufferGeometry {
+  const offset = moonPos.clone().sub(centerPos)
+  const radius = offset.length()
+  if (radius < 1e-4) {
+    return new THREE.BufferGeometry()
+  }
+  const u = offset.clone().normalize()
+  let v = new THREE.Vector3().crossVectors(UP_Y, u)
+  if (v.lengthSq() < 1e-5) {
+    v = new THREE.Vector3(1, 0, 0).cross(u)
+  }
+  v.normalize()
+
+  const positions = new Float32Array(segments * 3)
+  for (let i = 0; i < segments; i++) {
+    const a = (i / segments) * Math.PI * 2
+    const cosA = Math.cos(a)
+    const sinA = Math.sin(a)
+    positions[i * 3] = centerPos.x + (u.x * cosA + v.x * sinA) * radius
+    positions[i * 3 + 1] = centerPos.y + (u.y * cosA + v.y * sinA) * radius
+    positions[i * 3 + 2] = centerPos.z + (u.z * cosA + v.z * sinA) * radius
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  return geo
 }
 
 /**
@@ -774,7 +853,7 @@ function createStarfieldPoints(pixelRatio: number): {
       z = s * Math.sin(az)
     }
 
-    const r = 70 + rand() * 60
+    const r = 560 + rand() * 300
     positions[i * 3] = x * r
     positions[i * 3 + 1] = y * r
     positions[i * 3 + 2] = z * r
@@ -803,9 +882,9 @@ function createStarfieldPoints(pixelRatio: number): {
     const idx = starCount + p
     const pl = planets[p]
     const [px, py, pz] = latLonToUnitVec3(pl.lat, pl.lon)
-    positions[idx * 3] = px * 68
-    positions[idx * 3 + 1] = py * 68
-    positions[idx * 3 + 2] = pz * 68
+    positions[idx * 3] = px * 620
+    positions[idx * 3 + 1] = py * 620
+    positions[idx * 3 + 2] = pz * 620
     const col = new THREE.Color(pl.color)
     colors[idx * 3] = col.r
     colors[idx * 3 + 1] = col.g
@@ -832,7 +911,11 @@ function createStarfieldPoints(pixelRatio: number): {
   return { points, geometry, material }
 }
 
-function createMercatorPatchGeometry(z: number, tx: number, ty: number): THREE.BufferGeometry {
+function createMercatorPatchGeometry(
+  z: number,
+  tx: number,
+  ty: number,
+): { geometry: THREE.BufferGeometry; anchor: THREE.Vector3 } {
   const n = 1 << z
   const seg = z <= 4 ? 10 : z <= 6 ? 6 : 4
   const stride = seg + 1
@@ -840,6 +923,14 @@ function createMercatorPatchGeometry(z: number, tx: number, ty: number): THREE.B
   const positions = new Float32Array(vertexCount * 3)
   const normals = new Float32Array(vertexCount * 3)
   const uvs = new Float32Array(vertexCount * 2)
+
+  // Float64 RTC anchor at tile center -> sub-millimeter Float32 accuracy up to z=18 (P9)
+  const centerLat = mercYNormToLat((ty + 0.5) / n)
+  const centerLon = ((tx + 0.5) / n) * 360 - 180
+  const [ax, ay, az] = latLonToUnitVec3(centerLat, centerLon)
+  const anchorX = ax * PATCH_RADIUS
+  const anchorY = ay * PATCH_RADIUS
+  const anchorZ = az * PATCH_RADIUS
 
   let vi = 0
   let ui = 0
@@ -851,9 +942,9 @@ function createMercatorPatchGeometry(z: number, tx: number, ty: number): THREE.B
       const u = iu / seg
       const lon = ((tx + u) / n) * 360 - 180
       const [nx, ny, nz] = latLonToUnitVec3(lat, lon)
-      positions[vi] = nx * PATCH_RADIUS
-      positions[vi + 1] = ny * PATCH_RADIUS
-      positions[vi + 2] = nz * PATCH_RADIUS
+      positions[vi] = nx * PATCH_RADIUS - anchorX
+      positions[vi + 1] = ny * PATCH_RADIUS - anchorY
+      positions[vi + 2] = nz * PATCH_RADIUS - anchorZ
       normals[vi] = nx
       normals[vi + 1] = ny
       normals[vi + 2] = nz
@@ -881,7 +972,7 @@ function createMercatorPatchGeometry(z: number, tx: number, ty: number): THREE.B
   geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
   geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
   geometry.setIndex(indices)
-  return geometry
+  return { geometry, anchor: new THREE.Vector3(anchorX, anchorY, anchorZ) }
 }
 
 function pushCurvedRectSegments(
@@ -891,11 +982,13 @@ function pushCurvedRectSegments(
   lonMin: number,
   lonMax: number,
   radius: number,
+  anchor: readonly [number, number, number] = [0, 0, 0],
 ): void {
   const cLatMin = clamp(latMin, -85, 85)
   const cLatMax = clamp(latMax, -85, 85)
   const span = Math.max(Math.abs(cLatMax - cLatMin), Math.abs(lonMax - lonMin))
-  const steps = span > 25 ? 8 : span > 8 ? 4 : span > 2 ? 2 : 1
+  const steps = span > 25 ? 20 : span > 8 ? 10 : span > 2 ? 4 : 1
+  const [ax, ay, az] = anchor
 
   const pushArc = (la0: number, lo0: number, la1: number, lo1: number) => {
     let prev = latLonToUnitVec3(la0, lo0)
@@ -903,12 +996,12 @@ function pushCurvedRectSegments(
       const t = s / steps
       const curr = latLonToUnitVec3(la0 + (la1 - la0) * t, lo0 + (lo1 - lo0) * t)
       out.push(
-        prev[0] * radius,
-        prev[1] * radius,
-        prev[2] * radius,
-        curr[0] * radius,
-        curr[1] * radius,
-        curr[2] * radius,
+        prev[0] * radius - ax,
+        prev[1] * radius - ay,
+        prev[2] * radius - az,
+        curr[0] * radius - ax,
+        curr[1] * radius - ay,
+        curr[2] * radius - az,
       )
       prev = curr
     }
@@ -923,16 +1016,18 @@ function pushCurvedRectSegments(
 function buildCurvedRectFillGeometry(
   boxes: Array<{ latMin: number; latMax: number; lonMin: number; lonMax: number }>,
   radius: number,
+  anchor: readonly [number, number, number] = [0, 0, 0],
 ): THREE.BufferGeometry {
   const positions: number[] = []
   const indices: number[] = []
+  const [ax, ay, az] = anchor
   let baseVertex = 0
 
   for (const box of boxes) {
     const latMin = clamp(box.latMin, -85, 85)
     const latMax = clamp(box.latMax, -85, 85)
     const span = Math.max(Math.abs(latMax - latMin), Math.abs(box.lonMax - box.lonMin))
-    const seg = span > 25 ? 6 : span > 8 ? 3 : 1
+    const seg = span > 25 ? 10 : span > 8 ? 5 : 1
     const stride = seg + 1
 
     for (let iv = 0; iv <= seg; iv++) {
@@ -940,7 +1035,7 @@ function buildCurvedRectFillGeometry(
       for (let iu = 0; iu <= seg; iu++) {
         const lon = box.lonMin + ((box.lonMax - box.lonMin) * iu) / seg
         const [x, y, z] = latLonToUnitVec3(lat, lon)
-        positions.push(x * radius, y * radius, z * radius)
+        positions.push(x * radius - ax, y * radius - ay, z * radius - az)
       }
     }
 
@@ -996,6 +1091,19 @@ function buildCurvedTeleportArcGeometry(
   return geometry
 }
 
+function disposeMaterialSafe(mat: THREE.Material): void {
+  const basic = mat as THREE.MeshBasicMaterial
+  if (basic.map && !basic.map.userData?.cached) {
+    basic.map.dispose()
+  }
+  const shader = mat as THREE.ShaderMaterial
+  const uMap = shader.uniforms?.uMap?.value as THREE.Texture | undefined
+  if (uMap && !uMap.userData?.cached) {
+    uMap.dispose()
+  }
+  mat.dispose()
+}
+
 function disposeObject3D(obj: THREE.Object3D | null): void {
   if (!obj) return
   obj.traverse((child) => {
@@ -1005,9 +1113,9 @@ function disposeObject3D(obj: THREE.Object3D | null): void {
     }
     const mat = mesh.material
     if (Array.isArray(mat)) {
-      for (const m of mat) m.dispose()
+      for (const m of mat) disposeMaterialSafe(m)
     } else if (mat) {
-      mat.dispose()
+      disposeMaterialSafe(mat)
     }
   })
 }
@@ -1028,8 +1136,9 @@ interface QueuedGlobeBubble {
 }
 
 interface GlobeBubbleStackRender {
-  geohash: string // canonical channelKey ('9q8y' or 'topic:nostr')
-  displayTag: string // '#9q8y' or '#nostr'
+  geohash: string // canonical channelKey ('9q8y', 'mars:s000', or 'topic:nostr')
+  rawGeohash: string // bare base32 geohash on focused body (empty for topics)
+  displayTag: string // '#9q8y', '#mars:s000', or '#nostr'
   isTopic: boolean
   center: GeoCoords
   bubbles: QueuedGlobeBubble[]
@@ -1037,8 +1146,13 @@ interface GlobeBubbleStackRender {
   isFocused: boolean
 }
 
+interface PulseRoomOnBody extends PulseRoom {
+  rawGeohash: string
+}
+
 interface EarthPinRenderItem {
-  geohash: string
+  channelKey: string // canonical key ('9q8y' or 'mars:s000')
+  geohash: string // bare base32 geohash on focused body
   center: GeoCoords
   unreadCount: number
   mentionCount: number
@@ -1048,10 +1162,27 @@ interface EarthPinRenderItem {
 
 interface EarthPinRuntimeEntry {
   channelKey: string
+  rawGeohash: string
   root: THREE.Group
   normal: THREE.Vector3
   headTipY: number
+  scaleBoost: number
   hitMesh: THREE.Mesh
+}
+
+interface SolarBodyRuntimeEntry {
+  id: CelestialBodyId
+  def: CelestialBodyDef
+  root: THREE.Group
+  material: THREE.ShaderMaterial | null
+  hitMesh: THREE.Mesh
+  worldPos: THREE.Vector3
+  renderRadius: number
+  isChildMoon: boolean
+  isParentOfFocused: boolean
+  isSiblingMoon: boolean
+  isPlanet: boolean
+  isSun: boolean
 }
 
 interface TopicAsteroidRenderItem {
@@ -1075,13 +1206,14 @@ interface AsteroidRuntimeEntry {
   root: THREE.Group
   rockMesh: THREE.Mesh
   rockMaterial: THREE.ShaderMaterial
+  pinBeaconGroup: THREE.Group | null
   hitMesh: THREE.Mesh
   orbitLine: THREE.LineLoop | null
   orbitMaterial: THREE.LineBasicMaterial | null
   spinAxis: THREE.Vector3
-  orbitElapsedSec: number
   worldPos: THREE.Vector3
   isPinned: boolean
+  isPinFocused: boolean
   isLive: boolean
 }
 
@@ -1134,6 +1266,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       extraTopicKeys,
       activeChannelKey,
       selectedChannelKey,
+      focusedBodyId,
+      onFocusBodyChange,
       userCoords,
       isTeleported,
       onSelectGeohash,
@@ -1149,9 +1283,19 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     const canvasWrapRef = useRef<HTMLDivElement | null>(null)
 
     const [webglError, setWebglError] = useState(false)
-    const [hoverHud, setHoverHud] = useState<{ geohash: string; coords: string } | null>(null)
+    const [hoverHud, setHoverHud] = useState<{
+      geohash: string
+      coords: string
+      noHash?: boolean
+    } | null>(null)
     const [viewportTick, setViewportTick] = useState(0)
     const [bubbleStacks, setBubbleStacks] = useState<GlobeBubbleStackRender[]>([])
+    const [bubbleNowMs, setBubbleNowMs] = useState<number>(() => Date.now())
+    const [internalBodyId, setInternalBodyId] = useState<GeohashableBodyId>(
+      () => focusedBodyId ?? parseCelestialChannelKey(activeChannelKey ?? activeGeohash)?.bodyId ?? 'earth',
+    )
+
+    const activeBodyId: GeohashableBodyId = focusedBodyId ?? internalBodyId
 
     const effectiveActiveKey = (activeChannelKey ?? activeGeohash ?? '').trim().toLowerCase()
     const effectiveSelectedKey =
@@ -1159,18 +1303,18 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         ?.trim()
         .toLowerCase() || null
 
+    const parsedActiveCell = parseCelestialChannelKey(effectiveActiveKey || activeGeohash)
+    const parsedSelectedCell = parseCelestialChannelKey(effectiveSelectedKey ?? selectedGeohash)
+
+    const activeGeohashOnBody =
+      parsedActiveCell && parsedActiveCell.bodyId === activeBodyId ? parsedActiveCell.geohash : null
+    const selectedGeohashOnBody =
+      parsedSelectedCell && parsedSelectedCell.bodyId === activeBodyId
+        ? parsedSelectedCell.geohash
+        : null
+
     const safeActiveGeohash =
-      activeGeohash && !isTopicChannel(activeGeohash) && isValidGeohash(activeGeohash)
-        ? normalizeGeohash(activeGeohash)
-        : '9q8y'
-    const safeSelectedGeohash =
-      selectedGeohash && !isTopicChannel(selectedGeohash) && isValidGeohash(selectedGeohash)
-        ? normalizeGeohash(selectedGeohash)
-        : effectiveSelectedKey &&
-            !isTopicChannel(effectiveSelectedKey) &&
-            isValidGeohash(effectiveSelectedKey)
-          ? normalizeGeohash(effectiveSelectedKey)
-          : null
+      activeGeohashOnBody ?? (activeBodyId === 'earth' ? '9q8y' : '')
 
     // Keep fresh callbacks & reactive props in refs for rAF & Three.js event listeners
     const onSelectRef = useRef(onSelectGeohash)
@@ -1178,12 +1322,16 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     const onSelectChannelRef = useRef(onSelectChannel)
     const onTuneChannelRef = useRef(onTuneChannel)
     const onViewportInfoRef = useRef(onViewportInfoChange)
+    const onFocusBodyChangeRef = useRef(onFocusBodyChange)
     const precisionModeRef = useRef(precisionMode)
     const modeRef = useRef(mode)
     const themeRef = useRef(theme)
-    const prevActiveRef = useRef(safeActiveGeohash)
-    const activeGeohashRef = useRef(safeActiveGeohash)
-    const selectedGeohashRef = useRef(safeSelectedGeohash)
+    const activeBodyIdRef = useRef<GeohashableBodyId>(activeBodyId)
+    const prevBodyIdRef = useRef<GeohashableBodyId>(activeBodyId)
+    const lastFlyBodyRef = useRef<GeohashableBodyId | null>(null)
+    const prevActiveKeyRef = useRef(effectiveActiveKey)
+    const activeGeohashRef = useRef<string | null>(activeGeohashOnBody)
+    const selectedGeohashRef = useRef<string | null>(selectedGeohashOnBody)
     const activeChannelKeyRef = useRef(effectiveActiveKey)
     const selectedChannelKeyRef = useRef(effectiveSelectedKey)
     const showSubZonesRef = useRef(showSubZones)
@@ -1197,11 +1345,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       onSelectChannelRef.current = onSelectChannel
       onTuneChannelRef.current = onTuneChannel
       onViewportInfoRef.current = onViewportInfoChange
+      onFocusBodyChangeRef.current = onFocusBodyChange
       precisionModeRef.current = precisionMode
       modeRef.current = mode
       themeRef.current = theme
-      activeGeohashRef.current = safeActiveGeohash
-      selectedGeohashRef.current = safeSelectedGeohash
+      activeBodyIdRef.current = activeBodyId
+      activeGeohashRef.current = activeGeohashOnBody
+      selectedGeohashRef.current = selectedGeohashOnBody
       activeChannelKeyRef.current = effectiveActiveKey
       selectedChannelKeyRef.current = effectiveSelectedKey
       showSubZonesRef.current = showSubZones
@@ -1214,11 +1364,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       onSelectChannel,
       onTuneChannel,
       onViewportInfoChange,
+      onFocusBodyChange,
       precisionMode,
       mode,
       theme,
-      safeActiveGeohash,
-      safeSelectedGeohash,
+      activeBodyId,
+      activeGeohashOnBody,
+      selectedGeohashOnBody,
       effectiveActiveKey,
       effectiveSelectedKey,
       showSubZones,
@@ -1230,7 +1382,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     const emitSelectChannel = useCallback((channelKey: string) => {
       if (onSelectChannelRef.current) {
         onSelectChannelRef.current(channelKey)
-      } else if (!isTopicChannel(channelKey) && isValidGeohash(channelKey)) {
+      } else if (!isTopicChannel(channelKey) && parseCelestialChannelKey(channelKey)) {
         onSelectRef.current(channelKey)
       }
     }, [])
@@ -1243,12 +1395,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       }
     }, [])
 
-    // Initial wide camera framing in expanded mode so Earth, push-pins, & orbiting asteroids are immediately visible
-    const initialCamCenter = decodeCenter(safeActiveGeohash)
+    // Initial wide camera framing in expanded mode so the focused world, push-pins, & orbiting bodies are immediately visible
+    const initialCamCenter = safeActiveGeohash
+      ? decodeCenter(safeActiveGeohash)
+      : { lat: 14, lon: 0 }
     const initialCamZoom = clamp(
       mode === 'compact'
-        ? Math.max(2, getZoomForPrecision(safeActiveGeohash.length) - 1)
-        : Math.min(getZoomForPrecision(safeActiveGeohash.length), 2.15),
+        ? Math.max(2, getZoomForPrecision(Math.max(1, safeActiveGeohash.length)) - 1)
+        : Math.min(getZoomForPrecision(Math.max(1, safeActiveGeohash.length)), 2.15),
       MIN_VIRTUAL_ZOOM,
       MAX_VIRTUAL_ZOOM,
     )
@@ -1271,13 +1425,20 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       renderer: THREE.WebGLRenderer
       earthMesh: THREE.Mesh
       earthMaterial: THREE.ShaderMaterial
+      planetCentralMaterial: THREE.ShaderMaterial
       baseCanvas: HTMLCanvasElement
       baseTexture: THREE.CanvasTexture
       sunDir: THREE.Vector3
       sunGroup: THREE.Group
-      moonMesh: THREE.Mesh
-      moonMaterial: THREE.ShaderMaterial
+      sunHitMesh: THREE.Mesh
+      atmosphereMesh: THREE.Mesh
       atmosphereMaterial: THREE.ShaderMaterial
+      centralRingGroup: THREE.Group
+      solarSystemGroup: THREE.Group
+      planetOrbitGroup: THREE.Group
+      moonOrbitGroup: THREE.Group
+      planetOrbitMats: Map<CelestialBodyId, THREE.LineBasicMaterial>
+      moonOrbitMats: THREE.LineBasicMaterial[]
       patchGroup: THREE.Group
       patchCache: Map<string, PatchTileCacheEntry>
       gridGroup: THREE.Group
@@ -1289,49 +1450,71 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       pinGroup: THREE.Group
       asteroidGroup: THREE.Group
       asteroidOrbitGroup: THREE.Group
+      snapshot: SolarSystemSnapshot
       tileKind: 'dark' | 'light'
       baseLoadGen: number
       hoveredGeohash: string | null
       hoveredAsteroidKey: string | null
+      hoveredBodyId: CelestialBodyId | null
       orbitClockSec: number
       scheduleViewportEmit: () => void
       reloadBaseTiles: (kind: 'dark' | 'light') => void
       updatePatchTiles: () => void
       updateHoverMesh: (gh: string | null) => void
+      rebuildSolarSystem: (bodyId: GeohashableBodyId, now?: Date) => SolarSystemSnapshot
+      updateSolarPositions: (now?: Date) => void
     } | null>(null)
 
-    // Runtime 3D maps for pins & orbiting asteroids (mutated in-place inside rAF)
+    // Runtime 3D maps for pins, orbiting asteroids, & Solar System bodies (mutated in-place inside rAF)
     const pinEntriesRef = useRef<Map<string, EarthPinRuntimeEntry>>(new Map())
     const asteroidEntriesRef = useRef<Map<string, AsteroidRuntimeEntry>>(new Map())
+    // Persistent asteroid orbital & rotation motion state (NEVER reset on pulse/prop updates!)
+    const asteroidMotionRef = useRef<Map<string, { orbitElapsedSec: number; spinAngle: number }>>(
+      new Map(),
+    )
+    const bodyEntriesRef = useRef<Map<CelestialBodyId, SolarBodyRuntimeEntry>>(new Map())
+    const pinCountByBodyRef = useRef<Map<GeohashableBodyId, number>>(new Map())
 
     // Projected DOM overlay refs (updated directly in rAF for zero-re-render 60fps positioning)
     const bubbleStackElsRef = useRef<Map<string, HTMLDivElement>>(new Map())
     const beaconElsRef = useRef<Map<string, HTMLButtonElement>>(new Map())
     const pinChipElsRef = useRef<Map<string, HTMLButtonElement>>(new Map())
     const asteroidChipElsRef = useRef<Map<string, HTMLButtonElement>>(new Map())
+    const bodyChipElsRef = useRef<Map<CelestialBodyId, HTMLButtonElement>>(new Map())
     const activePillElRef = useRef<HTMLDivElement | null>(null)
     const selectedPillElRef = useRef<HTMLDivElement | null>(null)
     const gpsBeaconElRef = useRef<HTMLDivElement | null>(null)
     const bubbleStacksRef = useRef<GlobeBubbleStackRender[]>([])
-    const visiblePulseRoomsRef = useRef<PulseRoom[]>([])
+    const visiblePulseRoomsRef = useRef<PulseRoomOnBody[]>([])
 
     // Per-channel queue state for upward-sliding speech bubbles (Earth geohashes + Topic asteroids)
     const bubbleQueuesRef = useRef<Map<string, QueuedGlobeBubble[]>>(new Map())
     const evictedBubbleKeysRef = useRef<Map<string, Set<string>>>(new Map())
     const seededRoomsRef = useRef<Set<string>>(new Set())
 
-    const validPulseRooms = useMemo(
-      () =>
-        showPulse
-          ? pulseRooms
-              .filter((r) => !isTopicChannel(r.geohash) && isValidGeohash(r.geohash))
-              .slice(0, mode === 'compact' ? 24 : 48)
-          : [],
-      [showPulse, pulseRooms, mode],
-    )
+    const validPulseRooms = useMemo<PulseRoomOnBody[]>(() => {
+      if (!showPulse) return []
+      const out: PulseRoomOnBody[] = []
+      const limit = mode === 'compact' ? 24 : 48
+      for (const r of pulseRooms) {
+        if (out.length >= limit) break
+        if (isTopicChannel(r.geohash)) continue
+        const parsed = parseCelestialChannelKey(r.geohash)
+        if (!parsed || parsed.bodyId !== activeBodyId) continue
+        const canonical = makeCelestialChannelKey(parsed.bodyId, parsed.geohash)
+        if (!canonical) continue
+        out.push({
+          ...r,
+          geohash: canonical,
+          rawGeohash: parsed.geohash,
+          center: r.center ?? decodeCenter(parsed.geohash),
+        })
+      }
+      return out
+    }, [showPulse, pulseRooms, mode, activeBodyId])
 
     const validTopicRooms = useMemo(() => {
-      if (!showPulse) return []
+      if (!showPulse || activeBodyId !== 'earth') return []
       const byKey = new Map<string, PulseRoom>()
       for (const r of topicRooms ?? []) {
         if (!isTopicChannel(r.geohash)) continue
@@ -1345,28 +1528,65 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         if (key && !byKey.has(key)) byKey.set(key, { ...r, geohash: key })
       }
       return Array.from(byKey.values()).slice(0, 32)
-    }, [showPulse, topicRooms, pulseRooms])
+    }, [showPulse, topicRooms, pulseRooms, activeBodyId])
+
+      const pinCountByBody = useMemo(() => {
+        const counts = new Map<GeohashableBodyId, number>()
+        for (const pin of pinnedChannels ?? []) {
+          const bodyId = getChannelBodyId(pin.geohash)
+          if (bodyId) {
+            counts.set(bodyId, (counts.get(bodyId) ?? 0) + 1)
+          }
+        }
+        return counts
+      }, [pinnedChannels])
+
+      useEffect(() => {
+        pinCountByBodyRef.current = pinCountByBody
+      }, [pinCountByBody])
+
+    const solarChipBodies = useMemo<CelestialBodyDef[]>(() => {
+      const list: CelestialBodyDef[] = [SOLAR_BODIES.sun, SOLAR_BODIES[activeBodyId]]
+      const seen = new Set<CelestialBodyId>(['sun', activeBodyId])
+      const addBody = (id: CelestialBodyId) => {
+        if (seen.has(id)) return
+        seen.add(id)
+        list.push(SOLAR_BODIES[id])
+      }
+      const focusedDef = SOLAR_BODIES[activeBodyId]
+      if (focusedDef.kind === 'planet') {
+        for (const m of getMoonsOfBody(activeBodyId)) addBody(m.id)
+      } else if (focusedDef.kind === 'moon' && focusedDef.parentId) {
+        addBody(focusedDef.parentId)
+        for (const m of getMoonsOfBody(focusedDef.parentId)) addBody(m.id)
+      }
+      for (const pid of PLANET_BODY_IDS) addBody(pid)
+      return list
+    }, [activeBodyId])
 
     const pinnedEarthItems = useMemo<EarthPinRenderItem[]>(() => {
       if (!pinnedChannels || pinnedChannels.length === 0) return []
       const seen = new Set<string>()
       const out: EarthPinRenderItem[] = []
       for (const pin of pinnedChannels) {
-        if (isTopicChannel(pin.geohash) || !isValidGeohash(pin.geohash)) continue
-        const gh = normalizeGeohash(pin.geohash)
-        if (seen.has(gh)) continue
-        seen.add(gh)
+        if (isTopicChannel(pin.geohash)) continue
+        const parsed = parseCelestialChannelKey(pin.geohash)
+        if (!parsed || parsed.bodyId !== activeBodyId) continue
+        const channelKey = makeCelestialChannelKey(parsed.bodyId, parsed.geohash)
+        if (!channelKey || seen.has(channelKey)) continue
+        seen.add(channelKey)
         out.push({
-          geohash: gh,
-          center: decodeCenter(gh),
+          channelKey,
+          geohash: parsed.geohash,
+          center: decodeCenter(parsed.geohash),
           unreadCount: pin.unreadCount || 0,
           mentionCount: pin.mentionCount || 0,
-          isActive: gh === effectiveActiveKey,
-          isSelected: gh === effectiveSelectedKey,
+          isActive: channelKey === effectiveActiveKey,
+          isSelected: channelKey === effectiveSelectedKey,
         })
       }
       return out
-    }, [pinnedChannels, effectiveActiveKey, effectiveSelectedKey])
+    }, [pinnedChannels, activeBodyId, effectiveActiveKey, effectiveSelectedKey])
 
     const topicAsteroidItems = useMemo<TopicAsteroidRenderItem[]>(() => {
       const pinnedMap = new Map<string, PinnedChannel>()
@@ -1433,9 +1653,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
     const subZoneParent = useMemo(() => {
       if (!showSubZones) return null
-      const candidate = safeSelectedGeohash || safeActiveGeohash
-      return candidate && candidate.length < 8 ? candidate : null
-    }, [showSubZones, safeSelectedGeohash, safeActiveGeohash])
+      const candidate = selectedGeohashOnBody || activeGeohashOnBody
+      return candidate && candidate.length < 9 ? candidate : null
+    }, [showSubZones, selectedGeohashOnBody, activeGeohashOnBody])
 
     const allBubbleSourceRooms = useMemo(
       () => [...validPulseRooms, ...validTopicRooms],
@@ -1458,12 +1678,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           const room = roomByKey.get(key)
           if (!room) continue
           const isTopic = isTopicChannel(key)
-          if (!isTopic && subZoneParent === key) continue
+          const rawGh = isTopic ? '' : (getChannelRawGeohash(key) ?? '')
+          if (!isTopic && subZoneParent === rawGh) continue
           const latest = list[list.length - 1]
           const isFocused = key === effectiveActiveKey || key === effectiveSelectedKey
           const slug = isTopic ? getTopicSlug(key) : null
           out.push({
             geohash: key,
+            rawGeohash: rawGh,
             displayTag: slug ? `#${slug}` : `#${key}`,
             isTopic,
             center: room.center,
@@ -1626,8 +1848,19 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         }
       }
 
+      setBubbleNowMs(now)
       setBubbleStacks(buildRenderStacks(allBubbleSourceRooms))
     }, [showPulse, showBubbles, allBubbleSourceRooms, buildRenderStacks])
+
+    // Live relative-age clock for activity bubbles (ticks every 5s only while bubbles are present)
+    const hasAnyBubbles = bubbleStacks.length > 0
+    useEffect(() => {
+      if (!hasAnyBubbles) return
+      const timer = window.setInterval(() => {
+        setBubbleNowMs(Date.now())
+      }, 5_000)
+      return () => window.clearInterval(timer)
+    }, [hasAnyBubbles])
 
     // 5s post-demotion fadeout & eviction ticker
     const hasDemotedBubbles = useMemo(
@@ -1706,15 +1939,81 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       [],
     )
 
+    const flyToSunlitFace = useCallback(
+      (bodyId: GeohashableBodyId, animate = true, targetZoom = 1.95) => {
+        const snap =
+          sceneRefs.current && sceneRefs.current.snapshot.focusedBodyId === bodyId
+            ? sceneRefs.current.snapshot
+            : computeSolarSystemSnapshot(new Date(), bodyId)
+        const sunLL = unitVec3ToLatLon(new THREE.Vector3(...snap.focusedSunDir))
+        // Offset slightly off direct subsolar noon so the sunlit world shows sculptural terminator depth
+        startFlyTo(
+          clamp(sunLL.lat * 0.65 + 8, -38, 38),
+          wrapLongitude(sunLL.lon - 22),
+          targetZoom,
+          animate,
+        )
+      },
+      [startFlyTo],
+    )
+
+    const focusBodyInternal = useCallback(
+      (bodyId: GeohashableBodyId, options?: { geohash?: string; animate?: boolean }) => {
+        const animate = options?.animate !== false
+        const changed = activeBodyIdRef.current !== bodyId
+        lastFlyBodyRef.current = bodyId
+        if (changed) {
+          activeBodyIdRef.current = bodyId
+          setInternalBodyId(bodyId)
+          onFocusBodyChangeRef.current?.(bodyId)
+        }
+        const rawGh = options?.geohash
+          ? (getChannelRawGeohash(options.geohash) ??
+            (isValidGeohash(options.geohash) ? normalizeGeohash(options.geohash) : null))
+          : null
+        if (rawGh) {
+          const center = decodeCenter(rawGh)
+          const rawZoom =
+            modeRef.current === 'compact'
+              ? Math.max(2, getZoomForPrecision(rawGh.length) - 1)
+              : Math.min(MAX_VIRTUAL_ZOOM, getZoomForPrecision(rawGh.length))
+          startFlyTo(center.lat, center.lon, rawZoom, animate)
+        } else {
+          flyToSunlitFace(bodyId, animate, 1.95)
+        }
+      },
+      [flyToSunlitFace, startFlyTo],
+    )
+
+    const fitSolarSystemInternal = useCallback(() => {
+      // Align camera longitude with the Sun meridian so all 9 orbits sit symmetrically centered in viewport
+      const snap = sceneRefs.current?.snapshot ?? computeSolarSystemSnapshot(new Date(), activeBodyIdRef.current)
+      const sunLL = unitVec3ToLatLon(new THREE.Vector3(...snap.focusedSunDir))
+      startFlyTo(32, wrapLongitude(sunLL.lon), -6.15, true)
+    }, [startFlyTo])
+
     const flyToCellInternal = useCallback(
       (geohash: string, options?: { animate?: boolean; zoom?: number }) => {
-        if (!geohash || isTopicChannel(geohash) || !isValidGeohash(geohash)) return
-        const center = decodeCenter(geohash)
+        if (!geohash || isTopicChannel(geohash)) return
+        const hasExplicitBody = geohash.includes(':')
+        const parsed = parseCelestialChannelKey(geohash)
+        const rawGh = parsed?.geohash ?? (isValidGeohash(geohash) ? normalizeGeohash(geohash) : null)
+        if (!rawGh) return
+        // Only switch focused world on explicit '<bodyId>:<geohash>' keys; bare geohashes stay on current world!
+        const targetBody: GeohashableBodyId =
+          hasExplicitBody && parsed ? parsed.bodyId : activeBodyIdRef.current
+        if (targetBody !== activeBodyIdRef.current) {
+          lastFlyBodyRef.current = targetBody
+          activeBodyIdRef.current = targetBody
+          setInternalBodyId(targetBody)
+          onFocusBodyChangeRef.current?.(targetBody)
+        }
+        const center = decodeCenter(rawGh)
         const rawZoom =
           options?.zoom ??
           (modeRef.current === 'compact'
-            ? Math.max(2, getZoomForPrecision(geohash.length) - 1)
-            : Math.min(MAX_VIRTUAL_ZOOM, getZoomForPrecision(geohash.length)))
+            ? Math.max(2, getZoomForPrecision(rawGh.length) - 1)
+            : Math.min(MAX_VIRTUAL_ZOOM, getZoomForPrecision(rawGh.length)))
         startFlyTo(center.lat, center.lon, rawZoom, options?.animate !== false)
       },
       [startFlyTo],
@@ -1724,6 +2023,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       (topicChannelKey: string, options?: { animate?: boolean }) => {
         const canonical = makeTopicChannelKey(topicChannelKey)
         if (!canonical) return
+        if (activeBodyIdRef.current !== 'earth') {
+          lastFlyBodyRef.current = 'earth'
+          activeBodyIdRef.current = 'earth'
+          setInternalBodyId('earth')
+          onFocusBodyChangeRef.current?.('earth')
+        }
         const liveEntry = asteroidEntriesRef.current.get(canonical)
         let wx: number
         let wy: number
@@ -1775,14 +2080,32 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           startFlyTo(18, wrapLongitude(cam.lon), 0.85, true)
         },
         fitAsteroids() {
+          if (activeBodyIdRef.current !== 'earth') {
+            lastFlyBodyRef.current = 'earth'
+            activeBodyIdRef.current = 'earth'
+            setInternalBodyId('earth')
+            onFocusBodyChangeRef.current?.('earth')
+          }
           const cam = cameraStateRef.current
           startFlyTo(16, wrapLongitude(cam.lon), 0.25, true)
+        },
+        focusBody(bodyId: GeohashableBodyId, options?: { geohash?: string; animate?: boolean }) {
+          focusBodyInternal(bodyId, options)
+        },
+        fitSolarSystem() {
+          fitSolarSystemInternal()
         },
         getZoom() {
           return cameraStateRef.current.zoom
         },
       }),
-      [flyToCellInternal, flyToTopicInternal, startFlyTo],
+      [
+        fitSolarSystemInternal,
+        flyToCellInternal,
+        flyToTopicInternal,
+        focusBodyInternal,
+        startFlyTo,
+      ],
     )
 
     // -----------------------------------------------------------------------
@@ -1818,19 +2141,20 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const scene = new THREE.Scene()
       scene.background = new THREE.Color(palette.spaceBg)
 
-      const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, initW / initH, 0.01, 240)
+      const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, initW / initH, 0.01, 1400)
       camera.up.set(0, 1, 0)
 
-      // Live Astronomical Positions (Sun & Real Moon — 100% pure, untouched)
-      const sunDir = new THREE.Vector3(1, 0.25, 0.2).normalize()
-      const initSun = computeSubsolarPoint(new Date())
-      sunDir.set(...latLonToUnitVec3(initSun.lat, initSun.lon)).normalize()
+      // Live Floating-Origin Solar System Snapshot (all 24 bodies: Sun + 9 Planets + 14 Moons)
+      const initBodyId = activeBodyIdRef.current
+      let currentSnapshot = computeSolarSystemSnapshot(new Date(), initBodyId)
+      const sunDir = new THREE.Vector3(...currentSnapshot.focusedSunDir).normalize()
 
       const starfield = createStarfieldPoints(dpr)
       scene.add(starfield.points)
 
+      // Radiant Sun (radius 5.2, positioned at snapshot.sunPos, clickable -> fitSolarSystem)
       const sunGroup = new THREE.Group()
-      const sunCoreGeo = new THREE.SphereGeometry(0.88, 24, 16)
+      const sunCoreGeo = new THREE.SphereGeometry(SOLAR_BODIES.sun.visualRadius, 32, 24)
       const sunCoreMat = new THREE.MeshBasicMaterial({ color: '#FFF7E0' })
       const sunCoreMesh = new THREE.Mesh(sunCoreGeo, sunCoreMat)
       sunGroup.add(sunCoreMesh)
@@ -1843,26 +2167,20 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         depthWrite: false,
       })
       const sunCoronaSprite = new THREE.Sprite(sunCoronaMat)
-      sunCoronaSprite.scale.set(8.6, 8.6, 1)
+      sunCoronaSprite.scale.set(34, 34, 1)
       sunGroup.add(sunCoronaSprite)
-      sunGroup.position.copy(sunDir).multiplyScalar(38)
-      scene.add(sunGroup)
 
-      // Pure Real-Time Sun-Lit Moon (zero topic markers on Moon)
-      const moonTex = createLunarSurfaceTexture()
-      const moonGeo = new THREE.SphereGeometry(0.145, 32, 24)
-      const moonMaterial = new THREE.ShaderMaterial({
-        vertexShader: MOON_VERTEX_SHADER,
-        fragmentShader: MOON_FRAGMENT_SHADER,
-        uniforms: {
-          uMap: { value: moonTex },
-          uSunDir: { value: sunDir.clone() },
-        },
+      const sunHitGeo = new THREE.SphereGeometry(SOLAR_BODIES.sun.visualRadius * 1.45, 12, 10)
+      const sunHitMat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
       })
-      const moonMesh = new THREE.Mesh(moonGeo, moonMaterial)
-      const initMoon = computeSublunarPoint(new Date())
-      moonMesh.position.set(...latLonToUnitVec3(initMoon.lat, initMoon.lon)).multiplyScalar(4.2)
-      scene.add(moonMesh)
+      const sunHitMesh = new THREE.Mesh(sunHitGeo, sunHitMat)
+      sunHitMesh.userData = { hitKind: 'body', bodyId: 'sun' as CelestialBodyId }
+      sunGroup.add(sunHitMesh)
+      sunGroup.position.set(...currentSnapshot.sunPos)
+      scene.add(sunGroup)
 
       // Earth Base Equirectangular Texture (bright daylight Esri Topo for all themes)
       const baseCanvas = document.createElement('canvas')
@@ -1886,18 +2204,38 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           uIsLight: { value: initialTileKind === 'light' ? 1.0 : 0.0 },
           uOpacity: { value: 1.0 },
         },
+        polygonOffset: true,
+        polygonOffsetFactor: 2,
+        polygonOffsetUnits: 2,
+      })
+      const planetCentralMaterial = new THREE.ShaderMaterial({
+        vertexShader: EARTH_VERTEX_SHADER,
+        fragmentShader: PLANET_FRAGMENT_SHADER,
+        uniforms: {
+          uMap: { value: getCelestialSurfaceTexture('mars', 'hi') },
+          uSunDir: { value: sunDir.clone() },
+          uAtmoColor: { value: new THREE.Color('#60A5FA') },
+          uAtmoStrength: { value: 0.0 },
+          uOpacity: { value: 1.0 },
+        },
+        polygonOffset: true,
+        polygonOffsetFactor: 2,
+        polygonOffsetUnits: 2,
       })
       const earthMesh = new THREE.Mesh(earthGeo, earthMaterial)
       earthMesh.renderOrder = 1
       scene.add(earthMesh)
 
-      // Outer Atmosphere Shell
+      // Outer Atmosphere Shell (adapts tint/visibility per focused body)
       const atmosphereGeo = new THREE.SphereGeometry(1.032, 48, 32)
       const atmosphereMaterial = new THREE.ShaderMaterial({
         vertexShader: ATMOSPHERE_VERTEX_SHADER,
         fragmentShader: ATMOSPHERE_FRAGMENT_SHADER,
         uniforms: {
           uSunDir: { value: sunDir.clone() },
+          uHaloColor: { value: new THREE.Color(0.28, 0.62, 1.0) },
+          uIntensity: { value: 0.62 },
+          uTwilightMix: { value: 0.35 },
         },
         side: THREE.BackSide,
         transparent: true,
@@ -1908,7 +2246,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       atmosphereMesh.renderOrder = 3
       scene.add(atmosphereMesh)
 
-      // Layered Scene Groups (Earth overlays + 3D Push-Pins + Orbiting Topic Asteroid Belt)
+      // Layered Scene Groups (Focused World + Rings + Solar System + Orbits + Push-Pins + Topic Asteroids)
+      const centralRingGroup = new THREE.Group()
+      const solarSystemGroup = new THREE.Group()
+      const planetOrbitGroup = new THREE.Group()
+      const moonOrbitGroup = new THREE.Group()
       const patchGroup = new THREE.Group()
       const gridGroup = new THREE.Group()
       const subZoneGroup = new THREE.Group()
@@ -1920,6 +2262,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const asteroidOrbitGroup = new THREE.Group()
       const asteroidGroup = new THREE.Group()
       scene.add(
+        planetOrbitGroup,
+        moonOrbitGroup,
+        solarSystemGroup,
+        centralRingGroup,
         patchGroup,
         gridGroup,
         subZoneGroup,
@@ -1933,8 +2279,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       )
 
       const patchCache = new Map<string, PatchTileCacheEntry>()
+      const planetOrbitMats = new Map<CelestialBodyId, THREE.LineBasicMaterial>()
+      const moonOrbitMats: THREE.LineBasicMaterial[] = []
       const pinEntries = pinEntriesRef.current
       const asteroidEntries = asteroidEntriesRef.current
+      const bodyEntries = bodyEntriesRef.current
       let baseLoadGen = 0
       let isDisposed = false
       let viewportDebounceTimer: number | null = null
@@ -1990,6 +2339,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       const updatePatchTiles = () => {
         if (isDisposed) return
+        if (activeBodyIdRef.current !== 'earth') {
+          for (const entry of patchCache.values()) {
+            entry.mesh.visible = false
+          }
+          lastPatchKeySig = 'non-earth'
+          return
+        }
         const cam = cameraStateRef.current
         const dist = zoomToDistance(cam.zoom)
         const currentKind: 'dark' | 'light' = themeRef.current === 'daylight' ? 'light' : 'dark'
@@ -2004,12 +2360,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
         const halfFovRad = (CAMERA_FOV_DEG * DEG2RAD) / 2
         const halfAngRad = computeVisibleHalfAngleRad(dist, halfFovRad)
-        const latSpanDeg = Math.max(0.01, 2 * halfAngRad * RAD2DEG)
+        const latSpanDeg = Math.max(0.00005, 2 * halfAngRad * RAD2DEG)
         const cosLat = Math.max(0.2, Math.cos(cam.lat * DEG2RAD))
         const tileZ = clamp(
-          Math.round(Math.log2((360 * cosLat) / Math.max(0.008, latSpanDeg * 0.72))),
+          Math.round(Math.log2((360 * cosLat) / Math.max(0.00005, latSpanDeg * 0.72))),
           3,
-          12,
+          18,
         )
 
         const n = 1 << tileZ
@@ -2051,7 +2407,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             texture.colorSpace = THREE.SRGBColorSpace
             texture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy())
 
-            const geometry = createMercatorPatchGeometry(tileZ, tx, ty)
+            const { geometry, anchor } = createMercatorPatchGeometry(tileZ, tx, ty)
             const material = new THREE.ShaderMaterial({
               vertexShader: EARTH_VERTEX_SHADER,
               fragmentShader: EARTH_FRAGMENT_SHADER,
@@ -2062,11 +2418,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                 uOpacity: { value: 1.0 },
               },
               polygonOffset: true,
-              polygonOffsetFactor: -1,
-              polygonOffsetUnits: -1,
+              polygonOffsetFactor: 1,
+              polygonOffsetUnits: 1,
             })
 
             const mesh = new THREE.Mesh(geometry, material)
+            mesh.position.copy(anchor)
             mesh.visible = false
             mesh.renderOrder = 2
             patchGroup.add(mesh)
@@ -2144,10 +2501,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         }
         if (!gh || gh === activeGeohashRef.current || gh === selectedGeohashRef.current) return
         const b = decodeBounds(gh)
+        const c = decodeCenter(gh)
+        const anchor = latLonToUnitVec3(c.lat, c.lon)
         const pal = readCanvasPalette(hostRef.current, themeRef.current)
         const color = new THREE.Color(pal.accent)
 
-        const fillGeo = buildCurvedRectFillGeometry([b], OVERLAY_FILL_RADIUS)
+        const fillGeo = buildCurvedRectFillGeometry([b], OVERLAY_FILL_RADIUS, anchor)
         const fillMat = new THREE.MeshBasicMaterial({
           color,
           transparent: true,
@@ -2158,11 +2517,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           polygonOffsetUnits: -2,
         })
         const fillMesh = new THREE.Mesh(fillGeo, fillMat)
-        fillMesh.renderOrder = 4
+        fillMesh.position.set(anchor[0], anchor[1], anchor[2])
+        fillMesh.renderOrder = 6
         hoverGroup.add(fillMesh)
 
         const segs: number[] = []
-        pushCurvedRectSegments(segs, b.latMin, b.latMax, b.lonMin, b.lonMax, FOCUS_LINE_RADIUS)
+        pushCurvedRectSegments(segs, b.latMin, b.latMax, b.lonMin, b.lonMax, FOCUS_LINE_RADIUS, anchor)
         const lineGeo = new THREE.BufferGeometry()
         lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
         const lineMat = new THREE.LineBasicMaterial({
@@ -2172,8 +2532,296 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           depthWrite: false,
         })
         const line = new THREE.LineSegments(lineGeo, lineMat)
-        line.renderOrder = 6
+        line.position.set(anchor[0], anchor[1], anchor[2])
+        line.renderOrder = 7
         hoverGroup.add(line)
+      }
+
+      const clearGroupChildren = (g: THREE.Group) => {
+        while (g.children.length > 0) {
+          const ch = g.children[0]
+          g.remove(ch)
+          disposeObject3D(ch)
+        }
+      }
+
+      const syncSunDirUniforms = (dir: THREE.Vector3) => {
+        earthMaterial.uniforms.uSunDir.value.copy(dir)
+        planetCentralMaterial.uniforms.uSunDir.value.copy(dir)
+        atmosphereMaterial.uniforms.uSunDir.value.copy(dir)
+        for (const entry of patchCache.values()) {
+          entry.material.uniforms.uSunDir.value.copy(dir)
+        }
+        for (const entry of asteroidEntries.values()) {
+          entry.rockMaterial.uniforms.uSunDir.value.copy(dir)
+        }
+        asteroidGroup.traverse((child) => {
+          const m = (child as THREE.Mesh).material as THREE.ShaderMaterial | undefined
+          if (m && m.uniforms?.uSunDir) {
+            m.uniforms.uSunDir.value.copy(dir)
+          }
+        })
+        pinGroup.traverse((child) => {
+          const m = (child as THREE.Mesh).material as THREE.ShaderMaterial | undefined
+          if (m && m.uniforms?.uSunDir) {
+            m.uniforms.uSunDir.value.copy(dir)
+          }
+        })
+      }
+
+      const rebuildSolarSystem = (
+        bodyId: GeohashableBodyId,
+        now: Date = new Date(),
+      ): SolarSystemSnapshot => {
+        const snap = computeSolarSystemSnapshot(now, bodyId)
+        currentSnapshot = snap
+        sunDir.set(...snap.focusedSunDir).normalize()
+        sunGroup.position.set(...snap.sunPos)
+
+        // 1. Configure Central Focused World Surface, Atmosphere, Rings & Earth-only groups
+        const isEarth = bodyId === 'earth'
+        const focusedDef = SOLAR_BODIES[bodyId]
+        if (isEarth) {
+          earthMesh.material = earthMaterial
+          atmosphereMesh.visible = true
+          atmosphereMaterial.uniforms.uHaloColor.value.setRGB(0.28, 0.62, 1.0)
+          atmosphereMaterial.uniforms.uIntensity.value = 0.62
+          atmosphereMaterial.uniforms.uTwilightMix.value = 0.35
+        } else {
+          const hiTex = getCelestialSurfaceTexture(bodyId, 'hi')
+          hiTex.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy())
+          planetCentralMaterial.uniforms.uMap.value = hiTex
+          planetCentralMaterial.uniforms.uSunDir.value.copy(sunDir)
+          if (focusedDef.palette.atmosphere) {
+            planetCentralMaterial.uniforms.uAtmoColor.value.set(focusedDef.palette.atmosphere)
+            planetCentralMaterial.uniforms.uAtmoStrength.value = 0.34
+            atmosphereMesh.visible = true
+            atmosphereMaterial.uniforms.uHaloColor.value.set(focusedDef.palette.atmosphere)
+            atmosphereMaterial.uniforms.uIntensity.value = 0.44
+            atmosphereMaterial.uniforms.uTwilightMix.value = 0.08
+          } else {
+            planetCentralMaterial.uniforms.uAtmoStrength.value = 0.0
+            atmosphereMesh.visible = false
+          }
+          earthMesh.material = planetCentralMaterial
+        }
+
+        patchGroup.visible = isEarth
+        gpsGroup.visible = isEarth
+        asteroidGroup.visible = isEarth
+        asteroidOrbitGroup.visible = isEarth
+
+        clearGroupChildren(centralRingGroup)
+        if (focusedDef.rings) {
+          const centralRings = createPlanetaryRingMesh(
+            focusedDef.rings.innerRadius,
+            focusedDef.rings.outerRadius,
+            focusedDef.rings.color,
+            focusedDef.rings.opacity,
+            0, // Equatorial plane around the geohash-aligned central planet
+            112,
+          )
+          centralRingGroup.add(centralRings)
+        }
+
+        // 2. Rebuild Orbiting Planets, Child/Sibling Moons, & Rings
+        clearGroupChildren(solarSystemGroup)
+        clearGroupChildren(planetOrbitGroup)
+        clearGroupChildren(moonOrbitGroup)
+        bodyEntries.clear()
+        planetOrbitMats.clear()
+        moonOrbitMats.length = 0
+
+        // Register Sun in bodyEntries for unified chip projection & raycasting
+        bodyEntries.set('sun', {
+          id: 'sun',
+          def: SOLAR_BODIES.sun,
+          root: sunGroup,
+          material: null,
+          hitMesh: sunHitMesh,
+          worldPos: new THREE.Vector3(...snap.sunPos),
+          renderRadius: SOLAR_BODIES.sun.visualRadius,
+          isChildMoon: false,
+          isParentOfFocused: false,
+          isSiblingMoon: false,
+          isPlanet: false,
+          isSun: true,
+        })
+
+        // Determine all relevant non-focused bodies to render in 3D
+        const renderIds: GeohashableBodyId[] = []
+        const renderSet = new Set<CelestialBodyId>(['sun', bodyId])
+        const addRenderBody = (id: GeohashableBodyId) => {
+          if (renderSet.has(id)) return
+          renderSet.add(id)
+          renderIds.push(id)
+        }
+        if (focusedDef.kind === 'planet') {
+          for (const m of getMoonsOfBody(bodyId)) addRenderBody(m.id as GeohashableBodyId)
+        } else if (focusedDef.kind === 'moon' && focusedDef.parentId) {
+          if (focusedDef.parentId !== 'sun') addRenderBody(focusedDef.parentId)
+          for (const m of getMoonsOfBody(focusedDef.parentId)) {
+            addRenderBody(m.id as GeohashableBodyId)
+          }
+        }
+        for (const pid of PLANET_BODY_IDS) addRenderBody(pid)
+
+        for (const id of renderIds) {
+          const bSnap = snap.bodies[id]
+          const def = SOLAR_BODIES[id]
+          const root = new THREE.Group()
+          root.position.set(...bSnap.position)
+
+          const sphereGeo = new THREE.SphereGeometry(bSnap.renderRadius, 32, 24)
+          const loTex = getCelestialSurfaceTexture(id, 'lo')
+          const bMat = new THREE.ShaderMaterial({
+            vertexShader: EARTH_VERTEX_SHADER,
+            fragmentShader: PLANET_FRAGMENT_SHADER,
+            uniforms: {
+              uMap: { value: loTex },
+              uSunDir: { value: new THREE.Vector3(...bSnap.sunDir).normalize() },
+              uAtmoColor: {
+                value: new THREE.Color(def.palette.atmosphere ?? def.palette.accent),
+              },
+              uAtmoStrength: { value: def.palette.atmosphere ? 0.36 : 0.0 },
+              uOpacity: { value: 1.0 },
+            },
+          })
+          const sphereMesh = new THREE.Mesh(sphereGeo, bMat)
+          sphereMesh.userData = { hitKind: 'body', bodyId: id }
+          sphereMesh.renderOrder = 2
+          root.add(sphereMesh)
+
+          if (def.rings) {
+            const ringMesh = createPlanetaryRingMesh(
+              def.rings.innerRadius * bSnap.renderRadius,
+              def.rings.outerRadius * bSnap.renderRadius,
+              def.rings.color,
+              def.rings.opacity,
+              def.rings.tiltDeg,
+              72,
+            )
+            ringMesh.userData = { hitKind: 'body', bodyId: id }
+            root.add(ringMesh)
+          }
+
+          const hitRadius = Math.max(
+            bSnap.renderRadius * 2.15,
+            bSnap.isChildMoonOfFocused ? 0.42 : 0.9,
+          )
+          const hitGeo = new THREE.SphereGeometry(hitRadius, 10, 8)
+          const hitMat = new THREE.MeshBasicMaterial({
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+          })
+          const hitMesh = new THREE.Mesh(hitGeo, hitMat)
+          hitMesh.userData = { hitKind: 'body', bodyId: id }
+          root.add(hitMesh)
+
+          solarSystemGroup.add(root)
+          bodyEntries.set(id, {
+            id,
+            def,
+            root,
+            material: bMat,
+            hitMesh,
+            worldPos: new THREE.Vector3(...bSnap.position),
+            renderRadius: bSnap.renderRadius,
+            isChildMoon: bSnap.isChildMoonOfFocused,
+            isParentOfFocused: bSnap.isParentOfFocused,
+            isSiblingMoon: bSnap.isSiblingMoon,
+            isPlanet: def.kind === 'planet',
+            isSun: false,
+          })
+        }
+
+        // 3. Elliptical Planetary Orbital Rings around snapshot.sunPos
+        for (const pid of PLANET_BODY_IDS) {
+          const pts = samplePlanetOrbitPoints(pid, snap.sunPos, now, 160)
+          if (pts.length === 0) continue
+          const oGeo = new THREE.BufferGeometry()
+          oGeo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
+          const oMat = new THREE.LineBasicMaterial({
+            color: new THREE.Color(SOLAR_BODIES[pid].palette.orbitColor),
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+          })
+          const oLine = new THREE.Line(oGeo, oMat)
+          oLine.renderOrder = 0
+          planetOrbitGroup.add(oLine)
+          planetOrbitMats.set(pid, oMat)
+        }
+
+        // 4. Faint Moon Orbital Rings around focused planet (or parent planet when on a moon)
+        const originCenter = new THREE.Vector3(0, 0, 0)
+        if (focusedDef.kind === 'planet') {
+          for (const m of getMoonsOfBody(bodyId)) {
+            const mSnap = snap.bodies[m.id]
+            const mGeo = createMoonOrbitLoopGeometry(
+              originCenter,
+              new THREE.Vector3(...mSnap.position),
+              72,
+            )
+            const mMat = new THREE.LineBasicMaterial({
+              color: new THREE.Color(m.palette.orbitColor),
+              transparent: true,
+              opacity: 0.14,
+              depthWrite: false,
+            })
+            const mLoop = new THREE.LineLoop(mGeo, mMat)
+            mLoop.renderOrder = 0
+            moonOrbitGroup.add(mLoop)
+            moonOrbitMats.push(mMat)
+          }
+        } else if (focusedDef.kind === 'moon' && focusedDef.parentId) {
+          const parentPos = new THREE.Vector3(...snap.bodies[focusedDef.parentId].position)
+          for (const m of getMoonsOfBody(focusedDef.parentId)) {
+            const mSnap = snap.bodies[m.id]
+            const mPos = m.id === bodyId ? originCenter : new THREE.Vector3(...mSnap.position)
+            const mGeo = createMoonOrbitLoopGeometry(parentPos, mPos, 72)
+            const mMat = new THREE.LineBasicMaterial({
+              color: new THREE.Color(m.palette.orbitColor),
+              transparent: true,
+              opacity: m.id === bodyId ? 0.22 : 0.12,
+              depthWrite: false,
+            })
+            const mLoop = new THREE.LineLoop(mGeo, mMat)
+            mLoop.renderOrder = 0
+            moonOrbitGroup.add(mLoop)
+            moonOrbitMats.push(mMat)
+          }
+        }
+
+        syncSunDirUniforms(sunDir)
+        if (sceneRefs.current) {
+          sceneRefs.current.snapshot = snap
+        }
+        return snap
+      }
+
+      const updateSolarPositions = (now: Date = new Date()) => {
+        const snap = computeSolarSystemSnapshot(now, activeBodyIdRef.current)
+        currentSnapshot = snap
+        sunDir.set(...snap.focusedSunDir).normalize()
+        sunGroup.position.set(...snap.sunPos)
+
+        for (const [id, entry] of bodyEntries.entries()) {
+          const bSnap = snap.bodies[id]
+          if (!bSnap) continue
+          entry.worldPos.set(...bSnap.position)
+          if (!entry.isSun) {
+            entry.root.position.set(...bSnap.position)
+            if (entry.material) {
+              entry.material.uniforms.uSunDir.value.set(...bSnap.sunDir).normalize()
+            }
+          }
+        }
+        syncSunDirUniforms(sunDir)
+        if (sceneRefs.current) {
+          sceneRefs.current.snapshot = snap
+        }
       }
 
       sceneRefs.current = {
@@ -2182,13 +2830,20 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         renderer,
         earthMesh,
         earthMaterial,
+        planetCentralMaterial,
         baseCanvas,
         baseTexture,
         sunDir,
         sunGroup,
-        moonMesh,
-        moonMaterial,
+        sunHitMesh,
+        atmosphereMesh,
         atmosphereMaterial,
+        centralRingGroup,
+        solarSystemGroup,
+        planetOrbitGroup,
+        moonOrbitGroup,
+        planetOrbitMats,
+        moonOrbitMats,
         patchGroup,
         patchCache,
         gridGroup,
@@ -2200,48 +2855,32 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         pinGroup,
         asteroidGroup,
         asteroidOrbitGroup,
+        snapshot: currentSnapshot,
         tileKind: initialTileKind,
         baseLoadGen,
         hoveredGeohash: null,
         hoveredAsteroidKey: null,
+        hoveredBodyId: null,
         orbitClockSec: 0,
         scheduleViewportEmit,
         reloadBaseTiles,
         updatePatchTiles,
         updateHoverMesh,
+        rebuildSolarSystem,
+        updateSolarPositions,
       }
 
       reloadBaseTiles(initialTileKind)
+      rebuildSolarSystem(initBodyId, new Date())
 
-      // Refresh live Sun & Moon astronomical positions every 30s (+ sync uSunDir on asteroids & pins)
-      const syncCelestialBodies = () => {
-        const now = new Date()
-        const sun = computeSubsolarPoint(now)
-        const moon = computeSublunarPoint(now)
-        sunDir.set(...latLonToUnitVec3(sun.lat, sun.lon)).normalize()
-        sunGroup.position.copy(sunDir).multiplyScalar(38)
-        earthMaterial.uniforms.uSunDir.value.copy(sunDir)
-        atmosphereMaterial.uniforms.uSunDir.value.copy(sunDir)
-        moonMaterial.uniforms.uSunDir.value.copy(sunDir)
-        moonMesh.position.set(...latLonToUnitVec3(moon.lat, moon.lon)).multiplyScalar(4.2)
-        for (const entry of patchCache.values()) {
-          entry.material.uniforms.uSunDir.value.copy(sunDir)
-        }
-        for (const entry of asteroidEntries.values()) {
-          entry.rockMaterial.uniforms.uSunDir.value.copy(sunDir)
-        }
-        pinGroup.traverse((child) => {
-          const m = (child as THREE.Mesh).material as THREE.ShaderMaterial | undefined
-          if (m && m.uniforms?.uSunDir) {
-            m.uniforms.uSunDir.value.copy(sunDir)
-          }
-        })
-      }
-      const sunTimer = window.setInterval(syncCelestialBodies, SUN_REFRESH_INTERVAL_MS)
+      // Refresh live Solar System ephemeris positions every 30s
+      const sunTimer = window.setInterval(() => {
+        if (!isDisposed) updateSolarPositions(new Date())
+      }, SUN_REFRESH_INTERVAL_MS)
 
       // ---------------------------------------------------------------------
       // Pointer, Touch Pinch-Zoom, Wheel Zoom & Priority Raycast Controller
-      // Priority: 1) 3D Asteroids  2) 3D Earth Push-Pins  3) Earth Surface
+      // Priority: 1) Earth Topic Asteroids  2) 3D Red Push-Pins  3) Solar Bodies  4) Focused World
       // ---------------------------------------------------------------------
       const canvas = renderer.domElement
       const raycaster = new THREE.Raycaster()
@@ -2268,7 +2907,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       type SceneHitResult =
         | { kind: 'asteroid'; channelKey: string; slug: string }
-        | { kind: 'pin'; channelKey: string }
+        | { kind: 'pin'; channelKey: string; rawGeohash: string }
+        | { kind: 'body'; bodyId: CelestialBodyId }
         | { kind: 'earth'; lat: number; lon: number }
         | null
 
@@ -2284,9 +2924,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           camera.position.y,
           camera.position.z,
         ]
+        const camDist = Math.max(EARTH_RADIUS + 0.001, camera.position.length())
+        const rayHorizonCos = clamp(EARTH_RADIUS / camDist, 0.01, 0.996)
 
-        // 1. 3D Topic Asteroids (filter out asteroids hidden behind Earth's limb)
-        if (asteroidEntries.size > 0) {
+        // 1. 3D Topic Asteroids (Earth only, filter out asteroids behind Earth's limb)
+        if (activeBodyIdRef.current === 'earth' && asteroidEntries.size > 0) {
           const hitTargets: THREE.Object3D[] = []
           for (const entry of asteroidEntries.values()) {
             const p: [number, number, number] = [
@@ -2313,31 +2955,67 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
         }
 
-        // 2. 3D Earth Push-Pins (only front-facing hemisphere)
+        // 2. 3D Red Push-Pins on the focused world (exact geometric horizon check)
         if (pinEntries.size > 0) {
           const camDirNorm = camera.position.clone().normalize()
           const pinTargets: THREE.Object3D[] = []
           for (const entry of pinEntries.values()) {
-            if (entry.normal.dot(camDirNorm) >= 0.1) {
+            if (entry.normal.dot(camDirNorm) > rayHorizonCos + 0.004) {
               pinTargets.push(entry.hitMesh)
             }
           }
           if (pinTargets.length > 0) {
             const hits = raycaster.intersectObjects(pinTargets, false)
             if (hits.length > 0) {
-              const ud = hits[0].object.userData as { channelKey?: string }
+              const ud = hits[0].object.userData as { channelKey?: string; rawGeohash?: string }
               if (ud.channelKey) {
-                return { kind: 'pin', channelKey: ud.channelKey }
+                return {
+                  kind: 'pin',
+                  channelKey: ud.channelKey,
+                  rawGeohash: ud.rawGeohash ?? getChannelRawGeohash(ud.channelKey) ?? ud.channelKey,
+                }
               }
             }
           }
         }
 
-        // 3. Earth Globe Surface
-        const earthHits = raycaster.intersectObject(earthMesh, false)
-        if (earthHits.length > 0) {
-          const { lat, lon } = unitVec3ToLatLon(earthHits[0].point)
-          return { kind: 'earth', lat, lon }
+        // 3. Orbiting Planets, Moons & Sun (skip bodies occluded behind the central world)
+        if (bodyEntries.size > 0) {
+          const bodyTargets: THREE.Object3D[] = []
+          for (const entry of bodyEntries.values()) {
+            const p: [number, number, number] = [
+              entry.worldPos.x,
+              entry.worldPos.y,
+              entry.worldPos.z,
+            ]
+            if (!isPointOccludedByEarth(camPosTuple, p, EARTH_RADIUS)) {
+              bodyTargets.push(entry.hitMesh)
+            }
+          }
+          if (bodyTargets.length > 0) {
+            const hits = raycaster.intersectObjects(bodyTargets, false)
+            if (hits.length > 0) {
+              const ud = hits[0].object.userData as { bodyId?: CelestialBodyId }
+              if (ud.bodyId) {
+                return { kind: 'body', bodyId: ud.bodyId }
+              }
+            }
+          }
+        }
+
+        // 4. Focused World Surface — Exact Float64 Analytical Ray-Unit-Sphere Intersection (nanometer precision at P9!)
+        const o = raycaster.ray.origin
+        const d = raycaster.ray.direction
+        const b = o.x * d.x + o.y * d.y + o.z * d.z
+        const c = o.x * o.x + o.y * o.y + o.z * o.z - EARTH_RADIUS * EARTH_RADIUS
+        const disc = b * b - c
+        if (disc >= 0) {
+          const t = -b - Math.sqrt(disc)
+          if (t > 0) {
+            const hitPt = new THREE.Vector3(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t)
+            const { lat, lon } = unitVec3ToLatLon(hitPt)
+            return { kind: 'earth', lat, lon }
+          }
         }
         return null
       }
@@ -2400,7 +3078,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
           if (lastPinchDist > 8 && dist > 8) {
             const scaleRatio = dist / lastPinchDist
-            const zoomDelta = Math.log(scaleRatio) / ALTITUDE_DECAY
+            const pinchDecay = cam.zoom >= 1 ? Math.LN2 : DEEP_SPACE_DECAY
+            const zoomDelta = Math.log(scaleRatio) / pinchDecay
             cam.zoom = clamp(cam.zoom + zoomDelta, MIN_VIRTUAL_ZOOM, MAX_VIRTUAL_ZOOM)
             cam.targetZoom = cam.zoom
           }
@@ -2443,7 +3122,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           return
         }
 
-        // Desktop hover readout + curved hover highlight / asteroid highlight
+        // Desktop hover readout + curved hover highlight / asteroid / Solar body highlight
         if (!isTouchOnly && e.pointerType === 'mouse' && activePointers.size === 0) {
           const hit = raycastScene(e.clientX, e.clientY)
           const sr = sceneRefs.current
@@ -2455,6 +3134,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               updateHoverMesh(null)
             }
             sr.hoveredAsteroidKey = null
+            sr.hoveredBodyId = null
             canvas.style.cursor = ''
             setHoverHud(null)
             return
@@ -2466,6 +3146,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               updateHoverMesh(null)
             }
             sr.hoveredAsteroidKey = hit.channelKey
+            sr.hoveredBodyId = null
             canvas.style.cursor = 'pointer'
             setHoverHud({ geohash: hit.slug, coords: 'Topic Asteroid' })
             return
@@ -2474,27 +3155,51 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           sr.hoveredAsteroidKey = null
 
           if (hit.kind === 'pin') {
-            if (sr.hoveredGeohash !== hit.channelKey) {
-              sr.hoveredGeohash = hit.channelKey
-              updateHoverMesh(hit.channelKey)
+            sr.hoveredBodyId = null
+            if (sr.hoveredGeohash !== hit.rawGeohash) {
+              sr.hoveredGeohash = hit.rawGeohash
+              updateHoverMesh(hit.rawGeohash)
             }
             canvas.style.cursor = 'pointer'
             setHoverHud({ geohash: hit.channelKey, coords: 'Pinned' })
             return
           }
 
+          if (hit.kind === 'body') {
+            if (sr.hoveredGeohash !== null) {
+              sr.hoveredGeohash = null
+              updateHoverMesh(null)
+            }
+            sr.hoveredBodyId = hit.bodyId
+            const def = getBodyDef(hit.bodyId)
+            canvas.style.cursor = 'pointer'
+            setHoverHud({
+              geohash: def.name,
+              coords:
+                def.kind === 'star'
+                  ? 'Solar System Overview'
+                  : def.kind === 'moon'
+                    ? 'Moon · Click to visit'
+                    : 'Planet · Click to visit',
+              noHash: true,
+            })
+            return
+          }
+
+          sr.hoveredBodyId = null
           canvas.style.cursor = ''
           const p =
             precisionModeRef.current === 'auto'
               ? getRecommendedPrecisionForZoom(cam.zoom)
               : precisionModeRef.current
-          const gh = encodeGeohash(hit.lat, hit.lon, p)
-          if (sr.hoveredGeohash !== gh) {
-            sr.hoveredGeohash = gh
-            updateHoverMesh(gh)
+          const rawGh = encodeGeohash(hit.lat, hit.lon, p)
+          const channelKey = makeCelestialChannelKey(activeBodyIdRef.current, rawGh) ?? rawGh
+          if (sr.hoveredGeohash !== rawGh) {
+            sr.hoveredGeohash = rawGh
+            updateHoverMesh(rawGh)
           }
           setHoverHud({
-            geohash: gh,
+            geohash: channelKey,
             coords: formatCoords({ lat: hit.lat, lon: hit.lon }),
           })
         }
@@ -2537,6 +3242,16 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             cam.velLon = 0
             const hit = raycastScene(e.clientX, e.clientY)
             if (hit) {
+              if (hit.kind === 'body') {
+                lastTapMs = 0
+                if (hit.bodyId === 'sun') {
+                  fitSolarSystemInternal()
+                } else {
+                  focusBodyInternal(hit.bodyId, { animate: true })
+                }
+                return
+              }
+
               const nowMs = performance.now()
               const isTouchDoubleTap =
                 e.pointerType !== 'mouse' &&
@@ -2548,13 +3263,16 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                   ? hit.channelKey
                   : hit.kind === 'pin'
                     ? hit.channelKey
-                    : encodeGeohash(
-                        hit.lat,
-                        hit.lon,
-                        precisionModeRef.current === 'auto'
-                          ? getRecommendedPrecisionForZoom(cam.zoom)
-                          : precisionModeRef.current,
-                      )
+                    : (() => {
+                        const rawGh = encodeGeohash(
+                          hit.lat,
+                          hit.lon,
+                          precisionModeRef.current === 'auto'
+                            ? getRecommendedPrecisionForZoom(cam.zoom)
+                            : precisionModeRef.current,
+                        )
+                        return makeCelestialChannelKey(activeBodyIdRef.current, rawGh) ?? rawGh
+                      })()
 
               if (isTouchDoubleTap && modeRef.current === 'expanded') {
                 lastTapMs = 0
@@ -2579,6 +3297,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         if (modeRef.current !== 'expanded') return
         const hit = raycastScene(e.clientX, e.clientY)
         if (!hit) return
+        if (hit.kind === 'body') {
+          if (hit.bodyId === 'sun') fitSolarSystemInternal()
+          else focusBodyInternal(hit.bodyId, { animate: true })
+          return
+        }
         if (hit.kind === 'asteroid' || hit.kind === 'pin') {
           emitTuneChannel(hit.channelKey)
           return
@@ -2588,8 +3311,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           precisionModeRef.current === 'auto'
             ? getRecommendedPrecisionForZoom(cam.zoom)
             : precisionModeRef.current
-        const gh = encodeGeohash(hit.lat, hit.lon, p)
-        emitTuneChannel(gh)
+        const rawGh = encodeGeohash(hit.lat, hit.lon, p)
+        const channelKey = makeCelestialChannelKey(activeBodyIdRef.current, rawGh) ?? rawGh
+        emitTuneChannel(channelKey)
       }
 
       const onPointerLeave = () => {
@@ -2599,6 +3323,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             updateHoverMesh(null)
           }
           sceneRefs.current.hoveredAsteroidKey = null
+          sceneRefs.current.hoveredBodyId = null
         }
         canvas.style.cursor = ''
         setHoverHud(null)
@@ -2670,9 +3395,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       ro.observe(wrap)
 
       // ---------------------------------------------------------------------
-      // Main 60fps rAF Loop: Camera + Pin Scaling + Orbiting Asteroids + Projection
+      // Main 60fps rAF Loop: Camera + Solar System + Pin Scaling + Asteroids + Exact Projection
       // ---------------------------------------------------------------------
       const tmpVec = new THREE.Vector3()
+      const tipVec = new THREE.Vector3()
       const camDir = new THREE.Vector3()
       let lastFrameMs = performance.now()
       let lastPatchCheckMs = 0
@@ -2701,13 +3427,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         lon: number,
         viewW: number,
         viewH: number,
+        minFacingDot: number,
       ): { x: number; y: number; visible: boolean } => {
         const [ux, uy, uz] = latLonToUnitVec3(lat, lon)
         const facing = ux * camDir.x + uy * camDir.y + uz * camDir.z
-        if (facing < 0.14) {
+        if (facing <= minFacingDot) {
           return { x: 0, y: 0, visible: false }
         }
-        tmpVec.set(ux * FOCUS_LINE_RADIUS, uy * FOCUS_LINE_RADIUS, uz * FOCUS_LINE_RADIUS)
+        tmpVec.set(ux * EARTH_RADIUS, uy * EARTH_RADIUS, uz * EARTH_RADIUS)
         return projectWorldVecToScreen(tmpVec, viewW, viewH)
       }
 
@@ -2726,7 +3453,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         y: number,
         anchor: 'center' | 'bottom-center' | 'top-center' = 'center',
       ) => {
-        if (el.dataset.vis !== '1') {
+        if (el.dataset.vis !== '1' || el.style.visibility !== 'visible') {
           el.dataset.vis = '1'
           el.style.visibility = 'visible'
           el.style.opacity = '1'
@@ -2755,12 +3482,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         let cameraMoved = false
 
         if (cam.isFlying) {
-          const alpha = 1 - Math.exp(-dt * 8.5)
+          const alpha = 1 - Math.exp(-dt * 11.5)
           const dLat = cam.targetLat - cam.lat
           const dLon = cam.targetLon - cam.lon
           const dZoom = cam.targetZoom - cam.zoom
 
-          if (Math.abs(dLat) < 0.002 && Math.abs(dLon) < 0.002 && Math.abs(dZoom) < 0.003) {
+          if (Math.abs(dLat) < 1e-5 && Math.abs(dLon) < 1e-5 && Math.abs(dZoom) < 0.002) {
             cam.lat = cam.targetLat
             cam.lon = cam.targetLon
             cam.zoom = cam.targetZoom
@@ -2787,11 +3514,18 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         }
 
         const dist = zoomToDistance(cam.zoom)
-        const nextNear = clamp((dist - EARTH_RADIUS) * 0.16, 0.0003, 0.08)
-        if (Math.abs(camera.near - nextNear) > 0.0001) {
+        const alt = Math.max(0, dist - EARTH_RADIUS)
+        const nextNear = clamp(alt * 0.12, 5e-7, 1.5)
+        const nextFar = alt < 0.05 ? Math.max(20, alt * 4000) : 1400
+        if (
+          Math.abs(camera.near - nextNear) > Math.max(1e-7, camera.near * 0.05) ||
+          Math.abs(camera.far - nextFar) > Math.max(0.5, camera.far * 0.05)
+        ) {
           camera.near = nextNear
+          camera.far = nextFar
           camera.updateProjectionMatrix()
         }
+
         const [cx, cy, cz] = latLonToUnitVec3(cam.lat, cam.lon)
         camera.position.set(cx * dist, cy * dist, cz * dist)
         camera.lookAt(0, 0, 0)
@@ -2802,44 +3536,81 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           camera.position.z,
         ]
 
-        // Dynamically scale Earth 3D Push-Pins proportionally to altitude
-        const pinScale = clamp((dist - EARTH_RADIUS) * 0.044, 0.0024, 0.095)
-        for (const entry of pinEntries.values()) {
-          entry.root.scale.setScalar(pinScale)
+        // Exact geometric horizon cosine on unit sphere (eliminates back-hemisphere sliding dots!)
+        const horizonCos = clamp(EARTH_RADIUS / Math.max(EARTH_RADIUS + 0.00001, dist), 0.01, 0.996)
+        const visibleHorizonDot = horizonCos + 0.008
+        const maxVisiblePrecision = getMaxVisibleSurfacePrecision(cam.zoom)
+        const focusedBody = activeBodyIdRef.current
+        const isEarthFocused = focusedBody === 'earth'
+        const inDeepSpaceView = cam.zoom < -1.8
+
+        // Smoothly fade planetary orbital ellipses as user zooms out into Solar System view
+        const orbitFade = cam.zoom < 0.8 ? clamp((0.8 - cam.zoom) / 3.2, 0, 1) : 0
+        planetOrbitGroup.visible = orbitFade > 0.005
+        if (planetOrbitGroup.visible) {
+          for (const [pid, mat] of planetOrbitMats.entries()) {
+            mat.opacity = orbitFade * (pid === focusedBody ? 0.36 : 0.22)
+          }
+        }
+        const moonOrbitFade =
+          cam.zoom < 2.6 && cam.zoom > -3.2
+            ? clamp(Math.min((2.6 - cam.zoom) / 1.2, (cam.zoom + 3.2) / 1.2), 0, 1)
+            : 0
+        moonOrbitGroup.visible = moonOrbitFade > 0.01
+        if (moonOrbitGroup.visible) {
+          for (const mat of moonOrbitMats) {
+            mat.opacity = 0.16 * moonOrbitFade
+          }
         }
 
-        // Advance gentle orbital drift & rocky tumble for every 3D Topic Asteroid
+        // Dynamically scale 3D Red Push-Pins proportionally down to P9 (~31m altitude)
+        const pinScale = clamp(alt * 0.044, 1.5e-7, 0.095)
+        for (const entry of pinEntries.values()) {
+          entry.root.scale.setScalar(pinScale * entry.scaleBoost)
+        }
+
+        // Advance smooth eternal orbital drift & rocky tumble for Earth Topic Asteroids (ZERO angle resets!)
         const hoveredAst = sr?.hoveredAsteroidKey ?? null
         const activeKey = activeChannelKeyRef.current
         const selectedKey = selectedChannelKeyRef.current
-        for (const entry of asteroidEntries.values()) {
-          const isSteady =
-            entry.channelKey === hoveredAst || entry.channelKey === selectedKey
-          if (!isSteady) {
-            entry.orbitElapsedSec += dt
-          }
-          const [ax, ay, az] = computeAsteroidWorldPosition(entry.spec, entry.orbitElapsedSec)
-          entry.worldPos.set(ax, ay, az)
-          entry.root.position.set(ax, ay, az)
-          entry.rockMesh.rotateOnAxis(entry.spinAxis, entry.spec.spinSpeed * dt)
+        if (isEarthFocused) {
+          const motionMap = asteroidMotionRef.current
+          for (const entry of asteroidEntries.values()) {
+            let motion = motionMap.get(entry.channelKey)
+            if (!motion) {
+              motion = { orbitElapsedSec: sr?.orbitClockSec ?? 0, spinAngle: 0 }
+              motionMap.set(entry.channelKey, motion)
+            }
+            const isSteady =
+              entry.channelKey === hoveredAst || entry.channelKey === selectedKey
+            if (!isSteady) {
+              motion.orbitElapsedSec += dt
+            }
+            motion.spinAngle = (motion.spinAngle + entry.spec.spinSpeed * dt) % (Math.PI * 2)
 
-          const isHighlighted =
-            entry.channelKey === selectedKey || entry.channelKey === activeKey
-          const isHovered = entry.channelKey === hoveredAst
-          entry.rockMaterial.uniforms.uHighlight.value = isHighlighted
-            ? 1.0
-            : isHovered
-              ? 0.65
-              : entry.isPinned
-                ? 0.22
-                : 0.0
+            const [ax, ay, az] = computeAsteroidWorldPosition(entry.spec, motion.orbitElapsedSec)
+            entry.worldPos.set(ax, ay, az)
+            entry.root.position.set(ax, ay, az)
+            entry.rockMesh.quaternion.setFromAxisAngle(entry.spinAxis, motion.spinAngle)
 
-          if (entry.orbitMaterial) {
-            entry.orbitMaterial.opacity = isHighlighted || isHovered
-              ? 0.38
-              : entry.isPinned || entry.isLive
-                ? 0.075
-                : 0.03
+            const isHighlighted =
+              entry.channelKey === selectedKey || entry.channelKey === activeKey
+            const isHovered = entry.channelKey === hoveredAst
+            entry.rockMaterial.uniforms.uHighlight.value = isHighlighted
+              ? 1.0
+              : isHovered
+                ? 0.65
+                : entry.isPinned
+                  ? 0.22
+                  : 0.0
+
+            if (entry.orbitMaterial) {
+              entry.orbitMaterial.opacity = isHighlighted || isHovered
+                ? 0.38
+                : entry.isPinned || entry.isLive
+                  ? 0.075
+                  : 0.03
+            }
           }
         }
 
@@ -2858,20 +3629,27 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         const isCompact = modeRef.current === 'compact'
         const isNarrow = viewW < 640
 
-        // 1. Active & Selected Geohash Pill Badges (suppressed if a Pinned Push-Pin chip owns that exact geohash)
+        // 1. Active & Selected Geohash Pill Badges (suppressed in deep space or when a Red Pin chip owns that cell)
         const subParent = showSubZonesRef.current
           ? selectedGeohashRef.current || activeGeohashRef.current
           : null
-        const activeSubParent = subParent && subParent.length < 8 ? subParent : null
+        const activeSubParent = subParent && subParent.length < 9 ? subParent : null
 
         const activeEl = activePillElRef.current
         if (activeEl) {
           const gh = activeGeohashRef.current
           const isTopicActive = isTopicChannel(activeChannelKeyRef.current)
-          const hasPinHere = pinEntries.has(gh)
-          if (gh && !isTopicActive && !hasPinHere && activeSubParent !== gh) {
+          const activeChanKey = gh ? makeCelestialChannelKey(focusedBody, gh) : null
+          const hasPinHere = activeChanKey ? pinEntries.has(activeChanKey) : false
+          if (
+            !inDeepSpaceView &&
+            gh &&
+            !isTopicActive &&
+            !hasPinHere &&
+            activeSubParent !== gh
+          ) {
             const c = decodeCenter(gh)
-            const p = projectPointToScreen(c.lat, c.lon, viewW, viewH)
+            const p = projectPointToScreen(c.lat, c.lon, viewW, viewH, visibleHorizonDot)
             if (p.visible) showElAt(activeEl, p.x, p.y)
             else hideEl(activeEl)
           } else {
@@ -2885,8 +3663,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           const isTopicSelected = Boolean(
             selectedChannelKeyRef.current && isTopicChannel(selectedChannelKeyRef.current),
           )
-          const hasPinHere = gh ? pinEntries.has(gh) : false
+          const selChanKey = gh ? makeCelestialChannelKey(focusedBody, gh) : null
+          const hasPinHere = selChanKey ? pinEntries.has(selChanKey) : false
           if (
+            !inDeepSpaceView &&
             gh &&
             !isTopicSelected &&
             !hasPinHere &&
@@ -2894,7 +3674,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             activeSubParent !== gh
           ) {
             const c = decodeCenter(gh)
-            const p = projectPointToScreen(c.lat, c.lon, viewW, viewH)
+            const p = projectPointToScreen(c.lat, c.lon, viewW, viewH, visibleHorizonDot)
             if (p.visible) showElAt(selEl, p.x, p.y)
             else hideEl(selEl)
           } else {
@@ -2902,12 +3682,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
         }
 
-        // 2. User GPS Beacon
+        // 2. User GPS Beacon (Earth only, hidden in deep Solar System pullback)
         const gpsEl = gpsBeaconElRef.current
         if (gpsEl) {
           const coords = userCoordsRef.current
-          if (coords) {
-            const p = projectPointToScreen(coords.lat, coords.lon, viewW, viewH)
+          if (isEarthFocused && !inDeepSpaceView && coords) {
+            const p = projectPointToScreen(coords.lat, coords.lon, viewW, viewH, visibleHorizonDot)
             if (p.visible) showElAt(gpsEl, p.x, p.y)
             else hideEl(gpsEl)
           } else {
@@ -2915,18 +3695,21 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
         }
 
-        // 3. Projected Earth 3D Push-Pin Chips (anchored cleanly right above each 3D pinhead tip)
-        const tipVec = new THREE.Vector3()
-        for (const [gh, entry] of pinEntries.entries()) {
-          const chipEl = pinChipElsRef.current.get(gh)
+        // 3. Projected 3D Red Push-Pin Chips (exact geometric horizon occlusion!)
+        for (const [chanKey, entry] of pinEntries.entries()) {
+          const chipEl = pinChipElsRef.current.get(chanKey)
           if (!chipEl) continue
-          if (entry.normal.dot(camDir) < 0.14 || activeSubParent === gh) {
+          if (
+            inDeepSpaceView ||
+            entry.normal.dot(camDir) <= visibleHorizonDot ||
+            activeSubParent === entry.rawGeohash
+          ) {
             hideEl(chipEl)
             continue
           }
           tipVec
             .copy(entry.normal)
-            .multiplyScalar(EARTH_RADIUS + 0.0008 + entry.headTipY * pinScale)
+            .multiplyScalar(EARTH_RADIUS + entry.headTipY * pinScale * entry.scaleBoost)
           const p = projectWorldVecToScreen(tipVec, viewW, viewH)
           if (!p.visible) {
             hideEl(chipEl)
@@ -2935,10 +3718,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           showElAt(chipEl, p.x, p.y - 6, 'bottom-center')
         }
 
-        // 4. Projected Topic Asteroid Chips (occluded cleanly only when behind Earth's limb)
+        // 4. Projected Topic Asteroid Chips (Earth only; hidden in deep Solar System view or behind Earth)
         const visibleAsteroidScreen = new Map<string, { x: number; y: number }>()
         for (const [key, entry] of asteroidEntries.entries()) {
           const chipEl = asteroidChipElsRef.current.get(key)
+          if (!isEarthFocused || inDeepSpaceView) {
+            if (chipEl) hideEl(chipEl)
+            continue
+          }
           const posArr: [number, number, number] = [
             entry.worldPos.x,
             entry.worldPos.y,
@@ -2956,7 +3743,6 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
           visibleAsteroidScreen.set(key, { x: p.x, y: p.y })
           if (chipEl) {
-            // Keep chips clean in narrow viewports by hiding distant unpinned/non-selected starter rocks if zoomed deep onto Earth
             const hideInDeepEarthZoom =
               dist < 1.35 &&
               !entry.isPinned &&
@@ -2971,11 +3757,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
         }
 
-        // 5. Upward-Queued Speech Bubble Stacks (Earth Rooms AND Orbiting Topic Asteroids!)
+        // 5. Upward-Queued Speech Bubble Stacks (Precision-LOD filtered + Exact Horizon Occluded!)
         const placedBubbleBoxes: Array<{ l: number; r: number; t: number; b: number }> = []
         const visibleBubbleKeys = new Set<string>()
         const maxStacks = isCompact ? 3 : isNarrow ? 5 : 10
-        const stackW = isNarrow ? 142 : 162
+        const stackW = isNarrow ? 150 : 184
         const marginTop = !isCompact && viewH >= 440 ? (isNarrow ? 76 : 68) : 12
         const marginBottom = !isCompact && viewH >= 440 ? (isNarrow ? 104 : 96) : 12
         const marginRight = !isCompact ? (isNarrow ? 56 : 64) : 10
@@ -2993,12 +3779,30 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             continue
           }
 
+          if (stack.isTopic) {
+            if (!isEarthFocused || inDeepSpaceView) {
+              hideEl(el)
+              continue
+            }
+          } else {
+            if (stack.rawGeohash.length === 0 || stack.rawGeohash.length > maxVisiblePrecision) {
+              hideEl(el)
+              continue
+            }
+          }
+
           let p: { x: number; y: number; visible: boolean }
           if (stack.isTopic) {
             const astPt = visibleAsteroidScreen.get(stack.geohash)
             p = astPt ? { x: astPt.x, y: astPt.y, visible: true } : { x: 0, y: 0, visible: false }
           } else {
-            p = projectPointToScreen(stack.center.lat, stack.center.lon, viewW, viewH)
+            p = projectPointToScreen(
+              stack.center.lat,
+              stack.center.lon,
+              viewW,
+              viewH,
+              visibleHorizonDot,
+            )
           }
 
           if (!p.visible) {
@@ -3036,25 +3840,179 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           showElAt(el, p.x, p.y - tailOffset, 'bottom-center')
         }
 
-        // 6. Live Pulse Surface Sonar Beacons (Earth rooms without a 3D push-pin)
+        // 6. Live Pulse Surface Sonar Beacons (Dead-centered on exact lat/lon + Precision-LOD + Exact Horizon!)
         const rooms = visiblePulseRoomsRef.current
         for (const room of rooms) {
           const el = beaconElsRef.current.get(room.geohash)
           if (!el) continue
           if (
             !showPulseRef.current ||
-            activeSubParent === room.geohash ||
+            room.rawGeohash.length === 0 ||
+            room.rawGeohash.length > maxVisiblePrecision ||
+            activeSubParent === room.rawGeohash ||
             pinEntries.has(room.geohash)
           ) {
             hideEl(el)
             continue
           }
-          const p = projectPointToScreen(room.center.lat, room.center.lon, viewW, viewH)
+          const p = projectPointToScreen(
+            room.center.lat,
+            room.center.lon,
+            viewW,
+            viewH,
+            visibleHorizonDot,
+          )
           if (!p.visible) {
             hideEl(el)
             continue
           }
           showElAt(el, p.x, p.y)
+        }
+
+        // 7. Projected Clickable Solar System Planet, Moon, Sun & Focused-World Chips (.ag-globe-body-chip)
+        const placedBodyBoxes: Array<{ l: number; r: number; t: number; b: number }> = []
+        const originWorldVec = new THREE.Vector3(0, 0, 0)
+        const bodyCandidates: Array<{
+          id: CelestialBodyId
+          def: CelestialBodyDef
+          worldPos: THREE.Vector3
+          isSun: boolean
+          isParent: boolean
+          isFocusedCentral: boolean
+          el: HTMLButtonElement
+          prio: number
+        }> = []
+        const pinCounts = pinCountByBodyRef.current
+
+        for (const [bodyId, el] of bodyChipElsRef.current.entries()) {
+          if (bodyId === focusedBody) {
+            // In Solar System Overview (zoom < -1.8), label the central focused world (e.g. Earth) too!
+            if (!inDeepSpaceView) {
+              hideEl(el)
+              continue
+            }
+            bodyCandidates.push({
+              id: bodyId,
+              def: SOLAR_BODIES[bodyId],
+              worldPos: originWorldVec,
+              isSun: false,
+              isParent: false,
+              isFocusedCentral: true,
+              el,
+              prio: 96,
+            })
+            continue
+          }
+
+          const entry = bodyEntries.get(bodyId)
+          if (!entry) {
+            hideEl(el)
+            continue
+          }
+
+          let shouldShow = false
+          let prio = 10
+          if (entry.isParentOfFocused) {
+            shouldShow = cam.zoom < 2.8
+            prio = 100
+          } else if (entry.isChildMoon) {
+            shouldShow = cam.zoom < 2.2 && cam.zoom > -3.4
+            prio = 85
+          } else if (entry.isSiblingMoon) {
+            shouldShow = cam.zoom < 2.4 && cam.zoom > -3.4
+            prio = 75
+          } else if (entry.isSun) {
+            shouldShow = cam.zoom < -0.6
+            prio = 92
+          } else if (entry.isPlanet) {
+            shouldShow = cam.zoom < -0.6
+            const pins = bodyId !== 'sun' ? (pinCounts.get(bodyId) ?? 0) : 0
+            prio = 40 + (pins > 0 ? 30 : 0) + Math.min(18, entry.def.visualRadius * 6)
+          }
+
+          if (!shouldShow) {
+            hideEl(el)
+            continue
+          }
+
+          bodyCandidates.push({
+            id: bodyId,
+            def: entry.def,
+            worldPos: entry.worldPos,
+            isSun: entry.isSun,
+            isParent: entry.isParentOfFocused,
+            isFocusedCentral: false,
+            el,
+            prio,
+          })
+        }
+
+        bodyCandidates.sort((a, b) => b.prio - a.prio)
+        for (const cand of bodyCandidates) {
+          if (!cand.isFocusedCentral) {
+            const posArr: [number, number, number] = [
+              cand.worldPos.x,
+              cand.worldPos.y,
+              cand.worldPos.z,
+            ]
+            if (isPointOccludedByEarth(camPosTuple, posArr, EARTH_RADIUS)) {
+              hideEl(cand.el)
+              continue
+            }
+          }
+          const p = projectWorldVecToScreen(cand.worldPos, viewW, viewH)
+          if (
+            !p.visible ||
+            p.x < 24 ||
+            p.x > viewW - 24 ||
+            p.y < 38 ||
+            p.y > viewH - 30
+          ) {
+            hideEl(cand.el)
+            continue
+          }
+          const approxW = Math.max(54, cand.def.name.length * 7.2 + 24)
+          const offsetPx = cand.isSun ? 20 : cand.isParent ? 22 : 14
+          const belowBox = {
+            l: p.x - approxW / 2,
+            r: p.x + approxW / 2,
+            t: p.y + offsetPx,
+            b: p.y + offsetPx + 22,
+          }
+          const belowOverlaps = placedBodyBoxes.some(
+            (o) =>
+              belowBox.l < o.r + 3 &&
+              belowBox.r + 3 > o.l &&
+              belowBox.t < o.b + 3 &&
+              belowBox.b + 3 > o.t,
+          )
+          if (!belowOverlaps) {
+            placedBodyBoxes.push(belowBox)
+            showElAt(cand.el, p.x, p.y + offsetPx, 'top-center')
+            continue
+          }
+          // Try placing cleanly above the body so inner Solar System worlds (Sun/Mercury/Venus/Earth) stay all visible!
+          const aboveBox = {
+            l: p.x - approxW / 2,
+            r: p.x + approxW / 2,
+            t: p.y - offsetPx - 22,
+            b: p.y - offsetPx,
+          }
+          const aboveOverlaps =
+            aboveBox.t < 42 ||
+            placedBodyBoxes.some(
+              (o) =>
+                aboveBox.l < o.r + 3 &&
+                aboveBox.r + 3 > o.l &&
+                aboveBox.t < o.b + 3 &&
+                aboveBox.b + 3 > o.t,
+            )
+          if (!aboveOverlaps) {
+            placedBodyBoxes.push(aboveBox)
+            showElAt(cand.el, p.x, p.y - offsetPx, 'bottom-center')
+            continue
+          }
+          hideEl(cand.el)
         }
       }
 
@@ -3087,11 +4045,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         sunCoreMat.dispose()
         sunCoronaTex.dispose()
         sunCoronaMat.dispose()
-        moonGeo.dispose()
-        moonTex.dispose()
-        moonMaterial.dispose()
+        sunHitGeo.dispose()
+        sunHitMat.dispose()
         earthGeo.dispose()
         earthMaterial.dispose()
+        planetCentralMaterial.dispose()
         baseTexture.dispose()
         atmosphereGeo.dispose()
         atmosphereMaterial.dispose()
@@ -3104,6 +4062,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         patchCache.clear()
         pinEntries.clear()
         asteroidEntries.clear()
+        bodyEntries.clear()
+        planetOrbitMats.clear()
+        moonOrbitMats.length = 0
+        disposeObject3D(centralRingGroup)
+        disposeObject3D(solarSystemGroup)
+        disposeObject3D(planetOrbitGroup)
+        disposeObject3D(moonOrbitGroup)
         disposeObject3D(gridGroup)
         disposeObject3D(subZoneGroup)
         disposeObject3D(pulseGroup)
@@ -3121,7 +4086,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         sceneRefs.current = null
       }
       // Intentionally mount once per component instance
-    }, [emitSelectChannel, emitTuneChannel, flyToTopicInternal])
+    }, [emitSelectChannel, emitTuneChannel, fitSolarSystemInternal, flyToTopicInternal, focusBodyInternal])
 
     // -----------------------------------------------------------------------
     // 2. React to Theme Switches
@@ -3144,14 +4109,38 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     }, [theme])
 
     // -----------------------------------------------------------------------
+    // 2b. React to Focused Solar System Body Switches (Floating-Origin World)
+    // -----------------------------------------------------------------------
+    useEffect(() => {
+      const sr = sceneRefs.current
+      if (!sr) return
+      sr.rebuildSolarSystem(activeBodyId, new Date())
+      sr.hoveredGeohash = null
+      sr.hoveredAsteroidKey = null
+      sr.hoveredBodyId = null
+      sr.updateHoverMesh(null)
+      sr.updatePatchTiles()
+      sr.scheduleViewportEmit()
+
+      if (prevBodyIdRef.current !== activeBodyId) {
+        prevBodyIdRef.current = activeBodyId
+        if (lastFlyBodyRef.current !== activeBodyId) {
+          flyToSunlitFace(activeBodyId, true, 1.95)
+        }
+      }
+      lastFlyBodyRef.current = null
+    }, [activeBodyId, flyToSunlitFace])
+
+    // -----------------------------------------------------------------------
     // 3. Smoothly Fly Globe Whenever activeGeohash Changes Externally
     // -----------------------------------------------------------------------
     useEffect(() => {
-      if (prevActiveRef.current === safeActiveGeohash) return
-      prevActiveRef.current = safeActiveGeohash
-      if (isTopicChannel(effectiveActiveKey)) return
-      flyToCellInternal(safeActiveGeohash, { animate: true })
-    }, [safeActiveGeohash, effectiveActiveKey, flyToCellInternal])
+      if (prevActiveKeyRef.current === effectiveActiveKey) return
+      prevActiveKeyRef.current = effectiveActiveKey
+      if (!effectiveActiveKey || isTopicChannel(effectiveActiveKey)) return
+      if (!parseCelestialChannelKey(effectiveActiveKey)) return
+      flyToCellInternal(effectiveActiveKey, { animate: true })
+    }, [effectiveActiveKey, flyToCellInternal])
 
     // -----------------------------------------------------------------------
     // 4. Emit Effective Precision Whenever precisionMode Changes
@@ -3163,7 +4152,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     }, [precisionMode])
 
     // -----------------------------------------------------------------------
-    // 5. Render Curved Geohash Grid Lines on the Sphere Surface
+    // 5. Render Curved Geohash Grid Lines on the Focused Sphere (Float64 RTC)
     // -----------------------------------------------------------------------
     useEffect(() => {
       const sr = sceneRefs.current
@@ -3176,6 +4165,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       }
 
       const cam = cameraStateRef.current
+      if (cam.zoom < -1.8) return
       const dist = zoomToDistance(cam.zoom)
       const effectivePrecision =
         precisionMode === 'auto' ? getRecommendedPrecisionForZoom(cam.zoom) : precisionMode
@@ -3205,9 +4195,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const cells = getGeohashCellsInBounds(bounds, effectivePrecision, mode === 'compact' ? 84 : 164)
       if (cells.length === 0) return
 
-      const focusSet = new Set<string>([safeActiveGeohash])
-      if (safeSelectedGeohash) focusSet.add(safeSelectedGeohash)
+      const focusSet = new Set<string>()
+      if (activeGeohashOnBody) focusSet.add(activeGeohashOnBody)
+      if (selectedGeohashOnBody) focusSet.add(selectedGeohashOnBody)
 
+      const anchor = latLonToUnitVec3(cam.lat, cam.lon)
       const segs: number[] = []
       for (const cell of cells) {
         if (focusSet.has(cell.geohash)) continue
@@ -3218,6 +4210,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           cell.bounds.lonMin,
           cell.bounds.lonMax,
           OVERLAY_LINE_RADIUS,
+          anchor,
         )
       }
       if (segs.length === 0) return
@@ -3232,12 +4225,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         depthWrite: false,
       })
       const lines = new THREE.LineSegments(geo, mat)
-      lines.renderOrder = 4
+      lines.position.set(anchor[0], anchor[1], anchor[2])
+      lines.renderOrder = 5
       group.add(lines)
-    }, [viewportTick, precisionMode, safeActiveGeohash, safeSelectedGeohash, mode, theme])
+    }, [viewportTick, precisionMode, activeGeohashOnBody, selectedGeohashOnBody, activeBodyId, mode, theme])
 
     // -----------------------------------------------------------------------
-    // 6. Render Optional 32× Child Sub-Zones Curved on the Sphere
+    // 6. Render Optional 32× Child Sub-Zones Curved on the Sphere (Float64 RTC)
     // -----------------------------------------------------------------------
     useEffect(() => {
       const sr = sceneRefs.current
@@ -3253,12 +4247,15 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const children = getChildGeohashes(subZoneParent)
       if (children.length === 0) return
 
+      const parentCenter = decodeCenter(subZoneParent)
+      const anchor = latLonToUnitVec3(parentCenter.lat, parentCenter.lon)
       const pal = readCanvasPalette(hostRef.current, theme)
       const color = new THREE.Color(pal.accentSecondary)
 
       const fillGeo = buildCurvedRectFillGeometry(
         children.map((c) => c.bounds),
         OVERLAY_FILL_RADIUS,
+        anchor,
       )
       const fillMat = new THREE.MeshBasicMaterial({
         color,
@@ -3270,6 +4267,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         polygonOffsetUnits: -2,
       })
       const fillMesh = new THREE.Mesh(fillGeo, fillMat)
+      fillMesh.position.set(anchor[0], anchor[1], anchor[2])
       fillMesh.renderOrder = 4
       group.add(fillMesh)
 
@@ -3282,6 +4280,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           child.bounds.lonMin,
           child.bounds.lonMax,
           OVERLAY_LINE_RADIUS,
+          anchor,
         )
       }
       const lineGeo = new THREE.BufferGeometry()
@@ -3293,12 +4292,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         depthWrite: false,
       })
       const lines = new THREE.LineSegments(lineGeo, lineMat)
+      lines.position.set(anchor[0], anchor[1], anchor[2])
       lines.renderOrder = 5
       group.add(lines)
-    }, [subZoneParent, theme])
+    }, [subZoneParent, activeBodyId, theme])
 
     // -----------------------------------------------------------------------
-    // 7. Render Live Global Pulse Zone Highlights on the Sphere Surface
+    // 7. Render Live Global Pulse Zone Highlights on the Sphere (Per-Cell Float64 RTC)
     // -----------------------------------------------------------------------
     useEffect(() => {
       const sr = sceneRefs.current
@@ -3313,41 +4313,46 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       const pal = readCanvasPalette(hostRef.current, theme)
       const color = new THREE.Color(pal.accent)
-      const boxes = validPulseRooms.map((r) => decodeBounds(r.geohash))
 
-      const fillGeo = buildCurvedRectFillGeometry(boxes, OVERLAY_FILL_RADIUS)
-      const fillMat = new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.11,
-        depthWrite: false,
-        polygonOffset: true,
-        polygonOffsetFactor: -2,
-        polygonOffsetUnits: -2,
-      })
-      const fillMesh = new THREE.Mesh(fillGeo, fillMat)
-      fillMesh.renderOrder = 4
-      group.add(fillMesh)
+      for (const room of validPulseRooms) {
+        const b = decodeBounds(room.rawGeohash)
+        const c = decodeCenter(room.rawGeohash)
+        const anchor = latLonToUnitVec3(c.lat, c.lon)
 
-      const segs: number[] = []
-      for (const b of boxes) {
-        pushCurvedRectSegments(segs, b.latMin, b.latMax, b.lonMin, b.lonMax, OVERLAY_LINE_RADIUS)
+        const fillGeo = buildCurvedRectFillGeometry([b], OVERLAY_FILL_RADIUS, anchor)
+        const fillMat = new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.11,
+          depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2,
+        })
+        const fillMesh = new THREE.Mesh(fillGeo, fillMat)
+        fillMesh.position.set(anchor[0], anchor[1], anchor[2])
+        fillMesh.renderOrder = 4
+        group.add(fillMesh)
+
+        const segs: number[] = []
+        pushCurvedRectSegments(segs, b.latMin, b.latMax, b.lonMin, b.lonMax, OVERLAY_LINE_RADIUS, anchor)
+        const lineGeo = new THREE.BufferGeometry()
+        lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
+        const lineMat = new THREE.LineBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.56,
+          depthWrite: false,
+        })
+        const lines = new THREE.LineSegments(lineGeo, lineMat)
+        lines.position.set(anchor[0], anchor[1], anchor[2])
+        lines.renderOrder = 5
+        group.add(lines)
       }
-      const lineGeo = new THREE.BufferGeometry()
-      lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
-      const lineMat = new THREE.LineBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.56,
-        depthWrite: false,
-      })
-      const lines = new THREE.LineSegments(lineGeo, lineMat)
-      lines.renderOrder = 5
-      group.add(lines)
     }, [showPulse, validPulseRooms, theme])
 
     // -----------------------------------------------------------------------
-    // 8. Render Active Tuned & Selected Geohash Curved Polygon Fill & Borders
+    // 8. Render Active Tuned & Selected Geohash Curved Polygon Fill & Borders (Float64 RTC)
     // -----------------------------------------------------------------------
     useEffect(() => {
       const sr = sceneRefs.current
@@ -3363,9 +4368,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       const addFocusCell = (gh: string, hexColor: string, fillOpacity: number) => {
         const b = decodeBounds(gh)
+        const c = decodeCenter(gh)
+        const anchor = latLonToUnitVec3(c.lat, c.lon)
         const col = new THREE.Color(hexColor)
 
-        const fillGeo = buildCurvedRectFillGeometry([b], OVERLAY_FILL_RADIUS)
+        const fillGeo = buildCurvedRectFillGeometry([b], OVERLAY_FILL_RADIUS, anchor)
         const fillMat = new THREE.MeshBasicMaterial({
           color: col,
           transparent: true,
@@ -3376,11 +4383,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           polygonOffsetUnits: -3,
         })
         const fillMesh = new THREE.Mesh(fillGeo, fillMat)
-        fillMesh.renderOrder = 5
+        fillMesh.position.set(anchor[0], anchor[1], anchor[2])
+        fillMesh.renderOrder = 6
         group.add(fillMesh)
 
         const segs: number[] = []
-        pushCurvedRectSegments(segs, b.latMin, b.latMax, b.lonMin, b.lonMax, FOCUS_LINE_RADIUS)
+        pushCurvedRectSegments(segs, b.latMin, b.latMax, b.lonMin, b.lonMax, FOCUS_LINE_RADIUS, anchor)
         const lineGeo = new THREE.BufferGeometry()
         lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
         const lineMat = new THREE.LineBasicMaterial({
@@ -3390,24 +4398,25 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           depthWrite: false,
         })
         const lines = new THREE.LineSegments(lineGeo, lineMat)
+        lines.position.set(anchor[0], anchor[1], anchor[2])
         lines.renderOrder = 7
         group.add(lines)
       }
 
-      if (safeActiveGeohash && !isTopicChannel(effectiveActiveKey)) {
-        addFocusCell(safeActiveGeohash, pal.accent, 0.16)
+      if (activeGeohashOnBody && !isTopicChannel(effectiveActiveKey)) {
+        addFocusCell(activeGeohashOnBody, pal.accent, 0.16)
       }
       if (
-        safeSelectedGeohash &&
-        safeSelectedGeohash !== safeActiveGeohash &&
+        selectedGeohashOnBody &&
+        selectedGeohashOnBody !== activeGeohashOnBody &&
         !(effectiveSelectedKey && isTopicChannel(effectiveSelectedKey))
       ) {
-        addFocusCell(safeSelectedGeohash, pal.accentSecondary, 0.15)
+        addFocusCell(selectedGeohashOnBody, pal.accentSecondary, 0.15)
       }
-    }, [safeActiveGeohash, safeSelectedGeohash, effectiveActiveKey, effectiveSelectedKey, theme])
+    }, [activeGeohashOnBody, selectedGeohashOnBody, effectiveActiveKey, effectiveSelectedKey, activeBodyId, theme])
 
     // -----------------------------------------------------------------------
-    // 9. Render Orbital Great-Circle Teleport Vector Arc When Teleported
+    // 9. Render Orbital Great-Circle Teleport Vector Arc When Teleported (Earth Only)
     // -----------------------------------------------------------------------
     useEffect(() => {
       const sr = sceneRefs.current
@@ -3418,11 +4427,17 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         group.remove(ch)
         disposeObject3D(ch)
       }
-      if (!userCoords || !isTeleported || !safeActiveGeohash || isTopicChannel(effectiveActiveKey)) {
+      if (
+        activeBodyId !== 'earth' ||
+        !userCoords ||
+        !isTeleported ||
+        !activeGeohashOnBody ||
+        isTopicChannel(effectiveActiveKey)
+      ) {
         return
       }
 
-      const activeCenter = decodeCenter(safeActiveGeohash)
+      const activeCenter = decodeCenter(activeGeohashOnBody)
       const pal = readCanvasPalette(hostRef.current, theme)
       const arcGeo = buildCurvedTeleportArcGeometry(userCoords, activeCenter)
       const arcMat = new THREE.LineBasicMaterial({
@@ -3434,10 +4449,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const line = new THREE.Line(arcGeo, arcMat)
       line.renderOrder = 7
       group.add(line)
-    }, [userCoords, isTeleported, safeActiveGeohash, effectiveActiveKey, theme])
+    }, [activeBodyId, userCoords, isTeleported, activeGeohashOnBody, effectiveActiveKey, theme])
 
     // -----------------------------------------------------------------------
-    // 10. Build Physical Sculpted 3D Earth Push-Pins for Pinned Geohashes
+    // 10. Build Physical Sculpted 3D Red Push-Pins for Pinned Channels on Focused World
     // -----------------------------------------------------------------------
     useEffect(() => {
       const sr = sceneRefs.current
@@ -3452,28 +4467,30 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       if (pinnedEarthItems.length === 0) return
 
-      const pal = readCanvasPalette(hostRef.current, theme)
       const dist = zoomToDistance(cameraStateRef.current.zoom)
-      const initPinScale = clamp((dist - EARTH_RADIUS) * 0.044, 0.0024, 0.095)
+      const initPinScale = clamp(Math.max(0, dist - EARTH_RADIUS) * 0.044, 1.5e-7, 0.095)
 
       for (const item of pinnedEarthItems) {
         const normal = latLonToVec3(item.center.lat, item.center.lon, 1).normalize()
+        const isFocused = item.isActive || item.isSelected
+        const scaleBoost = isFocused ? 1.18 : 1.0
         const root = new THREE.Group()
-        root.position.copy(normal).multiplyScalar(EARTH_RADIUS + 0.0008)
+        root.position.copy(normal).multiplyScalar(EARTH_RADIUS)
         root.quaternion.setFromUnitVectors(UP_Y, normal)
-        root.scale.setScalar(initPinScale)
+        root.scale.setScalar(initPinScale * scaleBoost)
 
-        const headHex = item.isActive || item.isSelected ? pal.accent : '#EF4444'
+        // All 3D push-pins are unambiguously vivid classic red (active/selected distinguished by 1.18x scale + base halo)
+        const headHex = isFocused ? '#EF4444' : '#DC2626'
         const hasUnread = item.unreadCount > 0 || item.mentionCount > 0
-        const ud = { channelKey: item.geohash, hitKind: 'pin' }
+        const ud = { channelKey: item.channelKey, rawGeohash: item.geohash, hitKind: 'pin' }
 
-        // 1. Base contact glow ring flush on Earth
+        // 1. Red base contact glow ring flush on world (+ crisp white/red halo ring when active/selected)
         const ringGeo = new THREE.RingGeometry(0.16, 0.36, 24)
         ringGeo.rotateX(-Math.PI / 2)
         const ringMat = new THREE.MeshBasicMaterial({
-          color: new THREE.Color(headHex),
+          color: new THREE.Color('#EF4444'),
           transparent: true,
-          opacity: 0.72,
+          opacity: isFocused ? 0.9 : 0.74,
           side: THREE.DoubleSide,
           depthWrite: false,
         })
@@ -3482,6 +4499,38 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         ringMesh.userData = ud
         ringMesh.renderOrder = 8
         root.add(ringMesh)
+
+        if (isFocused) {
+          const whiteHaloGeo = new THREE.RingGeometry(0.39, 0.53, 28)
+          whiteHaloGeo.rotateX(-Math.PI / 2)
+          const whiteHaloMat = new THREE.MeshBasicMaterial({
+            color: new THREE.Color('#FFFFFF'),
+            transparent: true,
+            opacity: 0.94,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          })
+          const whiteHaloMesh = new THREE.Mesh(whiteHaloGeo, whiteHaloMat)
+          whiteHaloMesh.position.y = 0.028
+          whiteHaloMesh.userData = ud
+          whiteHaloMesh.renderOrder = 8
+          root.add(whiteHaloMesh)
+
+          const redOuterHaloGeo = new THREE.RingGeometry(0.53, 0.69, 28)
+          redOuterHaloGeo.rotateX(-Math.PI / 2)
+          const redOuterHaloMat = new THREE.MeshBasicMaterial({
+            color: new THREE.Color('#F87171'),
+            transparent: true,
+            opacity: 0.62,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          })
+          const redOuterHaloMesh = new THREE.Mesh(redOuterHaloGeo, redOuterHaloMat)
+          redOuterHaloMesh.position.y = 0.024
+          redOuterHaloMesh.userData = ud
+          redOuterHaloMesh.renderOrder = 8
+          root.add(redOuterHaloMesh)
+        }
 
         // 2. Metallic tapered pin shaft
         const shaftGeo = new THREE.CylinderGeometry(0.055, 0.022, 1.25, 10)
@@ -3492,7 +4541,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         shaftMesh.renderOrder = 9
         root.add(shaftMesh)
 
-        // 3. Glossy 3D spherical pinhead (custom lit specular shader)
+        // 3. Glossy 3D spherical red pinhead (custom lit specular shader)
         const headGeo = new THREE.SphereGeometry(0.32, 18, 14)
         const headMat = new THREE.ShaderMaterial({
           vertexShader: PINHEAD_VERTEX_SHADER,
@@ -3508,14 +4557,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         headMesh.renderOrder = 10
         root.add(headMesh)
 
-        // 4. Subtle warm halo ring around pinhead when unread / mentions exist
+        // 4. Red-accented halo ring around pinhead when unread / mentions exist
         if (hasUnread) {
           const haloGeo = new THREE.TorusGeometry(0.43, 0.045, 8, 24)
           haloGeo.rotateX(Math.PI / 2)
           const haloMat = new THREE.MeshBasicMaterial({
-            color: item.mentionCount > 0 ? '#F59E0B' : '#FB7185',
+            color: item.mentionCount > 0 ? '#EF4444' : '#F87171',
             transparent: true,
-            opacity: 0.9,
+            opacity: 0.92,
           })
           const haloMesh = new THREE.Mesh(haloGeo, haloMat)
           haloMesh.position.y = 1.38
@@ -3537,55 +4586,151 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         root.add(hitMesh)
 
         group.add(root)
-        pinEntriesRef.current.set(item.geohash, {
-          channelKey: item.geohash,
+        pinEntriesRef.current.set(item.channelKey, {
+          channelKey: item.channelKey,
+          rawGeohash: item.geohash,
           root,
           normal,
           headTipY: 1.74,
+          scaleBoost,
           hitMesh,
         })
       }
-    }, [pinnedEarthItems, theme])
+    }, [pinnedEarthItems])
 
     // -----------------------------------------------------------------------
-    // 11. Build Orbiting Procedural 3D Topic Asteroids + Orbital Track Rings
+    // 11. Reconcile Orbiting Procedural 3D Topic Asteroids In-Place (ZERO rotation resets!)
     // -----------------------------------------------------------------------
     useEffect(() => {
       const sr = sceneRefs.current
       if (!sr) return
 
-      // Preserve smooth continuous orbit elapsed timestamps across prop updates
-      const prevElapsedByKey = new Map<string, number>()
-      for (const [key, entry] of asteroidEntriesRef.current.entries()) {
-        prevElapsedByKey.set(key, entry.orbitElapsedSec)
-      }
-
       const group = sr.asteroidGroup
       const orbitGroup = sr.asteroidOrbitGroup
-      while (group.children.length > 0) {
-        const ch = group.children[0]
-        group.remove(ch)
-        disposeObject3D(ch)
-      }
-      while (orbitGroup.children.length > 0) {
-        const ch = orbitGroup.children[0]
-        orbitGroup.remove(ch)
-        disposeObject3D(ch)
-      }
-      asteroidEntriesRef.current.clear()
-
-      if (topicAsteroidItems.length === 0) return
+      const entries = asteroidEntriesRef.current
+      const motionMap = asteroidMotionRef.current
 
       const pal = readCanvasPalette(hostRef.current, theme)
       const rimColor = new THREE.Color(pal.accentSecondary)
       const pinAccent = new THREE.Color('#EF4444')
       const activeAccent = new THREE.Color(pal.accent)
 
+      const buildAsteroidPinBeacon = (
+        spec: TopicAsteroidSpec,
+        isPinFocused: boolean,
+        ud: Record<string, unknown>,
+      ): THREE.Group => {
+        const beaconGroup = new THREE.Group()
+        const pinBoost = isPinFocused ? 1.18 : 1.0
+        const pinStemH = spec.rockRadius * 0.72 * pinBoost
+        const stemGeo = new THREE.CylinderGeometry(
+          spec.rockRadius * 0.07 * pinBoost,
+          spec.rockRadius * 0.04 * pinBoost,
+          pinStemH,
+          8,
+        )
+        const stemMat = new THREE.MeshBasicMaterial({ color: '#E2E8F0' })
+        const stemMesh = new THREE.Mesh(stemGeo, stemMat)
+        stemMesh.position.y = spec.rockRadius * 0.92 + pinStemH * 0.45
+        stemMesh.userData = ud
+        stemMesh.renderOrder = 10
+        beaconGroup.add(stemMesh)
+
+        if (isPinFocused) {
+          const collarGeo = new THREE.TorusGeometry(
+            spec.rockRadius * 0.22,
+            spec.rockRadius * 0.035,
+            8,
+            18,
+          )
+          collarGeo.rotateX(Math.PI / 2)
+          const collarMat = new THREE.MeshBasicMaterial({
+            color: '#FFFFFF',
+            transparent: true,
+            opacity: 0.9,
+          })
+          const collarMesh = new THREE.Mesh(collarGeo, collarMat)
+          collarMesh.position.y = spec.rockRadius * 0.94
+          collarMesh.userData = ud
+          collarMesh.renderOrder = 10
+          beaconGroup.add(collarMesh)
+        }
+
+        const beaconGeo = new THREE.SphereGeometry(spec.rockRadius * 0.27 * pinBoost, 12, 10)
+        const beaconMat = new THREE.ShaderMaterial({
+          vertexShader: PINHEAD_VERTEX_SHADER,
+          fragmentShader: PINHEAD_FRAGMENT_SHADER,
+          uniforms: {
+            uColor: { value: pinAccent.clone() },
+            uSunDir: { value: sr.sunDir.clone() },
+          },
+        })
+        const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat)
+        beaconMesh.position.y =
+          spec.rockRadius * 0.92 + pinStemH + spec.rockRadius * 0.16 * pinBoost
+        beaconMesh.userData = ud
+        beaconMesh.renderOrder = 10
+        beaconGroup.add(beaconMesh)
+        return beaconGroup
+      }
+
+      const desiredKeys = new Set(topicAsteroidItems.map((it) => it.channelKey))
+
+      // 1. Remove asteroids no longer present
+      for (const [key, entry] of Array.from(entries.entries())) {
+        if (!desiredKeys.has(key)) {
+          group.remove(entry.root)
+          disposeObject3D(entry.root)
+          if (entry.orbitLine) {
+            orbitGroup.remove(entry.orbitLine)
+            disposeObject3D(entry.orbitLine)
+          }
+          entries.delete(key)
+          motionMap.delete(key)
+        }
+      }
+
+      // 2. Reconcile existing asteroids in-place or mount new ones without resetting rock rotation!
       for (const item of topicAsteroidItems) {
         const { spec } = item
-        const elapsed = prevElapsedByKey.get(item.channelKey) ?? sr.orbitClockSec
-        const [wx, wy, wz] = computeAsteroidWorldPosition(spec, elapsed)
+        const isHighlighted = item.isActive || item.isSelected
         const ud = { channelKey: item.channelKey, slug: item.slug, hitKind: 'asteroid' }
+        const existing = entries.get(item.channelKey)
+
+        if (existing) {
+          existing.isLive = item.isLive
+          existing.rockMaterial.uniforms.uRimColor.value.copy(
+            isHighlighted ? activeAccent : rimColor,
+          )
+          if (existing.orbitMaterial) {
+            existing.orbitMaterial.color.copy(isHighlighted ? activeAccent : rimColor)
+          }
+          // Only touch miniature red 3D pin beacon when pin/focus state actually changes
+          if (existing.isPinned !== item.isPinned || existing.isPinFocused !== isHighlighted) {
+            if (existing.pinBeaconGroup) {
+              existing.root.remove(existing.pinBeaconGroup)
+              disposeObject3D(existing.pinBeaconGroup)
+              existing.pinBeaconGroup = null
+            }
+            if (item.isPinned) {
+              const beaconGroup = buildAsteroidPinBeacon(spec, isHighlighted, ud)
+              existing.root.add(beaconGroup)
+              existing.pinBeaconGroup = beaconGroup
+            }
+            existing.isPinned = item.isPinned
+            existing.isPinFocused = isHighlighted
+          }
+          continue
+        }
+
+        // Seed persistent motion state if brand new
+        let motion = motionMap.get(item.channelKey)
+        if (!motion) {
+          motion = { orbitElapsedSec: sr.orbitClockSec, spinAngle: (spec.seed % 628) / 100 }
+          motionMap.set(item.channelKey, motion)
+        }
+        const [wx, wy, wz] = computeAsteroidWorldPosition(spec, motion.orbitElapsedSec)
+        const spinAxis = new THREE.Vector3(...spec.spinAxis).normalize()
 
         const root = new THREE.Group()
         root.position.set(wx, wy, wz)
@@ -3599,54 +4744,27 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             uSunDir: { value: sr.sunDir.clone() },
             uBaseColor: { value: new THREE.Color(spec.baseColorHex) },
             uRimColor: {
-              value: item.isActive || item.isSelected ? activeAccent.clone() : rimColor.clone(),
+              value: isHighlighted ? activeAccent.clone() : rimColor.clone(),
             },
             uHighlight: {
-              value: item.isActive || item.isSelected ? 1.0 : item.isPinned ? 0.22 : 0.0,
+              value: isHighlighted ? 1.0 : item.isPinned ? 0.22 : 0.0,
             },
             uMeanRadius: { value: spec.rockRadius },
           },
         })
         const rockMesh = new THREE.Mesh(rockGeo, rockMaterial)
+        rockMesh.quaternion.setFromAxisAngle(spinAxis, motion.spinAngle)
         rockMesh.userData = ud
         rockMesh.renderOrder = 9
         root.add(rockMesh)
 
-        // Miniature glowing 3D pin/beacon planted right onto pinned topic asteroids
+        let pinBeaconGroup: THREE.Group | null = null
         if (item.isPinned) {
-          const pinStemH = spec.rockRadius * 0.72
-          const stemGeo = new THREE.CylinderGeometry(
-            spec.rockRadius * 0.07,
-            spec.rockRadius * 0.04,
-            pinStemH,
-            8,
-          )
-          const stemMat = new THREE.MeshBasicMaterial({ color: '#E2E8F0' })
-          const stemMesh = new THREE.Mesh(stemGeo, stemMat)
-          stemMesh.position.y = spec.rockRadius * 0.92 + pinStemH * 0.45
-          stemMesh.userData = ud
-          stemMesh.renderOrder = 10
-          root.add(stemMesh)
-
-          const beaconGeo = new THREE.SphereGeometry(spec.rockRadius * 0.26, 12, 10)
-          const beaconMat = new THREE.ShaderMaterial({
-            vertexShader: PINHEAD_VERTEX_SHADER,
-            fragmentShader: PINHEAD_FRAGMENT_SHADER,
-            uniforms: {
-              uColor: {
-                value: item.isActive || item.isSelected ? activeAccent.clone() : pinAccent.clone(),
-              },
-              uSunDir: { value: sr.sunDir.clone() },
-            },
-          })
-          const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat)
-          beaconMesh.position.y = spec.rockRadius * 0.92 + pinStemH + spec.rockRadius * 0.16
-          beaconMesh.userData = ud
-          beaconMesh.renderOrder = 10
-          root.add(beaconMesh)
+          pinBeaconGroup = buildAsteroidPinBeacon(spec, isHighlighted, ud)
+          root.add(pinBeaconGroup)
         }
 
-        // Invisible larger hit-sphere (1.9x rockRadius) for effortless mobile & desktop tapping
+        // Invisible larger hit-sphere (1.95x rockRadius) for effortless mobile & desktop tapping
         const hitGeo = new THREE.SphereGeometry(spec.rockRadius * 1.95, 10, 8)
         const hitMat = new THREE.MeshBasicMaterial({
           transparent: true,
@@ -3659,9 +4777,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
         group.add(root)
 
-        // Delicate orbital track ring (subtle for pinned/live, highlighted for active/selected/hovered)
+        // Delicate orbital track ring
         const orbitGeo = createAsteroidOrbitLoopGeometry(spec)
-        const isHighlighted = item.isActive || item.isSelected
         const orbitMaterial = new THREE.LineBasicMaterial({
           color: isHighlighted ? activeAccent : rimColor,
           transparent: true,
@@ -3672,20 +4789,21 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         orbitLine.renderOrder = 2
         orbitGroup.add(orbitLine)
 
-        asteroidEntriesRef.current.set(item.channelKey, {
+        entries.set(item.channelKey, {
           channelKey: item.channelKey,
           slug: item.slug,
           spec,
           root,
           rockMesh,
           rockMaterial,
+          pinBeaconGroup,
           hitMesh,
           orbitLine,
           orbitMaterial,
-          spinAxis: new THREE.Vector3(...spec.spinAxis).normalize(),
-          orbitElapsedSec: elapsed,
+          spinAxis,
           worldPos: new THREE.Vector3(wx, wy, wz),
           isPinned: item.isPinned,
+          isPinFocused: isHighlighted,
           isLive: item.isLive,
         })
       }
@@ -3702,9 +4820,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       else beaconElsRef.current.delete(gh)
     }, [])
 
-    const setPinChipEl = useCallback((gh: string, node: HTMLButtonElement | null) => {
-      if (node) pinChipElsRef.current.set(gh, node)
-      else pinChipElsRef.current.delete(gh)
+    const setPinChipEl = useCallback((chanKey: string, node: HTMLButtonElement | null) => {
+      if (node) pinChipElsRef.current.set(chanKey, node)
+      else pinChipElsRef.current.delete(chanKey)
     }, [])
 
     const setAsteroidChipEl = useCallback((key: string, node: HTMLButtonElement | null) => {
@@ -3712,23 +4830,36 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       else asteroidChipElsRef.current.delete(key)
     }, [])
 
-    const nowMsForRecent = Date.now()
+    const setBodyChipEl = useCallback((id: CelestialBodyId, node: HTMLButtonElement | null) => {
+      if (node) bodyChipElsRef.current.set(id, node)
+      else bodyChipElsRef.current.delete(id)
+    }, [])
+
     const placedBubbleKeySet = useMemo(
       () => new Set(bubbleStacks.map((s) => s.geohash)),
       [bubbleStacks],
     )
+
+    const focusedBodyDef = SOLAR_BODIES[activeBodyId]
+    const activePillLabel = activeGeohashOnBody
+      ? makeCelestialChannelKey(activeBodyId, activeGeohashOnBody) ?? activeGeohashOnBody
+      : ''
+    const selectedPillLabel = selectedGeohashOnBody
+      ? makeCelestialChannelKey(activeBodyId, selectedGeohashOnBody) ?? selectedGeohashOnBody
+      : ''
 
     return (
       <div
         ref={hostRef}
         className={`ag-radar-map-host ag-radar-map-${mode} ${className}`}
         data-map-theme={theme}
+        data-focused-body={activeBodyId}
       >
-        {/* Three.js WebGL 3D Earth Globe + Topic Asteroid Belt Canvas */}
+        {/* Three.js WebGL 3D Interactive Solar System + Focused Geohash Globe Canvas */}
         <div
           ref={canvasWrapRef}
           className="ag-globe-canvas-wrap"
-          aria-label={`Interactive 3D geohash globe centered on #${safeActiveGeohash}`}
+          aria-label={`Interactive 3D Solar System globe focused on ${focusedBodyDef.name}${activePillLabel ? ` (#${activePillLabel})` : ''}`}
         />
 
         {/* Graceful Fallback if WebGL Cannot Initialize */}
@@ -3738,20 +4869,20 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               <div className="ag-globe-fallback-title">3D Globe Unavailable</div>
               <p className="ag-globe-fallback-sub">
                 WebGL hardware graphics could not initialize on this device. Active cell:{' '}
-                <span className="mono">#{safeActiveGeohash}</span>.
+                <span className="mono">#{activePillLabel || safeActiveGeohash || focusedBodyDef.name}</span>.
               </p>
             </div>
           </div>
         )}
 
-        {/* Projected 3D -> 2D Interactive Overlay Layer (Horizon & Earth-Limb Occluded in rAF) */}
+        {/* Projected 3D -> 2D Interactive Overlay Layer (Exact Horizon & Limb Occluded in rAF) */}
         {!webglError && (
           <div className="ag-globe-bubble-layer" aria-hidden={false}>
-            {/* Live Pulse Surface Sonar Beacons */}
+            {/* Live Pulse Surface Sonar Beacons (Dot Dead-Centered on Exact lat/lon; Pill Floats Beside It) */}
             {showPulse &&
               validPulseRooms.map((room) => {
                 const isFocused =
-                  room.geohash === safeActiveGeohash || room.geohash === safeSelectedGeohash
+                  room.geohash === effectiveActiveKey || room.geohash === effectiveSelectedKey
                 const hasBubble = showBubbles && placedBubbleKeySet.has(room.geohash)
                 const showPill = !isFocused && !hasBubble && mode === 'expanded' && room.peerCount >= 2
                 const countTag = room.peerCount > 0 ? `${room.peerCount}p` : `${room.messageCount}m`
@@ -3764,14 +4895,17 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                       position: 'absolute',
                       left: 0,
                       top: 0,
-                      display: 'inline-flex',
+                      width: 14,
+                      height: 14,
+                      display: 'flex',
                       alignItems: 'center',
-                      gap: 5,
+                      justifyContent: 'center',
                       padding: 0,
                       border: 'none',
                       background: 'transparent',
                       cursor: 'pointer',
                       pointerEvents: 'auto',
+                      overflow: 'visible',
                       zIndex: 6,
                       visibility: 'hidden',
                       opacity: 0,
@@ -3805,6 +4939,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                       <span
                         className="mono"
                         style={{
+                          position: 'absolute',
+                          left: 'calc(100% + 5px)',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
                           padding: '1px 6px',
                           borderRadius: '999px',
                           backgroundColor: 'color-mix(in srgb, var(--bg-surface) 92%, transparent)',
@@ -3824,29 +4962,45 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                 )
               })}
 
-            {/* Pinned Earth Geohash Push-Pin Chips (Anchored Above 3D Pinhead Tips) */}
+            {/* Pinned Geohash Push-Pin Chips on Focused World (Anchored Above 3D Red Pinhead Tips) */}
             {pinnedEarthItems.map((item) => {
               const badgeCount = item.mentionCount > 0 ? item.mentionCount : item.unreadCount
+              const isFocused = item.isActive || item.isSelected
               return (
                 <button
-                  key={item.geohash}
-                  ref={(node) => setPinChipEl(item.geohash, node)}
+                  key={item.channelKey}
+                  ref={(node) => setPinChipEl(item.channelKey, node)}
                   type="button"
+                  data-pin-color="red"
                   className={`ag-globe-pin-chip${item.isActive ? ' is-active' : ''}${item.isSelected ? ' is-selected' : ''}${badgeCount > 0 ? ' has-unread' : ''}`}
-                  style={{ visibility: 'hidden', opacity: 0 }}
-                  title={`Pinned #${item.geohash} — click to inspect, double-click to join`}
+                  style={{
+                    visibility: 'hidden',
+                    opacity: 0,
+                    borderColor: isFocused ? '#EF4444' : 'rgba(239, 68, 68, 0.56)',
+                    boxShadow: isFocused
+                      ? 'var(--shadow-md), 0 0 0 1.5px rgba(239, 68, 68, 0.45)'
+                      : undefined,
+                  }}
+                  title={`Pinned #${item.channelKey} — click to inspect, double-click to join`}
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation()
-                    emitSelectChannel(item.geohash)
+                    emitSelectChannel(item.channelKey)
                   }}
                   onDoubleClick={(e) => {
                     e.stopPropagation()
-                    emitTuneChannel(item.geohash)
+                    emitTuneChannel(item.channelKey)
                   }}
                 >
-                  <span className="ag-globe-pin-dot" aria-hidden="true" />
-                  <span className="ag-globe-pin-label mono">#{item.geohash}</span>
+                  <span
+                    className="ag-globe-pin-dot"
+                    style={{
+                      backgroundColor: '#EF4444',
+                      boxShadow: '0 0 6px rgba(239, 68, 68, 0.8)',
+                    }}
+                    aria-hidden="true"
+                  />
+                  <span className="ag-globe-pin-label mono">#{item.channelKey}</span>
                   {badgeCount > 0 && (
                     <span
                       className={`ag-globe-pin-badge mono${item.mentionCount > 0 ? ' is-mention' : ''}`}
@@ -3858,89 +5012,154 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               )
             })}
 
-            {/* Orbiting Topic Asteroid Chips (`kind: 23333`) */}
-            {topicAsteroidItems.map((item) => {
-              const badgeCount = item.mentionCount > 0 ? item.mentionCount : item.unreadCount
+            {/* Orbiting Solar System Planet, Moon & Sun Chips */}
+            {solarChipBodies.map((body) => {
+              const pinCount =
+                body.id !== 'sun' ? (pinCountByBody.get(body.id) ?? 0) : 0
+              const isParent = focusedBodyDef.kind === 'moon' && focusedBodyDef.parentId === body.id
               return (
                 <button
-                  key={item.channelKey}
-                  ref={(node) => setAsteroidChipEl(item.channelKey, node)}
+                  key={body.id}
+                  ref={(node) => setBodyChipEl(body.id, node)}
                   type="button"
-                  className={`ag-globe-asteroid-chip${item.isPinned ? ' is-pinned' : ''}${item.isLive ? ' is-live' : ''}${item.isActive ? ' is-active' : ''}${item.isSelected ? ' is-selected' : ''}${badgeCount > 0 ? ' has-unread' : ''}`}
+                  data-body-id={body.id}
+                  className={`ag-globe-body-chip${body.kind === 'star' ? ' is-sun' : ''}${body.kind === 'moon' ? ' is-moon' : ''}${isParent ? ' is-parent' : ''}${pinCount > 0 ? ' has-pins' : ''}`}
                   style={{ visibility: 'hidden', opacity: 0 }}
-                  title={`#${item.slug} · Topic Asteroid — click to focus, double-click to join`}
+                  title={
+                    body.id === 'sun'
+                      ? 'Sun — click for Solar System Overview'
+                      : `${body.name} — click to visit ${body.name}`
+                  }
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation()
-                    emitSelectChannel(item.channelKey)
-                    flyToTopicInternal(item.channelKey, { animate: true })
-                  }}
-                  onDoubleClick={(e) => {
-                    e.stopPropagation()
-                    emitTuneChannel(item.channelKey)
+                    if (body.id === 'sun') {
+                      fitSolarSystemInternal()
+                    } else {
+                      focusBodyInternal(body.id, { animate: true })
+                    }
                   }}
                 >
-                  {item.isPinned ? (
-                    <span className="ag-globe-asteroid-pin" aria-hidden="true">
-                      <Pin size={10} />
-                    </span>
-                  ) : (
-                    <span
-                      className={`ag-globe-asteroid-dot${item.isLive ? ' is-live' : ''}`}
-                      aria-hidden="true"
-                    />
-                  )}
-                  <span className="ag-globe-asteroid-slug mono">#{item.slug}</span>
-                  {item.isLive && item.peerCount > 0 && (
-                    <span className="ag-globe-asteroid-peers mono">{item.peerCount}p</span>
-                  )}
-                  {badgeCount > 0 && (
-                    <span
-                      className={`ag-globe-asteroid-badge mono${item.mentionCount > 0 ? ' is-mention' : ''}`}
-                    >
-                      {item.mentionCount > 0 ? `@${item.mentionCount}` : badgeCount > 99 ? '99+' : badgeCount}
+                  <span
+                    className="ag-globe-body-dot"
+                    style={{ backgroundColor: body.palette.primary }}
+                    aria-hidden="true"
+                  />
+                  <span className="ag-globe-body-name">{body.name}</span>
+                  {pinCount > 0 && (
+                    <span className="ag-globe-body-pins mono" aria-label={`${pinCount} pinned`}>
+                      <Pin size={9} color="#EF4444" aria-hidden="true" />
+                      {pinCount}
                     </span>
                   )}
                 </button>
               )
             })}
 
-            {/* Active Tuned Geohash Pill */}
-            <div
-              ref={activePillElRef}
-              style={{
-                position: 'absolute',
-                left: 0,
-                top: 0,
-                pointerEvents: 'none',
-                zIndex: 8,
-                visibility: 'hidden',
-                opacity: 0,
-              }}
-              aria-hidden="true"
-            >
-              <span
-                className="mono"
-                style={{
-                  display: 'inline-block',
-                  padding: '2px 7px',
-                  borderRadius: '999px',
-                  backgroundColor: 'var(--accent)',
-                  color: 'var(--text-inverse)',
-                  border: '1px solid color-mix(in srgb, var(--text-inverse) 28%, transparent)',
-                  fontSize: 11,
-                  fontWeight: 700,
-                  letterSpacing: '0.03em',
-                  whiteSpace: 'nowrap',
-                  boxShadow: 'var(--shadow-sm)',
-                }}
-              >
-                #{safeActiveGeohash}
-              </span>
-            </div>
+            {/* Orbiting Topic Asteroid Chips (`kind: 23333` — Earth Only) */}
+            {activeBodyId === 'earth' &&
+              topicAsteroidItems.map((item) => {
+                const badgeCount = item.mentionCount > 0 ? item.mentionCount : item.unreadCount
+                const isFocused = item.isActive || item.isSelected
+                return (
+                  <button
+                    key={item.channelKey}
+                    ref={(node) => setAsteroidChipEl(item.channelKey, node)}
+                    type="button"
+                    data-pin-color={item.isPinned ? 'red' : undefined}
+                    className={`ag-globe-asteroid-chip${item.isPinned ? ' is-pinned' : ''}${item.isLive ? ' is-live' : ''}${item.isActive ? ' is-active' : ''}${item.isSelected ? ' is-selected' : ''}${badgeCount > 0 ? ' has-unread' : ''}`}
+                    style={{
+                      visibility: 'hidden',
+                      opacity: 0,
+                      borderColor: item.isPinned
+                        ? isFocused
+                          ? '#EF4444'
+                          : 'rgba(239, 68, 68, 0.58)'
+                        : undefined,
+                      boxShadow:
+                        item.isPinned && isFocused
+                          ? '0 4px 16px rgba(2, 6, 23, 0.58), 0 0 0 1.5px rgba(239, 68, 68, 0.5)'
+                          : undefined,
+                    }}
+                    title={`#${item.slug} · Topic Asteroid — click to focus, double-click to join`}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      emitSelectChannel(item.channelKey)
+                      flyToTopicInternal(item.channelKey, { animate: true })
+                    }}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation()
+                      emitTuneChannel(item.channelKey)
+                    }}
+                  >
+                    {item.isPinned ? (
+                      <span
+                        className="ag-globe-asteroid-pin"
+                        style={{ color: '#EF4444' }}
+                        aria-hidden="true"
+                      >
+                        <Pin size={10} color="#EF4444" />
+                      </span>
+                    ) : (
+                      <span
+                        className={`ag-globe-asteroid-dot${item.isLive ? ' is-live' : ''}`}
+                        aria-hidden="true"
+                      />
+                    )}
+                    <span className="ag-globe-asteroid-slug mono">#{item.slug}</span>
+                    {item.isLive && item.peerCount > 0 && (
+                      <span className="ag-globe-asteroid-peers mono">{item.peerCount}p</span>
+                    )}
+                    {badgeCount > 0 && (
+                      <span
+                        className={`ag-globe-asteroid-badge mono${item.mentionCount > 0 ? ' is-mention' : ''}`}
+                      >
+                        {item.mentionCount > 0 ? `@${item.mentionCount}` : badgeCount > 99 ? '99+' : badgeCount}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
 
-            {/* Selected / Inspected Geohash Pill */}
-            {safeSelectedGeohash && safeSelectedGeohash !== safeActiveGeohash && (
+            {/* Active Tuned Geohash Pill on Focused World */}
+            {activePillLabel && (
+              <div
+                ref={activePillElRef}
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: 0,
+                  pointerEvents: 'none',
+                  zIndex: 8,
+                  visibility: 'hidden',
+                  opacity: 0,
+                }}
+                aria-hidden="true"
+              >
+                <span
+                  className="mono"
+                  style={{
+                    display: 'inline-block',
+                    padding: '2px 7px',
+                    borderRadius: '999px',
+                    backgroundColor: 'var(--accent)',
+                    color: 'var(--text-inverse)',
+                    border: '1px solid color-mix(in srgb, var(--text-inverse) 28%, transparent)',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    letterSpacing: '0.03em',
+                    whiteSpace: 'nowrap',
+                    boxShadow: 'var(--shadow-sm)',
+                  }}
+                >
+                  #{activePillLabel}
+                </span>
+              </div>
+            )}
+
+            {/* Selected / Inspected Geohash Pill on Focused World */}
+            {selectedPillLabel && selectedPillLabel !== activePillLabel && (
               <div
                 ref={selectedPillElRef}
                 style={{
@@ -3970,13 +5189,13 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                     boxShadow: 'var(--shadow-sm)',
                   }}
                 >
-                  #{safeSelectedGeohash}
+                  #{selectedPillLabel}
                 </span>
               </div>
             )}
 
-            {/* Physical User GPS Beacon */}
-            {userCoords && (
+            {/* Physical User GPS Beacon (Earth Only) */}
+            {activeBodyId === 'earth' && userCoords && (
               <div
                 ref={gpsBeaconElRef}
                 style={{
@@ -4005,7 +5224,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               </div>
             )}
 
-            {/* Upward-Queued Speech Bubbles (Earth Geohashes & Orbiting Topic Asteroids — Max 4 / 5s Fadeout) */}
+            {/* Upward-Queued Speech Bubbles (Focused World Geohashes & Earth Topic Asteroids) */}
             {showPulse &&
               showBubbles &&
               bubbleStacks.map((stack) => (
@@ -4018,14 +5237,15 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                   {stack.bubbles.map((bubble, idx) => {
                     const isLatest = idx === stack.bubbles.length - 1
                     const isDemoted = bubble.demotedAtMs !== null
-                    const isRecent = nowMsForRecent - bubble.tsMs < RECENT_BUBBLE_WINDOW_MS
+                    const isRecent = bubbleNowMs - bubble.tsMs < RECENT_BUBBLE_WINDOW_MS
+                    const bubbleAge = formatBubbleAge(bubble.tsMs, bubbleNowMs)
                     return (
                       <div
                         key={bubble.key}
                         role="button"
                         tabIndex={0}
                         className={`ag-globe-bubble${isLatest ? ' is-latest' : ' is-older'}${isDemoted ? ' is-demoted' : ''}${bubble.fadingOut ? ' is-fading' : ''}${isRecent ? ' is-recent' : ''}${stack.isFocused ? ' is-focused' : ''}`}
-                        title={`${stack.displayTag} — ${bubble.sender}: ${bubble.snippet}`}
+                        title={`${stack.displayTag} · ${bubbleAge} — ${bubble.sender}: ${bubble.snippet}`}
                         onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation()
@@ -4051,6 +5271,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                             className={`ag-globe-bubble-dot${isRecent && isLatest ? ' is-live' : ''}`}
                           />
                           <span className="ag-globe-bubble-sender">{bubble.sender}</span>
+                          <span className="ag-globe-bubble-age mono">{bubbleAge}</span>
                           {isLatest && (
                             <span className="ag-globe-bubble-tag mono">{stack.displayTag}</span>
                           )}
@@ -4064,7 +5285,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           </div>
         )}
 
-        {/* Compact Unobtrusive Map Tile Attribution */}
+        {/* Compact Unobtrusive Attribution */}
         {!webglError && (
           <div
             className="mono"
@@ -4084,14 +5305,16 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             }}
             aria-hidden="true"
           >
-            © Esri · OSM
+            {activeBodyId === 'earth' ? '© Esri · OSM' : `${focusedBodyDef.name} · J2000`}
           </div>
         )}
 
-        {/* Desktop Hover Coordinate / Pin / Topic Asteroid Readout */}
+        {/* Desktop Hover Coordinate / Pin / Solar Body / Topic Asteroid Readout */}
         {hoverHud && !webglError && (
           <div className="ag-radar-hover-hud mono" aria-hidden="true">
-            <span className="ag-radar-hud-accent">#{hoverHud.geohash}</span>
+            <span className="ag-radar-hud-accent">
+              {hoverHud.noHash ? hoverHud.geohash : `#${hoverHud.geohash}`}
+            </span>
             <span className="ag-radar-hud-sep">·</span>
             <span>{hoverHud.coords}</span>
           </div>

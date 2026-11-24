@@ -43,7 +43,6 @@ import {
   Video,
   Volume2,
   Wallet,
-  Waves,
   Wifi,
   Zap,
 } from 'lucide-react'
@@ -284,7 +283,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             subtitle: `Join geohash room #${cleanHash}`,
             keywords: `${q} ${cleanHash} #${cleanHash} geohash bitchat`,
             badge: 'GEO',
-            icon: <Waves size={15} />,
+            icon: <Globe size={15} />,
             run: () => {
               onTuneChannel(cleanHash)
               onClose()
@@ -367,7 +366,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       subtitle: 'Geohash rooms & named topic channels',
       keywords: 'open bitchat geo geohash topic channels rooms chat alt+2',
       badge: 'Alt+2',
-      icon: <Waves size={15} style={{ color: 'var(--accent)' }} />,
+      icon: <Globe size={15} style={{ color: 'var(--accent)' }} />,
       run: () => {
         onClose()
         if (onSelectBitchat) onSelectBitchat()
@@ -563,7 +562,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         icon: isTopic ? (
           <Hash size={15} style={{ color: 'var(--accent)' }} />
         ) : (
-          <Waves size={15} style={{ color: 'var(--accent)' }} />
+          <Globe size={15} style={{ color: 'var(--accent)' }} />
         ),
         run: () => {
           onTuneChannel(room.geohash)

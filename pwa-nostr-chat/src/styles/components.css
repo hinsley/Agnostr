@@ -1772,19 +1772,34 @@ img.ag-avatar-glubchat,
 @media (max-width: 867px) {
   .ag-mobile-tabbar {
     display: flex;
+    flex-wrap: nowrap;
     align-items: stretch;
-    justify-content: space-around;
+    justify-content: flex-start;
     flex: 0 0 auto;
     position: relative;
     z-index: 28;
     width: 100%;
+    max-width: 100vw;
     min-height: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px));
-    padding: 4px 4px max(6px, env(safe-area-inset-bottom, 0px));
+    padding: 4px 6px max(6px, env(safe-area-inset-bottom, 0px));
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    touch-action: pan-x;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
     background-color: var(--bg-surface);
     background-image: linear-gradient(var(--bg-glass), var(--bg-glass));
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border-top: 1px solid var(--border-subtle);
+  }
+
+  .ag-mobile-tabbar::-webkit-scrollbar {
+    display: none;
   }
 
   /* Hide bottom nav bar completely while virtual keyboard is open so composer sits flush above keyboard */
@@ -1793,10 +1808,11 @@ img.ag-avatar-glubchat,
   }
 
   .ag-mtab-btn {
-    flex: 1 1 0;
-    min-width: 0;
+    flex: 0 0 auto;
+    min-width: 74px;
     min-height: 46px;
-    padding: 2px 2px;
+    padding: 2px 8px;
+    scroll-snap-align: center;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1880,6 +1896,12 @@ img.ag-avatar-glubchat,
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+}
+
+@media (min-width: 560px) and (max-width: 867px) {
+  .ag-mobile-tabbar {
+    justify-content: space-around;
   }
 }
 
@@ -5646,6 +5668,17 @@ img.ag-avatar-glubchat,
   animation: ag-scale-in var(--dur-fast) var(--ease-out);
 }
 
+@keyframes ag-toast-drop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .ag-toast-icon {
   margin-top: 1px;
   flex-shrink: 0;
@@ -6916,37 +6949,42 @@ a.ag-untrusted-link {
   }
 
   .ag-toast-stack {
-    position: absolute;
-    left: 12px;
-    right: 12px;
-    bottom: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px) + 10px);
+    position: fixed;
+    top: calc(var(--ag-vvt, 0px) + env(safe-area-inset-top, 0px) + 10px);
+    bottom: auto;
+    left: 10px;
+    right: 10px;
+    width: auto;
     max-width: none;
+    align-items: stretch;
+    flex-direction: column-reverse;
   }
 
-  .ag-app[data-mobile-screen='chat'] .ag-toast-stack {
-    bottom: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px) + 64px);
+  .ag-toast {
+    animation: ag-toast-drop-in var(--dur-fast) var(--ease-out);
   }
 
-  html[data-keyboard-open='true'] .ag-toast-stack {
-    bottom: calc(var(--ag-mobile-tabbar-h, 0px) + 10px);
-  }
-
+  .ag-app[data-mobile-screen='chat'] .ag-toast-stack,
+  html[data-keyboard-open='true'] .ag-toast-stack,
   html[data-keyboard-open='true'] .ag-app[data-mobile-screen='chat'] .ag-toast-stack {
-    bottom: calc(var(--ag-mobile-tabbar-h, 0px) + 64px);
+    top: calc(var(--ag-vvt, 0px) + env(safe-area-inset-top, 0px) + 10px);
+    bottom: auto;
   }
 
   .ag-cf-status-popup {
-    position: absolute;
+    position: fixed;
+    top: calc(var(--ag-vvt, 0px) + env(safe-area-inset-top, 0px) + 10px);
+    bottom: auto;
     left: 50%;
     right: auto;
     transform: translateX(-50%);
-    bottom: calc(var(--ag-mobile-tabbar-h, 56px) + env(safe-area-inset-bottom, 0px) + 64px);
-    max-width: calc(100% - 24px);
+    max-width: calc(100vw - 24px);
     animation: ag-fade-in var(--dur-fast) var(--ease-out);
   }
 
   html[data-keyboard-open='true'] .ag-cf-status-popup {
-    bottom: calc(var(--ag-mobile-tabbar-h, 0px) + 64px);
+    top: calc(var(--ag-vvt, 0px) + env(safe-area-inset-top, 0px) + 10px);
+    bottom: auto;
   }
 }
 
@@ -7241,4 +7279,414 @@ a.ag-untrusted-link {
     width: 30px;
     height: 30px;
   }
+}
+
+/* --------------------------------------------------------------------------
+   16. Mobile Bitchat Channel Overview Slide-Out Drawer (.ag-bitchat-drawer*)
+   -------------------------------------------------------------------------- */
+.ag-bitchat-drawer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background-color: var(--bg-surface);
+  overflow: hidden;
+}
+
+.ag-bitchat-drawer-header {
+  display: flex;
+  align-items: center;
+  gap: 0.62rem;
+  min-height: var(--header-h);
+  padding: 0.6rem 0.75rem 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.ag-bitchat-drawer-emblem {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background-color: var(--accent-soft);
+  border: 1px solid var(--border-accent);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ag-bitchat-drawer-emblem.is-topic {
+  background-color: rgba(167, 139, 250, 0.14);
+  border-color: rgba(167, 139, 250, 0.34);
+  color: #a78bfa;
+}
+
+[data-theme='daylight'] .ag-bitchat-drawer-emblem.is-topic {
+  background-color: rgba(124, 58, 237, 0.1);
+  border-color: rgba(124, 58, 237, 0.28);
+  color: #7c3aed;
+}
+
+.ag-bitchat-drawer-emblem-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  border: 2px solid var(--bg-surface);
+}
+
+.ag-bitchat-drawer-title-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.ag-bitchat-drawer-title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+
+.ag-bitchat-drawer-sub {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--text-muted);
+}
+
+.ag-bitchat-drawer-close {
+  flex-shrink: 0;
+}
+
+.ag-bitchat-drawer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.72rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.72rem;
+}
+
+.ag-bitchat-drawer-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.42rem;
+}
+
+.ag-bitchat-drawer-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.28rem;
+  min-width: 0;
+  padding: 0.56rem 0.25rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-bitchat-drawer-action:hover,
+.ag-bitchat-drawer-action:active {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-accent);
+  color: var(--text-primary);
+}
+
+.ag-bitchat-drawer-pin-icon {
+  color: #ef4444;
+  flex-shrink: 0;
+}
+
+.ag-bitchat-drawer-action.is-pinned {
+  color: #ef4444;
+  border-color: color-mix(in srgb, #ef4444 48%, var(--border-default));
+  background-color: color-mix(in srgb, #ef4444 12%, var(--bg-surface));
+}
+
+.ag-bitchat-drawer-action.is-pinned:hover {
+  border-color: #ef4444;
+  background-color: color-mix(in srgb, #ef4444 18%, var(--bg-surface));
+  color: #ef4444;
+}
+
+.ag-bitchat-drawer-action.is-copied {
+  color: var(--accent);
+  border-color: var(--border-accent);
+  background-color: var(--accent-soft);
+}
+
+.ag-bitchat-drawer-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.48rem;
+  padding: 0.68rem 0.74rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.ag-bitchat-drawer-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.ag-bitchat-drawer-kicker {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.ag-bitchat-drawer-kicker-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.ag-bitchat-drawer-kicker-meta {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.ag-bitchat-drawer-link-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.ag-bitchat-drawer-link-btn:hover {
+  text-decoration: underline;
+}
+
+.ag-bitchat-drawer-meta-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+}
+
+.ag-bitchat-drawer-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.ag-bitchat-drawer-meta-row dt {
+  color: var(--text-muted);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.ag-bitchat-drawer-meta-row dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: right;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-bitchat-drawer-live-inline,
+.ag-bitchat-drawer-world-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+}
+
+.ag-bitchat-drawer-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background-color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-bitchat-drawer-status-dot.is-online {
+  background-color: var(--status-ok, #22c55e);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--status-ok, #22c55e) 70%, transparent);
+}
+
+.ag-bitchat-drawer-world-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.32);
+}
+
+.ag-bitchat-drawer-prec-row {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+}
+
+.ag-bitchat-drawer-step-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-bitchat-drawer-step-btn:hover:not(:disabled) {
+  border-color: var(--border-accent);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ag-bitchat-drawer-step-btn:disabled {
+  opacity: 0.36;
+  cursor: not-allowed;
+}
+
+.ag-bitchat-drawer-prefix-pills {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.28rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  padding: 1px 0;
+}
+
+.ag-bitchat-drawer-prefix-pills::-webkit-scrollbar {
+  display: none;
+}
+
+.ag-bitchat-drawer-prefix-pill {
+  height: 28px;
+  padding: 0 0.5rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-bitchat-drawer-prefix-pill:hover {
+  border-color: var(--border-accent);
+  color: var(--text-primary);
+}
+
+.ag-bitchat-drawer-prefix-pill.active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.ag-bitchat-drawer-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.36rem;
+}
+
+.ag-bitchat-drawer-note-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+  width: 100%;
+  padding: 0.45rem 0.54rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-bitchat-drawer-note-item:hover {
+  border-color: var(--border-accent);
+  background-color: var(--bg-elevated);
+}
+
+.ag-bitchat-drawer-note-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.ag-bitchat-drawer-note-author {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-bitchat-drawer-note-age {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-bitchat-drawer-note-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }

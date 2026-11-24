@@ -5,6 +5,7 @@ import {
   Check,
   Copy,
   Download,
+  Globe,
   Hash,
   Link2,
   Lock,
@@ -23,7 +24,6 @@ import {
   User,
   Users,
   Video,
-  Waves,
   X,
   Zap,
 } from 'lucide-react'
@@ -40,7 +40,10 @@ import { encodeGeohash } from '../lib/geohash.ts'
 import {
   buildBitchatChannelShareUrl,
   formatBitchatChannelLabel,
+  getChannelBodyName,
   isTopicChannel,
+  makeCelestialChannelKey,
+  parseCelestialChannelKey,
 } from '../lib/bitchatChannel.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { AvatarImg } from './AvatarImg.tsx'
@@ -306,22 +309,33 @@ export function RoomInfoSheet({
         ? 'Group Info'
         : 'Room Info'
 
+  const activeCelestial = parseCelestialChannelKey(activeGeohash)
+  const activeBodyId = activeCelestial?.bodyId ?? 'earth'
+  const isNonEarthCelestial = activeBodyId !== 'earth'
+
   const handleZoomOut = () => {
     if (cell.precision <= 1) return
+    const nextRaw = cell.geohash.slice(0, -1)
+    const nextKey = makeCelestialChannelKey(activeBodyId, nextRaw)
+    if (!nextKey) return
     onPlaySound?.('tune')
-    onTuneChannel(cell.geohash.slice(0, -1))
+    onTuneChannel(nextKey)
   }
 
   const handleZoomIn = () => {
-    if (cell.precision >= 8) return
+    if (cell.precision >= 9) return
     const nextPrecision = cell.precision + 1
-    const localNext = location.localGeohashes[nextPrecision]
     onPlaySound?.('tune')
-    if (localNext && localNext.startsWith(cell.geohash)) {
-      onTuneChannel(localNext)
-      return
+    if (!isNonEarthCelestial) {
+      const localNext = location.localGeohashes[nextPrecision]
+      if (localNext && localNext.startsWith(cell.geohash)) {
+        onTuneChannel(localNext)
+        return
+      }
     }
-    onTuneChannel(encodeGeohash(cell.center.lat, cell.center.lon, nextPrecision))
+    const nextRaw = encodeGeohash(cell.center.lat, cell.center.lon, nextPrecision)
+    const nextKey = makeCelestialChannelKey(activeBodyId, nextRaw) ?? nextRaw
+    onTuneChannel(nextKey)
   }
 
   const handleClearTimeline = () => {
@@ -333,7 +347,7 @@ export function RoomInfoSheet({
     setConfirmClear(false)
     onPlaySound?.('click')
     engine.clearCurrentTimeline()
-    engine.pushToast('info', `Cleared local cache for #${activeGeohash}`)
+    engine.pushToast('info', `Cleared local cache for ${formatBitchatChannelLabel(activeGeohash)}`)
   }
 
   const handleInspectServerMember = (m: Nip29Member) => {
@@ -529,12 +543,26 @@ export function RoomInfoSheet({
   const renderGeoBody = () => {
     const isTopic = isTopicChannel(activeGeohash)
     const channelLabel = formatBitchatChannelLabel(activeGeohash)
-    const cityLabel = isTopic ? null : cell.nearestCity || cell.label
+    const celestialBodyName = isNonEarthCelestial ? getChannelBodyName(activeGeohash) : null
+    const celestialLandmark =
+      isNonEarthCelestial && cell.nearestCity && cell.nearestCity !== celestialBodyName
+        ? cell.nearestCity
+        : null
+    const cityLabel = isTopic
+      ? null
+      : isNonEarthCelestial
+        ? celestialBodyName
+        : cell.nearestCity || cell.label
+    const baseGeoSubtitle = presence.isUncertainCount
+      ? isNonEarthCelestial
+        ? 'High-precision sector'
+        : 'High-precision room'
+      : `${presence.onlineCount} online`
     const subtitle = isTopic
       ? 'Topic Bitchat'
-      : presence.isUncertainCount
-        ? 'High-precision room'
-        : `${presence.onlineCount} online`
+      : isNonEarthCelestial && celestialLandmark
+        ? `${celestialLandmark} · ${baseGeoSubtitle}`
+        : baseGeoSubtitle
 
     const normalizedGh = activeGeohash.trim().toLowerCase()
     const geoCallRoster = calls.getGeoCallPresence(normalizedGh)
@@ -556,7 +584,7 @@ export function RoomInfoSheet({
         {/* Hero */}
         <div className="ag-sheet-hero">
           <div className="ag-sheet-emblem accent">
-            {isTopic ? <Hash size={26} /> : <Waves size={26} />}
+            {isTopic ? <Hash size={26} /> : <Globe size={26} />}
           </div>
           <h2 className="ag-sheet-hero-title">
             <span className="mono">{channelLabel}</span>
@@ -601,7 +629,7 @@ export function RoomInfoSheet({
         <section className="ag-sheet-section">
           <div className="ag-sheet-section-head">
             <span className="ag-sheet-section-title">
-              {isTopic ? <Hash size={13} /> : <Waves size={13} />}
+              {isTopic ? <Hash size={13} /> : <Globe size={13} />}
               <span>{isTopic ? 'Topic Bitchat Group Call' : 'Bitchat Group Call'}</span>
             </span>
             <span className="ag-sheet-section-meta mono">
@@ -681,7 +709,9 @@ export function RoomInfoSheet({
             <div className="ag-sheet-section-head">
               <span className="ag-sheet-section-title">Area Precision</span>
               <span className="ag-sheet-section-meta">
-                {cell.label} · {cell.approxSizeLabel}
+                {isNonEarthCelestial
+                  ? `${celestialBodyName ?? 'Sector'} · Precision ${cell.precision}`
+                  : `${cell.label} · ${cell.approxSizeLabel}`}
               </span>
             </div>
             <div className="ag-sheet-zoom-row">
@@ -698,17 +728,22 @@ export function RoomInfoSheet({
               <div className="ag-sheet-prefix-strip" role="list" aria-label="Geohash precision levels">
                 {cell.prefixChain.map((step) => {
                   const isCurrent = step.geohash === cell.geohash
+                  const stepKey = makeCelestialChannelKey(activeBodyId, step.geohash) ?? step.geohash
                   return (
                     <button
-                      key={step.geohash}
+                      key={stepKey}
                       type="button"
                       role="listitem"
                       className={`ag-sheet-prefix-pill mono ${isCurrent ? 'active' : ''}`}
-                      title={`${step.label} (${step.approxSizeLabel})`}
+                      title={
+                        isNonEarthCelestial
+                          ? `${celestialBodyName ?? activeBodyId} · Precision ${step.precision}`
+                          : `${step.label} (${step.approxSizeLabel})`
+                      }
                       onClick={() => {
                         if (isCurrent) return
                         onPlaySound?.('tune')
-                        onTuneChannel(step.geohash)
+                        onTuneChannel(stepKey)
                       }}
                     >
                       #{step.geohash}
@@ -720,7 +755,7 @@ export function RoomInfoSheet({
                 type="button"
                 className="ag-sheet-step-btn"
                 onClick={handleZoomIn}
-                disabled={cell.precision >= 8}
+                disabled={cell.precision >= 9}
                 aria-label="Zoom in to narrower area"
                 title="Closer area"
               >

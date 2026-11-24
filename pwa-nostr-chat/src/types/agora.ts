@@ -43,6 +43,7 @@ export interface AgoraMediaItem {
   mime?: string
   alt?: string
   dim?: string
+  thumb?: string
 }
 
 export interface AgoraUploadedMedia {
@@ -246,6 +247,10 @@ export interface AgoraEngine {
   selectHashtag: (tag: string) => void
   clearSearch: () => void
   trendingHashtags: AgoraTrendingHashtag[]
+  hiddenTrendingTopics: string[]
+  hideTrendingTopic: (tag: string) => void
+  unhideTrendingTopic: (tag: string) => void
+  clearHiddenTrendingTopics: () => void
   suggestedProfiles: AgoraProfile[]
 
   // Publishing, engagement & Blossom media uploads
