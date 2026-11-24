@@ -5811,6 +5811,7 @@ img.ag-avatar-agnostr,
   gap: 4px;
   margin-top: 2px;
   font-size: 11px;
+  line-height: 1.3;
   color: var(--text-muted);
 }
 

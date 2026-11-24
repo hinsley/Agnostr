@@ -21,6 +21,7 @@ import {
 import type { AgnostrEngine, GeoMessage, PeerInfo } from '../types/protocol'
 import type { ServerMessage } from '../types/servers'
 import {
+  resolveLanguageCodes,
   TRANSLATION_LANGUAGE_OPTIONS,
   TRANSLATOR_MODELS,
   translationCacheKey,
@@ -1597,6 +1598,22 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       if (tEntry?.status === 'done' && tEntry.text) {
                         displayContentOverride = tEntry.text
                         translationStatus = 'done'
+                        if (
+                          !explicitSourceLang &&
+                          !spec.sourceLang &&
+                          !spec.badge &&
+                          !tEntry.sameLanguage
+                        ) {
+                          const detectedLang = tEntry.detectedSourceLang?.trim()
+                          if (
+                            detectedLang &&
+                            detectedLang.toLowerCase() !== myLanguage.trim().toLowerCase() &&
+                            resolveLanguageCodes(detectedLang).nllbCode !==
+                              resolveLanguageCodes(myLanguage).nllbCode
+                          ) {
+                            translationBadge = `Translated from ${detectedLang}`
+                          }
+                        }
                       } else if (tEntry?.status === 'loading') {
                         translationStatus = 'loading'
                       } else if (tEntry?.status === 'error') {

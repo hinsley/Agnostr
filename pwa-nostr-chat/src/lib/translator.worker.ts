@@ -160,7 +160,7 @@ interface ActiveModelHandle {
 
 interface TranslationRunOutput {
   text: string
-  detectedSourceLang: string
+  detectedSourceLang?: string
   sameLanguage: boolean
 }
 
@@ -1095,10 +1095,10 @@ function resolveSourceLanguageForMessage(
   cleanTarget: string,
   explicitSource?: string,
   roomHintLang?: string | null
-): { sourceLang: string; alreadySameLanguage: boolean } {
+): { sourceLang: string; alreadySameLanguage: boolean; sourceDetected: boolean } {
   const explicitClean = explicitSource?.trim() ?? ''
   if (explicitClean && explicitClean.toLowerCase() !== 'auto') {
-    return { sourceLang: explicitClean, alreadySameLanguage: false }
+    return { sourceLang: explicitClean, alreadySameLanguage: false, sourceDetected: false }
   }
 
   const targetResolved = resolveLanguageCodes(cleanTarget)
@@ -1128,32 +1128,34 @@ function resolveSourceLanguageForMessage(
       (detected.confidence === 'high' || detected.confidence === 'medium') &&
       detected.lang
     ) {
-      return { sourceLang: detected.lang, alreadySameLanguage: true }
+      return { sourceLang: detected.lang, alreadySameLanguage: true, sourceDetected: true }
     }
     // Only override sticky room language to a DIFFERENT foreign language on HIGH confidence;
     // medium/low single-word cognates stick to roomHintLang to prevent model flip-flopping.
     if (detected.confidence === 'high' && detected.lang) {
-      return { sourceLang: detected.lang, alreadySameLanguage: false }
+      return { sourceLang: detected.lang, alreadySameLanguage: false, sourceDetected: true }
     }
-    return { sourceLang: hintClean, alreadySameLanguage: false }
+    return { sourceLang: hintClean, alreadySameLanguage: false, sourceDetected: true }
   }
 
   if ((detected.confidence === 'high' || detected.confidence === 'medium') && detected.lang) {
     return {
       sourceLang: detected.lang,
       alreadySameLanguage: detectedMatchesTarget,
+      sourceDetected: true,
     }
   }
 
   if (detected.lang && !detectedMatchesTarget) {
-    return { sourceLang: detected.lang, alreadySameLanguage: false }
+    return { sourceLang: detected.lang, alreadySameLanguage: false, sourceDetected: true }
   }
 
+  // Blind fallback guess when detector found no match — never report as auto-detected!
   if (targetResolved.m2mCode !== 'en') {
-    return { sourceLang: 'English', alreadySameLanguage: false }
+    return { sourceLang: 'English', alreadySameLanguage: false, sourceDetected: false }
   }
 
-  return { sourceLang: cleanTarget, alreadySameLanguage: true }
+  return { sourceLang: cleanTarget, alreadySameLanguage: true, sourceDetected: false }
 }
 
 /**
@@ -1211,7 +1213,7 @@ function buildParagraphSegments(part: string): Array<{ kind: 'raw'; text: string
 async function translateStructuredText(
   text: string,
   translateProseFn: (prose: string) => Promise<string>,
-  effectiveSource: string,
+  detectedSourceLang: string | undefined,
   stoppingCriteria: InterruptableCriteriaLike | null
 ): Promise<TranslationRunOutput> {
   // Split by fenced code blocks so code blocks stay 100% verbatim
@@ -1222,7 +1224,7 @@ async function translateStructuredText(
     if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
       return {
         text: '',
-        detectedSourceLang: effectiveSource,
+        detectedSourceLang,
         sameLanguage: false,
       }
     }
@@ -1239,7 +1241,7 @@ async function translateStructuredText(
       if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
         return {
           text: '',
-          detectedSourceLang: effectiveSource,
+          detectedSourceLang,
           sameLanguage: false,
         }
       }
@@ -1256,7 +1258,7 @@ async function translateStructuredText(
       if (stoppingCriteria?.interrupted || activePreempted || activeCancelled) {
         return {
           text: '',
-          detectedSourceLang: effectiveSource,
+          detectedSourceLang,
           sameLanguage: false,
         }
       }
@@ -1267,7 +1269,7 @@ async function translateStructuredText(
 
   return {
     text: renderedParts.join('').trim(),
-    detectedSourceLang: effectiveSource,
+    detectedSourceLang,
     sameLanguage: false,
   }
 }
@@ -1281,17 +1283,17 @@ async function runTranslation(
   stoppingCriteria: InterruptableCriteriaLike | null = null
 ): Promise<TranslationRunOutput> {
   const cleanTarget = targetLang.trim() || 'English'
-  const { sourceLang: effectiveSource, alreadySameLanguage } = resolveSourceLanguageForMessage(
-    text,
-    cleanTarget,
-    sourceLang,
-    roomHintLang
-  )
+  const {
+    sourceLang: effectiveSource,
+    alreadySameLanguage,
+    sourceDetected,
+  } = resolveSourceLanguageForMessage(text, cleanTarget, sourceLang, roomHintLang)
+  const reportedDetectedSource = sourceDetected ? effectiveSource : undefined
 
   if (alreadySameLanguage) {
     return {
       text: text.trim(),
-      detectedSourceLang: effectiveSource,
+      detectedSourceLang: reportedDetectedSource,
       sameLanguage: true,
     }
   }
@@ -1303,7 +1305,7 @@ async function runTranslation(
   if (srcCode === tgtCode) {
     return {
       text: text.trim(),
-      detectedSourceLang: effectiveSource,
+      detectedSourceLang: reportedDetectedSource,
       sameLanguage: true,
     }
   }
@@ -1311,7 +1313,7 @@ async function runTranslation(
   return await translateStructuredText(
     text,
     (prose) => translateProseChunk(handle, prose, srcCode, tgtCode, stoppingCriteria),
-    effectiveSource,
+    reportedDetectedSource,
     stoppingCriteria
   )
 }
@@ -1356,7 +1358,7 @@ async function runOpusSingleHop(
   text: string,
   src: ResolvedLanguageCodes,
   tgt: ResolvedLanguageCodes,
-  effectiveSource: string,
+  detectedSourceLang: string | undefined,
   stoppingCriteria: InterruptableCriteriaLike,
   protectedOpusModelId?: string
 ): Promise<OpusTranslationRunOutput> {
@@ -1370,7 +1372,7 @@ async function runOpusSingleHop(
   if (stoppingCriteria.interrupted || activePreempted || activeCancelled) {
     return {
       text: '',
-      detectedSourceLang: effectiveSource,
+      detectedSourceLang,
       sameLanguage: false,
       handle: pairHandle,
     }
@@ -1383,7 +1385,7 @@ async function runOpusSingleHop(
         useEnMulTag
           ? translateOpusEnMulProseChunk(mod, pairHandle, prose, tgt, stoppingCriteria)
           : translateOpusDirectProseChunk(pairHandle, prose, stoppingCriteria),
-      effectiveSource,
+      detectedSourceLang,
       stoppingCriteria
     ),
     INFERENCE_TIMEOUT_MS,
@@ -1406,17 +1408,17 @@ async function runOpusTranslation(
   stoppingCriteria: InterruptableCriteriaLike
 ): Promise<OpusTranslationRunOutput> {
   const cleanTarget = targetLang.trim() || 'English'
-  const { sourceLang: effectiveSource, alreadySameLanguage } = resolveSourceLanguageForMessage(
-    text,
-    cleanTarget,
-    sourceLang,
-    roomHintLang
-  )
+  const {
+    sourceLang: effectiveSource,
+    alreadySameLanguage,
+    sourceDetected,
+  } = resolveSourceLanguageForMessage(text, cleanTarget, sourceLang, roomHintLang)
+  const reportedDetectedSource = sourceDetected ? effectiveSource : undefined
 
   if (alreadySameLanguage) {
     return {
       text: text.trim(),
-      detectedSourceLang: effectiveSource,
+      detectedSourceLang: reportedDetectedSource,
       sameLanguage: true,
       handle: getLastActiveHandle('opus'),
     }
@@ -1429,7 +1431,7 @@ async function runOpusTranslation(
   if (srcResolved.m2mCode === tgtResolved.m2mCode) {
     return {
       text: text.trim(),
-      detectedSourceLang: effectiveSource,
+      detectedSourceLang: reportedDetectedSource,
       sameLanguage: true,
       handle: getLastActiveHandle('opus'),
     }
@@ -1442,7 +1444,7 @@ async function runOpusTranslation(
       text,
       srcResolved,
       tgtResolved,
-      effectiveSource,
+      reportedDetectedSource,
       stoppingCriteria
     )
   }
@@ -1456,7 +1458,7 @@ async function runOpusTranslation(
     text,
     srcResolved,
     ENGLISH_RESOLVED,
-    effectiveSource,
+    reportedDetectedSource,
     stoppingCriteria,
     hop2ModelId
   )
@@ -1469,7 +1471,7 @@ async function runOpusTranslation(
     toEn.text,
     ENGLISH_RESOLVED,
     tgtResolved,
-    effectiveSource,
+    reportedDetectedSource,
     stoppingCriteria,
     hop1ModelId
   )

@@ -872,8 +872,8 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
               ) : null}
 
               {translationBadge && (
-                <div className="ag-translator-msg-meta">
-                  <Languages size={11} />
+                <div className="ag-translator-msg-meta" title={translationBadge}>
+                  <Languages size={11} style={{ flexShrink: 0 }} aria-hidden="true" />
                   <span>{translationBadge}</span>
                 </div>
               )}
