@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from 'react'
-import { registerSW } from 'virtual:pwa-register'
 
 export type InstallPromptOutcome = 'accepted' | 'dismissed' | 'unavailable'
 
@@ -30,8 +29,6 @@ interface NavigatorPwaExtensions extends Navigator {
 
 const VISIBILITY_CHECK_THROTTLE_MS = 5 * 60 * 1000
 const PERIODIC_UPDATE_INTERVAL_MS = 30 * 60 * 1000
-const SW_RELOAD_GUARD_KEY = 'agnostr:sw_controller_reload_at'
-const SW_RELOAD_COOLDOWN_MS = 15_000
 
 interface PwaStoreSnapshot {
   canPromptInstall: boolean
@@ -43,9 +40,9 @@ interface PwaStoreSnapshot {
 
 let deferredPrompt: BeforeInstallPromptEvent | null = null
 let swRegistration: ServiceWorkerRegistration | null = null
-let updateSwFn: ((reloadPage?: boolean) => Promise<void>) | null = null
 let swInitialized = false
-let reloadingForSwUpdate = false
+let reloadOnActivation = false
+let controllerReplaced = false
 let lastAutoCheckAt = 0
 
 const storeListeners = new Set<() => void>()
@@ -146,7 +143,7 @@ async function runSwUpdateCheck(): Promise<boolean> {
     return storeState.updateAvailable
   }
 
-  if (reg.waiting) {
+  if (reg.waiting || controllerReplaced) {
     patchStore({ updateAvailable: true })
     return true
   }
@@ -191,47 +188,49 @@ function ensureSwRegistered(): void {
 
   if (!('serviceWorker' in navigator)) return
 
-  // Only auto-reload on controllerchange when an older SW was already controlling
-  // this page (never on first-ever SW install), with a sessionStorage cooldown guard
-  // so mobile PWAs pick up newly activated updates seamlessly without reload loops.
-  const hadControllerAtBoot = Boolean(navigator.serviceWorker.controller)
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!hadControllerAtBoot || reloadingForSwUpdate) return
-    try {
-      const lastRaw = window.sessionStorage.getItem(SW_RELOAD_GUARD_KEY)
-      const lastAt = lastRaw ? Number(lastRaw) : 0
-      if (Number.isFinite(lastAt) && Date.now() - lastAt < SW_RELOAD_COOLDOWN_MS) {
-        return
-      }
-      window.sessionStorage.setItem(SW_RELOAD_GUARD_KEY, String(Date.now()))
-    } catch {
-      // Ignore restricted sessionStorage contexts
+  // First-install claim makes this page available offline. Only a tab that
+  // explicitly accepted an update should reload; other tabs keep their drafts.
+  if (!import.meta.env.PROD) return
+  const workers = navigator.serviceWorker
+  let controller = workers.controller
+  workers.addEventListener('controllerchange', () => {
+    const previous = controller
+    controller = workers.controller
+    if (!controller || controller === previous) return
+    if (reloadOnActivation) {
+      reloadOnActivation = false
+      window.location.reload()
+      return
     }
-    reloadingForSwUpdate = true
-    window.location.reload()
+    if (previous) controllerReplaced = true
+    patchStore({ offlineReady: true, swReady: true, updateAvailable: controllerReplaced })
   })
 
-  updateSwFn = registerSW({
-    immediate: true,
-    onNeedRefresh() {
-      patchStore({ updateAvailable: true, swReady: true })
-    },
-    onOfflineReady() {
-      patchStore({ offlineReady: true, swReady: true })
-    },
-    onRegisteredSW(_swScriptUrl, registration) {
-      if (registration) {
-        swRegistration = registration
-        patchStore({
-          swReady: true,
-          offlineReady: storeState.offlineReady || Boolean(registration.active),
-          updateAvailable: storeState.updateAvailable || Boolean(registration.waiting),
-        })
+  void workers.register(`${import.meta.env.BASE_URL}sw.js`).then((registration) => {
+    swRegistration = registration
+    const watchInstall = () => {
+      const worker = registration.installing
+      if (!worker) return
+      const onState = () => {
+        if (worker.state === 'installed' && registration.active) {
+          patchStore({ updateAvailable: true })
+        }
+        if (worker.state === 'activated' || worker.state === 'redundant') {
+          worker.removeEventListener('statechange', onState)
+        }
       }
-    },
-    onRegisterError(error) {
-      console.warn('[Agnostr PWA] Service worker registration failed:', error)
-    },
+      worker.addEventListener('statechange', onState)
+      onState()
+    }
+    registration.addEventListener('updatefound', watchInstall)
+    watchInstall()
+    patchStore({
+      swReady: true,
+      offlineReady: storeState.offlineReady || Boolean(registration.active),
+      updateAvailable: controllerReplaced || Boolean(registration.waiting),
+    })
+  }).catch((error) => {
+    console.warn('[Agnostr PWA] Service worker registration failed:', error)
   })
 }
 
@@ -362,19 +361,12 @@ export function usePwa(badgeCount?: number): PwaState {
   }, [])
 
   const applyUpdate = useCallback(async (): Promise<void> => {
-    patchStore({ updateAvailable: false })
-    reloadingForSwUpdate = true
-    try {
-      if (updateSwFn) {
-        await updateSwFn(true)
-        return
-      }
-      const reg = await resolveRegistration()
-      if (reg?.waiting) {
-        reg.waiting.postMessage({ type: 'SKIP_WAITING' })
-        window.location.reload()
-      }
-    } catch {
+    const reg = await resolveRegistration()
+    if (reg?.waiting) {
+      reloadOnActivation = true
+      reg.waiting.postMessage({ type: 'SKIP_WAITING' })
+    } else if (controllerReplaced) {
+      // Another open tab already activated it. The new shell is ready to use.
       window.location.reload()
     }
   }, [])

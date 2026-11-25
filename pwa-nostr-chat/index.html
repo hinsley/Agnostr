@@ -7,7 +7,31 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <meta name="theme-color" content="#0B0C0F" />
-    <meta name="color-scheme" content="dark light" />
+    <meta name="color-scheme" content="dark" />
+    <!-- Paint the app canvas before external CSS, fonts, or React. Keep these four
+         first-paint colors in sync with tokens.css (checked by the boot-theme test). -->
+    <style>
+      html { color-scheme: dark; --boot-canvas: #0B0C0F; background-color: var(--bg-canvas, var(--boot-canvas)); }
+      html[data-theme="amber"] { --boot-canvas: #100F0E; }
+      html[data-theme="indigo"] { --boot-canvas: #090A10; }
+      html[data-theme="daylight"] { color-scheme: light; --boot-canvas: #FFFFFF; }
+    </style>
+    <script>
+      ;(function () {
+        try {
+          var settings = JSON.parse(localStorage.getItem('agnostr:v2:settings'))
+          var theme = settings && settings.theme
+          if (theme !== 'daylight' && theme !== 'indigo' && theme !== 'amber') return
+          var root = document.documentElement
+          root.dataset.theme = theme
+          document.querySelector('meta[name="color-scheme"]').content = theme === 'daylight' ? 'light' : 'dark'
+          document.querySelector('meta[name="theme-color"]').content =
+            getComputedStyle(root).getPropertyValue('--boot-canvas').trim()
+        } catch (_e) {
+          // A new profile, blocked storage, or malformed settings use the Carbon default.
+        }
+      })()
+    </script>
     <meta
       name="description"
       content="Agnostr — Ephemeral geohash Bitchat, encrypted DMs, groups, Agmail & Cashu wallet over Nostr"
@@ -23,6 +47,8 @@
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
       rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
     />
     <title>Agnostr — Bitchat & Encrypted Messaging over Nostr</title>
     <script>

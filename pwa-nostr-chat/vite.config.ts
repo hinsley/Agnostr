@@ -95,7 +95,8 @@ export default defineConfig({
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
-      registerType: 'prompt',
+      // usePwa owns registration so an update accepted in one tab never reloads another.
+      injectRegister: false,
       includeAssets: [
         'icon.svg',
         'icon-192.png',

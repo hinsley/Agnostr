@@ -14,6 +14,7 @@
     "test:agmail-reply-chain": "node --experimental-strip-types --test scripts/check-agmail-reply-chain.mjs",
     "test:room-roster": "node --experimental-strip-types --test scripts/check-room-roster.mjs",
     "test:agwallet": "node --test scripts/check-boltz-recovery-only.mjs scripts/check-lightning-melt-recovery.mjs scripts/check-native-bitcoin-send.mjs scripts/check-wallet-custody-boundary.mjs",
+    "test:pwa-first-paint": "node scripts/check-pwa-first-paint.mjs",
     "test:push": "node --test scripts/check-push-client.mjs scripts/check-push-display.mjs",
     "test:poker": "node --experimental-strip-types --test scripts/check-poker-governance.mjs",
     "test:notification-shortcut": "node --experimental-strip-types --test scripts/check-notification-shortcut.mjs",

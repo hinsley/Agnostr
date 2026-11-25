@@ -174,11 +174,8 @@ async function setBadgeSafe(count?: number): Promise<void> {
   }
 }
 
-// 2. Service Worker lifecycle & client messaging (instant update activation + call notification cleanup)
-swSelf.addEventListener('install', () => {
-  void swSelf.skipWaiting()
-})
-
+// Precache on install, but do not interrupt open sessions. With clients open,
+// activation waits for their explicit update button (SKIP_WAITING) or closure.
 swSelf.addEventListener('activate', (event) => {
   event.waitUntil(swSelf.clients.claim())
 })
@@ -188,7 +185,7 @@ swSelf.addEventListener('message', (event) => {
   if (!data || typeof data !== 'object') return
 
   if (data.type === 'SKIP_WAITING') {
-    void swSelf.skipWaiting()
+    event.waitUntil(swSelf.skipWaiting())
     return
   }
 
