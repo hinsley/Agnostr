@@ -82,3 +82,8 @@ The assets are already checked in: normal builds need no downloads or image
 tooling. To rebake deliberately, run
 `python3 scripts/build-solar-maps.py /path/to/source-cache` with Pillow/WebP,
 then `npm run test:solar-maps`. Input downloads have pinned SHA-256 hashes.
+
+The Moon uses NASA/JPL's approximate Mean Earth/polar-axis orientation, so its
+near side faces Earth with small date-dependent libration. The map, geohashes
+and overlays keep their standard lunar coordinates. Run
+`npm run test:lunar-orientation` for orbital orientation and UV regression checks.

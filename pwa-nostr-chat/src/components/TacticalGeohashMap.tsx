@@ -41,6 +41,7 @@ import {
   type CelestialBodyDef,
   type CelestialBodyId,
   type GeohashableBodyId,
+  type SolarBodySnapshot,
   type SolarSystemSnapshot,
 } from '../lib/solarSystem.ts'
 import { createPlanetaryRingTexture } from '../lib/planetTextures.ts'
@@ -890,6 +891,7 @@ function createMoonOrbitLoopGeometry(
   centerPos: THREE.Vector3,
   moonPos: THREE.Vector3,
   segments = 72,
+  orbitUp = UP_Y,
 ): THREE.BufferGeometry {
   const offset = moonPos.clone().sub(centerPos)
   const radius = offset.length()
@@ -897,7 +899,7 @@ function createMoonOrbitLoopGeometry(
     return new THREE.BufferGeometry()
   }
   const u = offset.clone().normalize()
-  let v = new THREE.Vector3().crossVectors(UP_Y, u)
+  let v = new THREE.Vector3().crossVectors(orbitUp, u)
   if (v.lengthSq() < 1e-5) {
     v = new THREE.Vector3(1, 0, 0).cross(u)
   }
@@ -3048,6 +3050,18 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         })
       }
 
+      const surfaceRotation = new THREE.Matrix4()
+      const setBodyPose = (root: THREE.Group, body: SolarBodySnapshot) => {
+        root.position.set(...body.position)
+        const m = body.surfaceAxes
+        if (m) {
+          surfaceRotation.set(m[0], m[1], m[2], 0, m[3], m[4], m[5], 0, m[6], m[7], m[8], 0, 0, 0, 0, 1)
+          root.quaternion.setFromRotationMatrix(surfaceRotation)
+        } else {
+          root.quaternion.identity()
+        }
+      }
+
       const rebuildSolarSystem = (
         bodyId: GeohashableBodyId,
         now: Date = new Date(),
@@ -3147,7 +3161,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           const bSnap = snap.bodies[id]
           const def = SOLAR_BODIES[id]
           const root = new THREE.Group()
-          root.position.set(...bSnap.position)
+          setBodyPose(root, bSnap)
 
           const sphereGeo = new THREE.SphereGeometry(bSnap.renderRadius, 32, 24)
           const bMat = new THREE.ShaderMaterial({
@@ -3214,7 +3228,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
         // 3. Elliptical Planetary Orbital Rings around snapshot.sunPos
         for (const pid of PLANET_BODY_IDS) {
-          const pts = samplePlanetOrbitPoints(pid, snap.sunPos, now, 160)
+          const pts = samplePlanetOrbitPoints(pid, snap.sunPos, now, 160, snap.earthToViewAxes)
           if (pts.length === 0) continue
           const oGeo = new THREE.BufferGeometry()
           oGeo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
@@ -3253,10 +3267,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
         } else if (focusedDef.kind === 'moon' && focusedDef.parentId) {
           const parentPos = new THREE.Vector3(...snap.bodies[focusedDef.parentId].position)
+          const mAxes = snap.earthToViewAxes
+          const orbitUp = mAxes ? new THREE.Vector3(mAxes[1], mAxes[4], mAxes[7]) : UP_Y
           for (const m of getMoonsOfBody(focusedDef.parentId)) {
             const mSnap = snap.bodies[m.id]
             const mPos = m.id === bodyId ? originCenter : new THREE.Vector3(...mSnap.position)
-            const mGeo = createMoonOrbitLoopGeometry(parentPos, mPos, 72)
+            const mGeo = createMoonOrbitLoopGeometry(parentPos, mPos, 72, orbitUp)
             const mMat = new THREE.LineBasicMaterial({
               color: new THREE.Color(m.palette.orbitColor),
               transparent: true,
@@ -3288,7 +3304,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           if (!bSnap) continue
           entry.worldPos.set(...bSnap.position)
           if (!entry.isSun) {
-            entry.root.position.set(...bSnap.position)
+            setBodyPose(entry.root, bSnap)
             if (entry.material) {
               entry.material.uniforms.uSunDir.value.set(...bSnap.sunDir).normalize()
             }

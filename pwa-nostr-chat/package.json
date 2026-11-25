@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test:solar-maps": "node scripts/check-solar-maps.mjs"
+    "test:solar-maps": "node scripts/check-solar-maps.mjs",
+    "test:lunar-orientation": "node --experimental-strip-types --test scripts/check-lunar-orientation.mjs"
   },
   "dependencies": {
     "@cashu/cashu-ts": "^4.13.1",

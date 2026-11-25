@@ -1,4 +1,4 @@
-import { computeSublunarPoint, computeSubsolarPoint, latLonToUnitVec3 } from './astronomy'
+import { computeSublunarPoint, computeSubsolarPoint, latLonToUnitVec3 } from './astronomy.ts'
 
 const DEG2RAD = Math.PI / 180
 const RAD2DEG = 180 / Math.PI
@@ -90,6 +90,8 @@ export interface SolarBodySnapshot {
   readonly position: Vec3Tuple
   readonly renderRadius: number
   readonly sunDir: Vec3Tuple
+  /** Surface-local axes in the view frame; omitted when already aligned. */
+  readonly surfaceAxes?: Mat3
   readonly distanceAuFromSun: number
   readonly isFocused: boolean
   readonly isSiblingMoon: boolean
@@ -101,6 +103,8 @@ export interface SolarSystemSnapshot {
   readonly focusedBodyId: GeohashableBodyId
   readonly sunPos: Vec3Tuple
   readonly focusedSunDir: Vec3Tuple
+  /** Rotation from Earth-fixed axes into the focused view, or null for no rotation. */
+  readonly earthToViewAxes: Mat3 | null
   readonly bodies: Record<CelestialBodyId, SolarBodySnapshot>
 }
 
@@ -1230,6 +1234,10 @@ function mat3Mul(a: Mat3, b: Mat3): Mat3 {
   ]
 }
 
+function mat3Transpose(m: Mat3): Mat3 {
+  return [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
+}
+
 /** Shortest-arc proper 3D rotation matrix mapping unit vector `from` onto unit vector `to`. */
 function rotationMatrixBetweenUnitVectors(
   from: readonly [number, number, number],
@@ -1409,6 +1417,59 @@ function buildEclipticToSceneMatrix(date: Date, earthEclipticAu: Vec3Tuple): Mat
   return mat3Mul(alignMat, rawMat)
 }
 
+// NASA/JPL NAIF pck00011.tpc: BODY3_NUT_PREC_ANGLES and BODY301_*.
+// The small periodic terms keep the mean Earth/polar-axis frame (IAU_MOON)
+// registered as the apparent Earth-facing point librates. Time: degrees,
+// degrees/Julian century, RA sine, declination cosine, prime-meridian sine.
+const LUNAR_ORIENTATION_TERMS = [
+  [125.045, -1935.5364525, -3.8787, 1.5419, 3.5610],
+  [250.089, -3871.072905, -0.1204, 0.0239, 0.1208],
+  [260.008, 475263.3328725, 0.0700, -0.0278, -0.0642],
+  [176.625, 487269.629985, -0.0172, 0.0068, 0.0158],
+  [357.529, 35999.0509575, 0, 0, 0.0252],
+  [311.589, 964468.49931, 0.0072, -0.0029, -0.0066],
+  [134.963, 477198.869325, 0, 0.0009, -0.0047],
+  [276.617, 12006.300765, 0, 0, -0.0046],
+  [34.226, 63863.5132425, 0, 0, 0.0028],
+  [15.134, -5806.6093575, -0.0052, 0.0008, 0.0052],
+  [119.743, 131.84064, 0, 0, 0.0040],
+  [239.961, 6003.1503825, 0, 0, 0.0019],
+  [25.053, 473327.79642, 0.0043, -0.0009, -0.0044],
+] as const
+
+/** Lunar map coordinates (+X prime meridian, +Y north, -Z east) to Earth scene axes. */
+function computeMoonToEarthAxes(d: number): Mat3 {
+  // UTC is sufficient for this view's low-precision ephemeris.
+  const T = d / 36525
+  let ra = 269.9949 + 0.0031 * T
+  let dec = 66.5392 + 0.0130 * T
+  let meridian = 38.3213 + 13.17635815 * d - 1.4e-12 * d * d
+  for (const [phase, rate, raAmp, decAmp, meridianAmp] of LUNAR_ORIENTATION_TERMS) {
+    const angle = (phase + rate * T) * DEG2RAD
+    const sin = Math.sin(angle)
+    ra += raAmp * sin
+    dec += decAmp * Math.cos(angle)
+    meridian += meridianAmp * sin
+  }
+
+  // Relative to the Greenwich meridian, which already rotates in the app's ECEF frame.
+  const a = (ra - gmstDegrees(d)) * DEG2RAD
+  const b = dec * DEG2RAD
+  const w = normalizeDeg(meridian) * DEG2RAD
+  const ca = Math.cos(a), sa = Math.sin(a)
+  const cb = Math.cos(b), sb = Math.sin(b)
+  const cw = Math.cos(w), sw = Math.sin(w)
+
+  // Node q = (-sin(a), cos(a), 0); r = north × q. Columns
+  // are (q cos(w) + r sin(w), north, q sin(w) - r cos(w)),
+  // with the usual equatorial (X,Y,Z) permuted to Three.js (X,Z,-Y).
+  return [
+    -sa * cw - sb * ca * sw, cb * ca, -sa * sw + sb * ca * cw,
+    cb * sw, sb, -cb * cw,
+    -ca * cw + sb * sa * sw, -cb * sa, -ca * sw - sb * sa * cw,
+  ]
+}
+
 function eclipticAuToVisualSceneOffset(eclipticAu: Vec3Tuple, eclToScene: Mat3): Vec3Tuple {
   const rAu = vecLength(eclipticAu)
   if (rAu <= 1e-12) return [0, 0, 0]
@@ -1573,7 +1634,15 @@ export function computeSolarSystemSnapshot(
     sunPos = vecScale(planetHelioVisual[focusedPlanetId], -1)
   }
 
-  const focusedSunDir = vecNormalize(sunPos)
+  const moonToEarthAxes = computeMoonToEarthAxes(d)
+  // Keep the active surface, camera, pins and geohashes in their common local axes.
+  // Only when looking from the Moon do we rotate the sky and other bodies instead.
+  const earthToViewAxes = focusedBodyId === 'moon' ? mat3Transpose(moonToEarthAxes) : null
+  const toView = (v: Vec3Tuple): Vec3Tuple => earthToViewAxes ? mat3MulVec(earthToViewAxes, v) : v
+  // The visually magnified Earth–Moon separation must not distort lunar phase.
+  // The Solar direction from Earth and from the Moon differs by at most ~0.16°.
+  const moonSunDir = vecNormalize(vecScale(planetHelioVisual.earth, -1))
+  const focusedSunDir = focusedBodyId === 'moon' ? moonSunDir : vecNormalize(sunPos)
 
   // 6. Populate snapshot records for Sun, planets, and moons
   const bodies = {} as Record<CelestialBodyId, SolarBodySnapshot>
@@ -1616,6 +1685,7 @@ export function computeSolarSystemSnapshot(
       position,
       renderRadius,
       sunDir,
+      surfaceAxes: earthToViewAxes ?? undefined,
       distanceAuFromSun: planetDistanceAu[planetId],
       isFocused,
       isSiblingMoon: false,
@@ -1656,13 +1726,16 @@ export function computeSolarSystemSnapshot(
       renderRadius = clamp(parentDef.visualRadius * def.visualRadius * 0.85, 0.08, 0.3)
     }
 
-    const sunDir = isFocused ? focusedSunDir : vecNormalize(vecSub(sunPos, position))
+    const sunDir = id === 'moon'
+      ? moonSunDir
+      : isFocused ? focusedSunDir : vecNormalize(vecSub(sunPos, position))
 
     bodies[id] = {
       id,
       position,
       renderRadius,
       sunDir,
+      surfaceAxes: isFocused ? undefined : id === 'moon' ? moonToEarthAxes : earthToViewAxes ?? undefined,
       distanceAuFromSun: planetDistanceAu[parentId],
       isFocused,
       isSiblingMoon,
@@ -1671,10 +1744,18 @@ export function computeSolarSystemSnapshot(
     }
   }
 
+  if (earthToViewAxes) {
+    for (const id of SOLAR_BODY_IDS) {
+      const body = bodies[id]
+      bodies[id] = { ...body, position: toView(body.position), sunDir: toView(body.sunDir) }
+    }
+  }
+
   return {
     focusedBodyId,
-    sunPos,
-    focusedSunDir,
+    sunPos: bodies.sun.position,
+    focusedSunDir: toView(focusedSunDir),
+    earthToViewAxes,
     bodies,
   }
 }
@@ -1688,7 +1769,8 @@ export function samplePlanetOrbitPoints(
   planetId: CelestialBodyId,
   sunPos: readonly [number, number, number],
   date: Date = new Date(),
-  segments = 192
+  segments = 192,
+  earthToViewAxes: Mat3 | null = null,
 ): Float32Array {
   if (!isPlanetBodyId(planetId)) {
     return new Float32Array(0)
@@ -1709,7 +1791,8 @@ export function samplePlanetOrbitPoints(
   for (let i = 0; i <= count; i++) {
     const E = i === count ? 0 : (i / count) * TWO_PI
     const eclAu = keplerElementsToEclipticAu(elements, E)
-    const offset = eclipticAuToVisualSceneOffset(eclAu, eclToScene)
+    const earthOffset = eclipticAuToVisualSceneOffset(eclAu, eclToScene)
+    const offset = earthToViewAxes ? mat3MulVec(earthToViewAxes, earthOffset) : earthOffset
     const base = i * 3
     out[base] = sunPos[0] + offset[0]
     out[base + 1] = sunPos[1] + offset[1]
