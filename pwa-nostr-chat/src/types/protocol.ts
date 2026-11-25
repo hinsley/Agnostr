@@ -148,6 +148,8 @@ export interface VoiceMemoEncryption {
 }
 
 export interface VoiceMemoAttachment {
+  /** Plain-text public-room marker; no sender-declared MIME or integrity hash. */
+  inlineVoiceMarker?: true
   url: string
   mime: string
   size: number

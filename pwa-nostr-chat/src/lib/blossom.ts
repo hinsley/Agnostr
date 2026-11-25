@@ -2,6 +2,7 @@ import { sha256 } from '@noble/hashes/sha256'
 import type { Event as NostrEvent, EventTemplate } from 'nostr-tools'
 import type { VoiceMemoAttachment, VoiceMemoEncryption } from '../types/protocol.ts'
 import { bytesToHex } from './identity.ts'
+import { inferInlineVoiceMime } from './inlineChatVoice.ts'
 import { inferInlineRasterMime } from './inlineChatImage.ts'
 import {
   decryptAesGcmOffMainThread,
@@ -32,6 +33,7 @@ export interface MediaBlobDescriptor {
   sha256: string
   encryption?: VoiceMemoEncryption
   inlineMarker?: true
+  inlineVoiceMarker?: true
 }
 
 export function normalizeBlossomServerUrl(raw: string): string | null {
@@ -360,6 +362,48 @@ export async function uploadBlobToBlossom(opts: {
   throw new Error(`Blossom upload failed across all servers (${errors.slice(0, 3).join('; ')})`)
 }
 
+/** Legacy voice URLs have no signed digest. Use an anonymous, bounded fetch
+ * and accept only actual audio bytes. Do not trust CDN response MIME. */
+async function downloadInlineVoice(url: string, timeoutMs: number): Promise<Blob> {
+  const controller = new AbortController()
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port) {
+      throw new Error('Blocked invalid voice memo URL.')
+    }
+    const response = await fetch(url, {
+      signal: controller.signal, mode: 'cors', credentials: 'omit',
+      referrerPolicy: 'no-referrer', redirect: 'error',
+    })
+    if (!response.ok || !response.body) throw new Error(`Voice memo download failed (HTTP ${response.status}).`)
+    if (Number(response.headers.get('Content-Length')) > MAX_VOICE_BLOB_BYTES) {
+      throw new Error('Voice memo exceeds maximum allowed download size.')
+    }
+    const reader = response.body.getReader()
+    const parts: ArrayBuffer[] = []
+    let size = 0
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        size += value.byteLength
+        if (size > MAX_VOICE_BLOB_BYTES) throw new Error('Voice memo exceeds maximum allowed download size.')
+        parts.push(toArrayBuffer(value))
+      }
+    } finally {
+      reader.releaseLock()
+    }
+    const bytes = new Uint8Array(await new Blob(parts).arrayBuffer())
+    const mime = inferInlineVoiceMime(bytes)
+    if (!mime) throw new Error('The link did not return a supported audio recording.')
+    return new Blob(parts, { type: mime })
+  } finally {
+    controller.abort()
+    globalThis.clearTimeout(timer)
+  }
+}
+
 /**
  * Fetches, SHA-256 verifies, and (if encrypted) AES-256-GCM decrypts a Blossom media blob
  * (voice memo or image attachment).
@@ -372,6 +416,7 @@ export async function downloadAndVerifyMediaBlob(
 ): Promise<Blob> {
   // Defense-in-depth authorization guard BEFORE any network I/O
   assertAuthorized()
+  if (media.inlineVoiceMarker && !media.encryption && !media.sha256) return await downloadInlineVoice(media.url, timeoutMs)
 
   if (!/^https?:\/\//i.test(media.url)) {
     throw new Error('Blocked invalid non-HTTP(S) media URL.')
@@ -431,7 +476,7 @@ export class VoiceBlobCache {
   private inflight = new Map<string, Promise<string>>()
 
   private keyFor(media: MediaBlobDescriptor): string {
-    return `${media.url}|${media.sha256}|${media.encryption?.ivB64 ?? 'plain'}|${media.inlineMarker ? 'marker' : ''}`
+    return `${media.url}|${media.sha256}|${media.encryption?.ivB64 ?? 'plain'}|${media.inlineVoiceMarker ? 'voice-marker' : media.inlineMarker ? 'image-marker' : ''}`
   }
 
   async getOrFetch(

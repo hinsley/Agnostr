@@ -8,6 +8,7 @@ import type {
   VoiceMemoAttachment,
 } from '../types/protocol.ts'
 import { normalizeGeohash } from './geohash.ts'
+import { parseInlineChatVoice } from './inlineChatVoice.ts'
 import { parseInlineChatImage } from './inlineChatImage.ts'
 import { bytesToHex, formatDisplayHandle } from './identity.ts'
 import { isOffMainThreadWorkerSupported, mineNip13OffMainThread } from './offMainThread.ts'
@@ -831,7 +832,7 @@ export function parseGeohashChatEvent(
     }
   }
 
-  const voiceMemo = parseVoiceMemoFromImeta(event.tags)
+  const voiceMemo = parseVoiceMemoFromImeta(event.tags) ?? parseInlineChatVoice(content, event.tags)?.memo
   const imageAttachment = parseImageFromImeta(event.tags) ?? parseInlineChatImage(content, event.tags)?.image
 
   return {
@@ -904,7 +905,7 @@ export function parseNamedBitchatChatEvent(
     }
   }
 
-  const voiceMemo = parseVoiceMemoFromImeta(event.tags)
+  const voiceMemo = parseVoiceMemoFromImeta(event.tags) ?? parseInlineChatVoice(content, event.tags)?.memo
   const imageAttachment = parseImageFromImeta(event.tags) ?? parseInlineChatImage(content, event.tags)?.image
 
   return {

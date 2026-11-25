@@ -49,6 +49,7 @@ import { ReactionPickerPopover } from './ReactionPickerPopover'
 import { requestUntrustedLinkOpen, tryOpenInternalAgoraLink } from './UntrustedLinkModal'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
 import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
+import { parseInlineChatVoice } from '../lib/inlineChatVoice'
 import { parseInlineChatImage } from '../lib/inlineChatImage'
 
 function formatMintHost(url: string): string {
@@ -426,10 +427,14 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       const inline = message.imageAttachment?.inlineMarker
         ? parseInlineChatImage(message.content, message.tags)
         : undefined
+      const caption = inline?.caption ?? message.content
+      const inlineVoice = message.voiceMemo?.inlineVoiceMarker
+        ? parseInlineChatVoice(caption, message.tags)
+        : undefined
       return message.voiceMemo || message.imageAttachment
         ? extractMediaCaption(
-            inline?.caption ?? message.content,
-            message.voiceMemo?.url,
+            inlineVoice?.caption ?? caption,
+            inlineVoice ? undefined : message.voiceMemo?.url,
             inline ? undefined : message.imageAttachment?.url
           )
         : message.content
@@ -1226,7 +1231,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
           {/* Left-Aligned Voice Memo Player / Untrusted Shielded Card */}
           {message.voiceMemo && (
-            <div className="ag-msg-media-slot">
+            <div className="ag-msg-media-slot" onClickCapture={interceptMessageLinkClick} onAuxClickCapture={interceptMessageLinkAuxClick}>
               <VoiceMemoPlayer
                 memo={message.voiceMemo}
                 memoKey={message.voiceMemo.sha256 || message.voiceMemo.url || message.id}
@@ -1236,7 +1241,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 isTrusted={isSenderTrusted}
                 isAllowed={canLoadVoiceMemo ?? isSenderTrusted}
                 isDmMode={isEncryptedContext}
-                autoTranscribe={autoTranscribe}
+                autoTranscribe={autoTranscribe && !message.voiceMemo.inlineVoiceMarker}
                 fetchVoiceMemoBlob={fetchVoiceMemoBlob}
                 memoTranscript={memoTranscript}
                 transcriptionModelStatus={transcriptionModelStatus}
@@ -1247,6 +1252,11 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 onInspectSender={(pk, nick) => onInspectAuthor?.(pk, nick)}
                 onBlockSender={onBlockSender}
               />
+              {message.voiceMemo.inlineVoiceMarker && /^https:\/\//i.test(message.voiceMemo.url) && (
+                <a className="ag-img-retry-btn ag-md-link" href={message.voiceMemo.url} target="_blank" rel="noopener noreferrer">
+                  Open voice memo link
+                </a>
+              )}
             </div>
           )}
 

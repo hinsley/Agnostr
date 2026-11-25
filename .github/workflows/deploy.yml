@@ -52,6 +52,10 @@ jobs:
         working-directory: pwa-nostr-chat
         run: npm run test:inline-chat-image
 
+      - name: Inline voice interoperability tests
+        working-directory: pwa-nostr-chat
+        run: npm run test:inline-chat-voice
+
       - name: Build
         working-directory: pwa-nostr-chat
         run: npm run build

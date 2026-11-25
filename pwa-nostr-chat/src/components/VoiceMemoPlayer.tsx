@@ -703,7 +703,7 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
             status === 'loading'
               ? isE2ee
                 ? 'Fetching & decrypting audio…'
-                : 'Fetching & verifying SHA-256…'
+                : memo.inlineVoiceMarker ? 'Fetching audio…' : 'Fetching & verifying SHA-256…'
               : isPlaying
                 ? 'Pause'
                 : 'Play voice memo'
