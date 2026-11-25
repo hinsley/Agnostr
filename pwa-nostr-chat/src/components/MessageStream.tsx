@@ -39,13 +39,16 @@ import {
   parseCelestialChannelKey,
 } from '../lib/bitchatChannel'
 import { isStuckMediaPlaceholder } from '../lib/storage'
+import { parseInlineChatImage } from '../lib/inlineChatImage'
 import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import { formatHandle } from '../utils/identicon'
 
 function extractCleanMessageText(msg: GeoMessage): string {
-  let text = msg.content.trim()
+  let text = msg.imageAttachment?.inlineMarker
+    ? (parseInlineChatImage(msg.content, msg.tags)?.caption ?? msg.content)
+    : msg.content.trim()
   if (!text) return ''
-  for (const rawUrl of [msg.voiceMemo?.url, msg.imageAttachment?.url]) {
+  for (const rawUrl of [msg.voiceMemo?.url, msg.imageAttachment?.inlineMarker ? undefined : msg.imageAttachment?.url]) {
     const target = rawUrl?.trim()
     if (!target) continue
     if (text === target) return ''
@@ -447,7 +450,11 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
           !isStuckMediaPlaceholder(m) &&
           (m.isSystem || m.geohash.toLowerCase() === activeKey) &&
           (m.isOwn || m.isSystem || m.isBlockedPlaceholder || !engine.isPeerBlocked(m.pubkey))
-      )
+      ).map((m) => {
+        if (m.imageAttachment || m.isSystem || m.isBlockedPlaceholder) return m
+        const inline = parseInlineChatImage(m.content, m.tags)
+        return inline ? { ...m, imageAttachment: inline.image } : m
+      })
     }
     return dmThread.messages
       .filter((dm) => !isStuckMediaPlaceholder(dm))

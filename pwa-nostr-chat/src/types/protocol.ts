@@ -185,6 +185,8 @@ export interface ImageAttachment {
   alt?: string
   encryption?: VoiceMemoEncryption
   server?: string
+  /** Untyped public-room marker; confirm raster bytes before display. */
+  inlineMarker?: true
 }
 
 export interface PreparedImage {

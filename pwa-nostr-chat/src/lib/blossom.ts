@@ -2,6 +2,7 @@ import { sha256 } from '@noble/hashes/sha256'
 import type { Event as NostrEvent, EventTemplate } from 'nostr-tools'
 import type { VoiceMemoAttachment, VoiceMemoEncryption } from '../types/protocol.ts'
 import { bytesToHex } from './identity.ts'
+import { inferInlineRasterMime } from './inlineChatImage.ts'
 import {
   decryptAesGcmOffMainThread,
   encryptAesGcmOffMainThread,
@@ -30,6 +31,7 @@ export interface MediaBlobDescriptor {
   mime: string
   sha256: string
   encryption?: VoiceMemoEncryption
+  inlineMarker?: true
 }
 
 export function normalizeBlossomServerUrl(raw: string): string | null {
@@ -375,7 +377,10 @@ export async function downloadAndVerifyMediaBlob(
     throw new Error('Blocked invalid non-HTTP(S) media URL.')
   }
 
-  const res = await fetchWithTimeout(media.url, { method: 'GET', mode: 'cors' }, timeoutMs)
+  const res = await fetchWithTimeout(media.url, {
+    method: 'GET', mode: 'cors',
+    ...(media.inlineMarker ? { credentials: 'omit', referrerPolicy: 'no-referrer' } : {}),
+  }, timeoutMs)
   if (!res.ok) {
     throw new Error(`Blossom download failed (HTTP ${res.status})`)
   }
@@ -403,7 +408,9 @@ export async function downloadAndVerifyMediaBlob(
     ? await decryptMediaBytesAesGcm(rawBytes, media.encryption)
     : rawBytes
 
-  return new Blob([toArrayBuffer(plainBytes)], { type: cleanMimeType(media.mime) })
+  const mime = media.inlineMarker ? inferInlineRasterMime(plainBytes) : cleanMimeType(media.mime)
+  if (!mime) throw new Error('The link did not return a supported image.')
+  return new Blob([toArrayBuffer(plainBytes)], { type: mime })
 }
 
 export async function downloadAndVerifyVoiceMemo(
@@ -424,7 +431,7 @@ export class VoiceBlobCache {
   private inflight = new Map<string, Promise<string>>()
 
   private keyFor(media: MediaBlobDescriptor): string {
-    return `${media.url}|${media.sha256}|${media.encryption?.ivB64 ?? 'plain'}`
+    return `${media.url}|${media.sha256}|${media.encryption?.ivB64 ?? 'plain'}|${media.inlineMarker ? 'marker' : ''}`
   }
 
   async getOrFetch(

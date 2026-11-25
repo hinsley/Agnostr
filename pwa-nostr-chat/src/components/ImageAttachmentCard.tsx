@@ -36,6 +36,15 @@ export interface ImageAttachmentCardProps {
   onOpenLightbox: (payload: LightboxImagePayload) => void
 }
 
+function InlineImageSource({ image }: { image: ImageAttachment }) {
+  if (!image.inlineMarker || !/^https:\/\//i.test(image.url)) return null
+  return (
+    <a className="ag-img-retry-btn ag-md-link" href={image.url} target="_blank" rel="noopener noreferrer">
+      Open image link
+    </a>
+  )
+}
+
 function formatFilterCategories(categories: readonly ContentFilterCategory[]): string {
   if (categories.length === 0) return 'Policy'
   return categories
@@ -144,6 +153,7 @@ function ShieldedImageCard({
           <Ban size={13} />
           <span>Block</span>
         </button>
+        <InlineImageSource image={image} />
       </div>
     </div>
   )
@@ -182,7 +192,7 @@ function TrustedImageView({
   const metaSummary = formatImageMeta(image)
   const aspectRatio = computeAspectRatio(image)
 
-  const { url, mime, sha256, size, width, height, alt, server } = image
+  const { url, mime, sha256, size, width, height, alt, server, inlineMarker } = image
   const encAlg = image.encryption?.alg
   const encKeyB64 = image.encryption?.keyB64
   const encIvB64 = image.encryption?.ivB64
@@ -198,6 +208,7 @@ function TrustedImageView({
       height,
       alt,
       server,
+      inlineMarker,
       encryption:
         encAlg && encKeyB64 && encIvB64 && encPlainSha256
           ? {
@@ -208,7 +219,7 @@ function TrustedImageView({
             }
           : undefined,
     }),
-    [url, mime, sha256, size, width, height, alt, server, encAlg, encKeyB64, encIvB64, encPlainSha256],
+    [url, mime, sha256, size, width, height, alt, server, inlineMarker, encAlg, encKeyB64, encIvB64, encPlainSha256],
   )
 
   useEffect(() => {
@@ -256,6 +267,7 @@ function TrustedImageView({
           <RotateCw size={12} />
           <span>Retry</span>
         </button>
+        <InlineImageSource image={image} />
       </div>
     )
   }
@@ -276,6 +288,7 @@ function TrustedImageView({
           {metaSummary && (
             <span className="ag-img-chip mono ag-img-skeleton-meta">{metaSummary}</span>
           )}
+          <InlineImageSource image={image} />
         </div>
       </div>
     )
@@ -299,6 +312,11 @@ function TrustedImageView({
       >
         <img
           src={blobUrl}
+          onError={() => {
+            if (!image.inlineMarker) return
+            setErrorMsg('Unable to decode image')
+            setStatus('error')
+          }}
           alt={image.alt || caption || `Image from ${senderDisplayHandle}`}
           className="ag-img-media"
           loading="lazy"
@@ -372,9 +390,9 @@ function ScreenedImageCard({
   const isE2ee = Boolean(image.encryption)
   const isViolet = isDmMode || isE2ee
   const metaSummary = formatImageMeta(image)
-  const cacheKey = image.sha256 || image.url
+  const cacheKey = image.inlineMarker ? `image-marker:${image.url}` : image.sha256 || image.url
 
-  const { url, mime, sha256, size, width, height, alt, server } = image
+  const { url, mime, sha256, size, width, height, alt, server, inlineMarker } = image
   const encAlg = image.encryption?.alg
   const encKeyB64 = image.encryption?.keyB64
   const encIvB64 = image.encryption?.ivB64
@@ -390,6 +408,7 @@ function ScreenedImageCard({
       height,
       alt,
       server,
+      inlineMarker,
       encryption:
         encAlg && encKeyB64 && encIvB64 && encPlainSha256
           ? {
@@ -400,7 +419,7 @@ function ScreenedImageCard({
             }
           : undefined,
     }),
-    [url, mime, sha256, size, width, height, alt, server, encAlg, encKeyB64, encIvB64, encPlainSha256],
+    [url, mime, sha256, size, width, height, alt, server, inlineMarker, encAlg, encKeyB64, encIvB64, encPlainSha256],
   )
 
   const verdict = contentFilter.getVerdict(cacheKey)
@@ -673,6 +692,7 @@ function ScreenedImageCard({
             <RotateCw size={13} />
             <span>Retry Scan</span>
           </button>
+          <InlineImageSource image={image} />
 
           {!isTrusted && (
             <button
@@ -765,6 +785,7 @@ function ScreenedImageCard({
       <p className="ag-img-shield-note">
         Checking image locally before display.
       </p>
+      <InlineImageSource image={image} />
 
       {!isTrusted && (
         <div className="ag-img-shield-actions">

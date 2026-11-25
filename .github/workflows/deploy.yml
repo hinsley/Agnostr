@@ -48,6 +48,10 @@ jobs:
         working-directory: pwa-nostr-chat
         run: npm run test:poker
 
+      - name: Inline image interoperability tests
+        working-directory: pwa-nostr-chat
+        run: npm run test:inline-chat-image
+
       - name: Build
         working-directory: pwa-nostr-chat
         run: npm run build

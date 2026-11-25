@@ -49,6 +49,7 @@ import { ReactionPickerPopover } from './ReactionPickerPopover'
 import { requestUntrustedLinkOpen, tryOpenInternalAgoraLink } from './UntrustedLinkModal'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
 import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
+import { parseInlineChatImage } from '../lib/inlineChatImage'
 
 function formatMintHost(url: string): string {
   try {
@@ -422,14 +423,17 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
     const rawVisibleContent = useMemo(() => {
       if (message.isSystem) return message.content
+      const inline = message.imageAttachment?.inlineMarker
+        ? parseInlineChatImage(message.content, message.tags)
+        : undefined
       return message.voiceMemo || message.imageAttachment
         ? extractMediaCaption(
-            message.content,
+            inline?.caption ?? message.content,
             message.voiceMemo?.url,
-            message.imageAttachment?.url
+            inline ? undefined : message.imageAttachment?.url
           )
         : message.content
-    }, [message.isSystem, message.voiceMemo, message.imageAttachment, message.content])
+    }, [message.isSystem, message.voiceMemo, message.imageAttachment, message.content, message.tags])
 
     // Extract Cashu Ecash tokens (fast check -> empty array for 99.9% of messages)
     const cashuTokens: CashuTokenPreview[] = useMemo(() => {
@@ -1248,7 +1252,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
           {/* Left-Aligned Image Attachment / Untrusted Shielded Card */}
           {message.imageAttachment && (
-            <div className="ag-msg-media-slot">
+            <div className="ag-msg-media-slot" onClickCapture={interceptMessageLinkClick} onAuxClickCapture={interceptMessageLinkAuxClick}>
               <ImageAttachmentCard
                 image={message.imageAttachment}
                 senderPubkey={message.pubkey}
