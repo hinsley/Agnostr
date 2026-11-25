@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type MouseEvent as ReactMouseEvent,
   type TouchEvent as ReactTouchEvent,
 } from 'react'
@@ -20,6 +21,7 @@ import {
   Download,
   FileText,
   Globe,
+  Gamepad2,
   Hash,
   HeadphoneOff,
   Headphones,
@@ -75,6 +77,8 @@ export interface CallStageProps {
   expanded: boolean
   compactFloating?: boolean
   floatingContext?: CallFloatingContext
+  gameFeed?: { label: string; pinned: boolean; pin: () => void; unpin: () => void; board: ReactNode; preview: ReactNode }
+  floatingDock?: HTMLElement | null
   dockContainer?: HTMLElement | null
   onToggleExpand: () => void
   onPlaySound?: (cue: SoundCue) => void
@@ -1022,6 +1026,8 @@ export function CallStage({
   compactFloating = false,
   floatingContext = 'workspace',
   dockContainer,
+  floatingDock,
+  gameFeed,
   onToggleExpand,
   onPlaySound,
   onInspectPeer,
@@ -1100,6 +1106,11 @@ export function CallStage({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [activeCall, endedTranscript, transcription])
 
+  const gamePinned = Boolean(gameFeed?.pinned)
+  useEffect(() => {
+    if (gamePinned) setPinnedVideoPubkey(null)
+  }, [gamePinned])
+
   const activeCallId = activeCall?.callId ?? null
   useEffect(() => {
     setPipCollapsed(false)
@@ -1161,6 +1172,7 @@ export function CallStage({
   const isAudioPopoverVisible = audioMenuOpen && Boolean(activeCall)
 
   // Android / PWA Back button closes CallStage overlays (LIFO: audio -> quality -> pinned -> transcript -> DM fullscreen minimize)
+  useBackHandler(Boolean(gameFeed?.pinned && !isDmCall), onToggleExpand)
   useBackHandler(isDmFullScreen, () => {
     if (activeCall) {
       setDmMinimizedCallId(activeCall.callId)
@@ -1469,8 +1481,23 @@ export function CallStage({
     }
   }
 
+  const renderGameFeed = (tile = false) => gameFeed && !gameFeed.pinned ? (
+    <button type="button" className={`ag-call-game-feed${tile ? ' is-stage-tile' : ''}`} onClick={() => {
+      setPinnedVideoPubkey(null)
+      gameFeed.pin()
+    }} aria-label={`Pin ${gameFeed.label} to stage`}>
+      {tile && gameFeed.preview}
+      <span className="ag-call-game-feed-label"><Gamepad2 size={18} />{gameFeed.label}<Pin size={13} /></span>
+    </button>
+  ) : null
+
+  const toggleGameStageSize = () => {
+    if (expanded && activeCall.mode === 'dm') setDmMinimizedCallId(activeCall.callId)
+    onToggleExpand()
+  }
+
   // Dedicated Native 1-on-1 Direct Call Experience for People / DMs (strictly self + single remotePeer)
-  if (activeCall.mode === 'dm') {
+  if (activeCall.mode === 'dm' && !(gameFeed && expanded)) {
     const selfParticipant = activeCall.participants.find((p) => p.isSelf) ?? null
     const remotePeer = activeCall.participants.find((p) => !p.isSelf) ?? null
     const dmPeerPubkey = remotePeer?.pubkey ?? activeCall.peerPubkey ?? ''
@@ -1518,7 +1545,7 @@ export function CallStage({
     const handleExpandDm = () => {
       onPlaySound?.('click')
       setDmMinimizedCallId(null)
-      if (compactFloating && !expanded) {
+      if ((compactFloating || gameFeed) && !expanded) {
         onToggleExpand()
       }
     }
@@ -1681,7 +1708,7 @@ export function CallStage({
                     </div>
                   </div>
                 </div>,
-                document.body,
+                floatingDock ?? document.body,
               )}
           </>
         )
@@ -1798,7 +1825,7 @@ export function CallStage({
                   </button>
                 </div>
               </div>,
-              document.body,
+              floatingDock ?? document.body,
             )}
         </>
       )
@@ -1862,6 +1889,7 @@ export function CallStage({
                 </div>
 
                 <div className="ag-dm-call-top-right">
+                  {renderGameFeed()}
                   {/* Audio Output / Mic Selector */}
                   <div
                     className={`ag-dm-call-audio-wrap ${isAudioPopoverVisible ? 'open' : ''}`}
@@ -2456,7 +2484,7 @@ export function CallStage({
                   </div>
                 </div>
               </div>,
-              document.body,
+              floatingDock ?? document.body,
             )}
         </>
       )
@@ -2559,7 +2587,7 @@ export function CallStage({
                 </button>
               </div>
             </div>,
-            document.body,
+            floatingDock ?? document.body,
           )}
       </>
     )
@@ -2618,7 +2646,8 @@ export function CallStage({
 
   const togglePinVideo = (pubkey: string) => {
     onPlaySound?.('click')
-    setPinnedVideoPubkey((prev) => (prev === pubkey ? null : pubkey))
+    if (gameFeed?.pinned) gameFeed.unpin()
+    setPinnedVideoPubkey((prev) => (prev === pubkey && !gameFeed?.pinned ? null : pubkey))
   }
 
   const openParticipantContextMenu = (e: ReactMouseEvent, participant: CallParticipant) => {
@@ -2971,7 +3000,7 @@ export function CallStage({
             className="ag-icon-btn-sm"
             onClick={() => {
               onPlaySound?.('click')
-              onToggleExpand()
+              toggleGameStageSize()
             }}
             title={expanded ? 'Minimize call stage (Esc)' : 'Full-screen spotlight'}
             aria-label={expanded ? 'Minimize call stage' : 'Expand call stage'}
@@ -2999,7 +3028,28 @@ export function CallStage({
           )}
 
           {/* Video-Priority Stage / Solo Pinned Video / Responsive 1–6 Grid */}
-          {pinnedStageItem ? (
+          {pinnedStageItem && renderGameFeed()}
+          {gameFeed?.pinned ? (
+            <div className="ag-call-game-layout">
+              <div className="ag-call-game-surface">{gameFeed.board}</div>
+              {stageParticipants.length > 0 && (
+                <div className="ag-call-game-filmstrip" aria-label="Call participants">
+                  {stageParticipants.map((item) => (
+                    <div key={item.participant.pubkey} className="ag-call-game-camera">
+                      {renderParticipantTile(item, { compact: true })}
+                      {item.liveVideo && (
+                        <button type="button" className="ag-call-game-camera-pin"
+                          aria-label={`Pin ${item.participant.displayHandle} video to stage`}
+                          onClick={() => togglePinVideo(item.participant.pubkey)}>
+                          <Pin size={13} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : pinnedStageItem ? (
             <div className="ag-call-stage-pinned">
               {renderParticipantTile(pinnedStageItem, { compact: false, isPinned: true })}
             </div>
@@ -3007,8 +3057,9 @@ export function CallStage({
             <div className="ag-call-stage-split">
               <div
                 className="ag-call-video-stage"
-                data-video-count={Math.min(6, videoStageItems.length)}
+                data-video-count={Math.min(6, videoStageItems.length + Number(Boolean(gameFeed)))}
               >
+                {renderGameFeed(true)}
                 {videoStageItems.map((item) =>
                   renderParticipantTile(item, {
                     compact: !expanded && videoStageItems.length > 2,
@@ -3022,7 +3073,8 @@ export function CallStage({
               </div>
             </div>
           ) : (
-            <div className="ag-call-grid" data-count={count}>
+            <div className="ag-call-grid" data-count={Math.min(6, count + Number(Boolean(gameFeed)))}>
+              {renderGameFeed(true)}
               {stageParticipants.map((item) => renderParticipantTile(item))}
             </div>
           )}
@@ -3557,7 +3609,7 @@ export function CallStage({
           createPortal(
             <div
               className="ag-call-modal-backdrop"
-              onClick={onToggleExpand}
+              onClick={toggleGameStageSize}
               role="presentation"
             >
               <div

@@ -3639,14 +3639,23 @@ button.ag-call-audio-opt:hover:not(:disabled) {
   display: contents;
 }
 
-.ag-call-mini-pill,
-.ag-call-mini-pip {
+.ag-activity-dock {
   position: fixed;
+  z-index: 68;
   right: 16px;
   bottom: 18px;
-  top: auto;
-  left: auto;
-  z-index: 68;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  max-width: calc(100vw - 20px);
+  pointer-events: none;
+}
+.ag-activity-dock > * { pointer-events: auto; }
+.ag-activity-dock:empty { display: none; }
+
+.ag-call-mini-pill,
+.ag-call-mini-pip {
   background-color: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
   backdrop-filter: blur(20px) saturate(150%);
   -webkit-backdrop-filter: blur(20px) saturate(150%);
@@ -3663,20 +3672,17 @@ button.ag-call-audio-opt:hover:not(:disabled) {
   animation: ag-scale-in var(--dur-fast) var(--ease-spring);
 }
 
-.ag-call-mini-pill[data-floating-context='globe'],
-.ag-call-mini-pip[data-floating-context='globe'] {
+.ag-activity-dock[data-floating-context='globe'] {
   right: 16px;
   bottom: 16px;
 }
 
-.ag-call-mini-pill[data-floating-context='chat'],
-.ag-call-mini-pip[data-floating-context='chat'] {
+.ag-activity-dock[data-floating-context='chat'] {
   right: 16px;
   bottom: 82px;
 }
 
-.ag-call-mini-pill[data-floating-context='workspace'],
-.ag-call-mini-pip[data-floating-context='workspace'] {
+.ag-activity-dock[data-floating-context='workspace'] {
   right: 16px;
   bottom: 18px;
 }
@@ -4078,8 +4084,7 @@ button.ag-call-audio-opt:hover:not(:disabled) {
 
 /* Medium Desktop (868px–1219px): Lift floating call above Bitchat Globe bottom card */
 @media (min-width: 868px) and (max-width: 1219px) {
-  .ag-call-mini-pill[data-floating-context='globe'],
-  .ag-call-mini-pip[data-floating-context='globe'] {
+  .ag-activity-dock[data-floating-context='globe'] {
     right: 16px;
     bottom: 96px;
   }
@@ -4087,22 +4092,20 @@ button.ag-call-audio-opt:hover:not(:disabled) {
 
 /* Mobile (<= 867px): Top-left below Globe top bar (clearing FAB stack & bottom card), top-right elsewhere */
 @media (max-width: 867px) {
-  .ag-call-mini-pill[data-floating-context='globe'],
-  .ag-call-mini-pip[data-floating-context='globe'] {
+  .ag-activity-dock[data-floating-context='globe'] {
     top: calc(var(--ag-vvt, 0px) + 58px + env(safe-area-inset-top, 0px));
     left: 10px;
     right: auto;
     bottom: auto;
+    align-items: flex-start;
   }
 
   .ag-call-mini-pill[data-floating-context='globe'] {
     max-width: calc(100vw - 68px);
   }
 
-  .ag-call-mini-pill[data-floating-context='chat'],
-  .ag-call-mini-pip[data-floating-context='chat'],
-  .ag-call-mini-pill[data-floating-context='workspace'],
-  .ag-call-mini-pip[data-floating-context='workspace'] {
+  .ag-activity-dock[data-floating-context='chat'],
+  .ag-activity-dock[data-floating-context='workspace'] {
     top: calc(var(--ag-vvt, 0px) + 56px + env(safe-area-inset-top, 0px));
     right: 10px;
     left: auto;

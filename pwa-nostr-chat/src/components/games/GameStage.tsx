@@ -6,25 +6,17 @@ import {
   Gamepad2,
   Minimize2,
   Phone,
+  PinOff,
   Spade,
   X,
 } from 'lucide-react'
 import type { AgnostrEngine } from '../../types/protocol.ts'
 import type {
-  ActiveChessSession,
   ActiveGameSession,
-  ActiveGoSession,
-  ActivePokerSession,
   GameEngine,
   GameKind,
 } from '../../types/games.ts'
-import {
-  createInitialChessState,
-  deserializeChessState,
-  type ChessState,
-} from '../../lib/games/chessEngine.ts'
-import { createInitialGoState, type GoState } from '../../lib/games/goEngine.ts'
-import type { PokerPublicState } from '../../lib/games/pokerEngine.ts'
+import { parseChessSessionState, parseGoSessionState, parsePokerSessionState } from './gameStageState'
 import { formatBitchatChannelLabel } from '../../lib/bitchatChannel.ts'
 import { useBackHandler } from '../../hooks/useBackNavigation.ts'
 import type { SoundCue } from '../../utils/sound.ts'
@@ -35,45 +27,14 @@ import { PokerTableView } from './PokerTableView.tsx'
 export interface GameStageProps {
   engine: AgnostrEngine
   games: GameEngine
-  onFocusCall?: () => void
+  embeddedSession?: ActiveGameSession
+  floatingDock?: HTMLElement | null
+  onUnpin?: () => void
   onPlaySound?: (cue: SoundCue) => void
 }
 
 function formatScoreNum(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, '')
-}
-
-function parseChessSessionState(session: ActiveChessSession): ChessState {
-  return deserializeChessState(session.stateJson) ?? createInitialChessState()
-}
-
-function parseGoSessionState(session: ActiveGoSession): GoState {
-  try {
-    const parsed = JSON.parse(session.stateJson) as GoState
-    if (
-      parsed &&
-      Array.isArray(parsed.board) &&
-      parsed.config &&
-      typeof parsed.config.boardSize === 'number'
-    ) {
-      return parsed
-    }
-  } catch {
-    // fallback to clean initial board matching goConfig
-  }
-  return createInitialGoState(session.goConfig)
-}
-
-function parsePokerSessionState(session: ActivePokerSession): PokerPublicState | null {
-  try {
-    const parsed = JSON.parse(session.publicStateJson) as PokerPublicState
-    if (parsed && Array.isArray(parsed.seats) && typeof parsed.tableId === 'string') {
-      return parsed
-    }
-  } catch {
-    // ignore malformed state
-  }
-  return null
 }
 
 function renderGameIcon(kind: GameKind, size = 15) {
@@ -235,6 +196,9 @@ function computeSessionMeta(
 export function GameStage({
   engine,
   games,
+  embeddedSession,
+  floatingDock,
+  onUnpin,
   onPlaySound,
 }: GameStageProps) {
   const [confirmClose, setConfirmClose] = useState(false)
@@ -244,16 +208,17 @@ export function GameStage({
     [games.activeGamesByScope],
   )
 
-  const focusedSession: ActiveGameSession | null = games.focusedScopeKey
+  const embedded = Boolean(embeddedSession)
+  const focusedSession: ActiveGameSession | null = embeddedSession ?? (games.focusedScopeKey
     ? (games.activeGamesByScope[games.focusedScopeKey] ?? null)
-    : null
+    : null)
 
-  const showModal = Boolean(focusedSession && !games.minimized)
+  const showModal = Boolean(focusedSession && (embedded || !games.minimized))
   const activeCall = engine.calls.activeCall
 
   // Prioritize a session where it's your turn when minimized across multiple active scopes
-  const pillSession = useMemo<ActiveGameSession | null>(() => {
-    if (showModal || allSessions.length === 0) return null
+  const pillSessions = useMemo(() => {
+    if (showModal) return []
     const ranked = allSessions.map((s) => ({
       session: s,
       meta: computeSessionMeta(s, engine),
@@ -264,7 +229,7 @@ export function GameStage({
       if (b.session.scopeKey === games.focusedScopeKey) return 1
       return b.session.updatedAtMs - a.session.updatedAtMs
     })
-    return ranked[0]?.session ?? null
+    return ranked
   }, [showModal, allSessions, engine, games.focusedScopeKey])
 
   // Reset close confirmation when switching/minimizing sessions
@@ -313,12 +278,12 @@ export function GameStage({
   ])
 
   // Android / PWA Back button & Escape minimize the open game smoothly (never destroying the game)
-  useBackHandler(showModal, () => {
+  useBackHandler(showModal && !embedded, () => {
     games.setMinimized(true)
   })
 
   useEffect(() => {
-    if (!showModal) return
+    if (!showModal || embedded) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
@@ -328,7 +293,7 @@ export function GameStage({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [showModal, games, onPlaySound])
+  }, [showModal, embedded, games, onPlaySound])
 
   if (typeof document === 'undefined') return null
 
@@ -336,7 +301,7 @@ export function GameStage({
     engine.identity.nickname.trim() || engine.identity.activeDisplayHandle || 'You'
   const myAvatarUrl = myMasterPubkey ? engine.getProfilePicture(myMasterPubkey) : undefined
 
-  // 1. Sleek Portaled Game Stage Modal (z-index: 62 — strictly below floating Call Pill/PiP at z-index: 68!)
+  // The same local controls render on the call stage or in the standalone game.
   if (showModal && focusedSession) {
     const meta = computeSessionMeta(focusedSession, engine)
 
@@ -486,180 +451,178 @@ export function GameStage({
       )
     }
 
-    return createPortal(
-      <div
-        className="ag-game-modal-backdrop"
-        role="presentation"
-        onClick={handleMinimize}
+    const board = (
+      <section
+        className={`ag-game-modal-frame is-${focusedSession.kind}${embedded ? ' ag-game-embedded' : ''}`}
+        role={embedded ? 'region' : 'dialog'}
+        aria-modal={embedded ? undefined : true}
+        aria-label={`${meta.title} · ${meta.scopeLabel}`}
+        onClick={(e) => e.stopPropagation()}
       >
-        <section
-          className={`ag-game-modal-frame is-${focusedSession.kind}`}
-          role="dialog"
-          aria-modal="true"
-          aria-label={`${meta.title} · ${meta.scopeLabel}`}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <header className="ag-game-stage-head">
-            <div className="ag-game-stage-head-left">
-              <span className="ag-game-stage-icon" aria-hidden="true">
-                {renderGameIcon(focusedSession.kind, 14)}
-              </span>
-              <span className="ag-game-stage-title truncate">{meta.title}</span>
+        <header className="ag-game-stage-head">
+          <div className="ag-game-stage-head-left">
+            <span className="ag-game-stage-icon" aria-hidden="true">
+              {renderGameIcon(focusedSession.kind, 14)}
+            </span>
+            <span className="ag-game-stage-title truncate">{meta.title}</span>
+            <span
+              className="ag-game-scope-pill ag-game-stage-sub mono truncate"
+              title={meta.subtitle}
+            >
+              {meta.subtitle}
+            </span>
+          </div>
+
+          <div className="ag-game-stage-head-actions">
+            {meta.headerStatus && (
               <span
-                className="ag-game-scope-pill ag-game-stage-sub mono truncate"
-                title={meta.subtitle}
+                className={`ag-game-status-pill${meta.isMyTurn ? ' is-my-turn' : ''}${
+                  meta.isFinished ? ' is-finished' : ''
+                }${meta.isWaiting ? ' is-waiting' : ''}`}
               >
-                {meta.subtitle}
+                {meta.isMyTurn && <span className="ag-game-mini-turn-dot" aria-hidden="true" />}
+                <span>{meta.headerStatus}</span>
               </span>
-            </div>
+            )}
 
-            <div className="ag-game-stage-head-actions">
-              {meta.headerStatus && (
-                <span
-                  className={`ag-game-status-pill${meta.isMyTurn ? ' is-my-turn' : ''}${
-                    meta.isFinished ? ' is-finished' : ''
-                  }${meta.isWaiting ? ' is-waiting' : ''}`}
-                >
-                  {meta.isMyTurn && <span className="ag-game-mini-turn-dot" aria-hidden="true" />}
-                  <span>{meta.headerStatus}</span>
-                </span>
-              )}
-
-              {!activeCall && (
-                <button
-                  type="button"
-                  className="ag-game-head-btn icon-only"
-                  onClick={handleStartQuickVoiceCall}
-                  title={`Start voice call in ${meta.scopeLabel}`}
-                  aria-label={`Start voice call in ${meta.scopeLabel}`}
-                >
-                  <Phone size={14} />
-                </button>
-              )}
-
+            {!activeCall && (
               <button
                 type="button"
                 className="ag-game-head-btn icon-only"
-                onClick={handleMinimize}
-                title="Minimize game (keep playing in background)"
-                aria-label="Minimize game"
+                onClick={handleStartQuickVoiceCall}
+                title={`Start voice call in ${meta.scopeLabel}`}
+                aria-label={`Start voice call in ${meta.scopeLabel}`}
               >
-                <Minimize2 size={14} />
+                <Phone size={14} />
               </button>
+            )}
 
-              {confirmClose && !meta.isFinished ? (
-                <div className="ag-game-close-confirm">
-                  <button
-                    type="button"
-                    className="ag-game-head-btn is-danger"
-                    onClick={handleCloseImmediate}
-                  >
-                    {focusedSession.kind === 'poker' ? 'Leave table' : 'End'}
-                  </button>
-                  <button
-                    type="button"
-                    className="ag-game-head-btn"
-                    onClick={() => setConfirmClose(false)}
-                  >
-                    Keep
-                  </button>
-                </div>
-              ) : (
+            <button
+              type="button"
+              className="ag-game-head-btn icon-only"
+              onClick={embedded ? onUnpin : handleMinimize}
+              title={embedded ? "Unpin game and show call feeds" : "Minimize game"}
+              aria-label={embedded ? "Unpin game" : "Minimize game"}
+            >
+              {embedded ? <PinOff size={14} /> : <Minimize2 size={14} />}
+            </button>
+
+            {confirmClose && !meta.isFinished ? (
+              <div className="ag-game-close-confirm">
                 <button
                   type="button"
-                  className="ag-game-head-btn icon-only"
-                  onClick={() => {
-                    if (meta.isFinished) {
-                      handleCloseImmediate()
-                    } else {
-                      onPlaySound?.('click')
-                      setConfirmClose(true)
-                    }
-                  }}
-                  title={
-                    meta.isFinished
-                      ? 'Close game'
-                      : focusedSession.kind === 'poker'
-                        ? 'Leave table'
-                        : 'End game'
-                  }
-                  aria-label={meta.isFinished ? 'Close game' : focusedSession.kind === 'poker' ? 'Leave table' : 'End game'}
+                  className="ag-game-head-btn is-danger"
+                  onClick={handleCloseImmediate}
                 >
-                  <X size={15} />
+                  {focusedSession.kind === 'poker' ? 'Leave table' : 'End'}
                 </button>
-              )}
-            </div>
-          </header>
+                <button
+                  type="button"
+                  className="ag-game-head-btn"
+                  onClick={() => setConfirmClose(false)}
+                >
+                  Keep
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="ag-game-head-btn icon-only"
+                onClick={() => {
+                  if (meta.isFinished) {
+                    handleCloseImmediate()
+                  } else {
+                    onPlaySound?.('click')
+                    setConfirmClose(true)
+                  }
+                }}
+                title={
+                  meta.isFinished
+                    ? 'Close game'
+                    : focusedSession.kind === 'poker'
+                      ? 'Leave table'
+                      : 'End game'
+                }
+                aria-label={meta.isFinished ? 'Close game' : focusedSession.kind === 'poker' ? 'Leave table' : 'End game'}
+              >
+                <X size={15} />
+              </button>
+            )}
+          </div>
+        </header>
 
-          <div className="ag-game-stage-body">{boardBody}</div>
-        </section>
+        <div className="ag-game-stage-body">{boardBody}</div>
+      </section>
+    )
+    if (embedded) return board
+    return createPortal(
+      <div className="ag-game-modal-backdrop" role="presentation" onClick={handleMinimize}>
+        {board}
       </div>,
       document.body,
     )
   }
 
-  // 2. Minimized Floating Game Pill (bottom-left at z-index: 66 — opposite bottom-right Call Pill!)
-  if (pillSession) {
-    const meta = computeSessionMeta(pillSession, engine)
-    const extraCount = allSessions.length - 1
-
+  if (floatingDock && pillSessions.length) {
     return createPortal(
-      <div
-        className={`ag-game-mini-pill${meta.isMyTurn ? ' is-my-turn' : ''}${
-          meta.isFinished ? ' is-finished' : ''
-        }`}
-        role="region"
-        aria-label={`Minimized game: ${meta.title} (${meta.scopeLabel})`}
-      >
-        <button
-          type="button"
-          className="ag-game-mini-main"
-          onClick={() => {
-            onPlaySound?.('click')
-            games.setFocusedScopeKey(pillSession.scopeKey)
-            games.setMinimized(false)
-          }}
-          title={`Resume ${meta.title} · ${meta.scopeLabel}`}
-        >
-          <span className="ag-game-mini-icon" aria-hidden="true">
-            {renderGameIcon(pillSession.kind, 14)}
-          </span>
-          <span className="ag-game-mini-copy">
-            <span className="ag-game-mini-title-row">
-              <span className="ag-game-mini-title truncate">{meta.title}</span>
-              <span className="ag-game-mini-scope mono truncate">{meta.scopeLabel}</span>
-            </span>
-            <span className="ag-game-mini-meta">
-              {meta.isMyTurn && <span className="ag-game-mini-turn-dot" aria-hidden="true" />}
-              <span>{meta.isMyTurn ? 'Your turn' : meta.statusLabel}</span>
-              {extraCount > 0 && (
-                <span className="ag-game-mini-more mono">+{extraCount}</span>
-              )}
-            </span>
-          </span>
-        </button>
-
-        {meta.isFinished && (
-          <button
-            type="button"
-            className="ag-game-mini-dismiss"
-            onClick={(e) => {
-              e.stopPropagation()
-              onPlaySound?.('click')
-              if (pillSession.kind === 'poker') {
-                void games.leavePokerTable(pillSession.scopeKey)
-              } else {
-                void games.endGame(pillSession.scopeKey)
-              }
-            }}
-            title="Dismiss finished game"
-            aria-label="Dismiss finished game"
+      <div className="ag-game-dock-list" aria-label="Minimized games" role="region">
+        {pillSessions.map(({ session: pillSession, meta }) => (
+          <div
+            key={pillSession.scopeKey}
+            className={`ag-game-mini-pill${meta.isMyTurn ? ' is-my-turn' : ''}${
+              meta.isFinished ? ' is-finished' : ''
+            }`}
+            role="region"
+            aria-label={`Minimized game: ${meta.title} (${meta.scopeLabel})`}
           >
-            <X size={13} />
-          </button>
-        )}
+            <button
+              type="button"
+              className="ag-game-mini-main"
+              onClick={() => {
+                onPlaySound?.('click')
+                games.setFocusedScopeKey(pillSession.scopeKey)
+                games.setMinimized(false)
+              }}
+              title={`Resume ${meta.title} · ${meta.scopeLabel}`}
+            >
+              <span className="ag-game-mini-icon" aria-hidden="true">
+                {renderGameIcon(pillSession.kind, 14)}
+              </span>
+              <span className="ag-game-mini-copy">
+                <span className="ag-game-mini-title-row">
+                  <span className="ag-game-mini-title truncate">{meta.title}</span>
+                  <span className="ag-game-mini-scope mono truncate">{meta.scopeLabel}</span>
+                </span>
+                <span className="ag-game-mini-meta">
+                  {meta.isMyTurn && <span className="ag-game-mini-turn-dot" aria-hidden="true" />}
+                  <span>{meta.isMyTurn ? 'Your turn' : meta.statusLabel}</span>
+                </span>
+              </span>
+            </button>
+
+            {meta.isFinished && (
+              <button
+                type="button"
+                className="ag-game-mini-dismiss"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onPlaySound?.('click')
+                  if (pillSession.kind === 'poker') {
+                    void games.leavePokerTable(pillSession.scopeKey)
+                  } else {
+                    void games.endGame(pillSession.scopeKey)
+                  }
+                }}
+                title="Dismiss finished game"
+                aria-label="Dismiss finished game"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+        ))}
       </div>,
-      document.body,
+      floatingDock,
     )
   }
 

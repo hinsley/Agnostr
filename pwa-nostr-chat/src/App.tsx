@@ -26,6 +26,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react'
+import { ActivityStages } from './components/ActivityStages'
 import { useAgnostrEngine } from './hooks/useAgnostrEngine'
 import { useBackHandler, useBackNavigation } from './hooks/useBackNavigation'
 import { useMobileSwipeDrawers } from './hooks/useMobileSwipeDrawers'
@@ -94,8 +95,6 @@ const AmailView = lazy(() => import('./components/AmailView'))
 const WalletModal = lazy(() => import('./components/WalletModal'))
 const SettingsModal = lazy(() => import('./components/SettingsModal'))
 const ExpandedRadarModal = lazy(() => import('./components/ExpandedRadarModal'))
-const CallStage = lazy(() => import('./components/CallStage'))
-const GameStage = lazy(() => import('./components/games/GameStage'))
 const GameSetupModal = lazy(() =>
   import('./components/games/GameSetupModal').then((m) => ({
     default: m.GameSetupModal,
@@ -3601,35 +3600,11 @@ export function App() {
         </div>
       )}
 
-      {/* Single Persistent Active P2P Voice & Video Call Stage (docks in <main>, portals fixed pill/PiP/modal to body across all workspaces) */}
-      {(activeCall || engine.transcription.endedCallTranscript) && (
-        <Suspense fallback={null}>
-          <CallStage
-            calls={engine.calls}
-            engine={engine}
-            expanded={callExpanded}
-            compactFloating={callCompactFloating}
-            floatingContext={callFloatingContext}
-            dockContainer={inChatRoomMain ? callDockSlotEl : null}
-            onToggleExpand={() => setCallExpanded((v) => !v)}
-            onInspectPeer={setInspectedPeer}
-            onOpenDm={handleOpenDm}
-            onReturnToCall={handleReturnToActiveCall}
-            onPlaySound={playSound}
-          />
-        </Suspense>
-      )}
-
-      {/* Lazy-Loaded Real-Time Multiplayer Games Stage (Chess, Go, Texas Hold'em Poker — coexists seamlessly under floating Calls!) */}
-      {hasAnyActiveGame && (
-        <Suspense fallback={null}>
-          <GameStage
-            engine={engine}
-            games={engine.games}
-            onFocusCall={() => setCallExpanded(true)}
-            onPlaySound={playSound}
-          />
-        </Suspense>
+      {(activeCall || engine.transcription.endedCallTranscript || hasAnyActiveGame) && (
+        <ActivityStages engine={engine} expanded={callExpanded} onSetExpanded={setCallExpanded}
+          compactFloating={callCompactFloating} floatingContext={callFloatingContext}
+          dockContainer={inChatRoomMain ? callDockSlotEl : null} onInspectPeer={setInspectedPeer}
+          onOpenDm={handleOpenDm} onReturnToCall={handleReturnToActiveCall} onPlaySound={playSound} />
       )}
 
       {/* Lazy-Loaded Context-Scoped Game Setup Launcher Modal */}
