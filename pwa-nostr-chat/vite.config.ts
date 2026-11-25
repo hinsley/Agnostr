@@ -186,7 +186,8 @@ export default defineConfig({
         ],
       },
       injectManifest: {
-        globPatterns: ['**/*.{js,css,html,svg,png,webmanifest,woff2}'],
+        // Only the shared preview is part of the offline install, never the detail catalog.
+        globPatterns: ['**/*.{js,css,html,svg,png,webmanifest,woff2}', '**/solar-overview-*.webp'],
         globIgnores: [
           '**/transformers.web-*.js',
           '**/parakeet-*.js',

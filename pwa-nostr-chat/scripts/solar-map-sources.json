@@ -1,0 +1,102 @@
+{
+  "mercury": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_mercury.jpg",
+    "sha256": "5a5c80607f643496bac9a631e71957def35ed788895f18b678ac849c2b38e48a"
+  },
+  "venus": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_venus_surface.jpg",
+    "sha256": "dbe5db1c794a8ab4cbf7dd6bf193540c400fc833ce1e6cc399318aa68026278b"
+  },
+  "earth": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_earth_daymap.jpg",
+    "sha256": "767ee1dc6eb3802699bfccf6f264880f8acd0b80de3191cd24984fe279b07b7c"
+  },
+  "moon": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_moon.jpg",
+    "sha256": "2764ba6535ea0481a062846ee033cc7a909dae05b31a8fd13f3e98f3a7fd92bd"
+  },
+  "mars": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_mars.jpg",
+    "sha256": "2d187f3e77a98eaa8cea5f4cc722f633c122ef170b9e94ace6b5fb6cbc3f8e01"
+  },
+  "phobos": {
+    "url": "https://maps.jpl.nasa.gov/tmaps/pix/mar1kuu2.jpg",
+    "sha256": "84eb21c08626a0558d1e88ccb666bd1e914606146423f9ebcf6c09953d7543af"
+  },
+  "deimos": {
+    "url": "https://maps.jpl.nasa.gov/tmaps/pix/mar2kuu2.jpg",
+    "sha256": "e8902c5b34e634c5146e5d8d2bf352bb5f45181c715ed15644edb5f009826ed6"
+  },
+  "jupiter": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_jupiter.jpg",
+    "sha256": "b0f04d005350252636b0e3396fc592548cbd9e9126b269d32d5c6abd4b0e4f2b"
+  },
+  "io": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/i/Io_1_3643.glb",
+    "sha256": "118a6bf7eda476ea6b454039f621778189141a82acb3ad0aaa762f1771c5a723"
+  },
+  "europa": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/e/Europa_1_3138.glb",
+    "sha256": "fe88cbe326574a658c9d3b0885d1a38deea3ebfb354772eb3b95fe0f3f3d542c"
+  },
+  "ganymede": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/g/Ganymede_1_5268.glb",
+    "sha256": "367bc128197bf1d25ef5af5269f2d1902aababaae167c3c8d6529443b0100d6f"
+  },
+  "callisto": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/c/Callisto_1_4821.glb",
+    "sha256": "0bdbd5600a4be4bef4bd85e53f6226f49e73a66c85310219402627e59457c303"
+  },
+  "saturn": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_saturn.jpg",
+    "sha256": "54a900ca9bf7ab62e70f862852759abdf342e6d6436a95a2fe9ebdb6bcd3bbac"
+  },
+  "enceladus": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/e/Enceladus_1_504.glb",
+    "sha256": "7548234bae15047d6c1af6bec4f348748b1acae7d4e7bfbe50e5bb3dda75506f"
+  },
+  "rhea": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/r/Rhea_1_1529.glb",
+    "sha256": "9cb351462fdc149303de79f9b8e33fb3deb9ce60102a190876a7ad280f307d57"
+  },
+  "titan": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/photojournal/pia/pia19/pia19658/PIA19658.jpg",
+    "sha256": "e918a4a18647dde41ede739c50427b28fcbb1872ba570ff3c637593852d7396a"
+  },
+  "uranus": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_uranus.jpg",
+    "sha256": "d15239d46f82d3ea13d2b260b5b29b2a382f42f2916dae0694d0387b1204a09d"
+  },
+  "titania": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/t/Titania_1_1577.glb",
+    "sha256": "08556622082b283f2f52c9214636c22acf27300889374dd37197f11a4448324c"
+  },
+  "oberon": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/o/Oberon_1_1523.glb",
+    "sha256": "7b42c417e523db2a22c744cd471587c26f07581564dae7c3b0c20986eea93add"
+  },
+  "neptune": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_neptune.jpg",
+    "sha256": "cb42ea82709741d28b0af44d8b283cbc6dbd0c521a7f0e1e1e010ade00977df6"
+  },
+  "triton": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/t/Triton_1_2707.glb",
+    "sha256": "a25df7ee7fe8679e3da8cca7f1a09ec7241ad5e0c7ad97a39f057b8c1a0043ce"
+  },
+  "pluto": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/p/l/Pluto_1_2374.glb",
+    "sha256": "9915e6874ff7e7cd64faf8ef016ea16de6c8058417c42909efa099a88f2dd25b"
+  },
+  "charon": {
+    "url": "https://science.nasa.gov/wp-content/uploads/2023/09/Charon_1_2.glb",
+    "sha256": "3677525ff10e15f3d9cd0f0152801ed27ac3c277f8aad15056fe01cba20b2dbe"
+  },
+  "venus-clouds": {
+    "url": "https://www.solarsystemscope.com/textures/download/2k_venus_atmosphere.jpg",
+    "sha256": "225012ad4911730605c4e189ca2a3bf674fce50cc48aab4102b936b47d6991ac"
+  },
+  "titan-haze": {
+    "url": "https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/t/Titan_1_5150.glb",
+    "sha256": "9e92e30902a26130895bf2558172d7f36186eb4a51368a60bc3ec1d01134fde4"
+  }
+}

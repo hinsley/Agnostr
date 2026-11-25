@@ -64,6 +64,16 @@ registerRoute(
   new NavigationRoute(createHandlerBoundToURL(`${BASE_PATH}index.html`))
 )
 
+// Cache only detail actually visited (content-hashed, same-origin files). The
+// precached overview keeps every world usable offline even on its first visit.
+registerRoute(
+  ({ sameOrigin, url }) => sameOrigin && /\/assets\/surface-[a-z]+-(512|1024)-[\w-]+\.webp$/.test(url.pathname),
+  new CacheFirst({
+    cacheName: 'solar-surface-details-v1',
+    plugins: [new ExpirationPlugin({ maxEntries: 8, maxAgeSeconds: 30 * 24 * 60 * 60 })],
+  })
+)
+
 registerRoute(
   ({ url }) => /^https:\/\/fonts\.googleapis\.com\/.*/i.test(url.href),
   new CacheFirst({

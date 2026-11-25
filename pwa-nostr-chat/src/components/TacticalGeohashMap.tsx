@@ -43,10 +43,8 @@ import {
   type GeohashableBodyId,
   type SolarSystemSnapshot,
 } from '../lib/solarSystem.ts'
-import {
-  createPlanetaryRingTexture,
-  getCelestialSurfaceTexture,
-} from '../lib/planetTextures.ts'
+import { createPlanetaryRingTexture } from '../lib/planetTextures.ts'
+import { SolarSurfaceMaps } from '../lib/solarSurfaceMaps.ts'
 
 export type PrecisionSelection = 'auto' | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
@@ -607,6 +605,9 @@ const ATMOSPHERE_FRAGMENT_SHADER = `
 
 const PLANET_FRAGMENT_SHADER = `
   uniform sampler2D uMap;
+  uniform vec4 uMapRect;
+  uniform bool uMapReady;
+  uniform vec3 uBaseColor;
   uniform vec3 uSunDir;
   uniform vec3 uAtmoColor;
   uniform float uAtmoStrength;
@@ -617,7 +618,7 @@ const PLANET_FRAGMENT_SHADER = `
   varying vec3 vWorldPos;
 
   void main() {
-    vec3 texel = texture2D(uMap, vUv).rgb;
+    vec3 texel = uMapReady ? texture2D(uMap, uMapRect.xy + vUv * uMapRect.zw).rgb : uBaseColor;
     vec3 N = normalize(vWorldNormal);
     vec3 L = normalize(uSunDir);
     vec3 V = normalize(cameraPosition - vWorldPos);
@@ -637,6 +638,7 @@ const PLANET_FRAGMENT_SHADER = `
     }
 
     gl_FragColor = vec4(color, uOpacity);
+    #include <colorspace_fragment>
   }
 `
 
@@ -2676,11 +2678,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         polygonOffsetFactor: 2,
         polygonOffsetUnits: 2,
       })
+      const surfaceMaps = new SolarSurfaceMaps(renderer.capabilities.getMaxAnisotropy())
       const planetCentralMaterial = new THREE.ShaderMaterial({
         vertexShader: EARTH_VERTEX_SHADER,
         fragmentShader: PLANET_FRAGMENT_SHADER,
         uniforms: {
-          uMap: { value: getCelestialSurfaceTexture('mars', 'hi') },
+          ...surfaceMaps.preview('earth'),
           uSunDir: { value: sunDir.clone() },
           uAtmoColor: { value: new THREE.Color('#60A5FA') },
           uAtmoStrength: { value: 0.0 },
@@ -2781,6 +2784,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const reloadBaseTiles = (kind: 'dark' | 'light') => {
         baseLoadGen += 1
         const gen = baseLoadGen
+        let tiled = false
+        void surfaceMaps.paintEarthBackdrop(baseCanvas, () => !isDisposed && gen === baseLoadGen && !tiled).then((painted) => {
+          if (painted && !isDisposed) baseTexture.needsUpdate = true
+        })
         const isLight = kind === 'light'
         paintProceduralBaseMap(baseCanvas)
         baseTexture.needsUpdate = true
@@ -2797,6 +2804,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             img.crossOrigin = 'anonymous'
             img.onload = () => {
               if (isDisposed || gen !== baseLoadGen) return
+              tiled = true
               compositeMercatorTileOntoEquirect(ctx, img, z, tx, ty, baseCanvas.width, baseCanvas.height)
               baseTexture.needsUpdate = true
             }
@@ -3052,6 +3060,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         // 1. Configure Central Focused World Surface, Atmosphere, Rings & Earth-only groups
         const isEarth = bodyId === 'earth'
         const focusedDef = SOLAR_BODIES[bodyId]
+        surfaceMaps.focus(isEarth ? null : bodyId, planetCentralMaterial.uniforms)
         if (isEarth) {
           earthMesh.material = earthMaterial
           atmosphereMesh.visible = true
@@ -3059,9 +3068,6 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           atmosphereMaterial.uniforms.uIntensity.value = 0.62
           atmosphereMaterial.uniforms.uTwilightMix.value = 0.35
         } else {
-          const hiTex = getCelestialSurfaceTexture(bodyId, 'hi')
-          hiTex.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy())
-          planetCentralMaterial.uniforms.uMap.value = hiTex
           planetCentralMaterial.uniforms.uSunDir.value.copy(sunDir)
           if (focusedDef.palette.atmosphere) {
             planetCentralMaterial.uniforms.uAtmoColor.value.set(focusedDef.palette.atmosphere)
@@ -3144,12 +3150,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           root.position.set(...bSnap.position)
 
           const sphereGeo = new THREE.SphereGeometry(bSnap.renderRadius, 32, 24)
-          const loTex = getCelestialSurfaceTexture(id, 'lo')
           const bMat = new THREE.ShaderMaterial({
             vertexShader: EARTH_VERTEX_SHADER,
             fragmentShader: PLANET_FRAGMENT_SHADER,
             uniforms: {
-              uMap: { value: loTex },
+              ...surfaceMaps.preview(id),
               uSunDir: { value: new THREE.Vector3(...bSnap.sunDir).normalize() },
               uAtmoColor: {
                 value: new THREE.Color(def.palette.atmosphere ?? def.palette.accent),
@@ -4843,6 +4848,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         earthGeo.dispose()
         earthMaterial.dispose()
         planetCentralMaterial.dispose()
+        surfaceMaps.dispose()
         baseTexture.dispose()
         atmosphereGeo.dispose()
         atmosphereMaterial.dispose()
@@ -6135,7 +6141,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
         {/* Compact Unobtrusive Attribution */}
         {!webglError && (
-          <div
+          <a
+            href={`${import.meta.env.BASE_URL}solar-map-credits.html`}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Planetary map sources, imagery credits and coverage"
             className="mono"
             style={{
               position: 'absolute',
@@ -6149,12 +6159,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               fontSize: 9,
               lineHeight: 1.3,
               opacity: 0.72,
-              pointerEvents: 'none',
+              textDecoration: 'underline',
             }}
-            aria-hidden="true"
           >
-            {activeBodyId === 'earth' ? '© Esri · OSM' : `${focusedBodyDef.name} · J2000`}
-          </div>
+            {activeBodyId === 'earth' ? '© Esri · OSM · Map credits' : `${focusedBodyDef.name} · Map credits`}
+          </a>
         )}
 
         {/* Desktop Hover Coordinate / Pin / Solar Body / Topic Asteroid Readout */}
