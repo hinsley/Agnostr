@@ -9,6 +9,7 @@ import './styles/panels.css'
 import './styles/servers.css'
 import './styles/radar.css'
 import './styles/calls.css'
+import './styles/games.css'
 import './styles/media.css'
 import App from './App.tsx'
 

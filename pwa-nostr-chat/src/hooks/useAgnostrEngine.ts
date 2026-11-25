@@ -175,6 +175,7 @@ import { revokeVoicePreviewUrl } from '../lib/voiceRecorder.ts'
 import { useAgora } from './useAgora.ts'
 import { useAmail } from './useAmail.ts'
 import { useCallEngine } from './useCallEngine.ts'
+import { useGameEngine } from './useGameEngine.ts'
 import { useCashuWallet } from './useCashuWallet.ts'
 import { useContentFilter } from './useContentFilter.ts'
 import { useDeviceSync } from './useDeviceSync.ts'
@@ -2584,6 +2585,24 @@ export function useAgnostrEngine(): AgnostrEngine {
     pushToast,
   })
 
+  const { games: gamesEngine, resetAllGames } = useGameEngine({
+    pool,
+    identityManager,
+    servers: serversEngine.joinedServers,
+    activeGeohash,
+    identityVersion,
+    blockedSet,
+    getPeerNickname: getCallPeerNickname,
+    onIncomingInvite: (invite) => {
+      const label =
+        invite.kind === 'chess'
+          ? 'Chess'
+          : `Go ${invite.goConfig?.boardSize ?? 19}×${invite.goConfig?.boardSize ?? 19}`
+      pushToast('info', `${invite.fromDisplayName} invited you to ${label}`)
+    },
+    pushToast,
+  })
+
   // Agmail — E2EE Store-and-Forward Meshnet Mail
   const notifyAmailChangedRef = useRef<() => void>(() => {})
   const handleAmailLocalChange = useCallback(() => {
@@ -2691,6 +2710,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       profileSwitchingRef.current = true
       setProfileSwitching(true)
       try {
+        resetAllGames()
         const ok = await switchToProfile(cur, tgt)
         if (!ok) {
           profileSwitchingRef.current = false
@@ -2707,7 +2727,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         )
       }
     },
-    [identityManager, pushToast]
+    [identityManager, pushToast, resetAllGames]
   )
 
   const createProfile = useCallback(
@@ -5499,6 +5519,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     void amailEngine.resetAll()
     agoraEngine.resetAll()
     resetAllCalls()
+    resetAllGames()
     pool.closeAll()
     voiceCacheRef.current?.revokeAll()
     clearProtocolCaches()
@@ -5581,6 +5602,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     clearAllDms,
     resetAllServers,
     resetAllCalls,
+    resetAllGames,
     resetAllTranscription,
     resetAllNotifications,
     contentFilterEngine,
@@ -5919,6 +5941,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     servers: serversEngine,
     calls: callsEngine,
+    games: gamesEngine,
     transcription: transcriptionEngine,
     contentFilter: contentFilterEngine,
     translator: translatorEngine,

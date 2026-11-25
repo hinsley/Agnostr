@@ -10,6 +10,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import {
+  Gamepad2,
   Loader2,
   Lock,
   MessageCircle,
@@ -19,6 +20,7 @@ import {
   Search,
   ShieldAlert,
   ShieldCheck,
+  Spade,
   Trash2,
   Video,
   WifiOff,
@@ -47,6 +49,13 @@ import {
   type ParsedShareTarget,
 } from './lib/shareLinks'
 import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
+import {
+  makeGameScopeKey,
+  type ChessSetupOptions,
+  type GameScope,
+  type GoSetupOptions,
+  type PokerSetupOptions,
+} from './types/games'
 import type { ServerMessage, ServerSummary } from './types/servers'
 import type { WalletInitialIntent, ZapTarget } from './types/wallet'
 import { bitchatAudio, type SoundCue } from './utils/sound'
@@ -84,6 +93,12 @@ const WalletModal = lazy(() => import('./components/WalletModal'))
 const SettingsModal = lazy(() => import('./components/SettingsModal'))
 const ExpandedRadarModal = lazy(() => import('./components/ExpandedRadarModal'))
 const CallStage = lazy(() => import('./components/CallStage'))
+const GameStage = lazy(() => import('./components/games/GameStage'))
+const GameSetupModal = lazy(() =>
+  import('./components/games/GameSetupModal').then((m) => ({
+    default: m.GameSetupModal,
+  }))
+)
 const RoomInfoSheet = lazy(() => import('./components/RoomInfoSheet'))
 const ServerHubModal = lazy(() => import('./components/ServerHubModal'))
 const ServerSettingsModal = lazy(() => import('./components/ServerSettingsModal'))
@@ -241,6 +256,7 @@ export function App() {
   const [installModalOpen, setInstallModalOpen] = useState(false)
   const [callExpanded, setCallExpanded] = useState(false)
   const [callDockSlotEl, setCallDockSlotEl] = useState<HTMLDivElement | null>(null)
+  const [gameSetupOpen, setGameSetupOpen] = useState(false)
   const [lightboxImage, setLightboxImage] = useState<LightboxImagePayload | null>(null)
   const [qrShareTarget, setQrShareTarget] = useState<QrShareTarget | null>(null)
   const [qrScannerOpen, setQrScannerOpen] = useState(false)
@@ -389,6 +405,47 @@ export function App() {
   const pwa = usePwa(totalUnreadBadge)
 
   const activeCall = engine.calls.activeCall
+  const currentGameScope: GameScope = isDm ? 'dm' : isServer ? 'server' : 'geo'
+  const currentGameTargetId =
+    isDm && engine.activeDmThread
+      ? engine.activeDmThread.peerPubkey
+      : isServer && activeServer
+        ? activeServer.id
+        : engine.activeGeohash
+  const currentGameTargetLabel =
+    isDm && engine.activeDmThread
+      ? engine.activeDmThread.peerDisplayHandle ||
+        engine.activeDmThread.peerNickname ||
+        shortPubkey(engine.activeDmThread.peerPubkey)
+      : isServer && activeServer
+        ? activeServer.name
+        : formatBitchatChannelLabel(engine.activeGeohash)
+  const currentGameScopeKey = currentGameTargetId
+    ? makeGameScopeKey(currentGameScope, currentGameTargetId)
+    : ''
+  const activeGameInCurrentScope = currentGameScopeKey
+    ? (engine.games.activeGamesByScope[currentGameScopeKey] ?? null)
+    : null
+  const hasActiveGameInCurrentScope = Boolean(
+    activeGameInCurrentScope && activeGameInCurrentScope.status !== 'finished'
+  )
+  const incomingGameInviteHere = currentGameScopeKey
+    ? (engine.games.incomingInvites.find((inv) => inv.scopeKey === currentGameScopeKey) ?? null)
+    : null
+  const livePokerTableHere =
+    currentGameScope !== 'dm' && currentGameScopeKey
+      ? (engine.games.roomPokerTables[currentGameScopeKey] ?? null)
+      : null
+  const showLivePokerJoinBanner = Boolean(
+    livePokerTableHere && !hasActiveGameInCurrentScope
+  )
+  const hasAnyActiveGame = Object.keys(engine.games.activeGamesByScope).length > 0
+  const isGameStageOpen = Boolean(
+    engine.games.focusedScopeKey &&
+      !engine.games.minimized &&
+      engine.games.activeGamesByScope[engine.games.focusedScopeKey]
+  )
+
   const inChatRoomMain =
     workspace === 'chat' &&
     !isBitchatGlobe &&
@@ -408,12 +465,18 @@ export function App() {
           engine.activeView.type === 'channel' &&
           (activeCall.geohash ?? '').toLowerCase() === engine.activeGeohash.toLowerCase()))
   )
-  const callCompactFloating = Boolean(activeCall && !callExpanded && !viewingActiveCallContext)
-  const callFloatingContext: 'globe' | 'chat' | 'workspace' = isBitchatGlobe
-    ? 'globe'
-    : workspace === 'chat'
-      ? 'chat'
-      : 'workspace'
+  const callCompactFloating = Boolean(
+    activeCall &&
+      !callExpanded &&
+      (!viewingActiveCallContext || !inChatRoomMain || isGameStageOpen)
+  )
+  const callFloatingContext: 'globe' | 'chat' | 'workspace' = isGameStageOpen
+    ? 'workspace'
+    : isBitchatGlobe
+      ? 'globe'
+      : workspace === 'chat'
+        ? 'chat'
+        : 'workspace'
 
   const activeGeoKey = engine.activeGeohash.toLowerCase()
   const inActiveGeoCallHere = Boolean(
@@ -429,6 +492,72 @@ export function App() {
   const activeGeoCallCount = activeGeoCallPresence.length
   const showGeoCallJoinBanner = !isDm && !isServer && !inActiveGeoCallHere && activeGeoCallCount > 0
   const isActiveGeoCallFull = activeGeoCallCount >= engine.calls.maxParticipants
+
+  // Auto-close game setup modal whenever user switches workspace, globe view, or active channel/DM/group
+  useEffect(() => {
+    setGameSetupOpen(false)
+  }, [workspace, currentGameScopeKey, isBitchatGlobe])
+
+  const handleOpenGameLauncher = useCallback(() => {
+    if (!currentGameScopeKey || !currentGameTargetId) return
+    bitchatAudio.play('click')
+    const existing = engine.games.activeGamesByScope[currentGameScopeKey]
+    if (existing && existing.status !== 'finished') {
+      engine.games.setFocusedScopeKey(currentGameScopeKey)
+      engine.games.setMinimized(false)
+      return
+    }
+    if (currentGameScope !== 'dm') {
+      const liveTable = engine.games.roomPokerTables[currentGameScopeKey]
+      if (liveTable) {
+        void engine.games.joinPokerTable(
+          currentGameScope,
+          currentGameTargetId,
+          liveTable.tableId
+        )
+        return
+      }
+    }
+    setGameSetupOpen(true)
+  }, [currentGameScope, currentGameScopeKey, currentGameTargetId, engine.games])
+
+  const handleStartChessFromModal = useCallback(
+    (opts: ChessSetupOptions) => {
+      if (currentGameScope !== 'dm' || !currentGameTargetId) return
+      bitchatAudio.play('click')
+      setGameSetupOpen(false)
+      void engine.games.startChessGame(currentGameTargetId, currentGameTargetLabel, opts)
+    },
+    [currentGameScope, currentGameTargetId, currentGameTargetLabel, engine.games]
+  )
+
+  const handleStartGoFromModal = useCallback(
+    (opts: GoSetupOptions) => {
+      if (currentGameScope !== 'dm' || !currentGameTargetId) return
+      bitchatAudio.play('click')
+      setGameSetupOpen(false)
+      void engine.games.startGoGame(currentGameTargetId, currentGameTargetLabel, opts)
+    },
+    [currentGameScope, currentGameTargetId, currentGameTargetLabel, engine.games]
+  )
+
+  const handleStartPokerFromModal = useCallback(
+    (opts: PokerSetupOptions) => {
+      if (currentGameScope === 'dm' || !currentGameTargetId) return
+      bitchatAudio.play('click')
+      setGameSetupOpen(false)
+      void engine.games.createPokerTable(currentGameScope, currentGameTargetId, opts)
+    },
+    [currentGameScope, currentGameTargetId, engine.games]
+  )
+
+  const handleResumeExistingGame = useCallback(() => {
+    if (!currentGameScopeKey) return
+    bitchatAudio.play('click')
+    setGameSetupOpen(false)
+    engine.games.setFocusedScopeKey(currentGameScopeKey)
+    engine.games.setMinimized(false)
+  }, [currentGameScopeKey, engine.games])
 
   const handleReturnToActiveCall = useCallback(() => {
     if (!activeCall) return
@@ -779,6 +908,7 @@ export function App() {
       setRadarExpanded(false)
       setInstallModalOpen(false)
       setCallExpanded(false)
+      setGameSetupOpen(false)
       setLightboxImage(null)
       setQrShareTarget(null)
       setQrScannerOpen(false)
@@ -920,6 +1050,8 @@ export function App() {
           setInstallModalOpen(false)
         } else if (callExpanded) {
           setCallExpanded(false)
+        } else if (gameSetupOpen) {
+          setGameSetupOpen(false)
         } else if (inspectedPeer) {
           setInspectedPeer(null)
         } else if (mobileUserListOpen) {
@@ -951,6 +1083,7 @@ export function App() {
     radarExpanded,
     installModalOpen,
     callExpanded,
+    gameSetupOpen,
     inspectedPeer,
     mobileUserListOpen,
     roomInfoOpen,
@@ -1378,6 +1511,10 @@ export function App() {
       closeServerHub()
       return true
     }
+    if (gameSetupOpen) {
+      setGameSetupOpen(false)
+      return true
+    }
     if (installModalOpen) {
       setInstallModalOpen(false)
       return true
@@ -1448,6 +1585,7 @@ export function App() {
     serverSettingsState.serverId,
     serverHubState.open,
     closeServerHub,
+    gameSetupOpen,
     installModalOpen,
     radarExpanded,
     settingsState.open,
@@ -1525,6 +1663,7 @@ export function App() {
     Boolean(inspectedPeer) ||
     Boolean(serverSettingsState.serverId) ||
     serverHubState.open ||
+    gameSetupOpen ||
     installModalOpen ||
     radarExpanded ||
     settingsState.open ||
@@ -2636,6 +2775,7 @@ export function App() {
                     }}
                     onExpandRadar={handleExpandRadar}
                     onFocusActiveCall={() => setCallExpanded(true)}
+                    onOpenGameLauncher={handleOpenGameLauncher}
                     onOpenZap={handleOpenZap}
                   />
 
@@ -2724,6 +2864,106 @@ export function App() {
                             <span>Video</span>
                           </button>
                         )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Incoming 1-on-1 DM Chess / Go Challenge Invite Banner */}
+                  {isDm && incomingGameInviteHere && (
+                    <div
+                      className="ag-game-banner is-invite"
+                      role="region"
+                      aria-label="Incoming game challenge"
+                    >
+                      <div className="ag-game-banner-left">
+                        <span className="ag-game-banner-icon" aria-hidden="true">
+                          <Gamepad2 size={14} />
+                        </span>
+                        <span className="ag-game-banner-text truncate">
+                          <strong>{incomingGameInviteHere.fromDisplayName}</strong> challenged you
+                          to{' '}
+                          {incomingGameInviteHere.kind === 'chess' ? (
+                            <>
+                              Chess (You play{' '}
+                              {incomingGameInviteHere.challengerColor === 'w' ? 'Black' : 'White'})
+                            </>
+                          ) : incomingGameInviteHere.goConfig ? (
+                            <>
+                              Go {incomingGameInviteHere.goConfig.boardSize}×
+                              {incomingGameInviteHere.goConfig.boardSize} · Komi{' '}
+                              {incomingGameInviteHere.goConfig.komi} ·{' '}
+                              {incomingGameInviteHere.goConfig.scoring === 'chinese'
+                                ? 'Chinese'
+                                : 'Japanese'}
+                            </>
+                          ) : (
+                            <>Go</>
+                          )}
+                        </span>
+                      </div>
+                      <div className="ag-game-banner-actions">
+                        <button
+                          type="button"
+                          className="ag-game-banner-btn primary"
+                          onClick={() => {
+                            playSound('click')
+                            void engine.games.acceptGameInvite(incomingGameInviteHere.gameId)
+                          }}
+                        >
+                          Accept
+                        </button>
+                        <button
+                          type="button"
+                          className="ag-game-banner-btn"
+                          onClick={() => {
+                            playSound('click')
+                            void engine.games.declineGameInvite(incomingGameInviteHere.gameId)
+                          }}
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Live Multiplayer Texas Hold'em Poker Table Join Banner (Bitchat Channels & Groups) */}
+                  {showLivePokerJoinBanner && livePokerTableHere && currentGameScope !== 'dm' && (
+                    <div
+                      className="ag-game-banner is-poker"
+                      role="region"
+                      aria-label="Live poker table"
+                    >
+                      <div className="ag-game-banner-left">
+                        <span className="ag-game-banner-icon" aria-hidden="true">
+                          <Spade size={14} />
+                        </span>
+                        <span className="ag-game-banner-text truncate">
+                          <strong>Texas Hold&apos;em Poker</strong> ·{' '}
+                          <span className="mono">
+                            {livePokerTableHere.seatedCount}/{livePokerTableHere.maxSeats}
+                          </span>{' '}
+                          seated ·{' '}
+                          <span className="mono">
+                            {livePokerTableHere.fixedBuyIn.toLocaleString()}
+                          </span>{' '}
+                          buy-in
+                        </span>
+                      </div>
+                      <div className="ag-game-banner-actions">
+                        <button
+                          type="button"
+                          className="ag-game-banner-btn primary"
+                          onClick={() => {
+                            playSound('click')
+                            void engine.games.joinPokerTable(
+                              currentGameScope,
+                              livePokerTableHere.targetId,
+                              livePokerTableHere.tableId
+                            )
+                          }}
+                        >
+                          Join Table
+                        </button>
                       </div>
                     </div>
                   )}
@@ -3352,6 +3592,35 @@ export function App() {
             onOpenDm={handleOpenDm}
             onReturnToCall={handleReturnToActiveCall}
             onPlaySound={playSound}
+          />
+        </Suspense>
+      )}
+
+      {/* Lazy-Loaded Real-Time Multiplayer Games Stage (Chess, Go, Texas Hold'em Poker — coexists seamlessly under floating Calls!) */}
+      {hasAnyActiveGame && (
+        <Suspense fallback={null}>
+          <GameStage
+            engine={engine}
+            games={engine.games}
+            onFocusCall={() => setCallExpanded(true)}
+            onPlaySound={playSound}
+          />
+        </Suspense>
+      )}
+
+      {/* Lazy-Loaded Context-Scoped Game Setup Launcher Modal */}
+      {gameSetupOpen && (
+        <Suspense fallback={null}>
+          <GameSetupModal
+            open={gameSetupOpen}
+            scope={currentGameScope}
+            targetLabel={currentGameTargetLabel}
+            hasActiveGameInScope={hasActiveGameInCurrentScope}
+            onClose={() => setGameSetupOpen(false)}
+            onStartChess={handleStartChessFromModal}
+            onStartGo={handleStartGoFromModal}
+            onStartPoker={handleStartPokerFromModal}
+            onResumeExisting={handleResumeExistingGame}
           />
         </Suspense>
       )}

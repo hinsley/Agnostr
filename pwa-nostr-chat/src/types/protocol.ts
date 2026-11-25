@@ -3,6 +3,7 @@ import type { AmailEngine } from './amail.ts'
 import type { CallEngine } from './calls.ts'
 import type { ContentFilterEngine } from './contentFilter.ts'
 import type { DeviceSyncEngine } from './deviceSync.ts'
+import type { GameEngineController } from '../hooks/useGameEngine.ts'
 import type { NotificationEngine } from './notifications.ts'
 import type { ServersEngine } from './servers.ts'
 import type { TranscriptionEngine } from './transcription.ts'
@@ -590,6 +591,9 @@ export interface AgnostrEngine {
 
   // P2P WebRTC Voice & Video Calls (1-on-1 DM Calls + Server Group Calls up to 6)
   calls: CallEngine
+
+  // Context-scoped Real-Time Nostr Games (1-on-1 Go & Chess in People; Texas Hold'em Poker in Bitchat & Groups)
+  games: GameEngineController
 
   // On-device local voice transcription (Voice Memos + Live Call Captions)
   transcription: TranscriptionEngine

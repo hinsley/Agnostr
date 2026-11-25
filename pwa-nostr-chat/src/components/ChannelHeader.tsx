@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Check,
   ChevronDown,
+  Gamepad2,
   Globe,
   Hash,
   Info,
@@ -18,6 +19,7 @@ import {
   Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, PulseRoom } from '../types/protocol'
+import { makeGameScopeKey } from '../types/games'
 import type { ZapTarget } from '../types/wallet'
 import {
   formatBitchatChannelLabel,
@@ -85,6 +87,7 @@ export interface ChannelHeaderProps {
   onExpandRadar: () => void
   onBackToGlobe?: () => void
   onTuneChannel?: (channelKey: string) => boolean | void
+  onOpenGameLauncher?: () => void
   onFocusActiveCall?: () => void
   onOpenZap?: (target: ZapTarget) => void
 }
@@ -105,6 +108,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   onExpandRadar,
   onBackToGlobe,
   onTuneChannel,
+  onOpenGameLauncher,
   onFocusActiveCall,
   onOpenZap,
 }) => {
@@ -183,6 +187,28 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
     !isDm && !isServer && !inThisGeoCall && geoCallCount >= engine.calls.maxParticipants
   const isDisconnected = engine.connectedRelayCount === 0
   const isBitchatChannel = !isDm && !isServer
+
+  const gameScopeKey =
+    isDm && dmThread
+      ? makeGameScopeKey('dm', dmThread.peerPubkey)
+      : isServer && activeServer
+        ? makeGameScopeKey('server', activeServer.id)
+        : makeGameScopeKey('geo', engine.activeGeohash)
+  const activeGameHere = engine.games?.activeGamesByScope?.[gameScopeKey]
+  const inviteHere = Boolean(
+    engine.games?.incomingInvites?.some((inv) => inv.scopeKey === gameScopeKey)
+  )
+  const pokerTableHere = engine.games?.roomPokerTables?.[gameScopeKey]
+  const hasGameActivityHere = Boolean(activeGameHere || inviteHere || pokerTableHere)
+  const dmGameTitle = activeGameHere
+    ? 'Open active game'
+    : inviteHere
+      ? 'Incoming game invite'
+      : 'Play Go or Chess'
+  const roomGameTitle =
+    activeGameHere || pokerTableHere
+      ? "Open Texas Hold'em Poker"
+      : "Start Texas Hold'em Poker"
 
   const [switcherOpen, setSwitcherOpen] = useState(false)
   const [switcherNowMs, setSwitcherNowMs] = useState(() => Date.now())
@@ -782,6 +808,19 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
 
               <button
                 type="button"
+                className={`ag-circle-btn ag-header-game-btn ${hasGameActivityHere ? 'active' : ''}`}
+                onClick={() => onOpenGameLauncher?.()}
+                title={dmGameTitle}
+                aria-label={dmGameTitle}
+              >
+                <Gamepad2 size={18} />
+                {hasGameActivityHere && (
+                  <span className="ag-back-unread-dot ag-header-game-dot" aria-hidden="true" />
+                )}
+              </button>
+
+              <button
+                type="button"
                 className={`ag-circle-btn ${translatorEnabled ? 'active' : ''}`}
                 onClick={handleToggleTranslator}
                 title={
@@ -843,6 +882,19 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                   <span className="ag-header-call-count tabular">
                     {serverCallCount}/{engine.calls.maxParticipants}
                   </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ag-header-game-btn ${hasGameActivityHere ? 'active' : ''}`}
+                onClick={() => onOpenGameLauncher?.()}
+                title={roomGameTitle}
+                aria-label={roomGameTitle}
+              >
+                <Gamepad2 size={18} />
+                {hasGameActivityHere && (
+                  <span className="ag-back-unread-dot ag-header-game-dot" aria-hidden="true" />
                 )}
               </button>
 
@@ -923,6 +975,19 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                   <span className="ag-header-call-count tabular">
                     {geoCallCount}/{engine.calls.maxParticipants}
                   </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                className={`ag-circle-btn ag-header-game-btn ${hasGameActivityHere ? 'active' : ''}`}
+                onClick={() => onOpenGameLauncher?.()}
+                title={roomGameTitle}
+                aria-label={roomGameTitle}
+              >
+                <Gamepad2 size={18} />
+                {hasGameActivityHere && (
+                  <span className="ag-back-unread-dot ag-header-game-dot" aria-hidden="true" />
                 )}
               </button>
 
