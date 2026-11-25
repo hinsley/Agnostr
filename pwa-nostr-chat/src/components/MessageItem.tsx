@@ -673,7 +673,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       const hasLinkSection = items.length > 0
 
       // 2. Core message actions
-      if (!isDmMode && onReply) {
+      if (onReply) {
         items.push({
           id: 'msg-reply',
           label: 'Reply',
@@ -925,7 +925,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       })
 
       const reactions: ContextMenuReaction[] | undefined =
-        !isDmMode && onReact
+        onReact
           ? pinnedReactions.map((emoji) => ({
               emoji,
               active: message.reactions.some((r) => r.emoji === emoji && r.reactedByMe),
@@ -934,7 +934,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
           : undefined
 
       const onExpandReactions =
-        !isDmMode && onReact
+        onReact
           ? (anchorRect: DOMRect) => {
               setPickerOpen(false)
               setExpandedPickerAnchor(anchorRect)
@@ -1278,7 +1278,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
           )}
 
           {/* Aggregated Emoji Reactions & Live NIP-57 Zap Receipt Total */}
-          {((!isDmMode && message.reactions.length > 0) || zapTotalSats > 0) && (
+          {(message.reactions.length > 0 || zapTotalSats > 0) && (
             <div className="ag-reactions" role="group" aria-label="Message reactions and zaps">
               {zapTotalSats > 0 && (
                 <button
@@ -1303,8 +1303,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                   <span>{zapTotalSats.toLocaleString()}</span>
                 </button>
               )}
-              {!isDmMode &&
-                message.reactions.map((rx) => (
+              {message.reactions.map((rx) => (
                   <button
                     key={rx.emoji}
                     type="button"
@@ -1417,7 +1416,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
           role="toolbar"
           aria-label="Message actions"
         >
-          {!isDmMode && onReact && (
+          {onReact && (
             <div ref={quickPickerWrapRef} style={{ position: 'relative' }}>
               <button
                 type="button"
@@ -1476,7 +1475,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             </div>
           )}
 
-          {!isDmMode && onReply && (
+          {onReply && (
             <button
               type="button"
               className="ag-msg-act-btn"
@@ -1522,7 +1521,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
         </div>
 
         {/* Expanded Detailed Emoji Reaction & Pin Picker (Portaled, Unclipped) */}
-        {expandedPickerAnchor && !isDmMode && onReact && (
+        {expandedPickerAnchor && onReact && (
           <ReactionPickerPopover
             anchorRect={expandedPickerAnchor}
             activeEmojis={myActiveEmojis}

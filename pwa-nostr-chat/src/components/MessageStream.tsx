@@ -1,3 +1,4 @@
+import { dmReplyReference, dmTargetId } from '../lib/dmMessageActions.ts'
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
@@ -409,6 +410,16 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     return map
   }, [isServer, engine.servers.messages])
 
+  const dmTargets = useMemo(() => {
+    const byWire = new Map<string, NonNullable<typeof dmThread>['messages'][number]>()
+    const localIds = new Set<string>()
+    for (const m of dmThread?.messages ?? []) {
+      const wireId = dmTargetId(m)
+      if (wireId) { byWire.set(wireId, m); localIds.add(m.id) }
+    }
+    return { byWire, localIds }
+  }, [dmThread])
+
   // Normalize DM & Server messages into GeoMessage shape for unified bubble rendering
   const displayMessages: GeoMessage[] = useMemo(() => {
     if (isServer && activeServer && activeChannel) {
@@ -482,7 +493,9 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
           isTeleported: false,
           isMeshBridge: false,
           powBits: 0,
-          reactions: [],
+          reactions: dm.reactions ?? [],
+          replyTo: dm.replyToId ? dmReplyReference(dm.replyToId, dmTargets.byWire.get(dm.replyToId),
+            engine.identity.nickname, dmThread.peerNickname) : undefined,
           mentions: [],
           voiceMemo: dm.voiceMemo,
           imageAttachment: dm.imageAttachment,
@@ -501,6 +514,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     engine,
     isDm,
     dmThread,
+    dmTargets,
   ])
 
   const hiddenEarlierCount = Math.max(0, displayMessages.length - renderLimit)
@@ -1043,6 +1057,10 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
   const handleReplyUnified = useCallback(
     (msg: GeoMessage) => {
+      if (engine.activeView.type === 'dm') {
+        engine.setDmReplyingTo(msg)
+        return
+      }
       if (isServer) {
         const sm = serverMsgById.get(msg.id)
         if (!sm) return
@@ -1052,11 +1070,15 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       }
       onReply(msg)
     },
-    [isServer, serverMsgById, onReplyServer, engine.servers, onReply]
+    [isServer, serverMsgById, onReplyServer, engine, onReply]
   )
 
   const handleReactUnified = useCallback(
     (msg: GeoMessage, emoji: string) => {
+      if (engine.activeView.type === 'dm') {
+        void engine.sendDmReaction(engine.activeView.peerPubkey, msg.id, emoji)
+        return
+      }
       if (isServer) {
         const sm = serverMsgById.get(msg.id)
         if (!sm) return
@@ -1066,7 +1088,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       }
       onReact(msg, emoji)
     },
-    [isServer, serverMsgById, onReactServer, engine.servers, onReact]
+    [isServer, serverMsgById, onReactServer, engine, onReact]
   )
 
   const handleDeleteServerMessage = useCallback(
@@ -2155,8 +2177,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       onStartDm={onStartDm}
                       onStartCall={handleStartCallSender}
                       onMentionAuthor={onMentionPeer}
-                      onReply={!isDm ? handleReplyUnified : undefined}
-                      onReact={!isDm ? handleReactUnified : undefined}
+                      onReply={!isDm || dmTargets.localIds.has(msg.id) ? handleReplyUnified : undefined}
+                      onReact={!isDm || dmTargets.localIds.has(msg.id) ? handleReactUnified : undefined}
                       resolveReactorName={resolveReactorName}
                       onDelete={
                         isServer &&

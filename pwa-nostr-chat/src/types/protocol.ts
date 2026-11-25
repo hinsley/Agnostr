@@ -342,6 +342,10 @@ export interface LocationNote {
 export type DmProtocol = 'bitchat' | 'nip17'
 
 export interface DmMessage {
+  /** Canonical ID known to the recipient; id remains stable for rendering and translation. */
+  wireId?: string
+  replyToId?: string
+  reactions?: ReactionSummary[]
   id: string
   peerPubkey: string
   senderPubkey: string
@@ -355,6 +359,8 @@ export interface DmMessage {
   imageAttachment?: ImageAttachment
   deliveryStatus: 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
 }
+
+export interface DmSendContext { peerPubkey: string; replyToId?: string }
 
 export interface DmThread {
   peerPubkey: string
@@ -492,8 +498,12 @@ export interface AgnostrEngine {
     peerPubkey: string,
     content: string,
     protocol?: DmProtocol,
-    onPublishedId?: (id: string) => void
+    onPublishedId?: (id: string) => void,
+    replyToId?: string
   ) => Promise<boolean>
+  sendDmReaction: (peer: string, messageId: string, emoji: string) => Promise<void>
+  dmReplyingTo: GeoMessage | null
+  setDmReplyingTo: (message: GeoMessage | null) => void
 
   // Channel & messaging actions
   tuneGeohash: (geohashOrCity: string) => boolean
@@ -550,10 +560,10 @@ export interface AgnostrEngine {
   removeBlossomServer: (url: string) => void
   resetBlossomServers: () => void
   voiceSendPhase: VoiceSendPhase
-  sendVoiceMemo: (recorded: RecordedVoiceMemo, caption?: string) => Promise<boolean>
+  sendVoiceMemo: (recorded: RecordedVoiceMemo, caption?: string, dm?: DmSendContext) => Promise<boolean>
   /** Policy-gated fetch: allows non-blocked senders by default (or trusted-only when restricted), refusing denied senders with zero network requests */
   fetchVoiceMemoBlob: (memo: VoiceMemoAttachment, senderPubkey: string) => Promise<string>
-  sendImageAttachment: (image: PreparedImage, caption?: string) => Promise<boolean>
+  sendImageAttachment: (image: PreparedImage, caption?: string, dm?: DmSendContext) => Promise<boolean>
   /** STRICT trusted-peers-gated fetch: refuses untrusted senders with zero network requests */
   fetchImageAttachmentBlob: (image: ImageAttachment, senderPubkey: string) => Promise<string>
 

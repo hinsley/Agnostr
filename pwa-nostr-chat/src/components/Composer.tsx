@@ -141,7 +141,16 @@ export const Composer: React.FC<ComposerProps> = ({
   const activeChannel = engine.servers.activeChannel
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
   const isViolet = isDm || isServerE2ee
-  const activeReply = isServer ? engine.servers.replyingTo : !isDm ? engine.replyingTo : null
+  const activeReply = isServer ? engine.servers.replyingTo : isDm ? engine.dmReplyingTo : engine.replyingTo
+  const dmContext = isDm && dmThread
+    ? { peerPubkey: dmThread.peerPubkey, replyToId: engine.dmReplyingTo?.id }
+    : undefined
+  const clearDmReplyOnSubmit = () => {
+    if (isDm && engine.dmReplyingTo) engine.setDmReplyingTo(null)
+  }
+  useEffect(() => {
+    if (engine.dmReplyingTo) textareaRef.current?.focus({ preventScroll: true })
+  }, [engine.dmReplyingTo])
   const activeTargetKey = isDm
     ? `dm:${dmThread?.peerPubkey ?? ''}`
     : isServer
@@ -520,6 +529,8 @@ export const Composer: React.FC<ComposerProps> = ({
       }
     }
 
+    if (stagedSnapshot || !trimmed.startsWith('/')) clearDmReplyOnSubmit()
+
     if (stagedSnapshot) {
       const staged = detachPendingImage() ?? stagedSnapshot
       const caption = trimmed || undefined
@@ -534,7 +545,7 @@ export const Composer: React.FC<ComposerProps> = ({
       const dispatchImage = (): Promise<boolean> =>
         submitIsServer
           ? engine.servers.sendImageAttachment(staged, caption)
-          : engine.sendImageAttachment(staged, caption)
+          : engine.sendImageAttachment(staged, caption, dmContext)
 
       let sendPromise: Promise<boolean>
       if (composerQueueRef.current.getPendingCount(submitTargetKey) > 0) {
@@ -626,7 +637,8 @@ export const Composer: React.FC<ComposerProps> = ({
           submitDmThread.peerPubkey,
           outgoingBody,
           submitDmThread.protocol,
-          onPublishedId
+          onPublishedId,
+          dmContext?.replyToId
         )
       }
       return engine.sendInput(outgoingBody, translatedMeta)
@@ -796,6 +808,7 @@ export const Composer: React.FC<ComposerProps> = ({
       if (activeReply) {
         e.preventDefault()
         if (isServer) engine.servers.setReplyingTo(null)
+        else if (isDm) engine.setDmReplyingTo(null)
         else engine.setReplyingTo(null)
       }
     }
@@ -817,6 +830,7 @@ export const Composer: React.FC<ComposerProps> = ({
     caption: string,
     previewTranscript?: VoicePreviewTranscript
   ): Promise<boolean> => {
+    clearDmReplyOnSubmit()
     submitSeqRef.current += 1
     const submitTargetKey = activeTargetKey
     const submitIsServer = isServer
@@ -834,7 +848,7 @@ export const Composer: React.FC<ComposerProps> = ({
     const dispatchVoice = (): Promise<boolean> =>
       submitIsServer
         ? engine.servers.sendVoiceMemo(payload, caption)
-        : engine.sendVoiceMemo(payload, caption)
+        : engine.sendVoiceMemo(payload, caption, dmContext)
 
     let sendPromise: Promise<boolean>
     if (composerQueueRef.current.getPendingCount(submitTargetKey) > 0) {
@@ -871,6 +885,7 @@ export const Composer: React.FC<ComposerProps> = ({
     const trimmed = text.trim()
     if (!trimmed || !canSign) return Promise.resolve(false)
 
+    if (!trimmed.startsWith('/')) clearDmReplyOnSubmit()
     submitSeqRef.current += 1
     const submitTargetKey = activeTargetKey
     const submitIsServer = isServer
@@ -919,7 +934,8 @@ export const Composer: React.FC<ComposerProps> = ({
           submitDmThread.peerPubkey,
           outgoingBody,
           submitDmThread.protocol,
-          onPublishedId
+          onPublishedId,
+          dmContext?.replyToId
         )
       }
       return engine.sendInput(outgoingBody, translatedMeta)
@@ -1188,7 +1204,7 @@ export const Composer: React.FC<ComposerProps> = ({
               onPointerDown={keepTextareaFocused}
               onMouseDown={keepTextareaFocused}
               onClick={() =>
-                isServer ? engine.servers.setReplyingTo(null) : engine.setReplyingTo(null)
+                isServer ? engine.servers.setReplyingTo(null) : isDm ? engine.setDmReplyingTo(null) : engine.setReplyingTo(null)
               }
               aria-label="Cancel reply"
             >

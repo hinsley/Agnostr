@@ -1,3 +1,4 @@
+import { addDmReaction, dmTargetId } from '../lib/dmMessageActions.ts'
 import { rememberLiveDmPush } from '../lib/pushDisplay.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PushPokePayload } from '../types/notifications.ts'
@@ -136,6 +137,37 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   const onIncomingRef = useRef(onIncomingDm)
   const onNotifyPushPokeRef = useRef(onNotifyPushPoke)
   const onErrorRef = useRef(onError)
+
+  // Relays can deliver a reaction before its parent or before our send completes.
+  // Hold only bounded, authenticated actions; they must never become chat bubbles.
+  const pendingReactions = useRef(new Map<string, { peer: string; target: string; sender: string; emoji: string; own: boolean }>())
+  const [reactionVersion, setReactionVersion] = useState(0)
+  const queueReaction = useCallback((peer: string, target: string, sender: string, emoji: string, own: boolean) => {
+    const key = JSON.stringify([peer, target, sender, emoji])
+    const pending = pendingReactions.current
+    if (pending.has(key)) return
+    if (pending.size >= 256) pending.delete(pending.keys().next().value!)
+    pending.set(key, { peer, target, sender, emoji, own })
+    setReactionVersion(v => v + 1)
+  }, [])
+
+  useEffect(() => {
+    const matched = new Map<string, Map<string, Array<{ sender: string; emoji: string; own: boolean }>>>()
+    for (const [key, r] of pendingReactions.current) {
+      const parent = threads.find(t => t.peerPubkey === r.peer)?.messages.find(m => dmTargetId(m) === r.target)
+      if (!parent) continue
+      pendingReactions.current.delete(key)
+      const byMessage = matched.get(r.peer) ?? new Map()
+      byMessage.set(parent.id, [...(byMessage.get(parent.id) ?? []), r])
+      matched.set(r.peer, byMessage)
+    }
+    if (!matched.size) return
+    setThreads(prev => prev.map(t => {
+      const byMessage = matched.get(t.peerPubkey)
+      return !byMessage ? t : { ...t, messages: t.messages.map(m =>
+        byMessage.get(m.id)?.reduce((msg, r) => addDmReaction(msg, r.sender, r.emoji, r.own), m) ?? m) }
+    }))
+  }, [threads, reactionVersion])
 
   useLayoutEffect(() => {
     threadsRef.current = threads
@@ -309,6 +341,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               return
             }
 
+            if (decrypted.reactionToId) {
+              queueReaction(senderPk, decrypted.reactionToId, senderPk, decrypted.content, false)
+              return
+            }
             if (!decrypted.content.trim()) return
 
             const decodedVoice = decodeDmVoicePayload(decrypted.content)
@@ -342,6 +378,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
             const baseMsg: DmMessage = {
               id: decrypted.id,
+              replyToId: decrypted.replyToId,
               peerPubkey: senderPk,
               senderPubkey: senderPk,
               content: displayContent,
@@ -420,7 +457,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       if (eoseGraceTimer !== null) window.clearTimeout(eoseGraceTimer)
       unsub()
     }
-  }, [pool, dmRelays, activeGeohash, identityManager, presenceTracker, identityVersion])
+  }, [pool, dmRelays, activeGeohash, identityManager, presenceTracker, identityVersion, queueReaction])
 
   const ensureThread = useCallback(
     (peerPubkey: string, nicknameHint?: string, preferredProtocol?: DmProtocol): DmThread => {
@@ -489,13 +526,20 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       peerPubkey: string,
       rawContent: string,
       protocolOverride?: DmProtocol,
-      onPublishedId?: (id: string) => void
+      onPublishedId?: (id: string) => void,
+      replyToId?: string
     ): Promise<boolean> => {
       const content = rawContent.trim()
       if (!content || !pool) return false
       const pk = peerPubkey.toLowerCase()
 
       const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+      const parent = replyToId ? existingThread?.messages.find(m => m.id === replyToId) : undefined
+      const target = parent && dmTargetId(parent)
+      if (replyToId && !target) {
+        onErrorRef.current?.('Cannot reply', 'This message has no shared ID in this conversation.')
+        return false
+      }
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
       const targetRelays = [...dmRelaysRef.current]
       const wipeGen = identityManager.getWipeGeneration()
@@ -511,6 +555,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
       const optimisticBase: DmMessage = {
         id: localMsgId,
+        replyToId: target,
         peerPubkey: pk,
         senderPubkey: signer.pubkey,
         content,
@@ -567,12 +612,13 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         async () => {
           if (identityManager.getWipeGeneration() !== wipeGen) return false
           try {
-            const { event, protocol } = await createEncryptedDmEvent({
+            const { event, protocol, wireId } = await createEncryptedDmEvent({
               content,
               recipientPubkey: pk,
               signer,
               protocol: chosenProtocol,
               messageId: localMsgId,
+              action: target ? { type: 'reply', targetId: target } : undefined,
             })
             if (identityManager.getWipeGeneration() !== wipeGen) return false
             processedWrapIdsRef.current.add(event.id)
@@ -588,7 +634,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                   protocol,
                   messages: t.messages.map((m) =>
                     m.id === localMsgId
-                      ? { ...m, protocol, deliveryStatus: ok ? 'sent' : 'failed' }
+                      ? { ...m, wireId, protocol, deliveryStatus: ok ? 'sent' : 'failed' }
                       : m
                   ),
                 }
@@ -639,13 +685,20 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       peerPubkey: string,
       voiceMemoOrLoader: VoiceMemoAttachment | (() => Promise<VoiceMemoAttachment>),
       caption?: string,
-      protocolOverride?: DmProtocol
+      protocolOverride?: DmProtocol,
+      replyToId?: string
     ): Promise<boolean> => {
       if (!pool) return false
       const pk = peerPubkey.toLowerCase()
       const cleanCaption = caption?.trim() ?? ''
 
       const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+      const parent = replyToId ? existingThread?.messages.find(m => m.id === replyToId) : undefined
+      const target = parent && dmTargetId(parent)
+      if (replyToId && !target) {
+        onErrorRef.current?.('Cannot reply', 'This message has no shared ID in this conversation.')
+        return false
+      }
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
       const targetRelays = [...dmRelaysRef.current]
       const wipeGen = identityManager.getWipeGeneration()
@@ -672,6 +725,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             const nowSec = Math.floor(nowMs / 1000)
             const msgBase: DmMessage = {
               id: localMsgId,
+              replyToId: target,
               peerPubkey: pk,
               senderPubkey: signer.pubkey,
               content: cleanCaption,
@@ -727,12 +781,13 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             })
 
             const wireContent = encodeDmVoicePayload(voiceMemo, cleanCaption)
-            const { event, protocol } = await createEncryptedDmEvent({
+            const { event, protocol, wireId } = await createEncryptedDmEvent({
               content: wireContent,
               recipientPubkey: pk,
               signer,
               protocol: chosenProtocol,
               messageId: localMsgId,
+              action: target ? { type: 'reply', targetId: target } : undefined,
             })
             if (identityManager.getWipeGeneration() !== wipeGen) return false
             processedWrapIdsRef.current.add(event.id)
@@ -750,6 +805,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                     m.id === localMsgId
                       ? {
                           ...m,
+                          wireId,
                           protocol,
                           voiceMemo,
                           content: cleanCaption,
@@ -807,13 +863,20 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       peerPubkey: string,
       imageOrLoader: ImageAttachment | (() => Promise<ImageAttachment>),
       caption?: string,
-      protocolOverride?: DmProtocol
+      protocolOverride?: DmProtocol,
+      replyToId?: string
     ): Promise<boolean> => {
       if (!pool) return false
       const pk = peerPubkey.toLowerCase()
       const cleanCaption = caption?.trim() ?? ''
 
       const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+      const parent = replyToId ? existingThread?.messages.find(m => m.id === replyToId) : undefined
+      const target = parent && dmTargetId(parent)
+      if (replyToId && !target) {
+        onErrorRef.current?.('Cannot reply', 'This message has no shared ID in this conversation.')
+        return false
+      }
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
       const targetRelays = [...dmRelaysRef.current]
       const wipeGen = identityManager.getWipeGeneration()
@@ -838,6 +901,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             const nowSec = Math.floor(nowMs / 1000)
             const msgBase: DmMessage = {
               id: localMsgId,
+              replyToId: target,
               peerPubkey: pk,
               senderPubkey: signer.pubkey,
               content: cleanCaption,
@@ -893,12 +957,13 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             })
 
             const wireContent = encodeDmImagePayload(imageAttachment, cleanCaption)
-            const { event, protocol } = await createEncryptedDmEvent({
+            const { event, protocol, wireId } = await createEncryptedDmEvent({
               content: wireContent,
               recipientPubkey: pk,
               signer,
               protocol: chosenProtocol,
               messageId: localMsgId,
+              action: target ? { type: 'reply', targetId: target } : undefined,
             })
             if (identityManager.getWipeGeneration() !== wipeGen) return false
             processedWrapIdsRef.current.add(event.id)
@@ -916,6 +981,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                     m.id === localMsgId
                       ? {
                           ...m,
+                          wireId,
                           protocol,
                           imageAttachment,
                           content: cleanCaption,
@@ -967,6 +1033,29 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     },
     [pool, identityManager, activeGeohash, presenceTracker]
   )
+
+  const sendDmReaction = useCallback(async (peer: string, messageId: string, emoji: string) => {
+    const pk = peer.toLowerCase()
+    const thread = threadsRef.current.find(t => t.peerPubkey === pk)
+    const parent = thread?.messages.find(m => m.id === messageId)
+    const targetId = parent && dmTargetId(parent)
+    if (!pool || !thread || !parent || !targetId || !emoji.trim() || emoji.length > 32) return
+    const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
+    if (parent.reactions?.some(r => r.emoji === emoji && r.pubkeys.includes(signer.pubkey))) return
+    const gen = identityManager.getWipeGeneration()
+    try {
+      const { event } = await createEncryptedDmEvent({ content: emoji, signer, recipientPubkey: pk,
+        protocol: thread.protocol, action: { type: 'reaction', targetId } })
+      if (gen !== identityManager.getWipeGeneration()) return
+      const result = await pool.publish([...dmRelaysRef.current], event)
+      if (gen !== identityManager.getWipeGeneration()) return
+      if (!result.acceptedRelays.length) throw new Error('No DM relay accepted the encrypted reaction.')
+      queueReaction(pk, targetId, signer.pubkey, emoji, true)
+    } catch (err) {
+      if (gen === identityManager.getWipeGeneration()) onErrorRef.current?.('Private reaction failed',
+        err instanceof Error ? err.message : 'Unable to send reaction')
+    }
+  }, [pool, identityManager, activeGeohash, queueReaction])
 
   const clearThread = useCallback((peerPubkey: string) => {
     const pk = peerPubkey.toLowerCase()
@@ -1197,6 +1286,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   const clearAllDms = useCallback(() => {
     dmSendQueueRef.current.clearAll()
     processedWrapIdsRef.current.clear()
+    pendingReactions.current.clear()
     dmClearedAtRef.current = {}
     setDmClearedAt({})
     setThreads([])
@@ -1223,6 +1313,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     totalDmUnread,
     ensureThread,
     sendDirectMessage,
+    sendDmReaction,
     sendDirectVoiceMemo,
     sendDirectImageAttachment,
     clearThread,

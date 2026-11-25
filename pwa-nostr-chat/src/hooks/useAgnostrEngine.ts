@@ -6,6 +6,7 @@ import type {
   AgnostrEngine,
   AppSettings,
   DmProtocol,
+  DmSendContext,
   GeoMessage,
   ImageAttachment,
   LocationNote,
@@ -2417,6 +2418,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     totalDmUnread,
     ensureThread,
     sendDirectMessage,
+    sendDmReaction,
     sendDirectVoiceMemo,
     sendDirectImageAttachment,
     clearThread,
@@ -2447,6 +2449,15 @@ export function useAgnostrEngine(): AgnostrEngine {
     () => (activeDmPeer ? dmThreads.find((t) => t.peerPubkey === activeDmPeer.toLowerCase()) ?? null : null),
     [activeDmPeer, dmThreads]
   )
+
+  // The public channel composer must never see a private reply target.
+  const [dmReply, setDmReply] = useState<{ peer: string; message: GeoMessage } | null>(null)
+  const dmReplyingTo = activeDmPeer && dmReply?.peer === activeDmPeer &&
+    activeDmThread?.messages.some(m => m.id === dmReply.message.id) ? dmReply.message : null
+  const setDmReplyingTo = useCallback((message: GeoMessage | null) => {
+    setDmReply(message && activeDmPeer ? { peer: activeDmPeer, message } : null)
+  }, [activeDmPeer])
+  useEffect(() => { setDmReply(null) }, [activeDmPeer, identityVersion])
 
   const handleSeedMemoTranscript = useCallback(
     (memoKey: string, text: string, modelLabel?: string) => {
@@ -4453,8 +4464,8 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   // Voice memo send (Blossom BUD-02 + NIP-92 imeta for public; AES-256-GCM + kind 1059 for DMs; delegates to Servers in server view)
   const sendVoiceMemo = useCallback(
-    async (recorded: RecordedVoiceMemo, caption?: string): Promise<boolean> => {
-      const view = activeViewRef.current
+    async (recorded: RecordedVoiceMemo, caption?: string, dm?: DmSendContext): Promise<boolean> => {
+      const view = dm ? { type: 'dm' as const, peerPubkey: dm.peerPubkey } : activeViewRef.current
       if (view.type === 'server') {
         beginMediaSend()
         try {
@@ -4523,7 +4534,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               setVoiceSendPhase('publishing')
               return attachment
             },
-            cleanCaption
+            cleanCaption, undefined, dm?.replyToId
           )
           if (ok) {
             pushToast(
@@ -4992,13 +5003,13 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const sendImageAttachment = useCallback(
-    async (image: PreparedImage, caption?: string): Promise<boolean> => {
+    async (image: PreparedImage, caption?: string, dm?: DmSendContext): Promise<boolean> => {
       if (!pool || image.size <= 0) {
         revokeImagePreviewUrl(image)
         return false
       }
 
-      const view = activeViewRef.current
+      const view = dm ? { type: 'dm' as const, peerPubkey: dm.peerPubkey } : activeViewRef.current
       if (view.type === 'server') {
         beginMediaSend()
         try {
@@ -5051,7 +5062,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               setVoiceSendPhase('publishing')
               return attachment
             },
-            cleanCaption
+            cleanCaption, undefined, dm?.replyToId
           )
           if (ok) {
             pushToast(
@@ -5847,6 +5858,9 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     dmThreads,
     activeDmThread,
+    dmReplyingTo,
+    setDmReplyingTo,
+    sendDmReaction,
     totalDmUnread,
     openDmThread,
     closeDmThread,

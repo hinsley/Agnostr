@@ -6,6 +6,7 @@ import {
   finalizeEvent,
   generateSecretKey,
   getPublicKey,
+  getEventHash,
   nip44,
   nip59,
   verifyEvent,
@@ -18,6 +19,7 @@ import type {
   VoiceMemoAttachment,
   VoiceMemoEncryption,
 } from '../types/protocol.ts'
+import { isDmTargetId } from './dmMessageActions.ts'
 import { KIND_DM_RUMOR, KIND_GIFT_WRAP, KIND_SEAL } from './bitchatProtocol.ts'
 import { bytesToHex, type SigningKeyMaterial } from './identity.ts'
 
@@ -203,6 +205,8 @@ export interface DecryptedDm {
   timestampMs?: number
   protocol: DmProtocol
   embeddedMessageId?: string
+  replyToId?: string
+  reactionToId?: string
   ackType?: 'delivered' | 'read'
 }
 
@@ -412,8 +416,17 @@ export async function createEncryptedDmEvent(opts: {
   signer: SigningKeyMaterial
   protocol: DmProtocol
   messageId?: string
-}): Promise<{ event: NostrEvent; protocol: DmProtocol }> {
+  action?: { type: 'reply' | 'reaction'; targetId: string }
+}): Promise<{ event: NostrEvent; protocol: DmProtocol; wireId: string }> {
   const recipientPk = opts.recipientPubkey.toLowerCase()
+
+  const action = opts.action
+  if (action && !isDmTargetId(action.targetId)) throw new Error('Invalid private message reference')
+  const kind = action?.type === 'reaction' ? 7 : KIND_DM_RUMOR
+  const tags = [['p', recipientPk], ...(action ? [['e', action.targetId]] : [])]
+  if (kind === 7) tags.push(['k', String(KIND_DM_RUMOR)])
+  // A nonce distinguishes identical messages from the same sender within one second.
+  if (opts.messageId) tags.push(['nonce-id', opts.messageId])
 
   // NIP-07 extension signer cannot derive raw Bitchat ECDH; use NIP-17 via window.nostr.nip44
   if (opts.signer.mode === 'extension' || !opts.signer.secretKey) {
@@ -423,11 +436,12 @@ export async function createEncryptedDmEvent(opts: {
     const rumor = {
       pubkey: opts.signer.pubkey,
       created_at: Math.floor(Date.now() / 1000),
-      kind: KIND_DM_RUMOR,
-      tags: [['p', recipientPk]],
+      kind,
+      tags,
       content: opts.content,
     }
-    const sealedContent = await window.nostr.nip44.encrypt(recipientPk, JSON.stringify(rumor))
+    const wireId = getEventHash(rumor)
+    const sealedContent = await window.nostr.nip44.encrypt(recipientPk, JSON.stringify({ ...rumor, id: wireId }))
     const sealTemplate: EventTemplate = {
       kind: KIND_SEAL,
       created_at: Math.floor(Date.now() / 1000) - Math.floor(Math.random() * 172800),
@@ -448,7 +462,7 @@ export async function createEncryptedDmEvent(opts: {
       },
       wrapSk
     )
-    return { event: wrapEvent, protocol: 'nip17' }
+    return { event: wrapEvent, protocol: 'nip17', wireId }
   }
 
   const sk = opts.signer.secretKey
@@ -456,7 +470,7 @@ export async function createEncryptedDmEvent(opts: {
 
   if (opts.protocol === 'bitchat') {
     const msgId = opts.messageId ?? bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
-    const embedded = encodeBitchatEmbeddedPM(opts.content, msgId)
+    const embedded = kind === KIND_DM_RUMOR ? encodeBitchatEmbeddedPM(opts.content, msgId) : null
     // If content > 255 bytes (exceeds 1-byte Bitchat TLV), send plain text inside v2 rumor or fall back to nip17
     const innerContent = embedded ?? opts.content
 
@@ -464,8 +478,8 @@ export async function createEncryptedDmEvent(opts: {
       id: '',
       pubkey: senderPk,
       created_at: Math.floor(Date.now() / 1000),
-      kind: KIND_DM_RUMOR,
-      tags: [] as string[][],
+      kind,
+      tags,
       content: innerContent,
     }
     const encryptedRumor = encryptBitchatV2(JSON.stringify(rumor), recipientPk, sk)
@@ -490,21 +504,13 @@ export async function createEncryptedDmEvent(opts: {
       },
       wrapSk
     )
-    return { event: giftWrap, protocol: 'bitchat' }
+    return { event: giftWrap, protocol: 'bitchat', wireId: embedded ? msgId : giftWrap.id }
   }
 
   // Standard NIP-17 / NIP-59 gift wrap
-  const wrapEvent = nip59.wrapEvent(
-    {
-      kind: KIND_DM_RUMOR,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [['p', recipientPk]],
-      content: opts.content,
-    },
-    sk,
-    recipientPk
-  )
-  return { event: wrapEvent, protocol: 'nip17' }
+  const rumor = nip59.createRumor({ kind, created_at: Math.floor(Date.now() / 1000), tags, content: opts.content }, sk)
+  const wrapEvent = nip59.createWrap(nip59.createSeal(rumor, sk, recipientPk), recipientPk)
+  return { event: wrapEvent, protocol: 'nip17', wireId: rumor.id }
 }
 
 /**
@@ -534,14 +540,14 @@ export async function decryptGiftWrapEvent(
     const rumorJson = decryptBitchatV2(seal.content, seal.pubkey, recipient.secretKey)
     if (!rumorJson) return null
 
-    let rumor: { kind?: number; pubkey?: string; created_at?: number; content?: string }
+    let rumor: { kind?: number; pubkey?: string; created_at?: number; content?: string; tags?: unknown }
     try {
       rumor = JSON.parse(rumorJson)
     } catch {
       return null
     }
     if (
-      rumor.kind !== KIND_DM_RUMOR ||
+      (rumor.kind !== KIND_DM_RUMOR && rumor.kind !== 7) ||
       typeof rumor.pubkey !== 'string' ||
       rumor.pubkey.toLowerCase() !== seal.pubkey.toLowerCase() ||
       typeof rumor.content !== 'string'
@@ -549,6 +555,13 @@ export async function decryptGiftWrapEvent(
       return null
     }
 
+    const refId = privateTarget(rumor.tags, recipient.pubkey, seal.pubkey)
+    if (refId === null) return null
+    if (rumor.kind === 7) {
+      if (!refId || !validReaction(rumor.content)) return null
+      return { id: giftWrap.id, senderPubkey: seal.pubkey, protocol: 'bitchat', content: rumor.content,
+        reactionToId: refId, createdAt: clampDmCreatedAtSec(rumor.created_at ?? giftWrap.created_at) }
+    }
     const decodedEmbedded = decodeBitchatEmbeddedPayload(rumor.content)
     const rawRumorSec = typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at
     if (decodedEmbedded) {
@@ -574,6 +587,7 @@ export async function decryptGiftWrapEvent(
       }
       return {
         id: decodedEmbedded.messageId || giftWrap.id,
+        replyToId: refId,
         senderPubkey: seal.pubkey.toLowerCase(),
         content: decodedEmbedded.content ?? '',
         createdAt: clampDmCreatedAtSec(embeddedSec),
@@ -587,62 +601,49 @@ export async function decryptGiftWrapEvent(
       id: giftWrap.id,
       senderPubkey: seal.pubkey.toLowerCase(),
       content: rumor.content,
+      replyToId: refId,
       createdAt: clampDmCreatedAtSec(rawRumorSec),
       protocol: 'bitchat',
     }
   }
 
-  // 2. Standard NIP-17 / NIP-59 gift wrap
-  if (recipient.secretKey) {
-    try {
-      const rumor = nip59.unwrapEvent(giftWrap, recipient.secretKey)
-      if (!rumor || rumor.kind !== KIND_DM_RUMOR || typeof rumor.content !== 'string') return null
-      return {
-        id: rumor.id || giftWrap.id,
-        senderPubkey: rumor.pubkey.toLowerCase(),
-        content: rumor.content,
-        createdAt: clampDmCreatedAtSec(rumor.created_at),
-        protocol: 'nip17',
-      }
-    } catch {
-      return null
-    }
+  // Verify the seal signature and bind the rumor author to it for *both* signers.
+  // The library's convenience unwrapEvent decrypts, but does not do either check.
+  try {
+    const decrypt = recipient.secretKey
+      ? (pk: string, content: string) => nip44.v2.decrypt(content, nip44.v2.utils.getConversationKey(recipient.secretKey!, pk))
+      : recipient.mode === 'extension' && window.nostr?.nip44?.decrypt
+        ? (pk: string, content: string) => window.nostr!.nip44!.decrypt(pk, content)
+        : null
+    if (!decrypt) return null
+    const seal = JSON.parse(await decrypt(giftWrap.pubkey, giftWrap.content)) as NostrEvent
+    if (!seal || seal.kind !== KIND_SEAL || !verifyEvent(seal)) return null
+    const rumor = JSON.parse(await decrypt(seal.pubkey, seal.content)) as NostrEvent
+    if (!rumor || (rumor.kind !== KIND_DM_RUMOR && rumor.kind !== 7) ||
+        rumor.pubkey !== seal.pubkey || typeof rumor.content !== 'string') return null
+    if (rumor.id && rumor.id !== getEventHash(rumor)) return null
+    const refId = privateTarget(rumor.tags, recipient.pubkey, seal.pubkey)
+    if (refId === null || (rumor.kind === 7 && (!refId || !validReaction(rumor.content)))) return null
+    return { id: rumor.id || giftWrap.id, senderPubkey: seal.pubkey, protocol: 'nip17',
+      content: rumor.content, createdAt: clampDmCreatedAtSec(rumor.created_at ?? giftWrap.created_at),
+      ...(rumor.kind === 7 ? { reactionToId: refId } : { replyToId: refId }) }
+  } catch {
+    return null
   }
+}
 
-  // 3. NIP-07 extension NIP-44 decrypt
-  if (recipient.mode === 'extension' && window.nostr?.nip44?.decrypt) {
-    try {
-      const sealJson = await window.nostr.nip44.decrypt(giftWrap.pubkey, giftWrap.content)
-      const seal = JSON.parse(sealJson) as NostrEvent
-      if (!seal || seal.kind !== KIND_SEAL || !verifyEvent(seal)) return null
-      const rumorJson = await window.nostr.nip44.decrypt(seal.pubkey, seal.content)
-      const rumor = JSON.parse(rumorJson) as {
-        id?: string
-        kind?: number
-        pubkey?: string
-        created_at?: number
-        content?: string
-      }
-      if (
-        rumor.kind !== KIND_DM_RUMOR ||
-        typeof rumor.pubkey !== 'string' ||
-        rumor.pubkey.toLowerCase() !== seal.pubkey.toLowerCase() ||
-        typeof rumor.content !== 'string'
-      ) {
-        return null
-      }
-      const rawSec = typeof rumor.created_at === 'number' ? rumor.created_at : giftWrap.created_at
-      return {
-        id: rumor.id || giftWrap.id,
-        senderPubkey: seal.pubkey.toLowerCase(),
-        content: rumor.content,
-        createdAt: clampDmCreatedAtSec(rawSec),
-        protocol: 'nip17',
-      }
-    } catch {
-      return null
-    }
+function validReaction(content: string): boolean {
+  return !!content.trim() && content.length <= 32 && !/\s/u.test(content)
+}
+
+// Never resolve a group-chat reference against a 1:1 conversation.
+function privateTarget(tags: unknown, recipient: string, sender: string): string | undefined | null {
+  if (!Array.isArray(tags)) return undefined
+  let id: string | undefined
+  for (const tag of tags) {
+    if (!Array.isArray(tag)) continue
+    if (tag[0] === 'p' && tag[1] !== recipient && tag[1] !== sender) return null
+    if (tag[0] === 'e' && isDmTargetId(tag[1])) id = tag[1]
   }
-
-  return null
+  return id
 }
