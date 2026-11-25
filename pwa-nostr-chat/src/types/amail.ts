@@ -243,7 +243,7 @@ export interface AmailSyncSnapshot {
   customFolders?: AmailCustomFolder[]
   deletedFolderIds?: Record<string, number>
   folderSortMode?: AmailFolderSortMode
-  settings?: Partial<AmailRelaySettings>
+  folderSortUpdatedAt?: number
 }
 
 export interface AmailEngine {

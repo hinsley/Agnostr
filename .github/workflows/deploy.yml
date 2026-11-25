@@ -60,6 +60,10 @@ jobs:
         working-directory: pwa-nostr-chat
         run: npm run test:content-filter
 
+      - name: Device sync and private DM regression tests
+        working-directory: pwa-nostr-chat
+        run: node --experimental-strip-types --test scripts/check-device-sync.mjs scripts/check-private-dm-actions.mjs
+
       - name: Build
         working-directory: pwa-nostr-chat
         run: npm run build

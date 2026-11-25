@@ -44,6 +44,7 @@ export interface AmailStorageSnapshot {
   contacts: AmailContact[]
   customFolders: AmailCustomFolder[]
   folderSortMode: AmailFolderSortMode
+  folderSortUpdatedAt: number
   relayCapsules: AmailRelayCapsuleMeta[]
   tombstonesCount: number
   settings: AmailRelaySettings
@@ -136,6 +137,7 @@ export class AmailStorage {
   private contactMap = new Map<string, AmailContact>()
   private customFolderMap = new Map<string, AmailCustomFolder>()
   private folderSortMode: AmailFolderSortMode = 'manual'
+  private folderSortUpdatedAt = 0
   private vaultMap = new Map<string, AmailSealedCapsule>()
   private tombstoneMap = new Map<string, AmailAckTombstone>()
   private settings: AmailRelaySettings = { ...DEFAULT_AMAIL_RELAY_SETTINGS }
@@ -190,7 +192,7 @@ export class AmailStorage {
           STORES.meta,
           'customFolders'
         ),
-        this.idbGet<{ key: string; value: AmailFolderSortMode }>(
+        this.idbGet<{ key: string; value: AmailFolderSortMode; updatedAt?: number }>(
           db,
           STORES.meta,
           'folderSortMode'
@@ -214,6 +216,7 @@ export class AmailStorage {
         }
       }
       this.folderSortMode = normalizeFolderSortMode(folderSortModeRec?.value)
+      this.folderSortUpdatedAt = folderSortModeRec?.updatedAt ?? (folderSortModeRec ? 1 : 0)
       this.vaultMap.clear()
       for (const cap of capsules) {
         if (cap && cap.capsuleId) this.vaultMap.set(cap.capsuleId, cap)
@@ -470,6 +473,7 @@ export class AmailStorage {
       contacts: this.getAllContacts(),
       customFolders: this.getAllCustomFolders(),
       folderSortMode: this.getFolderSortMode(),
+      folderSortUpdatedAt: this.folderSortUpdatedAt,
       relayCapsules: this.getAllVaultCapsules().map(toCapsuleMeta),
       tombstonesCount: this.tombstoneMap.size,
       settings: this.getSettings(),
@@ -561,10 +565,11 @@ export class AmailStorage {
     }
   }
 
-  async setFolderSortMode(mode: AmailFolderSortMode): Promise<void> {
+  async setFolderSortMode(mode: AmailFolderSortMode, updatedAt = Math.max(Date.now(), this.folderSortUpdatedAt + 1)): Promise<void> {
     const normalized = normalizeFolderSortMode(mode)
     this.folderSortMode = normalized
-    await this.idbPut(STORES.meta, { key: 'folderSortMode', value: normalized })
+    this.folderSortUpdatedAt = updatedAt
+    await this.idbPut(STORES.meta, { key: 'folderSortMode', value: normalized, updatedAt })
   }
 
   async mergeDeletedFolderTombstones(
@@ -804,6 +809,7 @@ export class AmailStorage {
     this.contactMap.clear()
     this.customFolderMap.clear()
     this.folderSortMode = 'manual'
+    this.folderSortUpdatedAt = 0
     this.vaultMap.clear()
     this.tombstoneMap.clear()
     this.settings = { ...DEFAULT_AMAIL_RELAY_SETTINGS }

@@ -1893,7 +1893,7 @@ export function SettingsModal({
         {/* 3. Device Sync Card */}
         <SettingsSection
           title="Device Sync"
-          description="Keep your profiles and settings synced across your own devices."
+          description="Keep this profile in sync on devices signed in with the same key."
           badge={
             <span
               className={`ag-badge ${
@@ -1916,7 +1916,7 @@ export function SettingsModal({
                   <span>Encrypted Background Sync</span>
                 </span>
                 <span className="ag-set-toggle-desc">
-                  Sync groups, friends, notes, pins, Agmail, and messages automatically. Agwallet stays on this device; use its backup tools to move it.
+                  Sync groups, friends, notes, pins, Agmail, and recent messages. AI models, device settings, and Agwallet stay on this device.
                 </span>
               </div>
               <input
@@ -2048,7 +2048,7 @@ export function SettingsModal({
                             engine.deviceSync.removeLinkedDevice(dev.deviceId)
                           }}
                           aria-label={`Forget ${dev.label} (${tag})`}
-                          title={`Forget ${dev.label}`}
+                          title={`Hide ${dev.label} from this list. This does not revoke key access.`}
                         >
                           <X size={13} />
                         </button>
@@ -2059,6 +2059,16 @@ export function SettingsModal({
               )}
             </div>
 
+            {engine.deviceSync.enabled && engine.deviceSync.checkpointIssue && (
+              <p className="ag-set-sync-empty" role="status">
+                {engine.deviceSync.checkpointIssue === 'too-large'
+                  ? 'This profile is too large for a relay checkpoint. Full offline recovery is unavailable.'
+                  : 'A relay didn’t accept the latest checkpoint. Agnostr will retry.'}
+              </p>
+            )}
+            {engine.deviceSync.linkedDevices.length > 0 && (
+              <p className="ag-set-sync-empty">Forgetting a device does not revoke its access if it still has your key.</p>
+            )}
             <div className="ag-set-sync-footer">
               <span
                 className="ag-set-sync-meta mono"

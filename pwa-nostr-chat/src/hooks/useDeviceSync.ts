@@ -28,10 +28,13 @@ import type { ServerMessage, ServerSummary } from '../types/servers.ts'
 import {
   buildAmailChunkPackets,
   buildMessageChunkPackets,
+  buildMessageRequestPackets,
   buildSignedDeviceSyncCheckpointEvent,
   buildSignedDeviceSyncEphemeralEvent,
   computeCrdtStateHash,
   computeJsonDigest,
+  computeDmMessageVersion,
+  computeDmScopeDigest,
   computeScopeDigest,
   createEmptyCrdtState,
   detectDeviceLabel,
@@ -58,6 +61,7 @@ import {
   parseDeviceSyncEphemeralEvent,
   reconcileLocalSnapshotIntoCrdt,
   sanitizeSyncedDevicesMap,
+  utf8ByteLength,
   type LocalSyncSnapshot,
 } from '../lib/deviceSync.ts'
 import type { IdentityManager } from '../lib/identity.ts'
@@ -145,6 +149,25 @@ const SIBLING_STATE_COOLDOWN_MS = 3_000
 const SIBLING_REQ_COOLDOWN_MS = 4_000
 const MAX_SEEN_SYNC_EVENTS = 1200
 const SELF_CHECKPOINT_STALE_MS = 15 * 60 * 1000
+
+const CHECKPOINT_PENDING_KEY = 'agnostr:v2:device_sync_checkpoint_pending'
+function hasPendingCheckpoint(owner: string): boolean {
+  try { return localStorage.getItem(CHECKPOINT_PENDING_KEY) === owner } catch { return false }
+}
+function savePendingCheckpoint(owner: string, pending: boolean) {
+  if (!owner) return
+  try {
+    if (pending) localStorage.setItem(CHECKPOINT_PENDING_KEY, owner)
+    else if (hasPendingCheckpoint(owner)) localStorage.removeItem(CHECKPOINT_PENDING_KEY)
+  } catch { /* sync still works without persistent browser storage */ }
+}
+
+function rememberCheckpoint(candidates: Map<string, NostrEvent>, event: NostrEvent) {
+  candidates.set(event.id, event)
+  if (candidates.size <= 16) return
+  const oldest = [...candidates.values()].sort((a,b) => a.created_at - b.created_at || a.id.localeCompare(b.id))[0]
+  candidates.delete(oldest.id)
+}
 
 function sortLinkedDevices(list: LinkedDeviceInfo[]): LinkedDeviceInfo[] {
   return [...list].sort(
@@ -295,6 +318,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       ? persistedInitial.lastSyncedAt
       : null
   )
+  const [checkpointIssue, setCheckpointIssue] = useState<DeviceSyncEngine['checkpointIssue']>(null)
   const [isSyncing, setIsSyncing] = useState<boolean>(false)
   const [syncedItemsCount, setSyncedItemsCount] = useState<number>(0)
 
@@ -321,7 +345,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   const lastSyncedAtRef = useRef<number | null>(lastSyncedAt)
   const isApplyingRemoteRef = useRef<boolean>(false)
   const checkpointHydratedRef = useRef<boolean>(false)
-  const checkpointDirtyRef = useRef<boolean>(Boolean(initialHealCheckpoint))
+  const checkpointDirtyRef = useRef<boolean>(Boolean(initialHealCheckpoint) || hasPendingCheckpoint(masterPubkey.toLowerCase()))
+  const publishingCheckpointRef = useRef(false)
   const checkpointTimerRef = useRef<number | null>(null)
   const msgSyncNotifyTimerRef = useRef<number | null>(null)
   const lastHelloSentAtRef = useRef<number>(0)
@@ -721,7 +746,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     const { dmMap, serverMap, bitchatMap } = collectLocalMessageBuckets()
     const dm: Record<string, DeviceSyncScopeDigest> = {}
     for (const [pk, entry] of dmMap.entries()) {
-      dm[pk] = computeScopeDigest(entry.messages)
+      dm[pk] = computeDmScopeDigest(entry.messages)
     }
     const server: Record<string, DeviceSyncScopeDigest> = {}
     for (const [k, msgs] of serverMap.entries()) {
@@ -793,7 +818,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       const relays = getSyncRelayUrlsRef.current()
       if (relays.length === 0) return false
       const signed = await buildSignedDeviceSyncEphemeralEvent(packet, material, allowExtensionPrompt)
-      if (!signed) return false
+      if (!signed || !enabledRef.current || identityManager.getMasterKeyMaterial().pubkey !== material.pubkey) return false
       seenEventIdsRef.current.add(signed.id)
       const res = await relayPool.publish(relays, signed, 3500)
       return res.acceptedRelays.length > 0
@@ -803,37 +828,49 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
 
   const publishCheckpointNow = useCallback(
     async (allowExtensionPrompt = false): Promise<boolean> => {
-      if (!enabledRef.current) return false
+      if (!enabledRef.current || publishingCheckpointRef.current) return false
       const material = identityManager.getMasterKeyMaterial()
       if (!material.secretKey && !allowExtensionPrompt) return false
       const relays = getSyncRelayUrlsRef.current()
       if (relays.length === 0) return false
-
-      const amailInfo = await getAmailExportInfo()
-      const recentTail = buildRecentMessagesTail()
-      upsertSelfDeviceRecord(Date.now())
-      persistLocalJournal()
-      const bounded = fitCheckpointStateWithinBudget(
-        crdtRef.current,
-        amailInfo,
-        recentTail,
-        MAX_NIP44_CHUNK_BYTES
-      )
-
-      const signed = await buildSignedDeviceSyncCheckpointEvent(
-        bounded,
-        material,
-        allowExtensionPrompt
-      )
-      if (!signed) return false
-      seenEventIdsRef.current.add(signed.id)
+      const device = deviceIdRef.current
+      const isCurrent = () => enabledRef.current && deviceIdRef.current === device &&
+        identityManager.getMasterKeyMaterial().pubkey === material.pubkey
+      publishingCheckpointRef.current = true
+      // Consume this attempt's dirtiness, not any changes made while we await the relay.
       checkpointDirtyRef.current = false
-      const res = await relayPool.publish(relays, signed, 4500)
-      if (res.acceptedRelays.length > 0) {
+      savePendingCheckpoint(material.pubkey, true)
+      let accepted = false
+      let issue: DeviceSyncEngine['checkpointIssue'] = 'retry'
+      try {
+        const amailInfo = await getAmailExportInfo()
+        if (!isCurrent()) return false
+        const recentTail = buildRecentMessagesTail()
+        upsertSelfDeviceRecord(Date.now())
+        persistLocalJournal()
+        const bounded = fitCheckpointStateWithinBudget(crdtRef.current, amailInfo, recentTail, MAX_NIP44_CHUNK_BYTES)
+        if (utf8ByteLength(JSON.stringify(bounded)) > MAX_NIP44_CHUNK_BYTES) {
+          issue = 'too-large'
+          return false
+        }
+        const signed = await buildSignedDeviceSyncCheckpointEvent(bounded, material, allowExtensionPrompt)
+        if (!signed || !isCurrent()) return false
+        seenEventIdsRef.current.add(signed.id)
+        const res = await relayPool.publish(relays, signed, 4500)
+        if (!isCurrent() || res.acceptedRelays.length === 0) return false
+        accepted = true
         recordSyncedActivity(0)
         return true
+      } catch {
+        return false
+      } finally {
+        publishingCheckpointRef.current = false
+        if (isCurrent()) {
+          setCheckpointIssue(accepted ? null : issue)
+          if (!accepted) checkpointDirtyRef.current = true
+          savePendingCheckpoint(material.pubkey, checkpointDirtyRef.current)
+        }
       }
-      return false
     },
     [
       identityManager,
@@ -847,6 +884,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   )
 
   const scheduleCheckpointPublish = useCallback(() => {
+    if (!checkpointDirtyRef.current) savePendingCheckpoint(ownerPubkeyRef.current ?? '', true)
     checkpointDirtyRef.current = true
     if (!enabledRef.current || !checkpointHydratedRef.current) return
     if (checkpointTimerRef.current !== null) {
@@ -865,6 +903,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       const material = identityManager.getMasterKeyMaterial()
       if (!material.secretKey && !allowExtensionPrompt) return false
       const msgDigests = await computeLocalMsgDigests()
+      if (identityManager.getMasterKeyMaterial().pubkey !== material.pubkey) return false
       const packet: DeviceSyncHelloPacket = {
         v: 1,
         type: 'sync-hello',
@@ -897,7 +936,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
       lastStateSentToPeerRef.current.set(key, now)
 
+      const owner = identityManager.getMasterKeyMaterial().pubkey
       const amailInfo = await getAmailExportInfo()
+      if (identityManager.getMasterKeyMaterial().pubkey !== owner) return false
       upsertSelfDeviceRecord(now)
       persistLocalJournal()
       const statePayload = fitCheckpointStateWithinBudget(
@@ -919,6 +960,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       return await publishEphemeralPacket(packet, allowExtensionPrompt)
     },
     [
+      identityManager,
       getAmailExportInfo,
       upsertSelfDeviceRecord,
       persistLocalJournal,
@@ -988,6 +1030,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
 
   const applyMergedRemoteCrdt = useCallback(
     async (remoteState: DeviceSyncCrdtState): Promise<{ changed: boolean; itemsApplied: number }> => {
+      const owner = identityManager.getMasterKeyMaterial().pubkey
       const { merged, changed, diff } = mergeCrdtStates(crdtRef.current, remoteState)
       let itemsApplied = 0
 
@@ -1062,6 +1105,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         }
       }
 
+      if (identityManager.getMasterKeyMaterial().pubkey !== owner) return { changed: false, itemsApplied: 0 }
       syncLinkedDevicesFromCrdt(changed ? merged : crdtRef.current)
 
       if (itemsApplied > 0 || changed) {
@@ -1069,37 +1113,41 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
       return { changed, itemsApplied }
     },
-    [applyRecentMessagesTail, syncLinkedDevicesFromCrdt, recordSyncedActivity]
+    [applyRecentMessagesTail, syncLinkedDevicesFromCrdt, recordSyncedActivity, identityManager]
   )
 
   const requestMissingMessagesFromPeer = useCallback(
     async (peerDeviceId: string, remoteDigests: DeviceSyncMsgDigests, bypassCooldown = false) => {
+      const owner = identityManager.getMasterKeyMaterial().pubkey
       const now = Date.now()
       const lastReq = lastReqSentToPeerRef.current.get(peerDeviceId) ?? 0
       if (!bypassCooldown && now - lastReq < SIBLING_REQ_COOLDOWN_MS) return
 
       const { dmMap, serverMap, bitchatMap } = collectLocalMessageBuckets()
       const localDigests = await computeLocalMsgDigests()
+      if (identityManager.getMasterKeyMaterial().pubkey !== owner) return
       const blocked = new Set(snapshotRef.current.blockedPubkeys.map((p) => p.toLowerCase()))
       const scopes: DeviceSyncScopeRequest[] = []
 
       for (const [pk, remoteDigest] of Object.entries(remoteDigests.dm)) {
         if (!remoteDigest || remoteDigest.count <= 0 || blocked.has(pk.toLowerCase())) continue
         const localDigest = localDigests.dm[pk]
-        if (!localDigest || localDigest.hash !== remoteDigest.hash) {
-          const knownIds = (dmMap.get(pk)?.messages ?? []).map((m) => m.id).slice(-200)
+        const useVersions = typeof remoteDigest.versionsHash === 'string'
+        if (!localDigest || localDigest.hash !== remoteDigest.hash ||
+            (useVersions && localDigest.versionsHash !== remoteDigest.versionsHash)) {
+          const knownIds = (dmMap.get(pk)?.messages ?? [])
+            .map(m => useVersions ? computeDmMessageVersion(m) : m.id).slice(-150)
           scopes.push({
             kind: 'dm',
             key: pk,
             knownIds,
+            ...(useVersions ? { dmVersions: true } : {}),
             sinceSec: snapshotRef.current.dmClearedAt[pk.toLowerCase()],
           })
         }
-        if (scopes.length >= 24) break
       }
 
       for (const [scopeKey, remoteDigest] of Object.entries(remoteDigests.server)) {
-        if (scopes.length >= 36) break
         if (!remoteDigest || remoteDigest.count <= 0) continue
         const decoded = decodeServerScopeKey(scopeKey)
         if (!decoded) continue
@@ -1114,7 +1162,6 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
 
       for (const [gh, remoteDigest] of Object.entries(remoteDigests.bitchat)) {
-        if (scopes.length >= 44) break
         if (!remoteDigest || remoteDigest.count <= 0) continue
         const localDigest = localDigests.bitchat[gh]
         if (!localDigest || localDigest.hash !== remoteDigest.hash) {
@@ -1141,14 +1188,22 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           scopes,
           ...(wantAmail ? { wantAmail: true } : {}),
         }
-        void publishEphemeralPacket(req, false)
+        for (const packet of buildMessageRequestPackets(req)) {
+          if (identityManager.getMasterKeyMaterial().pubkey !== owner) return
+          await publishEphemeralPacket(packet, false)
+        }
       }
     },
-    [collectLocalMessageBuckets, computeLocalMsgDigests, publishEphemeralPacket]
+    [collectLocalMessageBuckets, computeLocalMsgDigests, publishEphemeralPacket, identityManager]
   )
 
   const handleIncomingWirePacket = useCallback(
     async (packet: DeviceSyncWirePacket) => {
+      const own = identityManager.getMasterKeyMaterial().pubkey
+      const device = deviceIdRef.current
+      const isCurrent = () => enabledRef.current && deviceIdRef.current === device &&
+        identityManager.getMasterKeyMaterial().pubkey === own
+      if (!isCurrent()) return
       if (packet.deviceId === deviceIdRef.current) return
       if ('targetDeviceId' in packet && packet.targetDeviceId && packet.targetDeviceId !== deviceIdRef.current) {
         return
@@ -1172,6 +1227,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         })
         const remoteHashBefore = computeCrdtStateHash(packet.state)
         const { changed } = await applyMergedRemoteCrdt(packet.state)
+        if (!isCurrent()) return
         const localHashAfter = computeCrdtStateHash(crdtRef.current)
         if (changed) {
           scheduleCheckpointPublish()
@@ -1195,7 +1251,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
             const bucket = dmMap.get(req.key.toLowerCase())
             if (!bucket) continue
             const missing = bucket.messages.filter(
-              (m) => !known.has(m.id) && (!req.sinceSec || m.createdAt > req.sinceSec)
+              (m) => !known.has(req.dmVersions ? computeDmMessageVersion(m) : m.id) && (!req.sinceSec || m.createdAt > req.sinceSec)
             )
             if (missing.length === 0) continue
             const chunks = buildMessageChunkPackets({
@@ -1210,6 +1266,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
               messages: missing,
             })
             for (const chunk of chunks) {
+              if (!isCurrent()) return
               await publishEphemeralPacket(chunk, false)
             }
           } else if (req.kind === 'server') {
@@ -1225,6 +1282,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
               messages: missing,
             })
             for (const chunk of chunks) {
+              if (!isCurrent()) return
               await publishEphemeralPacket(chunk, false)
             }
           } else if (req.kind === 'bitchat') {
@@ -1240,6 +1298,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
               messages: missing,
             })
             for (const chunk of chunks) {
+              if (!isCurrent()) return
               await publishEphemeralPacket(chunk, false)
             }
           }
@@ -1247,6 +1306,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
 
         if (packet.wantAmail) {
           const amailInfo = await getAmailExportInfo()
+          if (!isCurrent()) return
           if (amailInfo) {
             const chunks = buildAmailChunkPackets({
               deviceId: deviceIdRef.current,
@@ -1257,6 +1317,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
               payload: amailInfo.payload,
             })
             for (const chunk of chunks) {
+              if (!isCurrent()) return
               await publishEphemeralPacket(chunk, false)
             }
           }
@@ -1320,6 +1381,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         }
         let transfer = amailTransfersRef.current.get(tKey)
         if (!transfer) {
+          if (amailTransfersRef.current.size >= 8) amailTransfersRef.current.delete(amailTransfersRef.current.keys().next().value!)
           transfer = {
             totalChunks: packet.totalChunks,
             updatedAt: packet.updatedAt,
@@ -1329,6 +1391,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           }
           amailTransfersRef.current.set(tKey, transfer)
         }
+        if (transfer.hash !== packet.hash || transfer.totalChunks !== packet.totalChunks ||
+            transfer.updatedAt !== packet.updatedAt) return
         transfer.chunks.set(packet.chunkIndex, packet.data)
         if (transfer.chunks.size >= transfer.totalChunks) {
           amailTransfersRef.current.delete(tKey)
@@ -1340,9 +1404,10 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           }
           try {
             const parsed: unknown = JSON.parse(combined)
+            if (computeJsonDigest(parsed) !== transfer.hash) return
             const res = await amailProviderRef.current.mergeSyncState(parsed)
             const count = typeof res === 'number' ? res : res === true ? 1 : 0
-            if (count > 0) {
+            if (isCurrent() && count > 0) {
               recordSyncedActivity(count)
             }
           } catch {
@@ -1354,6 +1419,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
 
     },
     [
+      identityManager,
       touchSiblingDevice,
       sendStateToPeer,
       requestMissingMessagesFromPeer,
@@ -1376,7 +1442,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     pendingAppliedNicknameRef.current = null
     stateRevisionRef.current = 0
     checkpointHydratedRef.current = false
-    checkpointDirtyRef.current = false
+    setCheckpointIssue(null)
+    checkpointDirtyRef.current = hasPendingCheckpoint(pk)
     seenEventIdsRef.current.clear()
     amailTransfersRef.current.clear()
 
@@ -1435,10 +1502,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     stateRevisionRef.current += 1
     persistLocalJournal()
 
-    if (!enabledRef.current) return
     if (!isInitialSeed) {
       scheduleCheckpointPublish()
-      void sendStateToPeer(undefined, false, true)
+      if (enabledRef.current) void sendStateToPeer(undefined, false, true)
     }
   }, [
     masterPubkey,
@@ -1487,25 +1553,21 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
 
   // When new local messages appear (sent or received), silently nudge online siblings & refresh checkpoint
   const msgActivitySignature = useMemo(() => {
-    let dmCount = 0
-    let dmLatest = 0
-    for (const t of dmThreads) {
-      dmCount += t.messages.length
-      if (t.lastMessageAt > dmLatest) dmLatest = t.lastMessageAt
-    }
+    const dmSignature = dmThreads.map(t => computeDmScopeDigest(
+      t.messages.slice(-150).filter(m => !isEphemeralPendingMessage(m) && !isStuckMediaPlaceholder(m))
+    ).versionsHash).join(':')
     const bitchatTail = activeBitchatMessages[activeBitchatMessages.length - 1]?.id ?? ''
     const serverTail = activeServerMessages[activeServerMessages.length - 1]?.id ?? ''
-    return `${dmCount}:${dmLatest}:${activeBitchatMessages.length}:${bitchatTail}:${activeServerMessages.length}:${serverTail}`
+    return `${dmSignature}:${activeBitchatMessages.length}:${bitchatTail}:${activeServerMessages.length}:${serverTail}`
   }, [dmThreads, activeBitchatMessages, activeServerMessages])
 
   const prevMsgSigRef = useRef<string>(msgActivitySignature)
   useEffect(() => {
     if (prevMsgSigRef.current === msgActivitySignature) return
     prevMsgSigRef.current = msgActivitySignature
-    if (!enabledRef.current || isApplyingRemoteRef.current || !checkpointHydratedRef.current) {
-      return
-    }
+    if (isApplyingRemoteRef.current) return
     scheduleCheckpointPublish()
+    if (!enabledRef.current || !checkpointHydratedRef.current) return
     const hasOnlineSibling = linkedDevicesRef.current.some(
       (d) => d.lastSeenAt > 0 && Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
     )
@@ -1534,15 +1596,19 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
 
     let cancelled = false
     checkpointHydratedRef.current = false
-    let newestCheckpointEvent: NostrEvent | null = null
+    const checkpoints = new Map<string, NostrEvent>()
+    const checkpointEoses = new Set<string>()
     let checkpointEoseDone = false
 
     const applyHydratedCheckpoint = async () => {
       if (cancelled || checkpointHydratedRef.current) return
       checkpointHydratedRef.current = true
-      if (newestCheckpointEvent) {
-        const parsed = await parseDeviceSyncCheckpointEvent(newestCheckpointEvent, material, false)
-        if (!cancelled && parsed) {
+      const events = [...checkpoints.values()].sort((a,b) => b.created_at - a.created_at || a.id.localeCompare(b.id))
+      for (const event of events) {
+        if (cancelled || identityManager.getMasterKeyMaterial().pubkey !== material.pubkey) return
+        seenEventIdsRef.current.add(event.id)
+        const parsed = await parseDeviceSyncCheckpointEvent(event, material, false)
+        if (!cancelled && parsed && identityManager.getMasterKeyMaterial().pubkey === material.pubkey) {
           await applyMergedRemoteCrdt(parsed)
         }
       }
@@ -1587,20 +1653,20 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           if (cancelled || ev.kind !== KIND_DEVICE_SYNC_CHECKPOINT) return
           if (seenEventIdsRef.current.has(ev.id)) return
           if (!checkpointHydratedRef.current) {
-            if (!newestCheckpointEvent || ev.created_at > newestCheckpointEvent.created_at) {
-              newestCheckpointEvent = ev
-            }
+            rememberCheckpoint(checkpoints, ev)
             return
           }
           seenEventIdsRef.current.add(ev.id)
           void parseDeviceSyncCheckpointEvent(ev, material, false).then((parsed) => {
-            if (!cancelled && parsed) {
+            if (!cancelled && parsed && identityManager.getMasterKeyMaterial().pubkey === pk) {
               void applyMergedRemoteCrdt(parsed)
             }
           })
         },
-        onEose: () => {
+        onEose: (relay) => {
           if (cancelled || checkpointEoseDone) return
+          checkpointEoses.add(relay)
+          if (checkpointEoses.size < relays.length) return
           checkpointEoseDone = true
           window.clearTimeout(checkpointFallback)
           void applyHydratedCheckpoint()
@@ -1628,7 +1694,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
             if (oldest) seenEventIdsRef.current.delete(oldest)
           }
           void parseDeviceSyncEphemeralEvent(ev, material, false).then((packet) => {
-            if (!cancelled && packet) {
+            if (!cancelled && packet && identityManager.getMasterKeyMaterial().pubkey === pk) {
               void handleIncomingWirePacket(packet)
             }
           })
@@ -1641,18 +1707,24 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       if (!cancelled) void broadcastHello(false)
     }, 600)
 
+    const retryCheckpoint = () => {
+      if (!cancelled && checkpointDirtyRef.current && checkpointHydratedRef.current && !publishingCheckpointRef.current) {
+        scheduleCheckpointPublish()
+      }
+    }
     const intervalId = window.setInterval(() => {
       if (!cancelled) void broadcastHello(false)
+      retryCheckpoint()
     }, DEVICE_SYNC_HELLO_INTERVAL_MS)
 
     const handleVisibility = () => {
       if (cancelled || document.visibilityState !== 'visible') return
+      retryCheckpoint()
       if (Date.now() - lastHelloSentAtRef.current < 5_000) return
       void broadcastHello(false)
     }
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', handleVisibility)
-    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    window.addEventListener('online', retryCheckpoint)
 
     // Periodic 15s refresh of sibling online indicators (120s TTL)
     const onlineTick = window.setInterval(() => {
@@ -1684,6 +1756,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibility)
       }
+      window.removeEventListener('online', retryCheckpoint)
       unsubCheckpoint()
       unsubLive()
     }
@@ -1808,8 +1881,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     try {
       const allowExt = material.mode === 'extension'
       // 1. Pull latest kind:30078 checkpoint
-      const fetchedCheckpoint = await new Promise<NostrEvent | null>((resolve) => {
-        let newest: NostrEvent | null = null
+      const fetchedCheckpoint = await new Promise<NostrEvent[]>((resolve) => {
+        const candidates = new Map<string, NostrEvent>()
+        const eoses = new Set<string>()
         let settled = false
         let unsub: (() => void) | null = null
         const finish = () => {
@@ -1817,7 +1891,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           settled = true
           window.clearTimeout(timer)
           unsub?.()
-          resolve(newest)
+          resolve([...candidates.values()].sort((a,b) => b.created_at - a.created_at || a.id.localeCompare(b.id)))
         }
         const timer = window.setTimeout(finish, 2500)
         unsub = relayPool.subscribe(
@@ -1834,20 +1908,24 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           {
             onEvent: (ev) => {
               if (ev.kind === KIND_DEVICE_SYNC_CHECKPOINT) {
-                if (!newest || ev.created_at > newest.created_at) newest = ev
+                rememberCheckpoint(candidates, ev)
               }
             },
-            onEose: finish,
+            onEose: relay => {
+              eoses.add(relay)
+              if (eoses.size >= relays.length) finish()
+            },
           }
         )
       })
 
-      if (fetchedCheckpoint) {
-        const parsed = await parseDeviceSyncCheckpointEvent(fetchedCheckpoint, material, allowExt)
-        if (parsed) {
-          await applyMergedRemoteCrdt(parsed)
-        }
+      const isCurrent = () => enabledRef.current && identityManager.getMasterKeyMaterial().pubkey === material.pubkey
+      for (const event of fetchedCheckpoint) {
+        if (!isCurrent()) return
+        const parsed = await parseDeviceSyncCheckpointEvent(event, material, allowExt)
+        if (parsed && isCurrent()) await applyMergedRemoteCrdt(parsed)
       }
+      if (!isCurrent()) return
       checkpointHydratedRef.current = true
 
       // 2. Broadcast live hello + state & publish merged checkpoint
@@ -1907,7 +1985,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     pendingAppliedNicknameRef.current = null
     stateRevisionRef.current = 0
     checkpointHydratedRef.current = false
+    setCheckpointIssue(null)
     checkpointDirtyRef.current = false
+    savePendingCheckpoint(ownerPubkeyRef.current ?? '', false)
     seenEventIdsRef.current.clear()
     amailTransfersRef.current.clear()
     lastStateSentToPeerRef.current.clear()
@@ -1936,6 +2016,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       linkedDevices,
       onlineSiblingCount,
       lastSyncedAt,
+      checkpointIssue,
       isSyncing,
       syncedItemsCount,
       syncNow,
@@ -1951,6 +2032,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       linkedDevices,
       onlineSiblingCount,
       lastSyncedAt,
+      checkpointIssue,
       isSyncing,
       syncedItemsCount,
       syncNow,

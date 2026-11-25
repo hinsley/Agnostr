@@ -725,7 +725,9 @@ export function mergeCrdtStates(
   const localServerOrder = local.serverOrder ?? { updatedAt: 0, ids: [] }
   const remoteServerOrder = remote.serverOrder ?? { updatedAt: 0, ids: [] }
   const mergedServerOrder: SyncedServerOrderState =
-    remoteServerOrder.updatedAt > localServerOrder.updatedAt
+    (remoteServerOrder.updatedAt > localServerOrder.updatedAt ||
+      (remoteServerOrder.updatedAt > 0 && remoteServerOrder.updatedAt === localServerOrder.updatedAt &&
+        JSON.stringify(remoteServerOrder.ids) > JSON.stringify(localServerOrder.ids)))
       ? {
           updatedAt: remoteServerOrder.updatedAt,
           ids: [...remoteServerOrder.ids],
@@ -895,9 +897,9 @@ export function mergeCrdtStates(
   let mergedLud16 = local.lud16
   if (
     remote.lud16.updatedAt > local.lud16.updatedAt ||
-    (remote.lud16.updatedAt === local.lud16.updatedAt &&
-      remote.lud16.value !== null &&
-      local.lud16.value === null)
+    (remote.lud16.updatedAt > 0 && remote.lud16.updatedAt === local.lud16.updatedAt &&
+      remote.lud16.value !== local.lud16.value &&
+      (remote.lud16.value === null || (local.lud16.value !== null && remote.lud16.value > local.lud16.value)))
   ) {
     mergedLud16 = { ...remote.lud16 }
     if (mergedLud16.value !== local.lud16.value) {
@@ -909,8 +911,10 @@ export function mergeCrdtStates(
   // 7. Merge Display Nickname LWW scalar
   let mergedNickname = local.nickname
   if (
-    remote.nickname.updatedAt > local.nickname.updatedAt &&
-    remote.nickname.value.trim().length > 0
+    remote.nickname.value.trim().length > 0 &&
+    (remote.nickname.updatedAt > local.nickname.updatedAt ||
+      (remote.nickname.updatedAt > 0 && remote.nickname.updatedAt === local.nickname.updatedAt &&
+        remote.nickname.value > local.nickname.value))
   ) {
     mergedNickname = {
       value: remote.nickname.value.trim().slice(0, 32),
@@ -1089,10 +1093,10 @@ export function mergeCrdtStates(
     Boolean(diff.serverOrderChanged) ||
     diff.trustedChanged ||
     diff.blockedChanged ||
-    diff.pinnedChanged ||
+    mergedPinned !== local.pinned ||
     diff.dmClearedChanged ||
-    diff.lud16Changed ||
-    diff.nicknameChanged ||
+    mergedLud16 !== local.lud16 ||
+    mergedNickname !== local.nickname ||
     diff.peerNotesChanged ||
     diff.dmPeerNamesChanged ||
     Boolean(diff.devicesChanged)
@@ -1302,6 +1306,40 @@ export function computeScopeDigest(
   }
 }
 
+/** ID digest remains compatible with older clients; the second digest tracks
+ * precisely the monotonic metadata that current clients can merge. */
+const dmVersionCache = new WeakMap<DmMessage, string>()
+export function computeDmMessageVersion(m: DmMessage): string {
+  const cached = dmVersionCache.get(m)
+  if (cached !== undefined) return cached
+  const reactions = (m.reactions ?? []).map(r => [r.emoji, [...r.pubkeys].sort(), r.reactedByMe])
+  reactions.sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+  const hash = sha256ShortHex(JSON.stringify([m.id, m.wireId, m.replyToId, m.deliveryStatus, reactions]))
+  dmVersionCache.set(m, hash)
+  return hash
+}
+
+export function computeDmScopeDigest(messages: readonly DmMessage[]): DeviceSyncScopeDigest {
+  return { ...computeScopeDigest(messages),
+    versionsHash: sha256ShortHex(messages.map(computeDmMessageVersion).sort().join('|')) }
+}
+
+/** Request groups fit on the wire even when dozens of threads have full histories. */
+export function buildMessageRequestPackets(packet: DeviceSyncMsgReqPacket): DeviceSyncMsgReqPacket[] {
+  const result: DeviceSyncMsgReqPacket[] = []
+  let next = { ...packet, scopes: [] as DeviceSyncScopeRequest[] }
+  for (const scope of packet.scopes) {
+    const candidate = { ...next, scopes: [...next.scopes, scope] }
+    if (next.scopes.length >= 32 || utf8ByteLength(JSON.stringify(candidate)) > MAX_NIP44_CHUNK_BYTES) {
+      if (next.scopes.length || next.wantAmail) result.push(next)
+      next = { ...packet, scopes: [], wantAmail: undefined }
+    }
+    next.scopes.push(scope)
+  }
+  if (next.scopes.length || next.wantAmail) result.push(next)
+  return result
+}
+
 export function computeJsonDigest(value: unknown): string {
   try {
     return sha256ShortHex(JSON.stringify(value) ?? '')
@@ -1493,25 +1531,23 @@ export function buildAmailChunkPackets(params: {
   }
   if (!serialized) return []
 
-  const slices: string[] = []
-  for (let i = 0; i < serialized.length; i += maxChunkChars) {
-    slices.push(serialized.slice(i, i + maxChunkChars))
-  }
-  const totalChunks = slices.length
   const ts = Date.now()
-  return slices.map((data, idx) => ({
-    v: 1,
-    type: 'sync-amail-chunk',
-    deviceId: params.deviceId,
-    targetDeviceId: params.targetDeviceId,
-    ts,
-    transferId: params.transferId,
-    updatedAt: params.updatedAt,
-    hash: params.hash,
-    chunkIndex: idx,
-    totalChunks,
-    data,
-  }))
+  const packet = (data: string, chunkIndex: number, totalChunks: number): DeviceSyncAmailChunkPacket => ({
+    v: 1, type: 'sync-amail-chunk', deviceId: params.deviceId, targetDeviceId: params.targetDeviceId,
+    ts, transferId: params.transferId, updatedAt: params.updatedAt, hash: params.hash, chunkIndex, totalChunks, data,
+  })
+  const slices: string[] = []
+  for (let offset = 0; offset < serialized.length;) {
+    if (slices.length >= 64) return []
+    let len = Math.max(1, Math.min(maxChunkChars, serialized.length - offset))
+    while (utf8ByteLength(JSON.stringify(packet(serialized.slice(offset, offset + len), 63, 64))) > MAX_NIP44_CHUNK_BYTES) {
+      if (len === 1) return []
+      len = Math.floor(len / 2)
+    }
+    slices.push(serialized.slice(offset, offset + len))
+    offset += len
+  }
+  return slices.map((data, idx) => packet(data, idx, slices.length))
 }
 
 /** Strictly NIP-44 v2 encrypt plaintext to our own master pubkey */
@@ -1573,7 +1609,7 @@ export async function buildSignedDeviceSyncEphemeralEvent(
   if ((packet as { type: string }).type === 'sync-wallet-chunk') return null
   let safePacket: DeviceSyncWirePacket = packet
   if (packet.type === 'sync-state') {
-    safePacket = { ...packet, state: removeLegacyWalletFromState(packet.state) }
+    safePacket = { ...packet, state: projectWireState(packet.state) }
   } else if (packet.type === 'sync-hello') {
     const msgDigests = { ...packet.msgDigests } as typeof packet.msgDigests & { wallet?: unknown }
     delete msgDigests.wallet
@@ -1610,10 +1646,13 @@ export async function buildSignedDeviceSyncEphemeralEvent(
   return null
 }
 
-function removeLegacyWalletFromState(state: DeviceSyncCrdtState): DeviceSyncCrdtState {
-  const safeState = { ...state } as DeviceSyncCrdtState & { wallet?: unknown }
-  delete safeState.wallet
-  return safeState
+function projectWireState(state: DeviceSyncCrdtState): DeviceSyncCrdtState {
+  return {
+    v: 1, servers: state.servers, serverOrder: state.serverOrder, trusted: state.trusted,
+    blocked: state.blocked, pinned: state.pinned, dmClearedAt: state.dmClearedAt, lud16: state.lud16,
+    nickname: state.nickname, peerNotes: state.peerNotes, dmPeerNames: state.dmPeerNames,
+    devices: state.devices, amail: state.amail, recentMessages: state.recentMessages,
+  }
 }
 
 export async function buildSignedDeviceSyncCheckpointEvent(
@@ -1621,7 +1660,7 @@ export async function buildSignedDeviceSyncCheckpointEvent(
   material: SigningKeyMaterial,
   allowExtensionPrompt = false
 ): Promise<VerifiedEvent | null> {
-  const plaintext = JSON.stringify(removeLegacyWalletFromState(state))
+  const plaintext = JSON.stringify(projectWireState(state))
   const ciphertext = await encryptSelfPayload(plaintext, material, allowExtensionPrompt)
   if (!ciphertext) return null
 
@@ -1921,6 +1960,7 @@ export async function parseDeviceSyncEphemeralEvent(
           kind: s.kind,
           key: s.key,
           knownIds: s.knownIds.filter((id): id is string => typeof id === 'string').slice(0, 250),
+          dmVersions: s.kind === 'dm' && s.dmVersions === true,
           sinceSec: typeof s.sinceSec === 'number' ? s.sinceSec : undefined,
         })
       }
@@ -1977,7 +2017,9 @@ export async function parseDeviceSyncEphemeralEvent(
         typeof parsed.hash !== 'string' ||
         typeof parsed.data !== 'string' ||
         typeof parsed.chunkIndex !== 'number' ||
-        typeof parsed.totalChunks !== 'number'
+        !Number.isInteger(parsed.totalChunks) || !Number.isInteger(parsed.chunkIndex) ||
+        Number(parsed.totalChunks) < 1 || Number(parsed.totalChunks) > 64 ||
+        Number(parsed.chunkIndex) < 0 || Number(parsed.chunkIndex) >= Number(parsed.totalChunks)
       ) {
         return null
       }
@@ -1990,8 +2032,8 @@ export async function parseDeviceSyncEphemeralEvent(
         transferId: parsed.transferId,
         updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
         hash: parsed.hash,
-        chunkIndex: parsed.chunkIndex,
-        totalChunks: parsed.totalChunks,
+        chunkIndex: Number(parsed.chunkIndex),
+        totalChunks: Number(parsed.totalChunks),
         data: parsed.data,
       } satisfies DeviceSyncAmailChunkPacket
     }

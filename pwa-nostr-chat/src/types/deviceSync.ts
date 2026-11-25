@@ -36,6 +36,7 @@ export interface DeviceSyncEngine {
   linkedDevices: LinkedDeviceInfo[]
   onlineSiblingCount: number
   lastSyncedAt: number | null
+  checkpointIssue: 'retry' | 'too-large' | null
   isSyncing: boolean
   syncedItemsCount: number
   syncNow: () => Promise<void>
@@ -160,6 +161,7 @@ export interface DeviceSyncScopeDigest {
   count: number
   latestTs: number
   hash: string
+  versionsHash?: string // mutable DM metadata, independent of the legacy ID digest
 }
 
 export interface DeviceSyncMsgDigests {
@@ -173,6 +175,7 @@ export interface DeviceSyncScopeRequest {
   kind: DeviceSyncMessageScopeKind
   key: string
   knownIds: string[]
+  dmVersions?: boolean
   sinceSec?: number
 }
 

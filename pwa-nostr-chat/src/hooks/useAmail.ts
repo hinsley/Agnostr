@@ -1,3 +1,4 @@
+import { amailTombstoneCovers, mergeAmailTombstones } from '../lib/amailSyncTombstones.ts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TurnServerConfig } from '../types/calls.ts'
 import type { PushPokePayload } from '../types/notifications.ts'
@@ -1744,7 +1745,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
     if (!storage) {
       return {
         version: 1,
-        updatedAt: Date.now(),
+        updatedAt: 0,
         messages: [],
         deletedMessageIds: {},
         contacts: [],
@@ -1755,17 +1756,25 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       }
     }
     const snap = storage.getSnapshot()
+    const messages = snap.messages.slice(0, 200)
+    const updatedAt = Math.max(0, snap.folderSortUpdatedAt,
+      ...messages.map(m => m.updatedAt ?? m.sentAt * 1000),
+      ...snap.contacts.map(c => c.updatedAt ?? c.addedAt),
+      ...snap.customFolders.map(f => f.updatedAt ?? f.createdAt),
+      ...Object.values(snap.deletedMessageIds),
+      ...Object.values(snap.removedContactPubkeys),
+      ...Object.values(snap.deletedFolderIds))
     return {
       version: 1,
-      updatedAt: Date.now(),
-      messages: snap.messages.slice(0, 200),
+      updatedAt,
+      messages,
       deletedMessageIds: snap.deletedMessageIds,
       contacts: snap.contacts,
       removedContactPubkeys: snap.removedContactPubkeys,
       customFolders: snap.customFolders,
       deletedFolderIds: snap.deletedFolderIds,
       folderSortMode: snap.folderSortMode,
-      settings: snap.settings,
+      folderSortUpdatedAt: snap.folderSortUpdatedAt,
     }
   }, [])
 
@@ -1777,18 +1786,14 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
 
       let changed = false
       const localSnap = storage.getSnapshot()
-      const mergedDeleted = {
-        ...localSnap.deletedMessageIds,
-        ...(remote.deletedMessageIds ?? {}),
+      const mergeDeletes = (local: Record<string, number>, incoming?: Record<string, number>) => {
+        const result = mergeAmailTombstones(local, incoming)
+        changed ||= result.changed
+        return result.merged
       }
-      const mergedRemovedContacts = {
-        ...localSnap.removedContactPubkeys,
-        ...(remote.removedContactPubkeys ?? {}),
-      }
-      const mergedDeletedFolders = {
-        ...localSnap.deletedFolderIds,
-        ...(remote.deletedFolderIds ?? {}),
-      }
+      const mergedDeleted = mergeDeletes(localSnap.deletedMessageIds, remote.deletedMessageIds)
+      const mergedRemovedContacts = mergeDeletes(localSnap.removedContactPubkeys, remote.removedContactPubkeys)
+      const mergedDeletedFolders = mergeDeletes(localSnap.deletedFolderIds, remote.deletedFolderIds)
       await storage.mergeSyncTombstones(
         mergedDeleted,
         mergedRemovedContacts,
@@ -1799,8 +1804,9 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       for (const rm of remote.messages ?? []) {
         if (!rm || !rm.id) continue
         const deletedAt = mergedDeleted[rm.id] ?? 0
-        if (deletedAt > (rm.updatedAt ?? rm.sentAt * 1000)) {
-          if (storage.getMessage(rm.id)) {
+        if (amailTombstoneCovers(deletedAt, rm.updatedAt ?? rm.sentAt * 1000)) {
+          const local = storage.getMessage(rm.id)
+          if (local && amailTombstoneCovers(deletedAt, local.updatedAt ?? local.sentAt * 1000)) {
             await storage.deleteMessage(rm.id, false)
             changed = true
           }
@@ -1883,7 +1889,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       // Apply remote deletions to local messages
       for (const [delId, delTs] of Object.entries(remote.deletedMessageIds ?? {})) {
         const local = storage.getMessage(delId)
-        if (local && delTs > (local.updatedAt ?? local.sentAt * 1000)) {
+        if (local && amailTombstoneCovers(delTs, local.updatedAt ?? local.sentAt * 1000)) {
           await storage.deleteMessage(delId, false)
           changed = true
         }
@@ -1895,8 +1901,9 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         const pk = rc.pubkey.toLowerCase()
         const removedAt = mergedRemovedContacts[pk] ?? 0
         const rcTs = rc.updatedAt ?? rc.addedAt
-        if (removedAt > rcTs) {
-          if (storage.getContact(pk)) {
+        if (amailTombstoneCovers(removedAt, rcTs)) {
+          const local = storage.getContact(pk)
+          if (local && amailTombstoneCovers(removedAt, local.updatedAt ?? local.addedAt)) {
             await storage.deleteContact(pk, false)
             changed = true
           }
@@ -1912,7 +1919,7 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       for (const [remPk, remTs] of Object.entries(remote.removedContactPubkeys ?? {})) {
         const pk = remPk.toLowerCase()
         const local = storage.getContact(pk)
-        if (local && remTs > (local.updatedAt ?? local.addedAt)) {
+        if (local && amailTombstoneCovers(remTs, local.updatedAt ?? local.addedAt)) {
           await storage.deleteContact(pk, false)
           changed = true
         }
@@ -1932,11 +1939,8 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         if (!cleanName) continue
         const deletedAt = mergedDeletedFolders[rf.id] ?? 0
         const rfTs = rf.updatedAt ?? rf.createdAt ?? 0
-        if (deletedAt > rfTs) {
-          if (storage.getCustomFolder(rf.id)) {
-            await storage.deleteCustomFolder(rf.id, false)
-            changed = true
-          }
+        if (amailTombstoneCovers(deletedAt, rfTs)) {
+          // The effective tombstone sweep below also relocates surviving messages.
           continue
         }
         const local = storage.getCustomFolder(rf.id)
@@ -1953,9 +1957,9 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
       }
 
       // Apply remote folder deletions locally and relocate any orphaned messages
-      for (const [delFolderId, delTs] of Object.entries(remote.deletedFolderIds ?? {})) {
+      for (const [delFolderId, delTs] of Object.entries(mergedDeletedFolders)) {
         const local = storage.getCustomFolder(delFolderId)
-        if (local && delTs > (local.updatedAt ?? local.createdAt ?? 0)) {
+        if (local && amailTombstoneCovers(delTs, local.updatedAt ?? local.createdAt ?? 0)) {
           await storage.deleteCustomFolder(delFolderId, false)
           changed = true
           const now = Date.now()
@@ -1979,14 +1983,17 @@ export function useAmail(options: UseAmailOptions): AmailEngine {
         }
       }
 
+      const remoteSortTs = typeof remote.folderSortUpdatedAt === 'number' && Number.isFinite(remote.folderSortUpdatedAt)
+        ? remote.folderSortUpdatedAt : 0
       if (
         remote.folderSortMode &&
         (remote.folderSortMode === 'manual' ||
           remote.folderSortMode === 'az' ||
           remote.folderSortMode === 'za') &&
-        remote.folderSortMode !== storage.getFolderSortMode()
+        (remoteSortTs > localSnap.folderSortUpdatedAt ||
+          (remoteSortTs !== 0 && remoteSortTs === localSnap.folderSortUpdatedAt && remote.folderSortMode > localSnap.folderSortMode))
       ) {
-        await storage.setFolderSortMode(remote.folderSortMode)
+        await storage.setFolderSortMode(remote.folderSortMode, remoteSortTs)
         changed = true
       }
 

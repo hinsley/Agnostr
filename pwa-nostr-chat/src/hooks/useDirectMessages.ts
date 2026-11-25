@@ -1,4 +1,4 @@
-import { addDmReaction, dmTargetId } from '../lib/dmMessageActions.ts'
+import { addDmReaction, dmTargetId, mergeDmMessageMetadata } from '../lib/dmMessageActions.ts'
 import { rememberLiveDmPush } from '../lib/pushDisplay.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PushPokePayload } from '../types/notifications.ts'
@@ -332,7 +332,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                     ...t,
                     messages: t.messages.map((m) =>
                       m.id === decrypted.embeddedMessageId
-                        ? { ...m, deliveryStatus: decrypted.ackType === 'read' ? 'read' : 'delivered' }
+                        ? mergeDmMessageMetadata(m, { ...m, deliveryStatus: decrypted.ackType === 'read' ? 'read' : 'delivered' })
                         : m
                     ),
                   }
@@ -1176,16 +1176,25 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
       if (validIncoming.length === 0 && !shouldUpgradeNameOnly) return 0
 
-      const existingIds = new Set(existingThread?.messages.map((m) => m.id) ?? [])
-      const uniqueNew = validIncoming.filter((m) => !existingIds.has(m.id))
-      if (uniqueNew.length === 0 && !shouldUpgradeNameOnly) return 0
+      const inboundById = new Map(validIncoming.map(m => [m.id, m]))
+      const existingById = new Map(existingThread?.messages.map(m => [m.id, m]))
+      const changes = validIncoming.filter(m => {
+        const existing = existingById.get(m.id)
+        return !existing || mergeDmMessageMetadata(existing, m) !== existing
+      }).length
+      if (!changes && !shouldUpgradeNameOnly) return 0
 
       setThreads((prev) => {
         const idx = prev.findIndex((t) => t.peerPubkey === pk)
         if (idx !== -1) {
           const existing = prev[idx]
-          const seen = new Set(existing.messages.map((m) => m.id))
-          const toAdd = validIncoming.filter((m) => !seen.has(m.id))
+          const seen = new Set(existing.messages.map(m => m.id))
+          const toAdd = [...inboundById.values()].filter(m => !seen.has(m.id))
+          const withMetadata = existing.messages.map(m => {
+            const incoming = inboundById.get(m.id)
+            return incoming ? mergeDmMessageMetadata(m, incoming) : m
+          })
+          const metadataChanged = withMetadata.some((m, i) => m !== existing.messages[i])
           const nextNick = pickBestPeerNickname(
             pk,
             metaNick,
@@ -1193,7 +1202,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             presenceTracker.getNickname(pk)
           )
           const nameChanged = nextNick !== existing.peerNickname
-          if (toAdd.length === 0 && !nameChanged) return prev
+          if (toAdd.length === 0 && !nameChanged && !metadataChanged) return prev
 
           if (toAdd.length === 0) {
             const copy = [...prev]
@@ -1201,11 +1210,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               ...existing,
               peerNickname: nextNick,
               peerDisplayHandle: formatDisplayHandle(nextNick, pk),
+              messages: withMetadata,
             }
             return copy
           }
 
-          const merged = [...existing.messages, ...toAdd].sort(compareDmMessages).slice(-150)
+          const merged = [...withMetadata, ...toAdd].sort(compareDmMessages).slice(-150)
           const tail = merged[merged.length - 1]
           const updated: DmThread = {
             ...existing,
@@ -1237,7 +1247,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         }
         return [created, ...prev].sort((a, b) => b.lastMessageAt - a.lastMessageAt)
       })
-      return uniqueNew.length > 0 ? uniqueNew.length : shouldUpgradeNameOnly ? 1 : 0
+      return changes || Number(shouldUpgradeNameOnly)
     },
     [identityManager, presenceTracker]
   )
