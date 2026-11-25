@@ -34,10 +34,14 @@ test('antimeridian wraps, poles clamp, and the prime meridian never shifts', () 
 
 test('all published levels contain complete, versioned 260px WebP grids', () => {
   assert.equal(levelManifest.moon.level, 4)
-  assert.ok(!levelManifest.earth)
+  const registry = readFileSync(new URL('../src/lib/solarSystem.ts', import.meta.url), 'utf8')
+  const bodies = [...registry.matchAll(/\bid: '([a-z]+)',\s+name: '[^']+',\s+kind: '(?:planet|moon)'/g)].map(m => m[1])
+  assert.deepEqual(Object.keys(levelManifest).sort(), bodies.filter(body => body !== 'earth').sort())
   const base = new URL('../public/solar-tiles/', import.meta.url)
-  for (const [body, { level, revision }] of Object.entries(levelManifest)) {
+  assert.deepEqual(readdirSync(base).sort(), Object.keys(levelManifest).sort())
+  for (const [body, { level, revision, sourceWidth }] of Object.entries(levelManifest)) {
     assert.ok(level >= 1 && level <= MAX_TILE_LEVEL)
+    assert.ok(sourceWidth > (256 << level) && sourceWidth <= (512 << level), body)
     const hash = createHash('sha256')
     const bodyRoot = new URL(body + '/', base)
     assert.deepEqual(readdirSync(bodyRoot), [revision])

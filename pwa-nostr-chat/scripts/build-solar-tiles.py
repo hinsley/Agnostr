@@ -52,7 +52,9 @@ def bake(body, cache):
     over = OVERRIDES.get(body)
     image = BASE["load_image"](body, cache, over, cache_name=body + "-detail" if over else None)
     max_width = min(image.width, 8192 if body == "moon" else 4096)
-    max_level = (max_width // (2 * TILE)).bit_length() - 1
+    # A non-power-of-two source uses the next grid size to retain all
+    # available samples, not to claim detail beyond the native resolution.
+    max_level = (max_width - 1).bit_length() - (2 * TILE).bit_length() + 1
     if max_level < 1:
         return None
     tiles = []
@@ -76,7 +78,7 @@ def bake(body, cache):
         # distant overview remains the original independently registered map.
         BASE["bake_focus_maps"](image, body)
     print(f"{body}: {image.width} px source → {512 << max_level} px tiled, {len(tiles)} files, {sum(len(data) for _, data in tiles):,} bytes", flush=True)
-    return {"level": max_level, "revision": revision}
+    return {"level": max_level, "revision": revision, "sourceWidth": max_width}
 
 
 if __name__ == "__main__":

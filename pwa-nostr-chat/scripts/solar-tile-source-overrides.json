@@ -2,5 +2,25 @@
   "moon": {
     "url": "https://svs.gsfc.nasa.gov/vis/a000000/a004700/a004720/lroc_color_poles_8k.tif",
     "sha256": "4af8b0cd4d50c30851359d98e7e72040240dd8d03256b58b345b5b76e9edb4ef"
+  },
+  "mercury": {
+    "url": "https://www.solarsystemscope.com/textures/download/8k_mercury.jpg",
+    "sha256": "5c8bd885ae3571c6ba2cd34b3446b9c6d767e314bf0ee8c1d5c147cadd388fc3"
+  },
+  "venus": {
+    "url": "https://www.solarsystemscope.com/textures/download/8k_venus_surface.jpg",
+    "sha256": "9bc21a50577ed8ac734cda91058724c7a741c19427aa276224ce349351432c5b"
+  },
+  "mars": {
+    "url": "https://www.solarsystemscope.com/textures/download/8k_mars.jpg",
+    "sha256": "4cc52149924abc6ae507d63032f994e1d42a55cb82c09e002d1a567ff66c23ee"
+  },
+  "jupiter": {
+    "url": "https://www.solarsystemscope.com/textures/download/8k_jupiter.jpg",
+    "sha256": "0bd844bf20822c4e3e80882b077859833c0dac44c7e4e1e0cd63d1b1b6d43085"
+  },
+  "saturn": {
+    "url": "https://www.solarsystemscope.com/textures/download/8k_saturn.jpg",
+    "sha256": "0d39a4a490c87c3edabe00a3881a29bb3418364178c79c534fe0986e97e09853"
   }
 }

@@ -1,6 +1,112 @@
 {
+  "callisto": {
+    "level": 2,
+    "revision": "3c76554519c02aa1",
+    "sourceWidth": 2048
+  },
+  "charon": {
+    "level": 2,
+    "revision": "b199ffe93c23d77e",
+    "sourceWidth": 1264
+  },
+  "deimos": {
+    "level": 2,
+    "revision": "cdadf4fab8c2a358",
+    "sourceWidth": 1440
+  },
+  "enceladus": {
+    "level": 3,
+    "revision": "eac4406c8613ab74",
+    "sourceWidth": 4096
+  },
+  "europa": {
+    "level": 3,
+    "revision": "964149ae262bf36b",
+    "sourceWidth": 4096
+  },
+  "ganymede": {
+    "level": 2,
+    "revision": "fe1b9072bfcd4416",
+    "sourceWidth": 2048
+  },
+  "io": {
+    "level": 3,
+    "revision": "d47cfce7b97bce8f",
+    "sourceWidth": 4096
+  },
+  "jupiter": {
+    "level": 3,
+    "revision": "f444d02e2fa8457c",
+    "sourceWidth": 4096
+  },
+  "mars": {
+    "level": 3,
+    "revision": "1a71da2103314cec",
+    "sourceWidth": 4096
+  },
+  "mercury": {
+    "level": 3,
+    "revision": "dc833e2ca60fa814",
+    "sourceWidth": 4096
+  },
   "moon": {
     "level": 4,
-    "revision": "65671721283f318f"
+    "revision": "65671721283f318f",
+    "sourceWidth": 8192
+  },
+  "neptune": {
+    "level": 2,
+    "revision": "4c8269706b44b25a",
+    "sourceWidth": 2048
+  },
+  "oberon": {
+    "level": 2,
+    "revision": "a930ecf94c9b25a5",
+    "sourceWidth": 2048
+  },
+  "phobos": {
+    "level": 2,
+    "revision": "bc5cfa478a0debd5",
+    "sourceWidth": 1440
+  },
+  "pluto": {
+    "level": 3,
+    "revision": "06dc3edb7192c5a9",
+    "sourceWidth": 4096
+  },
+  "rhea": {
+    "level": 3,
+    "revision": "eb207293845f0edd",
+    "sourceWidth": 4096
+  },
+  "saturn": {
+    "level": 3,
+    "revision": "b5d74cdc982fee1f",
+    "sourceWidth": 4096
+  },
+  "titan": {
+    "level": 3,
+    "revision": "22e57bd852546111",
+    "sourceWidth": 4044
+  },
+  "titania": {
+    "level": 2,
+    "revision": "a8dd0c6c01a81489",
+    "sourceWidth": 2048
+  },
+  "triton": {
+    "level": 3,
+    "revision": "4aa27b939343e38d",
+    "sourceWidth": 4096
+  },
+  "uranus": {
+    "level": 2,
+    "revision": "90aded42f7d2c710",
+    "sourceWidth": 2048
+  },
+  "venus": {
+    "level": 3,
+    "revision": "302a9b3deca13d78",
+    "sourceWidth": 4096
   }
 }
