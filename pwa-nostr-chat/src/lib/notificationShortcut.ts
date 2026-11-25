@@ -1,46 +1,21 @@
-import type { NotificationEngine, NotificationSettings } from '../types/notifications.ts'
-
-const ALERT_SWITCHES = [
-  'dms',
-  'agmail',
-  'agmailCcBcc',
-  'directPings',
-  'dmCallRinging',
-  'serverCalls',
-  'agoraRepliesMentions',
-  'agoraReactionsReposts',
-  'agoraZaps',
-  'agoraFollows',
-  'soundEnabled',
-  'ringtoneEnabled',
-  'vibrationEnabled',
-  'showPreviews',
-] as const satisfies readonly (keyof NotificationSettings)[]
+import type { NotificationEngine } from '../types/notifications.ts'
 
 type NotificationOptionState = Pick<
   NotificationEngine,
-  'settings' | 'permission' | 'isSupported' | 'isIosRequiresInstall' | 'isPushSupported' |
-    'pushStatus' | 'usesExternalPushSigner' | 'publicPinnedRoomFallbackAvailable'
+  'settings' | 'permission' | 'isSupported' | 'isIosRequiresInstall' | 'isPushSupported' | 'pushStatus'
 >
 
 /** A discoverability cue only: nothing here requests permission or changes preferences. */
 export function shouldOfferNotificationOptions(state: NotificationOptionState): boolean {
-  const { settings } = state
+  const { settings, pushStatus } = state
+  // The live connection is authoritative. A separate permission value can
+  // briefly lag behind it, and optional alert preferences aren't setup.
+  if (settings.enabled && settings.backgroundPushEnabled && pushStatus === 'connected') {
+    return false
+  }
   if (state.isIosRequiresInstall || (state.isSupported && state.permission !== 'granted')) {
     return true
   }
-  if (
-    !settings.enabled ||
-    ALERT_SWITCHES.some((key) => !settings[key]) ||
-    settings.serverMessages === 'off' ||
-    settings.geoMessages === 'off'
-  ) {
-    return true
-  }
-  if (!state.isPushSupported || state.pushStatus === 'unsupported') return false
-  if (!settings.backgroundPushEnabled || state.pushStatus !== 'connected') return true
-
-  return state.usesExternalPushSigner
-    ? !settings.extensionPushPokes
-    : state.publicPinnedRoomFallbackAvailable && !settings.publicPinnedRoomFallback
+  if (!settings.enabled) return true
+  return state.isPushSupported && pushStatus !== 'unsupported'
 }
