@@ -220,6 +220,182 @@ function unitVec3ToLatLon(v: THREE.Vector3): { lat: number; lon: number } {
   return { lat, lon }
 }
 
+interface WheelZoomAnchor {
+  wx: number
+  wy: number
+  wz: number
+  ndcX: number
+  ndcY: number
+  clientX: number
+  clientY: number
+}
+
+/**
+ * Analytical Float64 ray-sphere intersection in camera-local coordinates.
+ * Camera sits at (0, 0, dist) looking down -Z at the origin with vertical FOV CAMERA_FOV_DEG.
+ * Uses the cancellation-free quadratic form so full Float64 precision holds even at P9 (dist ≈ 1.0000048).
+ */
+function intersectCameraRayWithUnitSphere(
+  ndcX: number,
+  ndcY: number,
+  aspect: number,
+  dist: number,
+  radius = EARTH_RADIUS,
+): [number, number, number] | null {
+  if (!Number.isFinite(ndcX) || !Number.isFinite(ndcY) || !Number.isFinite(aspect) || aspect <= 0) {
+    return null
+  }
+  if (!Number.isFinite(dist) || dist <= radius) return null
+
+  const tanHalfFov = Math.tan((CAMERA_FOV_DEG * DEG2RAD) / 2)
+  const rx = ndcX * aspect * tanHalfFov
+  const ry = ndcY * tanHalfFov
+  const rz = -1
+  const rLen = Math.hypot(rx, ry, rz)
+  if (rLen <= 0) return null
+
+  const dx = rx / rLen
+  const dy = ry / rLen
+  const dz = rz / rLen
+
+  // Cancellation-free discriminant: b^2 - c = radius^2 - dist^2 * (dx^2 + dy^2)
+  const disc = radius * radius - dist * dist * (dx * dx + dy * dy)
+  if (disc < 0) return null
+
+  const sqrtDisc = Math.sqrt(disc)
+  const b = dist * dz // strictly negative because dz < 0
+  const c = (dist - radius) * (dist + radius)
+  const denom = -b + sqrtDisc
+  if (denom <= 1e-12) return null
+
+  const t = c / denom
+  if (!Number.isFinite(t) || t <= 0) return null
+
+  const hx = (t * dx) / radius
+  const hy = (t * dy) / radius
+  const hz = (dist + t * dz) / radius
+  const hLen = Math.hypot(hx, hy, hz)
+  if (hLen <= 1e-12) return null
+  return [hx / hLen, hy / hLen, hz / hLen]
+}
+
+/**
+ * Transforms a camera-local unit vector (hx, hy, hz) into world unit coordinates
+ * for a zero-roll camera at (camLatDeg, camLonDeg) looking at the origin with up = (0, 1, 0).
+ */
+function cameraLocalToWorldUnit(
+  hx: number,
+  hy: number,
+  hz: number,
+  camLatDeg: number,
+  camLonDeg: number,
+): [number, number, number] {
+  const phi = camLatDeg * DEG2RAD
+  const lambda = camLonDeg * DEG2RAD
+  const cosPhi = Math.cos(phi)
+  const sinPhi = Math.sin(phi)
+  const cosLam = Math.cos(lambda)
+  const sinLam = Math.sin(lambda)
+
+  const a = hz * cosPhi - hy * sinPhi
+  const wx = a * cosLam - hx * sinLam
+  const wy = hy * cosPhi + hz * sinPhi
+  const wz = -a * sinLam - hx * cosLam
+  return [wx, wy, wz]
+}
+
+/**
+ * Samples the world-space unit vector on the unit sphere currently under screen NDC (ndcX, ndcY),
+ * or returns null if the ray misses the sphere.
+ */
+function sampleWorldUnitAtNdc(
+  ndcX: number,
+  ndcY: number,
+  aspect: number,
+  camLatDeg: number,
+  camLonDeg: number,
+  dist: number,
+  radius = EARTH_RADIUS,
+): [number, number, number] | null {
+  const localHit = intersectCameraRayWithUnitSphere(ndcX, ndcY, aspect, dist, radius)
+  if (!localHit) return null
+  return cameraLocalToWorldUnit(localHit[0], localHit[1], localHit[2], camLatDeg, camLonDeg)
+}
+
+/**
+ * Closed-form Float64 inverse solver: given a world unit point `anchorUnit` on the sphere
+ * and a camera distance `dist`, returns the exact camera `{ lat, lon }` (up = (0, 1, 0))
+ * that projects `anchorUnit` back onto screen NDC `(ndcX, ndcY)`.
+ * Returns null if the cursor ray misses the sphere at `dist` (e.g. zooming out past the limb).
+ */
+function solveCameraLatLonForAnchor(
+  anchorUnit: [number, number, number],
+  ndcX: number,
+  ndcY: number,
+  aspect: number,
+  dist: number,
+  currentLatDeg: number,
+  currentLonDeg: number,
+  radius = EARTH_RADIUS,
+): { lat: number; lon: number } | null {
+  const localHit = intersectCameraRayWithUnitSphere(ndcX, ndcY, aspect, dist, radius)
+  if (!localHit) return null
+
+  const [hx, hy, hz] = localHit
+  const [wx, wy, wz] = anchorUnit
+  const rYz = Math.hypot(hy, hz)
+  if (rYz < 1e-9) return null
+
+  const beta = Math.atan2(hy, hz)
+  const sinSum = clamp(wy / rYz, -1, 1)
+  const asinVal = Math.asin(sinSum)
+
+  // Evaluate both branches of sin(phi + beta) = sinSum to avoid a 180-deg flip near the poles
+  const rawPhiCandidates = [
+    asinVal - beta,
+    (sinSum >= 0 ? Math.PI - asinVal : -Math.PI - asinVal) - beta,
+  ]
+
+  const [curX, curY, curZ] = latLonToUnitVec3(currentLatDeg, currentLonDeg)
+  const horizAnchorLen = Math.hypot(wx, wz)
+  const anchorAzimuth = Math.atan2(-wz, wx)
+
+  let bestLat = currentLatDeg
+  let bestLon = currentLonDeg
+  let bestScore = -Infinity
+  let hasValidCandidate = false
+
+  for (const rawPhi of rawPhiCandidates) {
+    const withinHemisphere = Math.abs(rawPhi) <= Math.PI / 2 + 1e-6
+    const latDeg = clamp(rawPhi * RAD2DEG, -82, 82)
+    const phi = latDeg * DEG2RAD
+    const a = hz * Math.cos(phi) - hy * Math.sin(phi)
+    const b = hx
+    const abLen = Math.hypot(b, a)
+
+    let lonDeg = currentLonDeg
+    if (abLen >= 1e-6 && horizAnchorLen >= 1e-6) {
+      const lambda = anchorAzimuth - Math.atan2(b, a)
+      lonDeg = currentLonDeg + wrapDeltaLon(lambda * RAD2DEG - currentLonDeg)
+    }
+
+    if (!Number.isFinite(latDeg) || !Number.isFinite(lonDeg)) continue
+
+    const [candX, candY, candZ] = latLonToUnitVec3(latDeg, lonDeg)
+    const camDot = candX * curX + candY * curY + candZ * curZ
+    const score = (withinHemisphere ? 4 : 0) + camDot
+    if (!hasValidCandidate || score > bestScore) {
+      hasValidCandidate = true
+      bestScore = score
+      bestLat = latDeg
+      bestLon = lonDeg
+    }
+  }
+
+  if (!hasValidCandidate) return null
+  return { lat: bestLat, lon: bestLon }
+}
+
 function latToMercYNorm(latDeg: number): number {
   const clamped = clamp(latDeg, -MAX_MERCATOR_LAT, MAX_MERCATOR_LAT)
   const rad = clamped * DEG2RAD
@@ -917,20 +1093,31 @@ function createMercatorPatchGeometry(
   ty: number,
 ): { geometry: THREE.BufferGeometry; anchor: THREE.Vector3 } {
   const n = 1 << z
-  const seg = z <= 4 ? 10 : z <= 6 ? 6 : 4
+  // Dense curved tessellation (<= 1.6° quads at z=3..5) eliminates Mercator-to-sphere
+  // text warping across triangles and minimizes chord sagitta.
+  const seg = z <= 3 ? 28 : z === 4 ? 16 : z === 5 ? 10 : z <= 7 ? 8 : z <= 9 ? 6 : 4
   const stride = seg + 1
   const vertexCount = stride * stride
   const positions = new Float32Array(vertexCount * 3)
   const normals = new Float32Array(vertexCount * 3)
   const uvs = new Float32Array(vertexCount * 2)
 
+  // Mathematically exact chord clearance radius so every interior patch triangle stays
+  // strictly outside earthGeo (r <= 1.0) at z=3..9 while tapering to 0.000px parallax at z>=10.
+  const tileSpanDeg = 360 / n
+  const stepRad = (tileSpanDeg / seg) * DEG2RAD
+  const halfDiagRad = stepRad * Math.SQRT1_2
+  const sagittaLift = PATCH_RADIUS * (1 / Math.cos(halfDiagRad) - 1)
+  const depthMargin = z <= 5 ? 0.00018 : z <= 7 ? 0.00008 : z <= 9 ? 0.000015 : 0
+  const patchRadius = PATCH_RADIUS + sagittaLift * 1.35 + depthMargin
+
   // Float64 RTC anchor at tile center -> sub-millimeter Float32 accuracy up to z=18 (P9)
   const centerLat = mercYNormToLat((ty + 0.5) / n)
   const centerLon = ((tx + 0.5) / n) * 360 - 180
   const [ax, ay, az] = latLonToUnitVec3(centerLat, centerLon)
-  const anchorX = ax * PATCH_RADIUS
-  const anchorY = ay * PATCH_RADIUS
-  const anchorZ = az * PATCH_RADIUS
+  const anchorX = ax * patchRadius
+  const anchorY = ay * patchRadius
+  const anchorZ = az * patchRadius
 
   let vi = 0
   let ui = 0
@@ -942,9 +1129,9 @@ function createMercatorPatchGeometry(
       const u = iu / seg
       const lon = ((tx + u) / n) * 360 - 180
       const [nx, ny, nz] = latLonToUnitVec3(lat, lon)
-      positions[vi] = nx * PATCH_RADIUS - anchorX
-      positions[vi + 1] = ny * PATCH_RADIUS - anchorY
-      positions[vi + 2] = nz * PATCH_RADIUS - anchorZ
+      positions[vi] = nx * patchRadius - anchorX
+      positions[vi + 1] = ny * patchRadius - anchorY
+      positions[vi + 2] = nz * patchRadius - anchorZ
       normals[vi] = nx
       normals[vi + 1] = ny
       normals[vi + 2] = nz
@@ -1267,6 +1454,7 @@ interface CameraState {
   velLon: number
   isFlying: boolean
   dragging: boolean
+  wheelAnchor: WheelZoomAnchor | null
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,6 +1629,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       velLon: 0,
       isFlying: false,
       dragging: false,
+      wheelAnchor: null,
     })
 
     const sceneRefs = useRef<{
@@ -1943,6 +2132,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
         cam.velLat = 0
         cam.velLon = 0
+        cam.wheelAnchor = null
 
         if (!animate) {
           cam.lat = clampedLat
@@ -2078,6 +2268,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       () => ({
         zoomIn() {
           const cam = cameraStateRef.current
+          cam.wheelAnchor = null
+          cam.velLat = 0
+          cam.velLon = 0
           cam.targetZoom = clamp(cam.targetZoom + 1.15, MIN_VIRTUAL_ZOOM, MAX_VIRTUAL_ZOOM)
           cam.isFlying = true
           cam.targetLat = cam.lat
@@ -2085,6 +2278,9 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         },
         zoomOut() {
           const cam = cameraStateRef.current
+          cam.wheelAnchor = null
+          cam.velLat = 0
+          cam.velLon = 0
           cam.targetZoom = clamp(cam.targetZoom - 1.15, MIN_VIRTUAL_ZOOM, MAX_VIRTUAL_ZOOM)
           cam.isFlying = true
           cam.targetLat = cam.lat
@@ -2441,9 +2637,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                 uIsLight: { value: isLight ? 1.0 : 0.0 },
                 uOpacity: { value: 1.0 },
               },
+              depthWrite: false,
               polygonOffset: true,
-              polygonOffsetFactor: 1,
-              polygonOffsetUnits: 1,
+              polygonOffsetFactor: -1,
+              polygonOffsetUnits: -2,
             })
 
             const mesh = new THREE.Mesh(geometry, material)
@@ -2479,9 +2676,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               ctx.drawImage(img, 0, 0, 256, 256)
               localEntry.texture.needsUpdate = true
               localEntry.loaded = true
+              const prefix = `topo:${tileZ}:`
               if (
-                lastPatchKeySig.includes(`${tx},${ty}`) &&
-                lastPatchKeySig.startsWith(`topo:${tileZ}:`)
+                lastPatchKeySig.startsWith(prefix) &&
+                lastPatchKeySig.slice(prefix.length).split('|').includes(`${tx},${ty}`)
               ) {
                 localEntry.mesh.visible = true
               }
@@ -3063,6 +3261,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         cam.isFlying = false
         cam.velLat = 0
         cam.velLon = 0
+        cam.wheelAnchor = null
         cam.targetLat = cam.lat
         cam.targetLon = cam.lon
         cam.targetZoom = cam.zoom
@@ -3101,6 +3300,27 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           const midX = (pts[0].x + pts[1].x) / 2
           const midY = (pts[0].y + pts[1].y) / 2
 
+          const rect = canvas.getBoundingClientRect()
+          let pinchAnchor: [number, number, number] | null = null
+          let newMidNdcX = 0
+          let newMidNdcY = 0
+          if (rect.width > 0 && rect.height > 0) {
+            const oldMidNdcX = ((lastPinchMidX - rect.left) / rect.width) * 2 - 1
+            const oldMidNdcY = -(((lastPinchMidY - rect.top) / rect.height) * 2 - 1)
+            newMidNdcX = ((midX - rect.left) / rect.width) * 2 - 1
+            newMidNdcY = -(((midY - rect.top) / rect.height) * 2 - 1)
+            if (Math.abs(oldMidNdcX) <= 1 && Math.abs(oldMidNdcY) <= 1) {
+              pinchAnchor = sampleWorldUnitAtNdc(
+                oldMidNdcX,
+                oldMidNdcY,
+                camera.aspect,
+                cam.lat,
+                cam.lon,
+                zoomToDistance(cam.zoom),
+              )
+            }
+          }
+
           if (lastPinchDist > 8 && dist > 8) {
             const scaleRatio = dist / lastPinchDist
             const pinchDecay = cam.zoom >= 1 ? Math.LN2 : DEEP_SPACE_DECAY
@@ -3109,14 +3329,34 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
             cam.targetZoom = cam.zoom
           }
 
-          const dpp = degPerPixel()
-          const dx = midX - lastPinchMidX
-          const dy = midY - lastPinchMidY
-          const cosLat = Math.max(0.24, Math.cos(cam.lat * DEG2RAD))
-          cam.lat = clamp(cam.lat + dy * dpp, -82, 82)
-          cam.lon -= (dx * dpp) / cosLat
-          cam.targetLat = cam.lat
-          cam.targetLon = cam.lon
+          const solvedPinch =
+            pinchAnchor && Math.abs(newMidNdcX) <= 1 && Math.abs(newMidNdcY) <= 1
+              ? solveCameraLatLonForAnchor(
+                  pinchAnchor,
+                  newMidNdcX,
+                  newMidNdcY,
+                  camera.aspect,
+                  zoomToDistance(cam.zoom),
+                  cam.lat,
+                  cam.lon,
+                )
+              : null
+
+          if (solvedPinch) {
+            cam.lat = solvedPinch.lat
+            cam.lon = solvedPinch.lon
+            cam.targetLat = solvedPinch.lat
+            cam.targetLon = solvedPinch.lon
+          } else {
+            const dpp = degPerPixel()
+            const dx = midX - lastPinchMidX
+            const dy = midY - lastPinchMidY
+            const cosLat = Math.max(0.24, Math.cos(cam.lat * DEG2RAD))
+            cam.lat = clamp(cam.lat + dy * dpp, -82, 82)
+            cam.lon -= (dx * dpp) / cosLat
+            cam.targetLat = cam.lat
+            cam.targetLon = cam.lon
+          }
 
           lastPinchDist = dist
           lastPinchMidX = midX
@@ -3320,6 +3560,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       const onDoubleClick = (e: MouseEvent) => {
         if (modeRef.current !== 'expanded') return
+        cameraStateRef.current.wheelAnchor = null
         const hit = raycastScene(e.clientX, e.clientY)
         if (!hit) return
         if (hit.kind === 'body') {
@@ -3373,11 +3614,56 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         }
 
         const cam = cameraStateRef.current
-        cam.targetZoom = clamp(
-          (cam.isFlying ? cam.targetZoom : cam.zoom) + zoomStep,
+        const isPureZoomFlight =
+          cam.isFlying &&
+          (cam.wheelAnchor !== null ||
+            (Math.abs(cam.targetLat - cam.lat) < 1e-4 && Math.abs(cam.targetLon - cam.lon) < 1e-4))
+        const nextTargetZoom = clamp(
+          (isPureZoomFlight ? cam.targetZoom : cam.zoom) + zoomStep,
           MIN_VIRTUAL_ZOOM,
           MAX_VIRTUAL_ZOOM,
         )
+
+        const rect = canvas.getBoundingClientRect()
+        const canReuseAnchor =
+          cam.isFlying &&
+          cam.wheelAnchor !== null &&
+          Math.hypot(e.clientX - cam.wheelAnchor.clientX, e.clientY - cam.wheelAnchor.clientY) <= 2
+
+        if (!canReuseAnchor) {
+          if (rect.width > 0 && rect.height > 0) {
+            const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1
+            const ndcY = -(((e.clientY - rect.top) / rect.height) * 2 - 1)
+            const hitUnit =
+              Math.abs(ndcX) <= 1 && Math.abs(ndcY) <= 1
+                ? sampleWorldUnitAtNdc(
+                    ndcX,
+                    ndcY,
+                    camera.aspect,
+                    cam.lat,
+                    cam.lon,
+                    zoomToDistance(cam.zoom),
+                  )
+                : null
+            cam.wheelAnchor = hitUnit
+              ? {
+                  wx: hitUnit[0],
+                  wy: hitUnit[1],
+                  wz: hitUnit[2],
+                  ndcX,
+                  ndcY,
+                  clientX: e.clientX,
+                  clientY: e.clientY,
+                }
+              : null
+          } else {
+            cam.wheelAnchor = null
+          }
+        }
+
+        cam.velLat = 0
+        cam.velLon = 0
+        cam.targetZoom = nextTargetZoom
         cam.targetLat = cam.lat
         cam.targetLon = cam.lon
         cam.isFlying = true
@@ -3415,6 +3701,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         lastH = nextH
         camera.aspect = nextW / nextH
         camera.updateProjectionMatrix()
+        cameraStateRef.current.wheelAnchor = null
         renderer.setSize(nextW, nextH, false)
         scheduleViewportEmit()
       })
@@ -3509,20 +3796,54 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
         if (cam.isFlying) {
           const alpha = 1 - Math.exp(-dt * 11.5)
-          const dLat = cam.targetLat - cam.lat
-          const dLon = cam.targetLon - cam.lon
-          const dZoom = cam.targetZoom - cam.zoom
+          if (cam.wheelAnchor) {
+            const dZoom = cam.targetZoom - cam.zoom
+            const done = Math.abs(dZoom) < 0.002
+            cam.zoom = done ? cam.targetZoom : cam.zoom + dZoom * alpha
 
-          if (Math.abs(dLat) < 1e-5 && Math.abs(dLon) < 1e-5 && Math.abs(dZoom) < 0.002) {
-            cam.lat = cam.targetLat
-            cam.lon = cam.targetLon
-            cam.zoom = cam.targetZoom
-            cam.isFlying = false
-            scheduleViewportEmit()
+            const solved = solveCameraLatLonForAnchor(
+              [cam.wheelAnchor.wx, cam.wheelAnchor.wy, cam.wheelAnchor.wz],
+              cam.wheelAnchor.ndcX,
+              cam.wheelAnchor.ndcY,
+              camera.aspect,
+              zoomToDistance(cam.zoom),
+              cam.lat,
+              cam.lon,
+            )
+            if (solved) {
+              cam.lat = solved.lat
+              cam.lon = solved.lon
+              cam.targetLat = solved.lat
+              cam.targetLon = solved.lon
+            } else {
+              // Cursor zoomed past the sphere limb (e.g. pulling out into Solar System):
+              // release the surface anchor and continue zooming smoothly toward targetZoom.
+              cam.wheelAnchor = null
+              cam.targetLat = cam.lat
+              cam.targetLon = cam.lon
+            }
+
+            if (done) {
+              cam.isFlying = false
+              cam.wheelAnchor = null
+              scheduleViewportEmit()
+            }
           } else {
-            cam.lat += dLat * alpha
-            cam.lon += dLon * alpha
-            cam.zoom += dZoom * alpha
+            const dLat = cam.targetLat - cam.lat
+            const dLon = cam.targetLon - cam.lon
+            const dZoom = cam.targetZoom - cam.zoom
+
+            if (Math.abs(dLat) < 1e-5 && Math.abs(dLon) < 1e-5 && Math.abs(dZoom) < 0.002) {
+              cam.lat = cam.targetLat
+              cam.lon = cam.targetLon
+              cam.zoom = cam.targetZoom
+              cam.isFlying = false
+              scheduleViewportEmit()
+            } else {
+              cam.lat += dLat * alpha
+              cam.lon += dLon * alpha
+              cam.zoom += dZoom * alpha
+            }
           }
           cameraMoved = true
         } else if (!cam.dragging && (Math.abs(cam.velLat) > 0.02 || Math.abs(cam.velLon) > 0.02)) {
