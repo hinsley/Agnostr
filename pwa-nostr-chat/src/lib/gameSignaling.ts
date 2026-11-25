@@ -1,4 +1,4 @@
-import { nip44, type Event as NostrEvent, type EventTemplate } from 'nostr-tools'
+import { nip44, verifyEvent, type Event as NostrEvent, type EventTemplate } from 'nostr-tools'
 import type {
   GameSignalPayload,
   GoGameConfig,
@@ -503,7 +503,27 @@ export function validateGameSignalPayload(raw: unknown): GameSignalPayload | nul
     case 'poker-leave': {
       const tableId = asNonEmptyId(obj.tableId)
       if (!tableId) return null
-      return { v: 1, type: 'poker-leave', tableId, ts }
+      const round = typeof obj.round === 'string' && obj.round.length <= 800 ? obj.round : undefined
+      return { v: 1, type: 'poker-leave', tableId, round, ts }
+    }
+
+    case 'poker-vote-out': {
+      const tableId = asNonEmptyId(obj.tableId)
+      const room = typeof obj.room === 'string' && obj.room.length <= 110 ? obj.room : null
+      const round = typeof obj.round === 'string' && obj.round.length <= 800 ? obj.round : null
+      const target = typeof obj.target === 'string' && HEX_PUBKEY_RE.test(obj.target)
+        ? obj.target.toLowerCase()
+        : null
+      if (!tableId || !room || !round || !target) return null
+      return { v: 1, type: 'poker-vote-out', tableId, room, round, target, ts }
+    }
+
+    case 'poker-roster-proof': {
+      const tableId = asNonEmptyId(obj.tableId)
+      if (!tableId || !Array.isArray(obj.events) || obj.events.length < 1 || obj.events.length > 8) return null
+      if (!obj.events.every((ev: unknown) => ev && typeof ev === 'object' &&
+          typeof (ev as NostrEvent).content === 'string' && (ev as NostrEvent).content.length <= 4096)) return null
+      return { v: 1, type: 'poker-roster-proof', tableId, events: obj.events as NostrEvent[], ts }
     }
 
     case 'poker-start': {
@@ -678,6 +698,39 @@ export function parseGeoGameSignalEvent(event: NostrEvent): GameSignalPayload | 
   try {
     const parsed: unknown = JSON.parse(event.content)
     return validateGameSignalPayload(parsed)
+  } catch {
+    return null
+  }
+}
+
+
+export async function parsePokerRosterEvidence(
+  original: NostrEvent,
+  roomTag: string,
+  server?: GameServerCryptoInfo,
+): Promise<{ signer: string; payload: Extract<GameSignalPayload, { type: 'poker-vote-out' | 'poker-leave' }> } | null> {
+  if (!original || original.kind !== KIND_GAME_SIGNAL || !Array.isArray(original.tags) ||
+      original.tags.length !== 1 || !Array.isArray(original.tags[0]) ||
+      original.tags[0].length !== 2 || original.tags[0][0] !== 't' ||
+      original.tags[0][1] !== roomTag || typeof original.content !== 'string' ||
+      original.content.length > 4096) return null
+  // Recheck the original signature over these exact fields; verification by
+  // remembered event ID alone must not authenticate an embedded ballot.
+  const ev = { kind: original.kind, tags: original.tags, content: original.content,
+    id: original.id, pubkey: original.pubkey, sig: original.sig, created_at: original.created_at }
+  try {
+    if (!verifyEvent(ev)) return null
+    let content = ev.content
+    if (server?.encrypted) {
+      const key = resolveServerAesKeyBytes(server)
+      if (!key) return null
+      const plain = await decryptAesGcmGamePayload(key, content)
+      if (!plain) return null
+      content = plain
+    }
+    const payload = validateGameSignalPayload(JSON.parse(content))
+    if (payload?.type !== 'poker-vote-out' && payload?.type !== 'poker-leave') return null
+    return { signer: ev.pubkey.toLowerCase(), payload }
   } catch {
     return null
   }

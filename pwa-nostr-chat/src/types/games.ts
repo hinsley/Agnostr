@@ -1,3 +1,4 @@
+import type { Event as NostrEvent } from 'nostr-tools'
 export type GameScope = 'dm' | 'geo' | 'server'
 
 export type GameKind = 'chess' | 'go' | 'poker'
@@ -282,6 +283,26 @@ export interface PokerLeaveSignal {
   v: 1
   type: 'poker-leave'
   tableId: string
+  round?: string
+  ts: number
+}
+
+export interface PokerVoteOutSignal {
+  v: 1
+  type: 'poker-vote-out'
+  tableId: string
+  room: string
+  round: string
+  target: string
+  ts: number
+}
+
+export interface PokerRosterProofSignal {
+  v: 1
+  type: 'poker-roster-proof'
+  tableId: string
+  /** Original events independently signed by the exiting seat or seated voters. */
+  events: NostrEvent[]
   ts: number
 }
 
@@ -338,6 +359,8 @@ export type GameSignalPayload =
   | PokerStateSignal
   | PokerJoinSignal
   | PokerLeaveSignal
+  | PokerVoteOutSignal
+  | PokerRosterProofSignal
   | PokerStartSignal
   | PokerActionSignal
   | PokerEndSignal
@@ -394,6 +417,7 @@ export interface ActivePokerSession extends ActiveGameSessionBase {
   publicStateJson: string
   myHoleCards: [PokerWireCard, PokerWireCard] | null
   myHoleHandNumber: number
+  myVoteTargets?: string[]
 }
 
 export type ActiveGameSession = ActiveChessSession | ActiveGoSession | ActivePokerSession
@@ -440,5 +464,5 @@ export interface GameEngine {
   leavePokerTable: (scopeKey: GameScopeKey) => Promise<void>
   startPokerHand: (scopeKey: GameScopeKey) => Promise<boolean>
   sendPokerAction: (scopeKey: GameScopeKey, action: PokerWireAction) => Promise<boolean>
-  endPokerTable: (scopeKey: GameScopeKey) => Promise<void>
+  voteOutPokerPlayer: (scopeKey: GameScopeKey, targetPubkey: string) => Promise<boolean>
 }

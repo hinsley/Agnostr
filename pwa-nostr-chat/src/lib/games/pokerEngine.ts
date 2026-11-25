@@ -68,6 +68,8 @@ export interface PokerWinnerSummary {
 export interface PokerPublicState {
   tableId: string
   hostPubkey: string
+  rosterRevision?: number
+  expelledPubkeys?: string[]
   fixedBuyIn: number
   smallBlind: number
   bigBlind: number
@@ -506,7 +508,7 @@ export function seatPokerPlayer(
   displayName: string,
 ): PokerPublicState | null {
   const pk = normalizePubkey(pubkey)
-  if (!pk) return null
+  if (!pk || state.expelledPubkeys?.includes(pk)) return null
   if (state.seats.length >= state.maxSeats) return null
   if (state.seats.some((s) => s.pubkey === pk)) return null
 
@@ -541,6 +543,7 @@ export function seatPokerPlayer(
   return {
     ...state,
     seats,
+    rosterRevision: (state.rosterRevision ?? 0) + 1,
     updatedAtMs: Date.now(),
   }
 }
@@ -611,11 +614,10 @@ function finalizeUncontestedWin(
     chips: s.pubkey === winner.pubkey ? s.chips + state.pot : s.chips,
     betThisStreet: 0,
   }))
-  const playersWithChips = updatedSeats.filter((s) => s.chips > 0).length
   return {
     ...state,
     seats: updatedSeats,
-    phase: playersWithChips >= 2 ? 'showdown' : 'finished',
+    phase: 'showdown',
     actingPubkey: null,
     currentBet: 0,
     minRaise: state.bigBlind,
@@ -634,76 +636,6 @@ function finalizeUncontestedWin(
   }
 }
 
-/**
- * Removes a player cleanly from the table.
- * If a hand is currently in progress, preserves their already-committed chips in the pot,
- * awards an uncontested pot immediately if only one contender remains, or advances `actingPubkey`.
- */
-export function removePokerPlayer(state: PokerPublicState, pubkey: string): PokerPublicState {
-  const pk = normalizePubkey(pubkey)
-  const target = state.seats.find((s) => s.pubkey === pk)
-  if (!target) return state
-
-  const remainingSeats = state.seats
-    .filter((s) => s.pubkey !== pk)
-    .map((s) => ({ ...s }))
-
-  if (!isLiveHandPhase(state.phase)) {
-    const nextDealer =
-      remainingSeats.length === 0
-        ? 0
-        : remainingSeats.some((s) => s.seatIndex === state.dealerSeatIndex)
-          ? state.dealerSeatIndex
-          : (findNextClockwiseSeat(remainingSeats, state.dealerSeatIndex, () => true)?.seatIndex ??
-            remainingSeats[0].seatIndex)
-    return {
-      ...state,
-      seats: remainingSeats,
-      dealerSeatIndex: nextDealer,
-      updatedAtMs: Date.now(),
-    }
-  }
-
-  const contenders = remainingSeats.filter((s) => !s.sittingOut && !s.folded)
-  if (contenders.length === 0) {
-    return {
-      ...state,
-      seats: remainingSeats,
-      phase: 'finished',
-      actingPubkey: null,
-      currentBet: 0,
-      lastActionText: `${target.displayName} left the table`,
-      updatedAtMs: Date.now(),
-    }
-  }
-
-  if (contenders.length === 1) {
-    return finalizeUncontestedWin(
-      state,
-      remainingSeats,
-      contenders[0],
-      `${target.displayName} left · ${contenders[0].displayName} wins ${state.pot}`,
-    )
-  }
-
-  let nextActingPubkey = state.actingPubkey
-  if (state.actingPubkey === pk) {
-    if (isStreetBettingComplete(remainingSeats, state.currentBet)) {
-      nextActingPubkey = null
-    } else {
-      const nextActor = findNextActor(remainingSeats, target.seatIndex)
-      nextActingPubkey = nextActor?.pubkey ?? null
-    }
-  }
-
-  return {
-    ...state,
-    seats: remainingSeats,
-    actingPubkey: nextActingPubkey,
-    lastActionText: `${target.displayName} left the hand`,
-    updatedAtMs: Date.now(),
-  }
-}
 
 /**
  * Returns `true` when at least 2 seated players hold chips (`chips > 0`).
@@ -868,7 +800,6 @@ function resolveShowdown(
     })
   })
 
-  const playersWithChips = seats.filter((s) => s.chips > 0).length
   const primarySummary =
     winners.length === 1
       ? `${winners[0].displayName} wins ${winners[0].amountWon} (${winners[0].handLabel})`
@@ -882,7 +813,7 @@ function resolveShowdown(
       seats,
       communityCards,
       pot: displayPot,
-      phase: playersWithChips >= 2 ? 'showdown' : 'finished',
+      phase: 'showdown',
       actingPubkey: null,
       currentBet: 0,
       minRaise: state.bigBlind,

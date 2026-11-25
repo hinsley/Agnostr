@@ -40,6 +40,10 @@ jobs:
         working-directory: pwa-nostr-chat
         run: npm run test:push
 
+      - name: Poker governance regression tests
+        working-directory: pwa-nostr-chat
+        run: npm run test:poker
+
       - name: Build
         working-directory: pwa-nostr-chat
         run: npm run build

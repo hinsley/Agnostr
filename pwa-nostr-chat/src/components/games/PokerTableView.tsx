@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { Crown, LogOut, Play, Sparkles, Trophy, UserPlus, X } from 'lucide-react'
+import { Crown, LogOut, Play, Sparkles, Trophy, UserPlus } from 'lucide-react'
 import {
   canStartPokerHand,
   evaluateBestFiveCardHand,
@@ -13,6 +13,7 @@ import {
   type PokerSeat,
 } from '../../lib/games/pokerEngine.ts'
 import { playGameSound } from '../../utils/gameSounds.ts'
+import { pokerVoteThreshold } from '../../lib/games/pokerGovernance.ts'
 import { AvatarImg } from '../AvatarImg.tsx'
 
 export interface PokerTableViewProps {
@@ -25,7 +26,8 @@ export interface PokerTableViewProps {
   onLeaveSeat: () => void
   onStartHand: () => void
   onAction: (action: PokerAction) => void
-  onEndTable?: () => void
+  onVoteOut: (target: string) => void
+  myVoteTargets: string[]
 }
 
 interface SeatCoord {
@@ -408,10 +410,11 @@ export function PokerTableView({
   onLeaveSeat,
   onStartHand,
   onAction,
-  onEndTable,
+  onVoteOut,
+  myVoteTargets,
 }: PokerTableViewProps) {
   const normalizedMyPubkey = myPubkey.trim().toLowerCase()
-  const [confirmEndTable, setConfirmEndTable] = useState(false)
+  const [voteTarget, setVoteTarget] = useState('')
   const [wagerAmount, setWagerAmount] = useState<number>(state.bigBlind * 2)
   const [isCompactViewport, setIsCompactViewport] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth <= 640 : false,
@@ -1293,46 +1296,36 @@ export function PokerTableView({
                 type="button"
                 className="ag-poker-btn is-subtle"
                 onClick={onLeaveSeat}
-                title="Leave seat"
+                title="Leave table"
               >
                 <LogOut size={13} aria-hidden="true" />
-                <span>Leave</span>
+                <span>Leave table</span>
               </button>
             )}
 
-            {isHost &&
-              onEndTable &&
-              (confirmEndTable ? (
-                <div className="ag-poker-confirm-group">
-                  <button
-                    type="button"
-                    className="ag-poker-btn is-danger"
-                    onClick={() => {
-                      setConfirmEndTable(false)
-                      onEndTable()
-                    }}
-                  >
-                    Confirm End
-                  </button>
-                  <button
-                    type="button"
-                    className="ag-poker-btn is-subtle"
-                    onClick={() => setConfirmEndTable(false)}
-                    aria-label="Cancel"
-                    title="Cancel"
-                  >
-                    <X size={13} />
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
+            {mySeat && state.seats.length >= 3 && (
+              <div className="ag-poker-confirm-group" role="group" aria-label="Vote to remove a player">
+                <select
                   className="ag-poker-btn is-subtle"
-                  onClick={() => setConfirmEndTable(true)}
+                  aria-label="Player to vote out"
+                  value={state.seats.some((s) => s.pubkey === voteTarget) ? voteTarget : ''}
+                  onChange={(e) => setVoteTarget(e.target.value)}
                 >
-                  End Table
+                  <option value="">Select player</option>
+                  {state.seats.filter((s) => s.pubkey !== normalizedMyPubkey).map((seat) => (
+                    <option key={seat.pubkey} value={seat.pubkey} disabled={myVoteTargets.includes(seat.pubkey)}>
+                      {seat.displayName}{seat.pubkey === state.hostPubkey ? ' (dealer)' : ''}
+                    </option>
+                  ))}
+                </select>
+                <button type="button" className="ag-poker-btn is-subtle"
+                  disabled={!voteTarget || myVoteTargets.includes(voteTarget) || !state.seats.some((s) => s.pubkey === voteTarget)}
+                  title={`Removal requires ${pokerVoteThreshold(state.seats.length)} seated votes`}
+                  onClick={() => onVoteOut(voteTarget)}>
+                  {myVoteTargets.includes(voteTarget) ? 'Vote sent' : 'Vote out'}
                 </button>
-              ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

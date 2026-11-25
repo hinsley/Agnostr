@@ -349,11 +349,7 @@ export function GameStage({
       onPlaySound?.('click')
       setConfirmClose(false)
       if (focusedSession.kind === 'poker') {
-        if (focusedSession.isHost) {
-          void games.endPokerTable(focusedSession.scopeKey)
-        } else {
-          void games.leavePokerTable(focusedSession.scopeKey)
-        }
+        void games.leavePokerTable(focusedSession.scopeKey)
       } else {
         void games.endGame(focusedSession.scopeKey)
       }
@@ -482,14 +478,8 @@ export function GameStage({
             onPlaySound?.('click')
             void games.sendPokerAction(focusedSession.scopeKey, action)
           }}
-          onEndTable={
-            focusedSession.isHost
-              ? () => {
-                  onPlaySound?.('click')
-                  void games.endPokerTable(focusedSession.scopeKey)
-                }
-              : undefined
-          }
+          myVoteTargets={focusedSession.myVoteTargets ?? []}
+          onVoteOut={(target) => { void games.voteOutPokerPlayer(focusedSession.scopeKey, target) }}
         />
       ) : (
         <div className="ag-game-loading-state">Syncing table state…</div>
@@ -564,7 +554,7 @@ export function GameStage({
                     className="ag-game-head-btn is-danger"
                     onClick={handleCloseImmediate}
                   >
-                    {focusedSession.kind === 'poker' && !focusedSession.isHost ? 'Leave' : 'End'}
+                    {focusedSession.kind === 'poker' ? 'Leave table' : 'End'}
                   </button>
                   <button
                     type="button"
@@ -589,11 +579,11 @@ export function GameStage({
                   title={
                     meta.isFinished
                       ? 'Close game'
-                      : focusedSession.kind === 'poker' && !focusedSession.isHost
+                      : focusedSession.kind === 'poker'
                         ? 'Leave table'
                         : 'End game'
                   }
-                  aria-label={meta.isFinished ? 'Close game' : 'End or leave game'}
+                  aria-label={meta.isFinished ? 'Close game' : focusedSession.kind === 'poker' ? 'Leave table' : 'End game'}
                 >
                   <X size={15} />
                 </button>
@@ -657,8 +647,7 @@ export function GameStage({
               e.stopPropagation()
               onPlaySound?.('click')
               if (pillSession.kind === 'poker') {
-                if (pillSession.isHost) void games.endPokerTable(pillSession.scopeKey)
-                else void games.leavePokerTable(pillSession.scopeKey)
+                void games.leavePokerTable(pillSession.scopeKey)
               } else {
                 void games.endGame(pillSession.scopeKey)
               }

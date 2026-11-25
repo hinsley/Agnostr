@@ -1,3 +1,4 @@
+import type { Event as NostrEvent } from 'nostr-tools'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   isGameAllowedInScope,
@@ -14,6 +15,8 @@ import {
   type GoSetupOptions,
   type IncomingGameInvite,
   type PokerSetupOptions,
+  type PokerVoteOutSignal,
+  type PokerRosterProofSignal,
   type RoomGameScope,
   type RoomPokerAnnouncement,
 } from '../types/games.ts'
@@ -54,7 +57,6 @@ import {
   canStartPokerHand,
   createPokerTable as engineCreatePokerTable,
   getRecommendedBlinds,
-  removePokerPlayer,
   seatPokerPlayer,
   startPokerHand as engineStartPokerHand,
   type PokerAction,
@@ -62,6 +64,7 @@ import {
   type PokerDealerPrivateState,
   type PokerPublicState,
 } from '../lib/games/pokerEngine.ts'
+import { addPokerBallot, applyPokerDeparture, pokerRosterRound, POKER_KEY_RE, qualifiesPokerBallot } from '../lib/games/pokerGovernance.ts'
 import {
   buildDirectGameSignalTemplate,
   buildGeoGameSignalTemplate,
@@ -76,6 +79,7 @@ import {
   MAX_GAME_SIGNAL_AGE_SEC,
   parseDirectGameSignalEvent,
   parseGeoGameSignalEvent,
+  parsePokerRosterEvidence,
   parseServerGameSignalEvent,
   POKER_HOLE_SIGNAL_TAG,
 } from '../lib/gameSignaling.ts'
@@ -196,14 +200,59 @@ function isValidGoStateSnapshot(raw: unknown): raw is GoState {
   return true
 }
 
+interface ObservedPoker {
+  pokerState: PokerPublicState
+  seq: number
+}
+
+interface KnownPokerTransition {
+  host: string
+  blocked: string[]
+  revision: number
+  closed: boolean
+}
+
+const pokerStoreKey = (room: GameScopeKey, table: string) =>
+  'agnostr-poker-moderation:' + JSON.stringify([room, table])
+
+function loadPokerTransition(room: GameScopeKey, table: string): KnownPokerTransition | null {
+  try {
+    const r = JSON.parse(localStorage.getItem(pokerStoreKey(room, table)) ?? 'null')
+    if (r && POKER_KEY_RE.test(r.host) && Array.isArray(r.blocked) &&
+        r.blocked.every((p: unknown) => typeof p === 'string' && POKER_KEY_RE.test(p)) &&
+        Number.isSafeInteger(r.revision) && typeof r.closed === 'boolean') return r
+  } catch { /* unavailable storage */ }
+  return null
+}
+
+function savePokerTransition(room: GameScopeKey, state: PokerPublicState) {
+  const r: KnownPokerTransition = {
+    host: state.hostPubkey, blocked: state.expelledPubkeys ?? [],
+    revision: state.rosterRevision ?? 0, closed: state.seats.length === 0,
+  }
+  try { localStorage.setItem(pokerStoreKey(room, state.tableId), JSON.stringify(r)) } catch { /* private browsing */ }
+}
+
 function isValidPokerPublicState(raw: unknown): raw is PokerPublicState {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
-  const obj = raw as Record<string, unknown>
-  if (typeof obj.tableId !== 'string' || !obj.tableId) return false
-  if (typeof obj.hostPubkey !== 'string' || !obj.hostPubkey) return false
-  if (!Array.isArray(obj.seats) || !Array.isArray(obj.communityCards)) return false
-  if (typeof obj.fixedBuyIn !== 'number' || typeof obj.handNumber !== 'number') return false
-  return true
+  const obj = raw as PokerPublicState
+  if (typeof obj.tableId !== 'string' || !obj.tableId ||
+      typeof obj.hostPubkey !== 'string' || !POKER_KEY_RE.test(obj.hostPubkey)) return false
+  if (!Number.isSafeInteger(obj.maxSeats) || obj.maxSeats < 2 || obj.maxSeats > 8 ||
+      !Array.isArray(obj.seats) || !obj.seats.length || obj.seats.length > obj.maxSeats ||
+      !Array.isArray(obj.communityCards)) return false
+  if (obj.phase === 'finished' || !['lobby', 'preflop', 'flop', 'turn', 'river', 'showdown'].includes(obj.phase)) return false
+  if (!Number.isSafeInteger(obj.fixedBuyIn) || !Number.isSafeInteger(obj.handNumber) || obj.handNumber < 0) return false
+  if (obj.rosterRevision !== undefined && (!Number.isSafeInteger(obj.rosterRevision) || obj.rosterRevision < 0)) return false
+  if (!obj.seats.every((seat) => seat && typeof seat.pubkey === 'string' &&
+      POKER_KEY_RE.test(seat.pubkey) && Number.isSafeInteger(seat.seatIndex) &&
+      seat.seatIndex >= 0 && seat.seatIndex < obj.maxSeats &&
+      Number.isSafeInteger(seat.chips) && seat.chips >= 0 &&
+      Number.isSafeInteger(seat.totalCommitted) && seat.totalCommitted >= 0 &&
+      typeof seat.displayName === 'string')) return false
+  return new Set(obj.seats.map((s) => s.seatIndex)).size === obj.seats.length &&
+    new Set(obj.seats.map((s) => s.pubkey)).size === obj.seats.length &&
+    obj.seats.some((s) => s.pubkey === obj.hostPubkey)
 }
 
 function makeChessSession(
@@ -285,6 +334,9 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
   focusedScopeKeyRef.current = focusedScopeKey
 
   // Strictly host-private Poker decks & hole cards (NEVER published publicly!)
+  const observedPokerRef = useRef(new Map<GameScopeKey, ObservedPoker>())
+  const pokerVotesRef = useRef(new Map<GameScopeKey, { tableId: string; round: string; ballots: Map<string, Map<string, NostrEvent>> }>())
+  const pokerProofsRef = useRef(new Map<GameScopeKey, PokerRosterProofSignal[]>())
   const pokerPrivateStateRef = useRef<Map<string, PokerDealerPrivateState>>(new Map())
   // Pending hole cards received slightly before poker-state arrives
   const pendingHoleCardsRef = useRef<
@@ -385,6 +437,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       targetId: string,
       payload: GameSignalPayload,
       notifyError = false,
+      onSigned?: (event: NostrEvent) => void,
     ): Promise<boolean> => {
       const currentPool = poolRef.current
       if (!currentPool) return false
@@ -394,14 +447,18 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
           const material = identityManager.getDerivedGeohashKeyMaterial(normGeo)
           const template = buildGeoGameSignalTemplate(payload, normGeo)
           const signed = await identityManager.signEventWithMaterial(template, material)
-          await currentPool.publish([...GAME_SIGNALING_RELAYS], signed, 2_000)
+          const result = await currentPool.publish([...GAME_SIGNALING_RELAYS], signed, 2_000)
+          if (onSigned && !result.sentCount) return false
+          onSigned?.(signed)
           return true
         }
         const server = serversRef.current.find((s) => s.id === targetId)
         if (!server) return false
         const template = await buildServerGameSignalTemplate(payload, server)
         const signed = await identityManager.signEvent(template)
-        await currentPool.publish(getRelaysForServerGame(server), signed, 2_000)
+        const result = await currentPool.publish(getRelaysForServerGame(server), signed, 2_000)
+        if (onSigned && !result.sentCount) return false
+        onSigned?.(signed)
         return true
       } catch (err) {
         if (notifyError) {
@@ -455,11 +512,12 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
   )
 
   const updateGameSession = useCallback((session: LiveGameSession) => {
-    setActiveGamesByScope((prev) => {
-      const next = { ...prev, [session.scopeKey]: session }
-      activeGamesRef.current = next
-      return next
-    })
+    if (session.kind === 'poker' && session.seq > 0) {
+      observedPokerRef.current.set(session.scopeKey, session)
+    }
+    const next = { ...activeGamesRef.current, [session.scopeKey]: session }
+    activeGamesRef.current = next
+    setActiveGamesByScope(next)
   }, [])
 
   const removeGameSession = useCallback(
@@ -471,13 +529,12 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
           pokerPrivateStateRef.current.delete(existing.tableId)
         }
       }
-      setActiveGamesByScope((prev) => {
-        if (!(scopeKey in prev)) return prev
-        const next = { ...prev }
+      if (existing) {
+        const next = { ...activeGamesRef.current }
         delete next[scopeKey]
         activeGamesRef.current = next
-        return next
-      })
+        setActiveGamesByScope(next)
+      }
       if (focusedScopeKeyRef.current === scopeKey) {
         setFocusedScopeKey(null)
         setMinimized(false)
@@ -1298,6 +1355,10 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
 
       const material = getMaterialForRoom(scope, cleanTarget)
       const myPubkey = material.pubkey.toLowerCase()
+      if (loadPokerTransition(scopeKey, announcement.tableId)?.blocked.includes(myPubkey)) {
+        pushToastRef.current('info', 'You were voted out of this table')
+        return false
+      }
       const myName = resolveSelfDisplayName(identityManager)
       const now = Date.now()
 
@@ -1313,7 +1374,8 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       placeholderState.bigBlind = announcement.bigBlind || blinds.bigBlind
       placeholderState.phase = announcement.phase
 
-      const pendingHole = pendingHoleCardsRef.current.get(announcement.tableId)
+      const seen = observedPokerRef.current.get(scopeKey)
+      const observed = seen?.pokerState.tableId === announcement.tableId ? seen : undefined
       const fallbackLabel =
         scope === 'geo'
           ? formatBitchatChannelLabel(cleanTarget)
@@ -1336,12 +1398,12 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
         hostPubkey: announcement.hostPubkey,
         hostDisplayName: announcement.hostDisplayName,
         isHost: announcement.hostPubkey.toLowerCase() === myPubkey,
-        seq: 0,
+        seq: observed?.seq ?? 0,
         createdAtMs: now,
         updatedAtMs: now,
-        pokerState: placeholderState,
-        myHoleCards: pendingHole?.cards ?? null,
-        myHoleHandNumber: pendingHole?.handNumber ?? 0,
+        pokerState: observed?.pokerState ?? placeholderState,
+        myHoleCards: null,
+        myHoleHandNumber: 0,
       })
 
       updateGameSession(session)
@@ -1432,7 +1494,9 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
     async (scopeKey: GameScopeKey, action: PokerAction): Promise<boolean> => {
       const session = activeGamesRef.current[scopeKey]
       if (!session || session.kind !== 'poker' || session.status !== 'active') return false
-      if (session.pokerState.actingPubkey?.toLowerCase() !== session.localPubkey) return false
+      if (session.pokerState.expelledPubkeys?.includes(session.localPubkey) ||
+          !session.pokerState.seats.some((s) => s.pubkey === session.localPubkey) ||
+          session.pokerState.actingPubkey?.toLowerCase() !== session.localPubkey) return false
 
       if (session.isHost) {
         const priv = pokerPrivateStateRef.current.get(session.tableId)
@@ -1464,53 +1528,137 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
     [broadcastHostPokerUpdate, publishRoomSignal, updateGameSession],
   )
 
-  const endPokerTable = useCallback(
-    async (scopeKey: GameScopeKey): Promise<void> => {
-      const session = activeGamesRef.current[scopeKey]
-      if (!session || session.kind !== 'poker') return
-      endedGameIdsRef.current.add(session.tableId)
-      pokerPrivateStateRef.current.delete(session.tableId)
-      pendingHoleCardsRef.current.delete(session.tableId)
-      removeGameSession(scopeKey)
-      setRoomPokerTables((prev) => {
-        if (!(scopeKey in prev)) return prev
-        const next = { ...prev }
-        delete next[scopeKey]
-        roomPokerTablesRef.current = next
-        return next
-      })
-      if (session.isHost) {
-        await publishRoomSignal(session.scope, session.targetId, {
-          v: 1,
-          type: 'poker-end',
-          tableId: session.tableId,
-          reason: 'host-ended',
-          ts: Date.now(),
-        })
+  const applyRosterEvidence = useCallback(async (
+    scope: RoomGameScope, targetId: string, tableId: string, events: NostrEvent[],
+  ) => {
+    const scopeKey = makeGameScopeKey(scope, targetId)
+    const server = scope === 'server' ? serversRef.current.find((s) => s.id === targetId) : undefined
+    if (scope === 'server' && !server) return
+    const tag = scope === 'geo' ? getGeoGameRoomTag(targetId) : getServerGameRoomTag(targetId)
+    const entries = await Promise.all(events.map(async (event) => ({
+      event, parsed: await parsePokerRosterEvidence(event, tag, server),
+    })))
+    const observed = observedPokerRef.current.get(scopeKey)
+    if (observed?.pokerState.tableId !== tableId) return
+    const state = observed.pokerState
+    const round = pokerRosterRound(state)
+    const liveVotes = pokerVotesRef.current.get(scopeKey)
+    const ballots = liveVotes?.tableId === tableId && liveVotes.round === round
+      ? liveVotes.ballots
+      : new Map<string, Map<string, NostrEvent>>()
+    pokerVotesRef.current.set(scopeKey, { tableId, round, ballots })
+    let change: { target: string; expelled: boolean; evidence: NostrEvent[] } | undefined
+    for (const { event, parsed } of entries) {
+      if (!parsed || parsed.payload.tableId !== tableId || parsed.payload.round !== round) continue
+      if (parsed.payload.type === 'poker-leave') {
+        if (state.seats.some((seat) => seat.pubkey === parsed.signer)) {
+          change = { target: parsed.signer, expelled: false, evidence: [event] }
+          break
+        }
+        continue
       }
-    },
-    [publishRoomSignal, removeGameSession],
-  )
+      const ballot = parsed.payload
+      const quorum = addPokerBallot(state, scopeKey, ballot, parsed.signer, event, ballots)
+      if (quorum) {
+        change = { target: ballot.target, expelled: true, evidence: quorum }
+        break
+      }
+    }
+    const session = activeGamesRef.current[scopeKey]
+    const watching = session?.kind === 'poker' && session.tableId === tableId ? session : null
+    if (!change) {
+      if (watching) {
+        const myVoteTargets = [...ballots].filter(([, voters]) => voters.has(watching.localPubkey)).map(([target]) => target)
+        if (myVoteTargets.length !== (watching.myVoteTargets?.length ?? 0)) {
+          updateGameSession(makePokerSession({ ...watching, myVoteTargets }))
+        }
+      }
+      return
+    }
+    const next = applyPokerDeparture(state, change.target, change.expelled, Date.now())
+    if (!next) return
+    // The successor's snapshots start a fresh sequence. Followers wait for
+    // sequence 1 from that authority to reconcile a missed final action.
+    const seq = watching?.localPubkey === next.hostPubkey ? 1 : 0
+    observedPokerRef.current.set(scopeKey, { pokerState: next, seq })
+    pokerVotesRef.current.delete(scopeKey)
+    pokerPrivateStateRef.current.delete(tableId)
+    pendingHoleCardsRef.current.delete(tableId)
+    savePokerTransition(scopeKey, next)
+    const proof: PokerRosterProofSignal = {
+      v: 1, type: 'poker-roster-proof', tableId, events: change.evidence, ts: Date.now(),
+    }
+    const previousProofs = pokerProofsRef.current.get(scopeKey) ?? []
+    pokerProofsRef.current.set(scopeKey, [...previousProofs.filter((p) => p.tableId === tableId), proof].slice(-16))
+    if (!next.seats.length) {
+      endedGameIdsRef.current.add(tableId)
+      // No successor will heartbeat the final signed departure.
+      if (watching?.localPubkey === change.target) void publishRoomSignal(scope, targetId, proof)
+    }
 
-  const leavePokerTable = useCallback(
-    async (scopeKey: GameScopeKey): Promise<void> => {
-      const session = activeGamesRef.current[scopeKey]
-      if (!session || session.kind !== 'poker') return
-      if (session.isHost) {
-        await endPokerTable(scopeKey)
-        return
+    const hostDisplayName = next.seats.find((seat) => seat.pubkey === next.hostPubkey)?.displayName ?? 'Host'
+    const ann = roomPokerTablesRef.current[scopeKey]
+    if (ann?.tableId === tableId || watching) {
+      const tables = { ...roomPokerTablesRef.current }
+      if (!next.seats.length) delete tables[scopeKey]
+      else tables[scopeKey] = {
+        tableId, scope, scopeKey, targetId,
+        hostPubkey: next.hostPubkey, hostDisplayName,
+        fixedBuyIn: next.fixedBuyIn, smallBlind: next.smallBlind, bigBlind: next.bigBlind,
+        maxSeats: next.maxSeats, seatedCount: next.seats.length, phase: next.phase, updatedAtMs: Date.now(),
       }
-      pendingHoleCardsRef.current.delete(session.tableId)
+      roomPokerTablesRef.current = tables
+      setRoomPokerTables(tables)
+    }
+
+    if (!watching) return
+    if (watching.localPubkey === change.target || !next.seats.length) {
       removeGameSession(scopeKey)
-      await publishRoomSignal(session.scope, session.targetId, {
-        v: 1,
-        type: 'poker-leave',
-        tableId: session.tableId,
-        ts: Date.now(),
-      })
-    },
-    [endPokerTable, publishRoomSignal, removeGameSession],
-  )
+      if (change.expelled && watching.localPubkey === change.target) {
+        pushToastRef.current('info', 'Voted out of the poker table')
+      }
+      return
+    }
+    const updated = makePokerSession({
+      ...watching, seq, hostPubkey: next.hostPubkey, hostDisplayName,
+      isHost: next.hostPubkey === watching.localPubkey,
+      status: 'active', pokerState: next, updatedAtMs: Date.now(),
+      myHoleCards: null, myHoleHandNumber: 0, myVoteTargets: [],
+    })
+    updateGameSession(updated)
+    if (updated.isHost) {
+      void publishRoomSignal(scope, targetId, proof)
+      void broadcastHostPokerUpdate(updated)
+    }
+  }, [broadcastHostPokerUpdate, publishRoomSignal, removeGameSession, updateGameSession])
+
+  const leavePokerTable = useCallback(async (scopeKey: GameScopeKey): Promise<void> => {
+    const session = activeGamesRef.current[scopeKey]
+    if (!session || session.kind !== 'poker') return
+    if (!session.pokerState.seats.some((seat) => seat.pubkey === session.localPubkey)) {
+      removeGameSession(scopeKey)
+      return
+    }
+    const sent = await publishRoomSignal(session.scope, session.targetId, {
+      v: 1, type: 'poker-leave', tableId: session.tableId,
+      round: pokerRosterRound(session.pokerState), ts: Date.now(),
+    }, true, (event) => { void applyRosterEvidence(session.scope, session.targetId, session.tableId, [event]) })
+    if (!sent) pushToastRef.current('warning', 'Still seated', 'Reconnect to the room and try leaving again.')
+  }, [applyRosterEvidence, publishRoomSignal, removeGameSession])
+
+  const voteOutPokerPlayer = useCallback(async (scopeKey: GameScopeKey, target: string): Promise<boolean> => {
+    const session = activeGamesRef.current[scopeKey]
+    if (!session || session.kind !== 'poker' || session.status !== 'active') return false
+    const payload: PokerVoteOutSignal = {
+      v: 1, type: 'poker-vote-out', tableId: session.tableId, room: scopeKey,
+      round: pokerRosterRound(session.pokerState), target, ts: Date.now(),
+    }
+    if (session.myVoteTargets?.includes(target) ||
+        !qualifiesPokerBallot(session.pokerState, scopeKey, payload, session.localPubkey)) return false
+    return await publishRoomSignal(session.scope, session.targetId, payload, true, (event) => {
+      void applyRosterEvidence(session.scope, session.targetId, session.tableId, [event])
+    })
+  }, [applyRosterEvidence, publishRoomSignal])
 
   const closeGame = useCallback(
     async (scopeKey: GameScopeKey): Promise<void> => {
@@ -1547,25 +1695,21 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       // Private NIP-44 Poker hole cards
       if (payload.type === 'poker-hole-cards') {
         if (endedGameIdsRef.current.has(payload.tableId)) return
-        pendingHoleCardsRef.current.set(payload.tableId, {
-          handNumber: payload.handNumber,
-          cards: payload.cards,
-        })
         const matchingEntry = Object.values(activeGamesRef.current).find(
           (g): g is LivePokerGameSession =>
-            g.kind === 'poker' &&
-            g.tableId === payload.tableId &&
-            g.hostPubkey.toLowerCase() === sender,
+            g.kind === 'poker' && g.tableId === payload.tableId && g.hostPubkey === sender,
         )
-        if (matchingEntry && payload.handNumber >= matchingEntry.myHoleHandNumber) {
-          updateGameSession(
-            makePokerSession({
-              ...matchingEntry,
-              myHoleCards: payload.cards,
-              myHoleHandNumber: payload.handNumber,
-              updatedAtMs: Date.now(),
-            }),
-          )
+        if (!matchingEntry || payload.handNumber < matchingEntry.pokerState.handNumber) return
+        if (payload.handNumber === matchingEntry.pokerState.handNumber) {
+          if (!['preflop','flop','turn','river','showdown'].includes(matchingEntry.pokerState.phase)) return
+          updateGameSession(makePokerSession({
+            ...matchingEntry, myHoleCards: payload.cards,
+            myHoleHandNumber: payload.handNumber, updatedAtMs: Date.now(),
+          }))
+        } else if (payload.handNumber === matchingEntry.pokerState.handNumber + 1) {
+          pendingHoleCardsRef.current.set(payload.tableId, {
+            handNumber: payload.handNumber, cards: payload.cards,
+          })
         }
         return
       }
@@ -1878,18 +2022,29 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
   )
 
   const handleRoomPokerPayload = useCallback(
-    (scope: RoomGameScope, targetId: string, senderPubkey: string, payload: GameSignalPayload) => {
-      const sender = senderPubkey.toLowerCase()
-      if (blockedSetRef.current.has(sender)) return
+    (scope: RoomGameScope, targetId: string, received: NostrEvent, payload: GameSignalPayload) => {
+      const sender = received.pubkey.toLowerCase()
+      const governance = payload.type === 'poker-leave' || payload.type === 'poker-vote-out' || payload.type === 'poker-roster-proof'
+      if (blockedSetRef.current.has(sender) && !governance) return
       const cleanTarget = scope === 'geo' ? normalizeGeoTarget(targetId) : targetId.trim()
       const scopeKey = makeGameScopeKey(scope, cleanTarget)
       const session = activeGamesRef.current[scopeKey]
+      const known = 'tableId' in payload ? loadPokerTransition(scopeKey, payload.tableId) : null
+      if (known?.closed || ('tableId' in payload && endedGameIdsRef.current.has(payload.tableId))) return
+      const old = observedPokerRef.current.get(scopeKey)
+      const ann = roomPokerTablesRef.current[scopeKey]
 
       switch (payload.type) {
         case 'poker-announce': {
           if (endedGameIdsRef.current.has(payload.tableId)) return
-          if (payload.hostPubkey.toLowerCase() !== sender) return
-          const ann: RoomPokerAnnouncement = {
+          if (payload.hostPubkey.toLowerCase() !== sender || payload.scope !== scope ||
+              payload.targetId !== cleanTarget || !payload.seatedCount || payload.phase === 'finished') return
+          if ((known && known.host !== sender) || known?.blocked.includes(sender)) return
+          if ((old?.pokerState.tableId === payload.tableId && old.pokerState.hostPubkey !== sender) ||
+              (session?.kind === 'poker' && (session.tableId !== payload.tableId || session.hostPubkey !== sender)) ||
+              (ann?.tableId === payload.tableId && ann.hostPubkey !== sender) ||
+              (ann && ann.tableId !== payload.tableId && Date.now() - ann.updatedAtMs < ROOM_POKER_TTL_MS)) return
+          const announcement: RoomPokerAnnouncement = {
             tableId: payload.tableId,
             scope,
             scopeKey,
@@ -1905,7 +2060,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
             updatedAtMs: Date.now(),
           }
           setRoomPokerTables((prev) => {
-            const next = { ...prev, [scopeKey]: ann }
+            const next = { ...prev, [scopeKey]: announcement }
             roomPokerTablesRef.current = next
             return next
           })
@@ -1913,32 +2068,43 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
         }
 
         case 'poker-state': {
-          if (endedGameIdsRef.current.has(payload.tableId)) return
-          if (!session || session.kind !== 'poker' || session.tableId !== payload.tableId) return
-          if (session.isHost || session.hostPubkey.toLowerCase() !== sender) return
-          if (payload.seq <= session.seq) return
           const parsed = parseJsonSafe<unknown>(payload.publicState)
-          if (!isValidPokerPublicState(parsed) || parsed.tableId !== session.tableId) return
+          if (!isValidPokerPublicState(parsed) || parsed.tableId !== payload.tableId || parsed.hostPubkey !== sender) return
+          if (known?.host && known.host !== sender) return
+          if (ann && (ann.tableId !== payload.tableId || ann.hostPubkey !== sender)) return
+          const prev = old?.pokerState.tableId === payload.tableId ? old : null
+          if (prev && prev.pokerState.hostPubkey !== sender) return
+          if (!ann && !prev && !known) return // a matching authenticated announce establishes first contact
+          const revision = parsed.rosterRevision ?? 0
+          if (revision < (known?.revision ?? 0)) return
+          const expelled = known?.blocked ?? prev?.pokerState.expelledPubkeys ?? []
+          if (parsed.seats.some((seat) => expelled.includes(seat.pubkey))) return
+          // A host snapshot may add seats, but not remove existing seats
+          // without a ballot proof or that player's signed leave.
+          if (prev) {
+            const oldRevision = prev.pokerState.rosterRevision ?? 0
+            if (revision < oldRevision || (revision === oldRevision && payload.seq <= prev.seq) ||
+                prev.pokerState.seats.some((s) => !parsed.seats.some((n) => n.pubkey === s.pubkey && n.seatIndex === s.seatIndex)) ||
+                (revision === oldRevision && parsed.rosterRevision !== undefined && parsed.seats.length !== prev.pokerState.seats.length)) return
+          }
+          parsed.expelledPubkeys = expelled // unsigned ban claims in host snapshots aren't evidence
+          observedPokerRef.current.set(scopeKey, { pokerState: parsed, seq: payload.seq })
+          if (!session || session.kind !== 'poker' || session.tableId !== payload.tableId || session.isHost) return
+          const pending = pendingHoleCardsRef.current.get(session.tableId)
+          const live = ['preflop','flop','turn','river','showdown'].includes(parsed.phase)
+          const nextHoleCards = !live ? null : pending?.handNumber === parsed.handNumber
+            ? pending.cards : session.myHoleHandNumber === parsed.handNumber ? session.myHoleCards : null
 
-          const pendingHole = pendingHoleCardsRef.current.get(session.tableId)
-          const holeMatchesHand =
-            pendingHole && pendingHole.handNumber === parsed.handNumber ? pendingHole.cards : null
-          const nextHoleCards =
-            parsed.handNumber !== session.myHoleHandNumber
-              ? holeMatchesHand
-              : (session.myHoleCards ?? holeMatchesHand)
-
-          updateGameSession(
-            makePokerSession({
-              ...session,
-              seq: payload.seq,
-              status: parsed.phase === 'finished' ? 'finished' : 'active',
-              updatedAtMs: Date.now(),
-              pokerState: parsed,
-              myHoleCards: nextHoleCards,
-              myHoleHandNumber: nextHoleCards ? parsed.handNumber : session.myHoleHandNumber,
-            }),
-          )
+          updateGameSession(makePokerSession({
+            ...session,
+            seq: payload.seq,
+            status: 'active',
+            updatedAtMs: Date.now(),
+            pokerState: parsed,
+            myHoleCards: nextHoleCards,
+            myHoleHandNumber: nextHoleCards ? parsed.handNumber : 0,
+            myVoteTargets: prev && pokerRosterRound(prev.pokerState) === pokerRosterRound(parsed) ? session.myVoteTargets : [],
+          }))
           break
         }
 
@@ -1950,12 +2116,16 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
             sender,
             payload.displayName.trim() || getPeerNicknameRef.current?.(sender) || 'Player',
           )
+          if (!seated) {
+            if (!session.pokerState.seats.some((seat) => seat.pubkey === sender)) return
+          }
           const nextState = seated ?? session.pokerState
           const nextSession = makePokerSession({
             ...session,
             seq: session.seq + 1,
             updatedAtMs: Date.now(),
             pokerState: nextState,
+            myVoteTargets: seated ? [] : session.myVoteTargets,
           })
           updateGameSession(nextSession)
           void broadcastHostPokerUpdate(nextSession)
@@ -1986,26 +2156,23 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
           break
         }
 
-        case 'poker-leave': {
-          if (!session || session.kind !== 'poker' || !session.isHost) return
-          if (session.tableId !== payload.tableId) return
-          const updatedState = removePokerPlayer(session.pokerState, sender)
-          const nextSession = makePokerSession({
-            ...session,
-            seq: session.seq + 1,
-            status: updatedState.phase === 'finished' ? 'finished' : 'active',
-            updatedAtMs: Date.now(),
-            pokerState: updatedState,
-          })
-          updateGameSession(nextSession)
-          void broadcastHostPokerUpdate(nextSession)
+        case 'poker-leave':
+        case 'poker-vote-out': {
+          void applyRosterEvidence(scope, cleanTarget, payload.tableId, [received])
+          break
+        }
+
+        case 'poker-roster-proof': {
+          void applyRosterEvidence(scope, cleanTarget, payload.tableId, payload.events)
           break
         }
 
         case 'poker-action': {
           if (!session || session.kind !== 'poker' || !session.isHost) return
           if (session.tableId !== payload.tableId) return
-          if (payload.handNumber !== session.pokerState.handNumber) return
+          if (session.pokerState.expelledPubkeys?.includes(sender) ||
+              !session.pokerState.seats.some((s) => s.pubkey === sender) ||
+              payload.handNumber !== session.pokerState.handNumber) return
           if (session.pokerState.actingPubkey?.toLowerCase() !== sender) return
           const priv = pokerPrivateStateRef.current.get(session.tableId)
           if (!priv) return
@@ -2026,38 +2193,19 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
           break
         }
 
-        case 'poker-end': {
-          endedGameIdsRef.current.add(payload.tableId)
-          const ann = roomPokerTablesRef.current[scopeKey]
-          if (ann && ann.tableId === payload.tableId && ann.hostPubkey.toLowerCase() === sender) {
-            setRoomPokerTables((prev) => {
-              const next = { ...prev }
-              delete next[scopeKey]
-              roomPokerTablesRef.current = next
-              return next
-            })
-          }
-          if (
-            session &&
-            session.kind === 'poker' &&
-            session.tableId === payload.tableId &&
-            session.hostPubkey.toLowerCase() === sender
-          ) {
-            removeGameSession(scopeKey)
-            pushToastRef.current('info', 'Poker table closed', 'The host ended the table.')
-          }
+        case 'poker-end':
+          // Legacy host-requested shutdown is not a membership transition.
           break
-        }
 
         default:
           break
       }
     },
     [
+      applyRosterEvidence,
       broadcastHostPokerUpdate,
       getMaterialForRoom,
       publishDirectSignal,
-      removeGameSession,
       updateGameSession,
     ],
   )
@@ -2222,7 +2370,6 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
         onEvent: (event) => {
           if (!rememberSeenEvent(event.id)) return
           const sender = event.pubkey.toLowerCase()
-          if (blockedSetRef.current.has(sender)) return
           if (Math.abs(Math.floor(Date.now() / 1000) - event.created_at) > MAX_GAME_SIGNAL_AGE_SEC) {
             return
           }
@@ -2246,7 +2393,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
 
           const payload = parseGeoGameSignalEvent(event)
           if (!payload) return
-          handleRoomPokerPayload('geo', matchedGeo, sender, payload)
+          handleRoomPokerPayload('geo', matchedGeo, event, payload)
         },
       },
     )
@@ -2291,7 +2438,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
         onEvent: (event) => {
           if (!rememberSeenEvent(event.id)) return
           const sender = event.pubkey.toLowerCase()
-          if (sender === masterPubkey || blockedSetRef.current.has(sender)) return
+          if (sender === masterPubkey) return
           if (Math.abs(Math.floor(Date.now() / 1000) - event.created_at) > MAX_GAME_SIGNAL_AGE_SEC) {
             return
           }
@@ -2312,7 +2459,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
           void (async () => {
             const payload = await parseServerGameSignalEvent(event, srv)
             if (!payload) return
-            handleRoomPokerPayload('server', srv.id, sender, payload)
+            handleRoomPokerPayload('server', srv.id, event, payload)
           })()
         },
       },
@@ -2331,7 +2478,12 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       const sessions = Object.values(activeGamesRef.current)
       for (const s of sessions) {
         if (s.kind === 'poker' && s.isHost && s.status === 'active') {
-          void publishRoomSignal(s.scope, s.targetId, buildPokerAnnouncementPayload(s))
+          void (async () => {
+            for (const proof of pokerProofsRef.current.get(s.scopeKey) ?? []) {
+              if (proof.tableId === s.tableId) void publishRoomSignal(s.scope, s.targetId, { ...proof, ts: Date.now() })
+            }
+            await broadcastHostPokerUpdate(s)
+          })()
           setRoomPokerTables((prev) => {
             const existing = prev[s.scopeKey]
             if (!existing || existing.tableId !== s.tableId) return prev
@@ -2374,7 +2526,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       window.clearInterval(announceTimer)
       window.clearInterval(sweepTimer)
     }
-  }, [buildPokerAnnouncementPayload, publishRoomSignal])
+  }, [broadcastHostPokerUpdate, publishRoomSignal])
 
   /* ------------------------------------------------------------------------
      Cleanup & Reset (Profile Switches / Panic Wipe)
@@ -2386,6 +2538,9 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
     }
     inviteTimersRef.current.clear()
     pokerPrivateStateRef.current.clear()
+    observedPokerRef.current.clear()
+    pokerProofsRef.current.clear()
+    pokerVotesRef.current.clear()
     pendingHoleCardsRef.current.clear()
     seenEventIdsRef.current.clear()
     endedGameIdsRef.current.clear()
@@ -2476,7 +2631,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       leavePokerTable,
       startPokerHand,
       sendPokerAction: playPokerAction,
-      endPokerTable,
+      voteOutPokerPlayer,
       // Convenience & explicit #1106 method aliases
       startDmChess,
       startDmGo,
@@ -2525,7 +2680,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       leavePokerTable,
       startPokerHand,
       playPokerAction,
-      endPokerTable,
+      voteOutPokerPlayer,
       getActiveGameForScope,
       getIncomingInviteForPeer,
       getRoomPokerTable,
