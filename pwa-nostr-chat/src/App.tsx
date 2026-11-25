@@ -1459,6 +1459,11 @@ export function App() {
         return
       }
       if (tab === 'dms') {
+        if (workspace === 'chat' && listTab === 'dms' && !settingsState.open) {
+          // Reselecting People reveals the contact list without reopening the current DM.
+          handleLeftDrawerOpenChange(true)
+          return
+        }
         handleSelectPeople()
         return
       }
@@ -1472,7 +1477,7 @@ export function App() {
       setListTab(tab)
       setMobileScreen('list')
     },
-    [handleSelectBitchat, handleSelectPeople]
+    [handleLeftDrawerOpenChange, handleSelectBitchat, handleSelectPeople, listTab, settingsState.open, workspace]
   )
 
   const { pushToast } = engine
