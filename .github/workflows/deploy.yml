@@ -56,6 +56,10 @@ jobs:
         working-directory: pwa-nostr-chat
         run: npm run test:inline-chat-voice
 
+      - name: Content safety worker tests
+        working-directory: pwa-nostr-chat
+        run: npm run test:content-filter
+
       - name: Build
         working-directory: pwa-nostr-chat
         run: npm run build

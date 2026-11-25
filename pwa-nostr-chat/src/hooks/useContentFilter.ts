@@ -15,6 +15,7 @@ import {
 } from '../types/contentFilter.ts'
 import type { ImageAttachment, ToastLevel } from '../types/protocol.ts'
 import { downloadAndVerifyMediaBlob } from '../lib/blossom.ts'
+import { ContentFilterWorkerClient } from '../lib/contentFilterWorkerClient.ts'
 import type {
   ContentFilterRulesPayload,
   ContentFilterWorkerInMessage,
@@ -39,11 +40,6 @@ export interface UseContentFilterOptions {
   trustedSet: Set<string>
   blockedSet: Set<string>
   pushToast?: (level: ToastLevel, title: string, detail?: string) => void
-}
-
-interface PendingWorkerRequest {
-  resolve: (msg: ContentFilterWorkerOutMessage) => void
-  reject: (err: Error) => void
 }
 
 function detectWebGpuSupport(): boolean {
@@ -297,8 +293,7 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
   const blockedSetRef = useRef<Set<string>>(blockedSet)
   const pushToastRef = useRef(pushToast)
 
-  const workerRef = useRef<Worker | null>(null)
-  const pendingReqRef = useRef<Map<string, PendingWorkerRequest>>(new Map())
+  const workerClientRef = useRef<ContentFilterWorkerClient | null>(null)
   const inflightScreenRef = useRef<Map<string, Promise<ContentFilterVerdict>>>(new Map())
   const inflightPreloadRef = useRef<Promise<boolean> | null>(null)
   const skipNextAutoLoadRef = useRef<boolean>(false)
@@ -448,101 +443,44 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     []
   )
 
-  const getWorker = useCallback((): Worker => {
-    if (workerRef.current) return workerRef.current
-
-    const worker = new Worker(
-      new URL('../lib/contentFilter.worker.ts', import.meta.url),
-      { type: 'module' }
-    )
-
-    worker.onmessage = (event: MessageEvent<ContentFilterWorkerOutMessage>) => {
-      const msg = event.data
-      if (!msg || typeof msg !== 'object') return
-
-      if (msg.type === 'status') {
-        setModelStatus(msg.status)
-        modelStatusRef.current = msg.status
-        if (typeof msg.progress === 'number') {
-          setDownloadProgress(msg.progress)
-        }
-        if (msg.file !== undefined) {
-          setDownloadFile(msg.file)
-        }
-        if (msg.runtimeDevice !== undefined) {
-          setRuntimeDevice(msg.runtimeDevice)
-        }
-        if (msg.status === 'error') {
-          setModelError(msg.error ?? `Failed to load ${CONTENT_FILTER_MODEL_LABEL}.`)
-        } else if (msg.status === 'ready' || msg.status === 'idle') {
-          setModelError(null)
-        }
-        return
-      }
-
-      if (msg.type === 'result' || msg.type === 'cache-cleared') {
-        const pending = pendingReqRef.current.get(msg.requestId)
-        if (pending) {
-          pendingReqRef.current.delete(msg.requestId)
-          pending.resolve(msg)
-        }
-        return
-      }
-
-      if (msg.type === 'error') {
-        const pending = pendingReqRef.current.get(msg.requestId)
-        if (pending) {
-          pendingReqRef.current.delete(msg.requestId)
-          pending.reject(new Error(msg.error || 'Image safety filtering error.'))
-        }
-      }
-    }
-
-    worker.onerror = (ev) => {
-      const errMsg = ev.message || 'Content filter worker crashed.'
-      setModelStatus('error')
-      modelStatusRef.current = 'error'
-      setModelError(errMsg)
-      inflightPreloadRef.current = null
-      for (const [id, pending] of Array.from(pendingReqRef.current.entries())) {
-        pendingReqRef.current.delete(id)
-        pending.reject(new Error(errMsg))
-      }
-    }
-
-    workerRef.current = worker
-    return worker
-  }, [])
-
   const postWorkerRequest = useCallback(
     (
-      payload: ContentFilterWorkerInMessage & { requestId: string }
+      payload: Extract<ContentFilterWorkerInMessage, { requestId: string }>
     ): Promise<ContentFilterWorkerOutMessage> => {
-      const worker = getWorker()
-      return new Promise((resolve, reject) => {
-        pendingReqRef.current.set(payload.requestId, { resolve, reject })
-        worker.postMessage(payload)
-      })
+      if (!workerClientRef.current) {
+        workerClientRef.current = new ContentFilterWorkerClient(
+          () => new Worker(new URL('../lib/contentFilter.worker.ts', import.meta.url), { type: 'module' }),
+          (msg) => {
+            setModelStatus(msg.status)
+            modelStatusRef.current = msg.status
+            if (typeof msg.progress === 'number') setDownloadProgress(msg.progress)
+            if (msg.file !== undefined) setDownloadFile(msg.file)
+            if (msg.runtimeDevice !== undefined) setRuntimeDevice(msg.runtimeDevice)
+            if (msg.status === 'error') {
+              setModelError(msg.error ?? `Failed to load ${CONTENT_FILTER_MODEL_LABEL}.`)
+            } else if (msg.status === 'ready' || msg.status === 'idle') {
+              setModelError(null)
+            }
+          },
+          (message) => {
+            inflightPreloadRef.current = null
+            setModelStatus('error')
+            modelStatusRef.current = 'error'
+            setDownloadProgress(0)
+            setDownloadFile(null)
+            setRuntimeDevice(null)
+            setModelError(message)
+          }
+        )
+      }
+      return workerClientRef.current.request(payload)
     },
-    [getWorker]
+    []
   )
 
   const terminateWorker = useCallback(() => {
-    const w = workerRef.current
-    workerRef.current = null
+    workerClientRef.current?.reset()
     inflightPreloadRef.current = null
-    if (w) {
-      try {
-        w.postMessage({ type: 'dispose' } satisfies ContentFilterWorkerInMessage)
-      } catch {
-        // Ignore postMessage failure
-      }
-      w.terminate()
-    }
-    for (const [id, pending] of Array.from(pendingReqRef.current.entries())) {
-      pendingReqRef.current.delete(id)
-      pending.reject(new Error('Content filter worker reset.'))
-    }
     inflightScreenRef.current.clear()
   }, [])
 
@@ -585,6 +523,9 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
         return await inflightPreloadRef.current
       }
 
+      // A failed dynamic import can be cached for the lifetime of a worker.
+      // Explicit reload after any model error must start in a new context.
+      if (modelStatusRef.current === 'error') terminateWorker()
       const silent = Boolean(preloadOpts?.silent)
       skipNextAutoLoadRef.current = false
       cancelInFlightRef.current = false
@@ -616,15 +557,15 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
             pushToastRef.current?.('error', 'Content Filter download failed', message)
           }
           return false
-        } finally {
-          inflightPreloadRef.current = null
         }
       })()
 
       inflightPreloadRef.current = task
-      return await task
+      const result = await task
+      if (inflightPreloadRef.current === task) inflightPreloadRef.current = null
+      return result
     },
-    [postWorkerRequest]
+    [postWorkerRequest, terminateWorker]
   )
 
   const cancelDownload = useCallback(() => {
@@ -737,14 +678,15 @@ export function useContentFilter(opts: UseContentFilterOptions): ContentFilterEn
     skipNextAutoLoadRef.current = true
     inflightPreloadRef.current = null
     clearVerdictCache()
-    if (workerRef.current) {
+    if (workerClientRef.current?.running) {
       const requestId = `cf-clear-${++reqSeqRef.current}`
       try {
         await postWorkerRequest({ type: 'clear-cache', requestId })
       } catch {
         terminateWorker()
       }
-    } else {
+    }
+    if (!workerClientRef.current?.running) {
       try {
         if (typeof caches !== 'undefined') {
           await caches.delete(CONTENT_FILTER_CACHE_NAME)

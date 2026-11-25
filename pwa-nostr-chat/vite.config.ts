@@ -188,13 +188,14 @@ export default defineConfig({
       injectManifest: {
         // Only the shared preview is part of the offline install, never the detail catalog.
         globPatterns: ['**/*.{js,css,html,svg,png,webmanifest,woff2}', '**/solar-overview-*.webp'],
+        // Precache the small filter worker entry with the app version that creates it.
+        // The large on-demand inference chunks and model remain outside the app shell.
         globIgnores: [
           '**/transformers.web-*.js',
           '**/parakeet-*.js',
           '**/ort.bundle*.js',
           '**/ort.webgpu*.js',
           '**/ort-wasm-*.wasm',
-          '**/contentFilter.worker-*.js',
           '**/translator.worker-*.js',
           '**/mathjax-*.js',
           '**/jsqr-*.js',

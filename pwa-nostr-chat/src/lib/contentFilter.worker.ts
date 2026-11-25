@@ -654,7 +654,7 @@ self.onmessage = (event: MessageEvent<ContentFilterWorkerInMessage>) => {
   }
 
   if (msg.type === 'clear-cache') {
-    queue.length = 0
+    // Preserve in-flight callers: silently dropping their jobs strands promises.
     queue.push({ type: 'clear-cache', requestId: msg.requestId })
     void processQueue()
     return
