@@ -75,6 +75,18 @@ registerRoute(
   })
 )
 
+// Zoom tiles are immutable by revision and fetched only for the world in view.
+registerRoute(
+  ({ sameOrigin, url }) => sameOrigin && /\/solar-tiles\/[a-z]+\/[a-f0-9]{16}\/[0-5]\/\d+\/\d+\.webp$/.test(url.pathname),
+  new CacheFirst({
+    cacheName: 'solar-surface-tiles-v1',
+    plugins: [
+      new CacheableResponsePlugin({ statuses: [200] }),
+      new ExpirationPlugin({ maxEntries: 96, maxAgeSeconds: 30 * 24 * 60 * 60, purgeOnQuotaError: true }),
+    ],
+  }),
+)
+
 registerRoute(
   ({ url }) => /^https:\/\/fonts\.googleapis\.com\/.*/i.test(url.href),
   new CacheFirst({

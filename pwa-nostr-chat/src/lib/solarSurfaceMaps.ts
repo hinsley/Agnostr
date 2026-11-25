@@ -49,6 +49,8 @@ export class SolarSurfaceMaps {
     this.atlasImage.src = overviewUrl
   }
 
+  get focusTextureWidth() { return this.size }
+
   /** Fill the existing Earth basemap from the photos before Esri tiles arrive.
    * Do not delay the tile requests or paint over an already-composited tile. */
   async paintEarthBackdrop(canvas: HTMLCanvasElement, mayPaint: () => boolean): Promise<boolean> {

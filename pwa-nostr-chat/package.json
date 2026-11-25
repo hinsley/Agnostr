@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:solar-maps": "node scripts/check-solar-maps.mjs",
+    "test:solar-tiles": "node --experimental-strip-types --test scripts/check-solar-tiles.mjs",
     "test:lunar-orientation": "node --experimental-strip-types --test scripts/check-lunar-orientation.mjs",
     "test:content-filter": "node --experimental-strip-types --test scripts/check-content-filter-worker.mjs",
     "test:agmail-reply-chain": "node --experimental-strip-types --test scripts/check-agmail-reply-chain.mjs",

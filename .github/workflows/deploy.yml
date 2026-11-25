@@ -64,6 +64,10 @@ jobs:
         working-directory: pwa-nostr-chat
         run: node --experimental-strip-types --test scripts/check-device-sync.mjs scripts/check-private-dm-actions.mjs
 
+      - name: Solar map regression tests
+        working-directory: pwa-nostr-chat
+        run: npm run test:solar-maps && npm run test:solar-tiles && npm run test:lunar-orientation
+
       - name: Build
         working-directory: pwa-nostr-chat
         run: npm run build

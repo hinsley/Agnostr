@@ -46,6 +46,8 @@ import {
 } from '../lib/solarSystem.ts'
 import { createPlanetaryRingTexture } from '../lib/planetTextures.ts'
 import { SolarSurfaceMaps } from '../lib/solarSurfaceMaps.ts'
+import { SolarSurfaceTiles } from '../lib/solarSurfaceTiles.ts'
+import { TILE_COLUMNS, TILE_PIXELS, TILE_GUTTER, TILE_STRIDE } from '../lib/solarTileLayout.ts'
 
 export type PrecisionSelection = 'auto' | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
@@ -607,6 +609,12 @@ const ATMOSPHERE_FRAGMENT_SHADER = `
 const PLANET_FRAGMENT_SHADER = `
   uniform sampler2D uMap;
   uniform vec4 uMapRect;
+  #ifdef SURFACE_TILES
+  uniform sampler2D uSurfaceAtlas;
+  uniform sampler2D uSurfaceLookup;
+  uniform float uSurfaceAtlasRows;
+  uniform bool uSurfaceTilesReady;
+  #endif
   uniform bool uMapReady;
   uniform vec3 uBaseColor;
   uniform vec3 uSunDir;
@@ -620,6 +628,21 @@ const PLANET_FRAGMENT_SHADER = `
 
   void main() {
     vec3 texel = uMapReady ? texture2D(uMap, uMapRect.xy + vUv * uMapRect.zw).rgb : uBaseColor;
+    #ifdef SURFACE_TILES
+    if (uSurfaceTilesReady) {
+      vec2 northUp = vec2(fract(vUv.x), clamp(1.0 - vUv.y, 0.0, 0.9999999));
+      vec2 entry = floor(texture2D(uSurfaceLookup, northUp).rg * 255.0 + 0.5);
+      if (entry.x > 0.0) {
+        const float columns = ${TILE_COLUMNS}.0;
+        float index = entry.x - 1.0;
+        vec2 slot = vec2(mod(index, columns), floor(index / columns));
+        vec2 within = fract(northUp * exp2(entry.y) * vec2(2.0, 1.0));
+        vec2 tileUV = (${TILE_GUTTER}.0 + within * ${TILE_PIXELS}.0) / ${TILE_STRIDE}.0;
+        vec2 atlasUV = (slot + tileUV) / vec2(columns, uSurfaceAtlasRows);
+        texel = texture2D(uSurfaceAtlas, vec2(atlasUV.x, 1.0 - atlasUV.y)).rgb;
+      }
+    }
+    #endif
     vec3 N = normalize(vWorldNormal);
     vec3 L = normalize(uSunDir);
     vec3 V = normalize(cameraPosition - vWorldPos);
@@ -2681,11 +2704,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         polygonOffsetUnits: 2,
       })
       const surfaceMaps = new SolarSurfaceMaps(renderer.capabilities.getMaxAnisotropy())
+      const surfaceTiles = new SolarSurfaceTiles(surfaceMaps.focusTextureWidth)
       const planetCentralMaterial = new THREE.ShaderMaterial({
+        defines: { SURFACE_TILES: 1 },
         vertexShader: EARTH_VERTEX_SHADER,
         fragmentShader: PLANET_FRAGMENT_SHADER,
         uniforms: {
           ...surfaceMaps.preview('earth'),
+          ...surfaceTiles.uniforms,
           uSunDir: { value: sunDir.clone() },
           uAtmoColor: { value: new THREE.Color('#60A5FA') },
           uAtmoStrength: { value: 0.0 },
@@ -3075,6 +3101,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         const isEarth = bodyId === 'earth'
         const focusedDef = SOLAR_BODIES[bodyId]
         surfaceMaps.focus(isEarth ? null : bodyId, planetCentralMaterial.uniforms)
+        surfaceTiles.focus(isEarth ? null : bodyId)
         if (isEarth) {
           earthMesh.material = earthMaterial
           atmosphereMesh.visible = true
@@ -4242,6 +4269,10 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
         }
 
+        if (!isEarthFocused) {
+          surfaceTiles.update(nowMs, cam.lat * Math.PI / 180, cam.lon * Math.PI / 180, alt,
+            camera.fov * Math.PI / 180, camera.aspect, lastH * Math.min(1.5, renderer.getPixelRatio()))
+        }
         try {
           renderer.render(scene, camera)
         } catch {
@@ -4864,6 +4895,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         earthGeo.dispose()
         earthMaterial.dispose()
         planetCentralMaterial.dispose()
+        surfaceTiles.dispose()
         surfaceMaps.dispose()
         baseTexture.dispose()
         atmosphereGeo.dispose()
