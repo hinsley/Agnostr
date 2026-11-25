@@ -31,6 +31,7 @@ import { useBackHandler, useBackNavigation } from './hooks/useBackNavigation'
 import { useMobileSwipeDrawers } from './hooks/useMobileSwipeDrawers'
 import { useMobileViewport } from './hooks/useMobileViewport'
 import { usePwa } from './hooks/usePwa'
+import { useRoomRoster } from './hooks/useRoomRoster'
 import { doesContentMentionUser } from './lib/bitchatProtocol'
 import {
   formatBitchatChannelLabel,
@@ -215,6 +216,7 @@ export function App() {
   const [userListCollapsed, setUserListCollapsed] = useState(false)
   const [mobileUserListOpen, setMobileUserListOpen] = useState(false)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
+  const roomRoster = useRoomRoster(engine, roomInfoOpen || (workspace === 'chat' && !isBitchatGlobe))
 
   // Keep selectedServerId synced with active server & joined servers list
   const activeServerId = engine.servers.activeServer?.id ?? null
@@ -3036,6 +3038,7 @@ export function App() {
                 >
                   <UserListPane
                     engine={engine}
+                    roomRoster={roomRoster}
                     collapsed={userListCollapsed}
                     onCloseMobile={() => setMobileUserListOpen(false)}
                     onInspectPeer={setInspectedPeer}
@@ -3063,6 +3066,7 @@ export function App() {
               isSwiping={false}
               inShell={isMobileViewport}
               engine={engine}
+              roomRoster={roomRoster}
               onClose={() => setRoomInfoOpen(false)}
               onInspectPeer={setInspectedPeer}
               onStartDm={handleOpenDm}

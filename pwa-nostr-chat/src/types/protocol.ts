@@ -456,6 +456,8 @@ export interface AgnostrEngine {
   // Messages, peers, presence & notes for active geohash
   messages: GeoMessage[]
   peers: PeerInfo[]
+  /** Read the active room directly from the presence tracker at a roster tick. */
+  readRoomPeers: () => PeerInfo[]
   presence: ChannelPresenceSummary
   locationNotes: LocationNote[]
   unreadDividerId: string | null

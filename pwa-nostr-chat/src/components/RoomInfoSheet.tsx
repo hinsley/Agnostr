@@ -49,10 +49,12 @@ import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { AvatarImg } from './AvatarImg.tsx'
 import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 import { formatCompactLastActive } from '../utils/relativeTime.ts'
+import type { RoomRoster } from '../lib/roomRoster.ts'
 
 export interface RoomInfoSheetProps {
   open: boolean
   engine: AgnostrEngine
+  roomRoster: RoomRoster | null
   onClose: () => void
   onInspectPeer: (peer: PeerInfo) => void
   onStartDm: (pubkey: string, nickname?: string) => void
@@ -110,6 +112,7 @@ function comparePeerPriority(
 export function RoomInfoSheet({
   open,
   engine,
+  roomRoster,
   onClose,
   onInspectPeer,
   onStartDm,
@@ -168,57 +171,39 @@ export function RoomInfoSheet({
   }, [dmPeerPubkey, engine.zaps])
 
   const sortedGeoPeers = useMemo(() => {
-    const decorated = engine.peers.map((p) => {
-      const pk = p.pubkey.toLowerCase()
-      const isAgnostrClient = p.isSelf
-        ? Boolean(p.isAgnostrClient ?? engine.broadcastClientTag)
-        : Boolean(p.isAgnostrClient)
-      const isBlocked = !p.isSelf && engine.isPeerBlocked(pk)
-      const isTrusted = !p.isSelf && engine.isExplicitlyTrusted(pk)
-      return { peer: p, isAgnostrClient, isBlocked, isTrusted }
-    })
+    const peers = roomRoster?.type === 'channel' ? [...roomRoster.peers] : []
 
-    decorated.sort((a, b) => {
-      if (a.peer.isSelf !== b.peer.isSelf) return a.peer.isSelf ? -1 : 1
-      if (a.peer.isOnline !== b.peer.isOnline) return a.peer.isOnline ? -1 : 1
+    peers.sort((a, b) => {
+      if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1
+      if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1
       const prio = comparePeerPriority(
         {
-          isSelf: a.peer.isSelf,
+          isSelf: a.isSelf,
           isBlocked: a.isBlocked,
-          isTrusted: a.isTrusted,
-          isAgnostrClient: a.isAgnostrClient,
-          nickname: a.peer.nickname,
+          isTrusted: Boolean(a.isTrusted),
+          isAgnostrClient: Boolean(a.isAgnostrClient),
+          nickname: a.nickname,
         },
         {
-          isSelf: b.peer.isSelf,
+          isSelf: b.isSelf,
           isBlocked: b.isBlocked,
-          isTrusted: b.isTrusted,
-          isAgnostrClient: b.isAgnostrClient,
-          nickname: b.peer.nickname,
+          isTrusted: Boolean(b.isTrusted),
+          isAgnostrClient: Boolean(b.isAgnostrClient),
+          nickname: b.nickname,
         },
       )
       if (prio !== 0) return prio
-      if (b.peer.lastSeenAt !== a.peer.lastSeenAt) {
-        return b.peer.lastSeenAt - a.peer.lastSeenAt
+      if (b.lastSeenAt !== a.lastSeenAt) {
+        return b.lastSeenAt - a.lastSeenAt
       }
-      return a.peer.nickname.localeCompare(b.peer.nickname, undefined, { sensitivity: 'base' })
+      return a.nickname.localeCompare(b.nickname, undefined, { sensitivity: 'base' })
     })
 
-    return decorated.map((entry) => entry.peer)
-  }, [engine])
+    return peers
+  }, [roomRoster])
 
   const sortedServerMembers = useMemo(() => {
-    const decorated = engine.servers.members.map((m) => {
-      const pk = m.pubkey.toLowerCase()
-      const known = engine.getPeerByPubkey(pk)
-      const isAgnostrClient = m.isSelf
-        ? Boolean(known?.isAgnostrClient ?? engine.broadcastClientTag)
-        : Boolean(known?.isAgnostrClient)
-      const isOnline = m.isSelf ? true : Boolean(known?.isOnline)
-      const isBlocked = !m.isSelf && engine.isPeerBlocked(pk)
-      const isTrusted = !m.isSelf && engine.isExplicitlyTrusted(pk)
-      return { member: m, isAgnostrClient, isOnline, isBlocked, isTrusted }
-    })
+    const decorated = roomRoster?.type === 'server' ? [...roomRoster.members] : []
 
     decorated.sort((a, b) => {
       if (Boolean(a.member.isFounder) !== Boolean(b.member.isFounder)) {
@@ -246,8 +231,8 @@ export function RoomInfoSheet({
       return a.member.nickname.localeCompare(b.member.nickname, undefined, { sensitivity: 'base' })
     })
 
-    return decorated.map((entry) => entry.member)
-  }, [engine])
+    return decorated
+  }, [roomRoster])
 
   const isVisible =
     open || (swipeProgress !== undefined && swipeProgress > 0) || Boolean(isSwiping)
@@ -258,7 +243,7 @@ export function RoomInfoSheet({
       return engine.activeDmThread?.peerPubkey ? [engine.activeDmThread.peerPubkey] : []
     }
     if (engine.activeView.type === 'server') {
-      return sortedServerMembers.map((m) => m.pubkey)
+      return sortedServerMembers.map(({ member }) => member.pubkey)
     }
     return sortedGeoPeers.map((p) => p.pubkey)
   }, [
@@ -777,7 +762,7 @@ export function RoomInfoSheet({
           ) : (
             <div className="ag-sheet-list" role="list">
               {sortedGeoPeers.map((peer) => {
-                const trusted = !peer.isSelf && engine.isExplicitlyTrusted(peer.pubkey)
+                const trusted = peer.isTrusted
                 const peerLud16 = !peer.isSelf
                   ? engine.zaps.getPeerLightningAddress(peer.pubkey)
                   : null
@@ -838,7 +823,7 @@ export function RoomInfoSheet({
                             ? 'You'
                             : peer.isOnline
                               ? 'Online'
-                              : formatCompactLastActive(peer.lastSeenAt)}
+                              : formatCompactLastActive(peer.lastSeenAt, roomRoster?.sampledAt)}
                           {trusted && (
                             <span className="ag-sheet-trusted-inline">
                               <ShieldCheck size={12} />
@@ -1453,15 +1438,14 @@ export function RoomInfoSheet({
               <Users size={13} />
               <span>Members</span>
             </span>
-            <span className="ag-sheet-section-meta">{servers.members.length}</span>
+            <span className="ag-sheet-section-meta">{sortedServerMembers.length}</span>
           </div>
 
           {sortedServerMembers.length === 0 ? (
             <p className="ag-sheet-empty">Members appear here as they join or send messages.</p>
           ) : (
             <div className="ag-sheet-list" role="list">
-              {sortedServerMembers.map((m) => {
-                const trusted = !m.isSelf && engine.isExplicitlyTrusted(m.pubkey)
+              {sortedServerMembers.map(({ member: m, isTrusted: trusted, isAgnostrClient, clientName }) => {
                 const memberLud16 = !m.isSelf
                   ? engine.zaps.getPeerLightningAddress(m.pubkey)
                   : null
@@ -1499,22 +1483,14 @@ export function RoomInfoSheet({
                       }}
                     >
                       <span className="ag-sheet-avatar-wrap">
-                        {(() => {
-                          const knownMember = engine.getPeerByPubkey(m.pubkey)
-                          const memberIsAgnostr = m.isSelf
-                            ? Boolean(knownMember?.isAgnostrClient ?? engine.broadcastClientTag)
-                            : Boolean(knownMember?.isAgnostrClient)
-                          return (
-                            <AvatarImg
-                              pubkey={m.pubkey}
-                              pictureUrl={engine.getProfilePicture(m.pubkey)}
-                              alt=""
-                              width={36}
-                              height={36}
-                              className={`ag-sheet-avatar ${clientAvatarRingClass(knownMember?.clientName, memberIsAgnostr)}`}
-                            />
-                          )
-                        })()}
+                        <AvatarImg
+                          pubkey={m.pubkey}
+                          pictureUrl={engine.getProfilePicture(m.pubkey)}
+                          alt=""
+                          width={36}
+                          height={36}
+                          className={`ag-sheet-avatar ${clientAvatarRingClass(clientName, isAgnostrClient)}`}
+                        />
                       </span>
                       <span className="ag-sheet-person-text">
                         <span

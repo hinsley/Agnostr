@@ -14,6 +14,7 @@ import {
   Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
+import type { RoomRoster } from '../lib/roomRoster.ts'
 import type { ZapTarget } from '../types/wallet.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { clientAvatarRingClass } from '../lib/bitchatProtocol.ts'
@@ -25,6 +26,7 @@ import { formatCompactLastActive } from '../utils/relativeTime.ts'
 
 export interface UserListPaneProps {
   engine: AgnostrEngine
+  roomRoster: RoomRoster | null
   collapsed: boolean
   onCloseMobile: () => void
   onInspectPeer: (peer: PeerInfo) => void
@@ -85,6 +87,7 @@ function comparePeerPriority(
 
 export function UserListPane({
   engine,
+  roomRoster,
   collapsed,
   onCloseMobile,
   onInspectPeer,
@@ -101,10 +104,7 @@ export function UserListPane({
   const {
     activeView,
     activeGeohash,
-    activeDmThread,
-    identity,
     servers,
-    peers,
     peerNotes,
     ensureProfilePictures,
   } = engine
@@ -123,35 +123,19 @@ export function UserListPane({
   }, [viewKey])
 
   const headerTitle = activeView.type === 'server' ? 'Members' : 'People'
+  const dmEngine = activeView.type === 'dm' ? engine : null
 
   const rawGroups = useMemo<UserListGroup[]>(() => {
-    const nowSec = Math.floor(Date.now() / 1000)
-
-    if (activeView.type === 'server') {
-      const visibleMembers = servers.members.filter((m) => !m.isBanned)
-      const serverLastSeenByPubkey = new Map<string, number>()
-      for (const msg of servers.messages) {
-        if (msg.isSystem || msg.isBlockedPlaceholder || !msg.pubkey) continue
-        const mpk = msg.pubkey.toLowerCase()
-        const prev = serverLastSeenByPubkey.get(mpk) ?? 0
-        if (msg.createdAt > prev) serverLastSeenByPubkey.set(mpk, msg.createdAt)
-      }
+    if (roomRoster?.type === 'server') {
       const staff: NormalizedUserItem[] = []
       const regulars: NormalizedUserItem[] = []
 
-      for (const m of visibleMembers) {
+      for (const entry of roomRoster.members) {
+        const { member: m, known, isOnline, isBlocked, isTrusted, clientName } = entry
+        if (m.isBanned) continue
         const pk = m.pubkey.toLowerCase()
-        const known = engine.getPeerByPubkey(pk)
-        const isAgnostr = m.isSelf
-          ? Boolean(known?.isAgnostrClient ?? engine.broadcastClientTag)
-          : Boolean(known?.isAgnostrClient)
-        const clientName = known?.clientName ?? (isAgnostr ? 'agnostr' : undefined)
-        const isOnline = m.isSelf ? true : Boolean(known?.isOnline)
-        const isBlocked = !m.isSelf && engine.isPeerBlocked(pk)
-        const isTrusted = !m.isSelf && engine.isExplicitlyTrusted(pk)
-        const memberLastSeenAt = m.isSelf
-          ? nowSec
-          : Math.max(known?.lastSeenAt ?? 0, serverLastSeenByPubkey.get(pk) ?? 0)
+        const isAgnostr = entry.isAgnostrClient
+        const memberLastSeenAt = entry.lastSeenAt
         const primaryRole = m.roles[0]?.trim() || ''
         const isStaff =
           m.isFounder ||
@@ -238,15 +222,17 @@ export function UserListPane({
       return out
     }
 
-    if (activeView.type === 'dm') {
+    if (dmEngine) {
+      const { activeDmThread, identity } = dmEngine
+      const nowSec = Math.floor(Date.now() / 1000)
       const items: NormalizedUserItem[] = []
       if (activeDmThread) {
         const peerPk = activeDmThread.peerPubkey.toLowerCase()
-        const knownPeer = engine.getPeerByPubkey(peerPk)
+        const knownPeer = dmEngine.getPeerByPubkey(peerPk)
         const isAgnostr = Boolean(knownPeer?.isAgnostrClient)
         const clientName = knownPeer?.clientName ?? (isAgnostr ? 'agnostr' : undefined)
-        const isBlocked = engine.isPeerBlocked(peerPk)
-        const isTrusted = engine.isExplicitlyTrusted(peerPk)
+        const isBlocked = dmEngine.isPeerBlocked(peerPk)
+        const isTrusted = dmEngine.isExplicitlyTrusted(peerPk)
         const isOnline = Boolean(knownPeer?.isOnline)
         const peerLastSeenAt = Math.max(
           knownPeer?.lastSeenAt ?? 0,
@@ -299,8 +285,8 @@ export function UserListPane({
       }
 
       const selfPk = identity.masterPubkey.toLowerCase()
-      const knownSelf = engine.getPeerByPubkey(selfPk) ?? engine.getPeerByPubkey(identity.activePubkey)
-      const selfIsAgnostr = Boolean(knownSelf?.isAgnostrClient ?? engine.broadcastClientTag)
+      const knownSelf = dmEngine.getPeerByPubkey(selfPk) ?? dmEngine.getPeerByPubkey(identity.activePubkey)
+      const selfIsAgnostr = Boolean(knownSelf?.isAgnostrClient ?? dmEngine.broadcastClientTag)
       const selfClientName = knownSelf?.clientName ?? (selfIsAgnostr ? 'agnostr' : undefined)
       const selfHandle = formatHandle(identity.nickname, selfPk)
       const selfPeerInfo: PeerInfo = knownSelf
@@ -352,33 +338,21 @@ export function UserListPane({
     const online: NormalizedUserItem[] = []
     const offline: NormalizedUserItem[] = []
 
-    for (const p of peers) {
-      const pk = p.pubkey.toLowerCase()
-      const isAgnostr = p.isSelf
-        ? Boolean(p.isAgnostrClient ?? engine.broadcastClientTag)
-        : Boolean(p.isAgnostrClient)
-      const isBlocked = !p.isSelf && engine.isPeerBlocked(pk)
-      const isTrusted = !p.isSelf && engine.isExplicitlyTrusted(pk)
-
+    for (const p of roomRoster?.type === 'channel' ? roomRoster.peers : []) {
       const item: NormalizedUserItem = {
-        pubkey: pk,
+        pubkey: p.pubkey,
         npub: p.npub,
         nickname: p.nickname,
         displayHandle: p.displayHandle,
         lastSeenAt: p.lastSeenAt,
         isSelf: p.isSelf,
         isOnline: p.isOnline,
-        isAgnostrClient: isAgnostr,
-        clientName: p.clientName ?? (isAgnostr ? 'agnostr' : undefined),
-        isBlocked,
-        isTrusted,
+        isAgnostrClient: Boolean(p.isAgnostrClient),
+        clientName: p.clientName,
+        isBlocked: p.isBlocked,
+        isTrusted: Boolean(p.isTrusted),
         roleBadge: p.isSelf ? 'You' : undefined,
-        peerInfo: {
-          ...p,
-          isBlocked,
-          isTrusted,
-          isAgnostrClient: isAgnostr,
-        },
+        peerInfo: p,
       }
 
       if (p.isOnline) online.push(item)
@@ -401,7 +375,7 @@ export function UserListPane({
     if (online.length > 0) out.push({ id: 'online', label: 'Online', items: online })
     if (offline.length > 0) out.push({ id: 'offline', label: 'Offline', items: offline })
     return out
-  }, [activeView.type, servers.members, servers.messages, activeDmThread, identity, peers, engine])
+  }, [dmEngine, roomRoster])
 
   const visiblePubkeys = useMemo(() => {
     const pks: string[] = []
@@ -446,6 +420,8 @@ export function UserListPane({
 
   const handleRowContextMenu = (e: ReactMouseEvent, item: NormalizedUserItem) => {
     const savedNote = peerNotes[item.pubkey] ?? ''
+    const isTrusted = !item.isSelf && engine.isExplicitlyTrusted(item.pubkey)
+    const isBlocked = !item.isSelf && engine.isPeerBlocked(item.pubkey)
     const peerLud16 = !item.isSelf ? engine.zaps.getPeerLightningAddress(item.pubkey) : null
     const peerCanZap = !item.isSelf && engine.zaps.canZapPeer(item.pubkey)
     const items: ContextMenuItem[] = [
@@ -503,12 +479,12 @@ export function UserListPane({
 
       items.push({
         id: 'trust',
-        label: item.isTrusted ? 'Remove Trust' : 'Trust',
-        icon: item.isTrusted ? <ShieldOff size={14} /> : <ShieldCheck size={14} />,
+        label: isTrusted ? 'Remove Trust' : 'Trust',
+        icon: isTrusted ? <ShieldOff size={14} /> : <ShieldCheck size={14} />,
         dividerBefore: true,
         onSelect: () => {
           onPlaySound?.('click')
-          if (item.isTrusted) {
+          if (isTrusted) {
             engine.untrustPubkey(item.pubkey)
           } else {
             engine.trustPubkey(item.pubkey, item.nickname)
@@ -549,9 +525,9 @@ export function UserListPane({
 
       items.push({
         id: 'block',
-        label: item.isBlocked ? 'Unblock' : 'Mute / Block',
+        label: isBlocked ? 'Unblock' : 'Mute / Block',
         icon: <Ban size={14} />,
-        danger: !item.isBlocked,
+        danger: !isBlocked,
         dividerBefore: true,
         onSelect: () => {
           onPlaySound?.('click')
@@ -563,7 +539,7 @@ export function UserListPane({
         activeView.type === 'server' &&
         activeServer &&
         servers.canModerate &&
-        !item.isFounder
+        !servers.members.some((member) => member.pubkey.toLowerCase() === item.pubkey && member.isFounder)
       ) {
         items.push({
           id: 'ban',
@@ -652,7 +628,7 @@ export function UserListPane({
                       ? 'Muted'
                       : item.isOnline
                         ? 'Online'
-                        : formatCompactLastActive(item.lastSeenAt)
+                        : formatCompactLastActive(item.lastSeenAt, roomRoster?.sampledAt)
                   const sublineTitle =
                     !savedNote && !item.isBlocked && !item.isOnline && item.lastSeenAt > 0
                       ? `Last active ${new Date(item.lastSeenAt * 1000).toLocaleString()}`

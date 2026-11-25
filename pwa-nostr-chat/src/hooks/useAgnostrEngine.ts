@@ -5843,6 +5843,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
     messages: visibleMessages,
     peers,
+    readRoomPeers: () => presenceTracker.getPeers(activeGeohash, ownPubkeys, blockedSet),
     presence,
     locationNotes,
     unreadDividerId,
