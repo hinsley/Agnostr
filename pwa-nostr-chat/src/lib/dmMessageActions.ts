@@ -1,4 +1,4 @@
-import type { DmMessage, ReactionSummary, ReplyReference } from '../types/protocol.ts'
+import type { DmMessage, DmThread, ReactionSummary, ReplyReference } from '../types/protocol.ts'
 
 export function isDmTargetId(id: unknown): id is string {
   return typeof id === 'string' && id.length > 0 && id.length <= 255 && !/[\s\p{Cc}]/u.test(id)
@@ -27,6 +27,36 @@ export function addDmReaction(message: DmMessage, sender: string, emoji: string,
     reactedByMe: own || !!match?.reactedByMe,
   }
   return { ...message, reactions: match ? reactions.map(r => r === match ? next : r) : [...reactions, next] }
+}
+
+export interface DmReactionUpdate {
+  peer: string
+  target: string
+  sender: string
+  emoji: string
+  own: boolean
+}
+
+export function findDmReactionTarget(threads: DmThread[], update: DmReactionUpdate): DmMessage | undefined {
+  return threads.find((thread) => thread.peerPubkey === update.peer)
+    ?.messages.find((message) => dmTargetId(message) === update.target)
+}
+
+/** Reactions only update the matching thread/message without changing unread counts or ordering. */
+export function applyDmReaction(threads: DmThread[], update: DmReactionUpdate): DmThread[] {
+  const index = threads.findIndex((thread) => thread.peerPubkey === update.peer)
+  if (index === -1) return threads
+  const thread = threads[index]
+  const messageIndex = thread.messages.findIndex((message) => dmTargetId(message) === update.target)
+  if (messageIndex === -1) return threads
+  const message = thread.messages[messageIndex]
+  const next = addDmReaction(message, update.sender, update.emoji, update.own)
+  if (next === message) return threads
+  const messages = thread.messages.slice()
+  messages[messageIndex] = next
+  const result = threads.slice()
+  result[index] = { ...thread, messages }
+  return result
 }
 
 export function dmReplyReference(id: string, parent: DmMessage | undefined, me: string, peer: string): ReplyReference {

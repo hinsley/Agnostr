@@ -2427,6 +2427,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const {
     dmThreads,
+    visibleDmThreads,
     dmClearedAt,
     totalDmUnread,
     ensureThread,
@@ -2459,8 +2460,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   })
 
   const activeDmThread = useMemo(
-    () => (activeDmPeer ? dmThreads.find((t) => t.peerPubkey === activeDmPeer.toLowerCase()) ?? null : null),
-    [activeDmPeer, dmThreads]
+    () => (activeDmPeer ? visibleDmThreads.find((t) => t.peerPubkey === activeDmPeer.toLowerCase()) ?? null : null),
+    [activeDmPeer, visibleDmThreads]
   )
 
   // The public channel composer must never see a private reply target.

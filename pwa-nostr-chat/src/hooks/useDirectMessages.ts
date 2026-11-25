@@ -1,4 +1,10 @@
-import { addDmReaction, dmTargetId, mergeDmMessageMetadata } from '../lib/dmMessageActions.ts'
+import {
+  applyDmReaction,
+  dmTargetId,
+  findDmReactionTarget,
+  mergeDmMessageMetadata,
+  type DmReactionUpdate,
+} from '../lib/dmMessageActions.ts'
 import { rememberLiveDmPush } from '../lib/pushDisplay.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PushPokePayload } from '../types/notifications.ts'
@@ -138,36 +144,52 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   const onNotifyPushPokeRef = useRef(onNotifyPushPoke)
   const onErrorRef = useRef(onError)
 
-  // Relays can deliver a reaction before its parent or before our send completes.
-  // Hold only bounded, authenticated actions; they must never become chat bubbles.
-  const pendingReactions = useRef(new Map<string, { peer: string; target: string; sender: string; emoji: string; own: boolean }>())
-  const [reactionVersion, setReactionVersion] = useState(0)
-  const queueReaction = useCallback((peer: string, target: string, sender: string, emoji: string, own: boolean) => {
-    const key = JSON.stringify([peer, target, sender, emoji])
+  // Hold out-of-order authenticated actions until their parent is genuinely available.
+  // Existing parents update directly, without a separate render/effect round trip.
+  const pendingReactions = useRef(new Map<string, DmReactionUpdate>())
+  const acceptIncomingReaction = useCallback((reaction: DmReactionUpdate) => {
+    if (findDmReactionTarget(threadsRef.current, reaction)) {
+      setThreads((prev) => applyDmReaction(prev, reaction))
+      return
+    }
+    const key = JSON.stringify([reaction.peer, reaction.target, reaction.sender, reaction.emoji])
     const pending = pendingReactions.current
     if (pending.has(key)) return
     if (pending.size >= 256) pending.delete(pending.keys().next().value!)
-    pending.set(key, { peer, target, sender, emoji, own })
-    setReactionVersion(v => v + 1)
+    pending.set(key, reaction)
   }, [])
 
-  useEffect(() => {
-    const matched = new Map<string, Map<string, Array<{ sender: string; emoji: string; own: boolean }>>>()
-    for (const [key, r] of pendingReactions.current) {
-      const parent = threads.find(t => t.peerPubkey === r.peer)?.messages.find(m => dmTargetId(m) === r.target)
-      if (!parent) continue
+  useLayoutEffect(() => {
+    const matched: DmReactionUpdate[] = []
+    for (const [key, reaction] of pendingReactions.current) {
+      if (!findDmReactionTarget(threads, reaction)) continue
       pendingReactions.current.delete(key)
-      const byMessage = matched.get(r.peer) ?? new Map()
-      byMessage.set(parent.id, [...(byMessage.get(parent.id) ?? []), r])
-      matched.set(r.peer, byMessage)
+      if (!blockedRef.current.has(reaction.sender)) matched.push(reaction)
     }
-    if (!matched.size) return
-    setThreads(prev => prev.map(t => {
-      const byMessage = matched.get(t.peerPubkey)
-      return !byMessage ? t : { ...t, messages: t.messages.map(m =>
-        byMessage.get(m.id)?.reduce((msg, r) => addDmReaction(msg, r.sender, r.emoji, r.own), m) ?? m) }
-    }))
-  }, [threads, reactionVersion])
+    if (matched.length) {
+      setThreads((prev) => matched.reduce(applyDmReaction, prev))
+    }
+  }, [threads])
+
+  // Optimistic rows are presentation only: storage and device sync consume confirmed threads.
+  const outgoingReactions = useRef(new Map<string, DmReactionUpdate>())
+  const [optimisticReactions, setOptimisticReactions] = useState<DmReactionUpdate[]>([])
+  const reactionIdentity = useMemo(() => {
+    void identityVersion
+    return identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+  }, [identityManager, identityVersion])
+  const updateOptimisticReactions = useCallback(() => {
+    setOptimisticReactions(Array.from(outgoingReactions.current.values()))
+  }, [])
+  const dropReactionsForPeer = useCallback((peer: string) => {
+    for (const [key, r] of pendingReactions.current) {
+      if (r.peer === peer) pendingReactions.current.delete(key)
+    }
+    for (const [key, r] of outgoingReactions.current) {
+      if (r.peer === peer) outgoingReactions.current.delete(key)
+    }
+    updateOptimisticReactions()
+  }, [updateOptimisticReactions])
 
   useLayoutEffect(() => {
     threadsRef.current = threads
@@ -342,7 +364,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             }
 
             if (decrypted.reactionToId) {
-              queueReaction(senderPk, decrypted.reactionToId, senderPk, decrypted.content, false)
+              acceptIncomingReaction({
+                peer: senderPk, target: decrypted.reactionToId, sender: senderPk,
+                emoji: decrypted.content, own: false,
+              })
               return
             }
             if (!decrypted.content.trim()) return
@@ -457,7 +482,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       if (eoseGraceTimer !== null) window.clearTimeout(eoseGraceTimer)
       unsub()
     }
-  }, [pool, dmRelays, activeGeohash, identityManager, presenceTracker, identityVersion, queueReaction])
+  }, [pool, dmRelays, activeGeohash, identityManager, presenceTracker, identityVersion, acceptIncomingReaction])
 
   const ensureThread = useCallback(
     (peerPubkey: string, nicknameHint?: string, preferredProtocol?: DmProtocol): DmThread => {
@@ -1036,37 +1061,54 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
   const sendDmReaction = useCallback(async (peer: string, messageId: string, emoji: string) => {
     const pk = peer.toLowerCase()
-    const thread = threadsRef.current.find(t => t.peerPubkey === pk)
-    const parent = thread?.messages.find(m => m.id === messageId)
+    const thread = threadsRef.current.find((t) => t.peerPubkey === pk)
+    const parent = thread?.messages.find((m) => m.id === messageId)
     const targetId = parent && dmTargetId(parent)
-    if (!pool || !thread || !parent || !targetId || !emoji.trim() || emoji.length > 32) return
+    if (!pool || !thread || !parent || !targetId || !emoji || emoji.length > 32 || /\s/u.test(emoji)) return
     const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
-    if (parent.reactions?.some(r => r.emoji === emoji && r.pubkeys.includes(signer.pubkey))) return
-    const gen = identityManager.getWipeGeneration()
+    const sender = signer.pubkey.toLowerCase()
+    if (parent.reactions?.some((r) => r.emoji === emoji && r.pubkeys.includes(sender))) return
+    const key = JSON.stringify([pk, targetId, sender, emoji])
+    const inflight = outgoingReactions.current
+    if (inflight.has(key)) return
+    const reaction: DmReactionUpdate = { peer: pk, target: targetId, sender, emoji, own: true }
+    const wipeGen = identityManager.getWipeGeneration()
+    const isCurrent = () => inflight.get(key) === reaction &&
+      identityManager.getWipeGeneration() === wipeGen &&
+      identityManager.getMasterKeyMaterial().pubkey.toLowerCase() === sender
+    inflight.set(key, reaction)
+    updateOptimisticReactions()
     try {
       const { event } = await createEncryptedDmEvent({ content: emoji, signer, recipientPubkey: pk,
         protocol: thread.protocol, action: { type: 'reaction', targetId } })
-      if (gen !== identityManager.getWipeGeneration()) return
+      if (!isCurrent()) return
       const result = await pool.publish([...dmRelaysRef.current], event)
-      if (gen !== identityManager.getWipeGeneration()) return
+      if (!isCurrent()) return
       if (!result.acceptedRelays.length) throw new Error('No DM relay accepted the encrypted reaction.')
-      queueReaction(pk, targetId, signer.pubkey, emoji, true)
+      setThreads((prev) => applyDmReaction(prev, reaction))
     } catch (err) {
-      if (gen === identityManager.getWipeGeneration()) onErrorRef.current?.('Private reaction failed',
+      if (isCurrent()) onErrorRef.current?.('Private reaction failed',
         err instanceof Error ? err.message : 'Unable to send reaction')
+    } finally {
+      if (inflight.get(key) === reaction) {
+        inflight.delete(key)
+        updateOptimisticReactions()
+      }
     }
-  }, [pool, identityManager, activeGeohash, queueReaction])
+  }, [pool, identityManager, activeGeohash, updateOptimisticReactions])
 
   const clearThread = useCallback((peerPubkey: string) => {
     const pk = peerPubkey.toLowerCase()
+    dropReactionsForPeer(pk)
     setThreads((prev) =>
       prev.map((t) => (t.peerPubkey === pk ? { ...t, messages: [], lastPreview: '', unreadCount: 0 } : t))
     )
-  }, [])
+  }, [dropReactionsForPeer])
 
   const closeThread = useCallback((peerPubkey: string) => {
     const pk = peerPubkey.trim().toLowerCase()
     if (!pk) return
+    dropReactionsForPeer(pk)
     const nextClearedAt: Record<string, number> = {
       ...dmClearedAtRef.current,
       [pk]: Math.floor(Date.now() / 1000),
@@ -1079,7 +1121,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       saveDmThreads(next)
       return next
     })
-  }, [])
+  }, [dropReactionsForPeer])
 
   const mergeSyncedDmClearedAt = useCallback((remoteClearedAt: Record<string, number>): number => {
     const nextMap: Record<string, number> = { ...dmClearedAtRef.current }
@@ -1297,10 +1339,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     dmSendQueueRef.current.clearAll()
     processedWrapIdsRef.current.clear()
     pendingReactions.current.clear()
+    outgoingReactions.current.clear()
+    updateOptimisticReactions()
     dmClearedAtRef.current = {}
     setDmClearedAt({})
     setThreads([])
-  }, [])
+  }, [updateOptimisticReactions])
 
   const sanitizedThreads = useMemo(
     () =>
@@ -1312,6 +1356,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     [threads, blockedPubkeys]
   )
 
+  const visibleDmThreads = useMemo(
+    () => optimisticReactions.reduce((result, reaction) =>
+      reaction.sender === reactionIdentity ? applyDmReaction(result, reaction) : result, sanitizedThreads),
+    [optimisticReactions, reactionIdentity, sanitizedThreads],
+  )
+
   const totalDmUnread = useMemo(
     () => sanitizedThreads.reduce((sum, t) => sum + t.unreadCount, 0),
     [sanitizedThreads]
@@ -1319,6 +1369,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
   return {
     dmThreads: sanitizedThreads,
+    visibleDmThreads,
     dmClearedAt,
     totalDmUnread,
     ensureThread,

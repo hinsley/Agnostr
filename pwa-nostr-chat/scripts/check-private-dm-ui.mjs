@@ -44,14 +44,18 @@ try {
   }
   const setup = ({pk,npub}) => {
     if(location.protocol !== 'http:') return
-    window.testEvents = {}; window.testSockets = []
+    window.testEvents = {}; window.testSockets = []; window.testAcks = []; window.holdTestAcks = false
     window.WebSocket = class extends EventTarget {
       static OPEN=1; static CONNECTING=0; static CLOSED=3
       constructor(url){super();this.url=url;this.readyState=0;this.reqs={};window.testSockets.push(this);
         setTimeout(()=>{if(this.readyState!==0)return;this.readyState=1;this.dispatchEvent(new Event('open'))},10)}
       frame(frame){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(frame)}))}
       send(raw){const [cmd,id,...args]=JSON.parse(raw)
-        if(cmd==='EVENT'){window.testEvents[id.id]=id;setTimeout(()=>this.frame(['OK',id.id,true,'']),5)}
+        if(cmd==='EVENT'){
+          window.testEvents[id.id]=id
+          if(window.holdTestAcks)window.testAcks.push({socket:this,id:id.id})
+          else setTimeout(()=>this.frame(['OK',id.id,true,'']),5)
+        }
         if(cmd==='REQ'){this.reqs[id]=args;setTimeout(()=>this.frame(['EOSE',id]),5)}
         if(cmd==='CLOSE')delete this.reqs[id]}
       close(){this.readyState=3}
@@ -78,9 +82,31 @@ try {
   await run(()=>{const t=document.querySelector('.ag-composer-bar textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(t,'Reply from fixture');t.dispatchEvent(new Event('input',{bubbles:true}))})
   await run(()=>document.querySelector('[aria-label="Send message"]').click())
   await wait(()=>[...document.querySelectorAll('article')].some(a=>a.textContent.includes('Reply from fixture')&&a.querySelector('.ag-reply-quote-text')?.textContent==='Selected test DM'))
-  await run(()=>document.querySelector('#msg-fixture1 [aria-label="Add reaction"]').click())
-  await run(()=>document.querySelector('#msg-fixture1 .ag-emoji-opt').click())
-  await wait(()=>document.querySelector('#msg-fixture1 .ag-reaction-pill')?.textContent)
+  const chooseReaction = async index => {
+    await run(()=>document.querySelector('#msg-fixture1').click())
+    await wait(()=>getComputedStyle(document.querySelector('#msg-fixture1 .ag-msg-actions')).pointerEvents!=='none')
+    await run(()=>document.querySelector('#msg-fixture1 [aria-label="Add reaction"]').click())
+    return run(i=>{
+      const button=document.querySelectorAll('#msg-fixture1 .ag-emoji-opt:not(.ag-emoji-expand-btn)')[i]
+      const emoji=button.textContent.trim()
+      button.click()
+      return emoji
+    },index)
+  }
+  const rememberedReaction = emoji => run(e=>JSON.parse(localStorage.getItem('agnostr:v2:dm_threads')||'[]')
+    .flatMap(t=>t.messages).find(m=>m.id==='fixture1')?.reactions?.some(r=>r.emoji===e&&r.reactedByMe)??false,emoji)
+  const releaseAcks = ok => run(accept=>{
+    window.holdTestAcks=false
+    for(const {socket,id} of window.testAcks.splice(0))socket.frame(['OK',id,accept,accept?'':'synthetic rejection'])
+  },ok)
+  await run(()=>{window.holdTestAcks=true})
+  const ownEmoji=await chooseReaction(0)
+  await wait(e=>[...document.querySelectorAll('#msg-fixture1 .ag-reaction-pill.mine')].some(p=>p.textContent.includes(e)),ownEmoji)
+  await wait(()=>window.testAcks.length)
+  assert.equal(await rememberedReaction(ownEmoji),false,'pending reactions must not be persisted')
+  await releaseAcks(true)
+  await wait(e=>JSON.parse(localStorage.getItem('agnostr:v2:dm_threads')||'[]').flatMap(t=>t.messages)
+    .find(m=>m.id==='fixture1')?.reactions?.some(r=>r.emoji===e&&r.reactedByMe),ownEmoji)
   const events=await run(()=>Object.values(window.testEvents))
   assert.ok(!events.some(ev=>ev.kind===7||ev.kind===14),'found public plaintext action')
   const wraps=events.filter(ev=>ev.kind===1059&&ev.tags[0]?.[1]===peer.pubkey)
@@ -94,6 +120,20 @@ try {
   }},event)
   await deliver(inbound.event)
   await wait(()=>[...document.querySelectorAll('article')].find(a=>a.textContent.includes('Reply from fixture'))?.querySelector('.ag-reaction-pill')?.textContent?.includes('💜'))
+  await run(()=>{window.holdTestAcks=true})
+  const rejectedEmoji=await chooseReaction(1)
+  await wait(e=>[...document.querySelectorAll('#msg-fixture1 .ag-reaction-pill.mine')].some(p=>p.textContent.includes(e)),rejectedEmoji)
+  await wait(()=>window.testAcks.length)
+  const reactToFixture=await createEncryptedDmEvent({recipientPubkey:reply.senderPubkey,signer:peer,protocol:'nip17',
+    content:rejectedEmoji,action:{type:'reaction',targetId:'fixture1'}})
+  await deliver(reactToFixture.event)
+  // An incoming reaction updates immediately even while a local send's ACKs are held.
+  await wait(e=>[...document.querySelectorAll('#msg-fixture1 .ag-reaction-pill.mine')]
+    .some(p=>p.textContent.includes(e+'2')),rejectedEmoji)
+  await releaseAcks(false)
+  await wait(e=>[...document.querySelectorAll('#msg-fixture1 .ag-reaction-pill:not(.mine)')]
+    .some(p=>p.textContent.includes(e+'1')),rejectedEmoji)
+  assert.equal(await rememberedReaction(rejectedEmoji),false)
   // Backlog can arrive in arbitrary order. A reaction and reply preceding their
   // target must reconcile when that target arrives, without an extra chat row.
   const fromPeer = (content,action) => createEncryptedDmEvent({recipientPubkey:reply.senderPubkey,
@@ -110,7 +150,7 @@ try {
   assert.equal(await run(()=>!!document.querySelector('.ag-composer-reply-strip')),false)
   await cdp('Page.navigate',{url:base.href.split('#')[0]+'?reload=1#'+base.hash.slice(1)})
   await wait(()=>[...document.querySelectorAll('article')].find(a=>a.textContent.includes('Reply from fixture'))?.querySelector('.ag-reaction-pill')?.textContent?.includes('💜'))
-  console.log('PASS: real People DM entry, targeted composer/quote, send/receive private reactions, reload, no public action.')
+  console.log('PASS: real People DM entry, targeted composer/quote, optimistic reactions before ACK, reject rollback preserves incoming reaction, reload, no public action.')
 } finally {
   ws?.close();chrome.kill();await new Promise(r=>chrome.exitCode!==null?r():chrome.once('exit',r))
   rmSync(tmp,{recursive:true,force:true,maxRetries:4,retryDelay:100})
