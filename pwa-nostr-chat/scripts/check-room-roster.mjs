@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  appendRoomRosterJoins,
   captureRoomRoster,
+  compareRoomRosterPosition,
   roomRosterKey,
   ROOM_ROSTER_REFRESH_MS,
   startRoomRosterSampling,
@@ -72,6 +74,85 @@ test('bursts, removals, and presence changes are batched into the latest roster 
   clock.advance(120_000)
   assert.equal(clock.pending(), 0)
   assert.equal(frames.length, 3)
+})
+
+test('joins publish immediately without pushing existing rows around or restarting refresh', () => {
+  const clock = fakeClock()
+  const frames = []
+  let peers = [peer('A', 'Alpha'), peer('C', 'Charlie')]
+  const engine = channel(() => peers)
+  engine.peers = peers
+  let roster
+  const publish = (next) => {
+    if (next === roster) return
+    frames.push(next)
+    roster = next
+  }
+  const stop = startRoomRosterSampling(() => publish(captureRoomRoster(engine)), clock)
+  const detect = (items) => {
+    peers = items
+    engine.peers = items
+    publish(appendRoomRosterJoins(roster, engine))
+  }
+  const initial = roster
+  clock.advance(5_000)
+  // C departed, and A's name and presence changed. Neither should change the
+  // shown snapshot. B is appended once (case-insensitive) as soon as detected.
+  detect([{ ...peer('a', 'Zulu', 5), isOnline: false }, peer('B', 'Aardvark'), peer('b')])
+  assert.equal(frames.length, 2)
+  assert.deepEqual(roster.peers.slice(0, 2), initial.peers)
+  assert.equal(roster.sampledAt, initial.sampledAt)
+  assert.deepEqual([...roster.pendingJoins], ['b'])
+  assert.deepEqual(roster.peers.map((p) => p.pubkey), ['a', 'c', 'b'])
+
+  clock.advance(10_000)
+  detect([peer('B', 'Changed nickname'), peer('c')])
+  assert.equal(frames.length, 2)
+  clock.advance(20_000)
+  detect([peer('D', 'First in alphabet'), peer('B', 'Latest B', 20)])
+  assert.equal(frames.length, 3)
+  assert.deepEqual([...roster.peers].sort((a, b) =>
+    compareRoomRosterPosition(roster, a.pubkey, b.pubkey, () => a.nickname.localeCompare(b.nickname))
+  ).map((p) => p.pubkey), ['a', 'c', 'b', 'd'])
+
+  clock.advance(29_999)
+  assert.equal(frames.length, 3)
+  clock.advance(30_000)
+  assert.equal(clock.pending(), 1)
+  assert.equal(frames.length, 4)
+  assert.deepEqual(roster.peers.map((p) => [p.pubkey, p.nickname]), [['d', 'First in alphabet'], ['b', 'Latest B']])
+  assert.equal(roster.pendingJoins, undefined)
+  detect([...peers, peer('a', 'Returned after expiry')])
+  assert.deepEqual(roster.peers.map((p) => p.pubkey), ['d', 'b', 'a'])
+  stop()
+})
+
+test('group joins use normalized keys, while roles and banned-only entries wait for sampling', () => {
+  const member = (pk, roles = ['member'], isBanned = false) => ({
+    ...peer(pk), roles, isAdmin: false, isFounder: false, isBanned,
+  })
+  const engine = channel(() => [])
+  engine.activeView = { type: 'server', serverId: 'grp', channelId: 'text' }
+  engine.getPeerByPubkey = () => null
+  engine.servers = { members: [member('A')], messages: [] }
+  const initial = captureRoomRoster(engine)
+  engine.servers.members = [member('a', ['moderator']), member('B'), member('b'), member('C', [], true)]
+  engine.servers.messages = [{ pubkey: 'B', createdAt: 20 }]
+  const withJoin = appendRoomRosterJoins(initial, engine)
+  assert.deepEqual([...withJoin.pendingJoins], ['b'])
+  assert.deepEqual(withJoin.members.map((m) => m.member.pubkey), ['a', 'b'])
+  assert.equal(withJoin.members[0], initial.members[0])
+  assert.equal(withJoin.members[0].member.roles[0], 'member')
+  assert.equal(withJoin.members[1].lastSeenAt, 20)
+  assert.equal(appendRoomRosterJoins(withJoin, engine), withJoin)
+  engine.servers.members.pop()
+  engine.servers.members.splice(1)
+  const refreshed = captureRoomRoster(engine)
+  assert.deepEqual(refreshed.members.map((m) => m.member.pubkey), ['a'])
+  assert.equal(refreshed.members[0].member.roles[0], 'moderator')
+  assert.equal(refreshed.pendingJoins, undefined)
+  engine.activeView = { type: 'dm', peerPubkey: 'b' }
+  assert.equal(appendRoomRosterJoins(withJoin, engine), withJoin)
 })
 
 test('one delayed timer does not publish catch-up frames or leave an old room timer active', () => {

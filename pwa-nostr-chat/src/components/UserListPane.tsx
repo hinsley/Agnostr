@@ -14,7 +14,7 @@ import {
   Zap,
 } from 'lucide-react'
 import type { AgnostrEngine, PeerInfo } from '../types/protocol.ts'
-import type { RoomRoster } from '../lib/roomRoster.ts'
+import { compareRoomRosterPosition, type RoomRoster } from '../lib/roomRoster.ts'
 import type { ZapTarget } from '../types/wallet.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import { clientAvatarRingClass } from '../lib/bitchatProtocol.ts'
@@ -213,8 +213,10 @@ export function UserListPane({
         return a.nickname.localeCompare(b.nickname, undefined, { sensitivity: 'base' })
       }
 
-      staff.sort(sortMembers)
-      regulars.sort(sortMembers)
+      const sortMemberPositions = (a: NormalizedUserItem, b: NormalizedUserItem) =>
+        compareRoomRosterPosition(roomRoster, a.pubkey, b.pubkey, () => sortMembers(a, b))
+      staff.sort(sortMemberPositions)
+      regulars.sort(sortMemberPositions)
 
       const out: UserListGroup[] = []
       if (staff.length > 0) out.push({ id: 'staff', label: 'Staff', items: staff })
@@ -368,8 +370,10 @@ export function UserListPane({
       return a.nickname.localeCompare(b.nickname, undefined, { sensitivity: 'base' })
     }
 
-    online.sort(sortBitchatPeers)
-    offline.sort(sortBitchatPeers)
+    const sortPeerPositions = (a: NormalizedUserItem, b: NormalizedUserItem) =>
+      compareRoomRosterPosition(roomRoster, a.pubkey, b.pubkey, () => sortBitchatPeers(a, b))
+    online.sort(sortPeerPositions)
+    offline.sort(sortPeerPositions)
 
     const out: UserListGroup[] = []
     if (online.length > 0) out.push({ id: 'online', label: 'Online', items: online })

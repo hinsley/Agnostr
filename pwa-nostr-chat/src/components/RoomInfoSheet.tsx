@@ -49,7 +49,7 @@ import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { AvatarImg } from './AvatarImg.tsx'
 import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 import { formatCompactLastActive } from '../utils/relativeTime.ts'
-import type { RoomRoster } from '../lib/roomRoster.ts'
+import { compareRoomRosterPosition, type RoomRoster } from '../lib/roomRoster.ts'
 
 export interface RoomInfoSheetProps {
   open: boolean
@@ -173,7 +173,7 @@ export function RoomInfoSheet({
   const sortedGeoPeers = useMemo(() => {
     const peers = roomRoster?.type === 'channel' ? [...roomRoster.peers] : []
 
-    peers.sort((a, b) => {
+    peers.sort((a, b) => compareRoomRosterPosition(roomRoster, a.pubkey, b.pubkey, () => {
       if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1
       if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1
       const prio = comparePeerPriority(
@@ -197,7 +197,7 @@ export function RoomInfoSheet({
         return b.lastSeenAt - a.lastSeenAt
       }
       return a.nickname.localeCompare(b.nickname, undefined, { sensitivity: 'base' })
-    })
+    }))
 
     return peers
   }, [roomRoster])
@@ -205,7 +205,7 @@ export function RoomInfoSheet({
   const sortedServerMembers = useMemo(() => {
     const decorated = roomRoster?.type === 'server' ? [...roomRoster.members] : []
 
-    decorated.sort((a, b) => {
+    decorated.sort((a, b) => compareRoomRosterPosition(roomRoster, a.member.pubkey, b.member.pubkey, () => {
       if (Boolean(a.member.isFounder) !== Boolean(b.member.isFounder)) {
         return a.member.isFounder ? -1 : 1
       }
@@ -229,7 +229,7 @@ export function RoomInfoSheet({
       )
       if (prio !== 0) return prio
       return a.member.nickname.localeCompare(b.member.nickname, undefined, { sensitivity: 'base' })
-    })
+    }))
 
     return decorated
   }, [roomRoster])
