@@ -1231,7 +1231,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
 
           {/* Left-Aligned Voice Memo Player / Untrusted Shielded Card */}
           {message.voiceMemo && (
-            <div className="ag-msg-media-slot" onClickCapture={interceptMessageLinkClick} onAuxClickCapture={interceptMessageLinkAuxClick}>
+            <div className="ag-msg-media-slot">
               <VoiceMemoPlayer
                 memo={message.voiceMemo}
                 memoKey={message.voiceMemo.sha256 || message.voiceMemo.url || message.id}
@@ -1252,11 +1252,6 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 onInspectSender={(pk, nick) => onInspectAuthor?.(pk, nick)}
                 onBlockSender={onBlockSender}
               />
-              {message.voiceMemo.inlineVoiceMarker && /^https:\/\//i.test(message.voiceMemo.url) && (
-                <a className="ag-img-retry-btn ag-md-link" href={message.voiceMemo.url} target="_blank" rel="noopener noreferrer">
-                  Open voice memo link
-                </a>
-              )}
             </div>
           )}
 
