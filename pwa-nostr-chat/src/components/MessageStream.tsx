@@ -1078,9 +1078,10 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     const clientHeight = el.clientHeight
     const distFromBottom = Math.max(0, scrollHeight - scrollTop - clientHeight)
 
-    // If container height just shrank (e.g. mobile keyboard opened) while anchored to bottom,
-    // immediately re-pin instead of clearing stickToBottomRef.
-    if (prevClientHeight > 0 && clientHeight < prevClientHeight - 4 && stickToBottomRef.current) {
+    // Mobile keyboard open/close can move scrollTop while the live feed stays
+    // anchored. Don't treat that layout change as an upward reading gesture.
+    if (prevClientHeight > 0 && Math.abs(clientHeight - prevClientHeight) > 4 &&
+        stickToBottomRef.current && !isUpwardInputActive()) {
       pinScrollToBottomNow(el)
       syncViewportRange()
       return
@@ -1204,7 +1205,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     syncViewportRange,
   ])
 
-  const scrollToLatest = useCallback(() => {
+  const jumpToLatest = useCallback((smooth: boolean) => {
     stickToBottomRef.current = true
     lastUpwardInputAtRef.current = 0
     touchDraggingUpRef.current = false
@@ -1213,13 +1214,28 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     if (isBitchat && readingPageRef.current) {
       pageRequestRef.current = null
       setLoadingPage(false)
+      readingAnchorRef.current = null
       applyReadingPage(null)
     } else {
-      scrollContainerToBottom(true)
+      scrollContainerToBottom(smooth)
     }
     syncViewportRange()
     engine.markChannelRead()
   }, [applyReadingPage, engine, isBitchat, scrollContainerToBottom, syncViewportRange])
+  const scrollToLatest = useCallback(() => jumpToLatest(true), [jumpToLatest])
+
+  // Sending is an explicit return to the live room, unlike a relay arrival
+  // (including one sent using our key from a sibling device). Do this for the
+  // optimistic message before signing or acknowledgments, not only for archiveable rows.
+  const handledLocalSendRef = useRef(engine.localBitchatSend)
+  useLayoutEffect(() => {
+    const sent = engine.localBitchatSend
+    if (!sent || sent === handledLocalSendRef.current) return
+    handledLocalSendRef.current = sent
+    if (!isBitchat || sent.channelKey !== engine.activeGeohash) return
+    clearSmoothScrollGuard()
+    jumpToLatest(false)
+  }, [clearSmoothScrollGuard, engine.activeGeohash, engine.localBitchatSend, isBitchat, jumpToLatest])
 
   useLayoutEffect(() => {
     if (isBitchat && !publicPage && stickToBottomRef.current && scrollRef.current) {

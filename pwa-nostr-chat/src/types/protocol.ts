@@ -471,6 +471,8 @@ export interface AgnostrEngine {
   presence: ChannelPresenceSummary
   locationNotes: LocationNote[]
   channelHistoryEpoch: number
+  /** Transient local send signal, never derived from relay or sync messages. */
+  localBitchatSend: { channelKey: string; messageId: string } | null
   unreadDividerId: string | null
   sending: boolean
   replyingTo: GeoMessage | null

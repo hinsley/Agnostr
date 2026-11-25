@@ -1107,6 +1107,14 @@ export function useAgnostrEngine(): AgnostrEngine {
     recomputeGeoUnreads()
   }, [blockedSet, trustedSet, ownPubkeys, settings.strictWhitelistMode, recomputeGeoUnreads])
 
+  const [localBitchatSend, setLocalBitchatSend] = useState<AgnostrEngine['localBitchatSend']>(null)
+  const revealLocalBitchatSend = useCallback((channelKey: string, messageId: string) => {
+    // An upload can finish after switching rooms or opening a DM; never pull a different view to bottom.
+    if (activeViewRef.current.type === 'channel' && activeGeohashRef.current === channelKey) {
+      setLocalBitchatSend({ channelKey, messageId })
+    }
+  }, [])
+
   /**
    * Channel-safe state + storage mutator:
    * - Refuses to ever write messages belonging to another channel into live state or localStorage.
@@ -3492,6 +3500,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         },
         { allowBackgroundPersist: true }
       )
+      revealLocalBitchatSend(gh, tempId)
       const optimisticPreview = formatBitchatPreviewText({ content })
       if (optimisticPreview) {
         upsertChannelPreview(
@@ -3720,6 +3729,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.broadcastClientTag,
       zapsEngine.lightningAddress,
       updateChannelMessages,
+      revealLocalBitchatSend,
       upsertChannelPreview,
       recordRoomMessage,
       adjustInFlightSend,
@@ -4675,6 +4685,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                   },
                   { allowBackgroundPersist: true }
                 )
+                revealLocalBitchatSend(gh, parsed.id)
                 const signedVoicePreview = formatBitchatPreviewText({
                   content: parsed.content,
                   hasVoice: true,
@@ -4787,6 +4798,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.broadcastClientTag,
       zapsEngine.lightningAddress,
       updateChannelMessages,
+      revealLocalBitchatSend,
       upsertChannelPreview,
       recordRoomMessage,
       adjustInFlightSend,
@@ -5196,6 +5208,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                   },
                   { allowBackgroundPersist: true }
                 )
+                revealLocalBitchatSend(gh, parsed.id)
                 const signedImagePreview = formatBitchatPreviewText({
                   content: parsed.content,
                   hasImage: true,
@@ -5308,6 +5321,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       settings.broadcastClientTag,
       zapsEngine.lightningAddress,
       updateChannelMessages,
+      revealLocalBitchatSend,
       upsertChannelPreview,
       recordRoomMessage,
       adjustInFlightSend,
@@ -5848,6 +5862,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     presence,
     locationNotes,
     channelHistoryEpoch,
+    localBitchatSend,
     unreadDividerId,
     sending,
     replyingTo,

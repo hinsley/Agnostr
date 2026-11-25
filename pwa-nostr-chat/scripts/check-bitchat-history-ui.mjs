@@ -43,16 +43,22 @@ try {
     throw Error('Timeout: '+fn+' | '+await run(()=>document.body.innerText.slice(-1500)))
   }
   const seedCount = 250, geohash = '9q'
-  const setup = ({pk,seedCount,geohash}) => {
+  const localSecret = generateSecretKey()
+  const setup = ({pk,seedCount,geohash,localSecret}) => {
     if(location.protocol !== 'http:') return
-    window.testEvents = {}; window.testSockets = []
+    window.testEvents = {}; window.testSockets = []; window.delayedChatAcks = []
     window.WebSocket = class extends EventTarget {
       static OPEN=1; static CONNECTING=0; static CLOSED=3
       constructor(url){super();this.url=url;this.readyState=0;this.reqs={};window.testSockets.push(this);
         setTimeout(()=>{if(this.readyState!==0)return;this.readyState=1;this.dispatchEvent(new Event('open'))},10)}
       frame(frame){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(frame)}))}
       send(raw){const [cmd,id,...args]=JSON.parse(raw)
-        if(cmd==='EVENT'){window.testEvents[id.id]=id;setTimeout(()=>this.frame(['OK',id.id,true,'']),5)}
+        if(cmd==='EVENT'){
+          window.testEvents[id.id]=id
+          const ack=()=>this.frame(['OK',id.id,true,''])
+          if(window.holdChatAcknowledgments && id.kind===20000) window.delayedChatAcks.push(ack)
+          else setTimeout(ack,5)
+        }
         if(cmd==='REQ'){this.reqs[id]=args;setTimeout(()=>this.frame(['EOSE',id]),5)}
         if(cmd==='CLOSE')delete this.reqs[id]}
       close(){this.readyState=3}
@@ -72,14 +78,17 @@ try {
     if(sessionStorage.getItem('seeded'))return
     sessionStorage.setItem('seeded','1')
     const messages = Array.from({length:seedCount}, (_, i) => window.fixtureMessage(2501 - seedCount + i))
+    localStorage.setItem('agnostr:v2:device_seed',localSecret)
     localStorage.setItem('agnostr:v2:active_geohash',geohash)
     localStorage.setItem('agnostr:v2:msgs:'+geohash,JSON.stringify(messages))
   }
   await cdp('Page.enable')
   await cdp('Network.enable')
   await cdp('Network.setBlockedURLs',{urls:['*://fonts.*/*']})
-  await cdp('Page.addScriptToEvaluateOnNewDocument',{source:'('+setup+')('+JSON.stringify({pk:peer.pubkey,seedCount,geohash})+')'})
-  await cdp('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true})
+  await cdp('Page.addScriptToEvaluateOnNewDocument',{source:'('+setup+')('+JSON.stringify({pk:peer.pubkey,seedCount,geohash,localSecret:Buffer.from(localSecret).toString('hex')})+')'})
+  const setMobileHeight = height => cdp('Emulation.setDeviceMetricsOverride',{width:390,height,deviceScaleFactor:1,mobile:true})
+  await cdp('Emulation.setUserAgentOverride',{userAgent:'Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36'})
+  await setMobileHeight(844)
   await cdp('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1})
   base.hash=geohash
   await cdp('Page.navigate',{url:base.href})
@@ -163,6 +172,52 @@ try {
     db.close()
     return {count:current.result, selected:received.result.filter(k=>ids.includes(k[3])).map(k=>k[3])}
   }
+  async function checkLocalSendWhileReading() {
+    await park(430)
+    assert.ok((await run(state,{})).reading,'did not open a settled history page')
+    const sibling=finalizeEvent({kind:20000,created_at:Math.floor(Date.now()/1000)-4,
+      content:'Same identity from another device',tags:[['g',geohash],['n','Sibling']]},localSecret)
+    await send([sibling])
+    await sleep(250)
+    assert.ok((await run(state,{})).reading,'sibling-device event tore us out of history')
+    await run(()=>{
+      window.holdChatAcknowledgments=true
+      const input=document.querySelector('.ag-composer-bar textarea')
+      input.focus();input.select()
+    })
+    await setMobileHeight(594)
+    const body='Fresh outgoing message while reading'
+    await cdp('Input.insertText',{text:body})
+    await run(()=>document.querySelector('button[aria-label="Send message"]').click())
+    await wait(body=>{
+      const s=document.querySelector('.ag-stream-scroll')
+      const row=[...s.querySelectorAll('.ag-msg-row')].find(r=>r.textContent.includes(body))
+      return !!row && !s.classList.contains('is-reading') &&
+        row.getBoundingClientRect().bottom>s.getBoundingClientRect().top &&
+        row.getBoundingClientRect().top<s.getBoundingClientRect().bottom
+    },body)
+    const packet=await wait(body=>Object.values(window.testEvents).find(e=>e.kind===20000&&e.content.includes(body)),body)
+    assert.equal(await run(()=>window.holdChatAcknowledgments),true)
+    await wait(id=>window.delayedChatAcks.length>0 && document.getElementById('msg-'+id)?.classList.contains('is-own'),packet.id)
+    const storedAsSent = ({id,geohash}) => JSON.parse(localStorage.getItem('agnostr:v2:msgs:'+geohash) ?? '[]')
+      .some(m=>m.id===id && m.deliveryStatus==='sent')
+    assert.equal(await run(storedAsSent,{id:packet.id,geohash}),false)
+    await run(()=>{window.holdChatAcknowledgments=false; window.delayedChatAcks.splice(0).forEach(ack=>ack())})
+    await wait(storedAsSent,{id:packet.id,geohash})
+    await setMobileHeight(844)
+    await wait(()=>{const s=document.querySelector('.ag-stream-scroll');return !s.classList.contains('is-reading')&&s.scrollHeight-s.clientHeight-s.scrollTop<=2})
+    assert.equal(await run(body=>[...document.querySelectorAll('.ag-msg-row')].filter(r=>r.textContent.includes(body)).length,body),1)
+    if(process.argv.includes('--send-only')){
+      await cdp('Page.reload')
+      await wait(()=>!!document.querySelector('.ag-msg-row')||[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Open Chat'))
+      if(!await run(chat))await run(()=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Open Chat').click())
+      await wait(id=>document.getElementById('msg-'+id)?.classList.contains('is-own'),packet.id)
+    }
+    console.log('Bitchat: own send returned to live and appeared before ACK with no relay echo; sibling activity preserved reading position.')
+  }
+  if(process.argv.includes('--send-only')) {
+    await checkLocalSendWhileReading()
+  } else {
   assert.ok((await run(dbStats,{})).count >= 240,'existing recent cache did not migrate')
   await run(dbStats,{seed:true})
   assert.ok((await run(dbStats,{})).count >= 2500,'archive fixture not persisted')
@@ -266,6 +321,8 @@ try {
   assert.equal(capped.selected.length,1)
   assert.equal(await run(draft),'My unsent draft')
 
+  await checkLocalSendWhileReading()
+
   await run(()=>{
     const input=document.querySelector('.ag-composer-bar textarea')
     input.focus()
@@ -276,6 +333,7 @@ try {
   await wait(()=>!document.querySelector('.ag-stream-scroll .ag-msg-row'))
   assert.equal((await run(dbStats,{})).count,0,'/clear left public local history behind')
   console.log(`Bitchat: ${visited} on-device pages, 160 mounted rows, 5000 stored messages, stable anchor through swipes/arrivals, preserved draft, and /clear purged the room.`)
+  }
 } finally {
   ws?.close(); chrome.kill(); await sleep(350); rmSync(tmp,{recursive:true,force:true,maxRetries:4,retryDelay:250});
 }
