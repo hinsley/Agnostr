@@ -2495,7 +2495,7 @@ export function App() {
         opts?: Parameters<typeof engineWallet.payBolt11Invoice>[1]
       ) => {
         const res = await engineWallet.payBolt11Invoice(invoice, opts)
-        if (opts?.txType === 'zap_out' && zapTargetEventId) {
+        if (res.paid && opts?.txType === 'zap_out' && zapTargetEventId) {
           engineAgora.recordOptimisticZap(zapTargetEventId, res.amountSats)
         }
         return res

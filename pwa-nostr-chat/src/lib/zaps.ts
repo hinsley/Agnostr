@@ -188,6 +188,24 @@ export function extractBolt11Invoice(raw: string): string | null {
   return match[1].toLowerCase()
 }
 
+/** Read a fixed BOLT-11 amount without rounding sub-satoshi amounts. */
+export function decodeBolt11AmountMsats(bolt11: string): bigint | null {
+  const clean = extractBolt11Invoice(bolt11)
+  if (!clean) return null
+  const match = clean.slice(0, clean.lastIndexOf('1')).match(/^ln(?:bcrt|bc|tb)(\d+)([munp]?)$/)
+  if (!match || match[1].length > 18) return null
+  const amount = BigInt(match[1])
+  if (amount <= 0n) return null
+  switch (match[2]) {
+    case '': return amount * 100_000_000_000n
+    case 'm': return amount * 100_000_000n
+    case 'u': return amount * 100_000n
+    case 'n': return amount * 100n
+    case 'p': return amount % 10n === 0n ? amount / 10n : null
+    default: return null
+  }
+}
+
 export function isBolt11Invoice(raw: string): boolean {
   return extractBolt11Invoice(raw) !== null
 }
@@ -572,6 +590,9 @@ export async function fetchLnurlPayInvoice(params: {
     const invoice = data.pr ? extractBolt11Invoice(data.pr) : null
     if (!invoice) {
       throw new Error('LNURL server did not return a valid BOLT-11 invoice.')
+    }
+    if (decodeBolt11AmountMsats(invoice) !== BigInt(msat)) {
+      throw new Error('The Lightning invoice does not match the requested amount.')
     }
     return invoice
   } catch (err) {

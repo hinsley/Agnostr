@@ -1,14 +1,12 @@
-import { secp256k1 } from '@noble/curves/secp256k1'
-import { sha256 } from '@noble/hashes/sha256'
 import type {
   BoltzReversePairInfo,
   BoltzSubmarinePairInfo,
   BoltzSwapDirection,
   BoltzSwapRecord,
-  BoltzSwapTree,
 } from '../types/wallet.ts'
-import { bytesToHex } from './identity.ts'
 
+export const BOLTZ_NEW_SWAPS_PAUSED_MESSAGE =
+  'New Boltz swaps are paused. You can still check and export rescue files for existing swaps.'
 export const DEFAULT_BOLTZ_API_URL = 'https://api.boltz.exchange/v2'
 export const BOLTZ_SWAPS_STORAGE_KEY = 'agnostr:v2:boltz_swaps'
 export const BOLTZ_API_URL_STORAGE_KEY = 'agnostr:v2:boltz_api_url'
@@ -67,38 +65,6 @@ export function getMempoolTxUrl(txid: string): string {
 
 export function getMempoolAddressUrl(address: string): string {
   return `https://mempool.space/address/${encodeURIComponent(address)}`
-}
-
-/**
- * Generates a fresh local secp256k1 keypair with a 33-byte compressed public key
- * for Boltz v2 HTLC refund (Submarine) or claim (Reverse Submarine) safety.
- */
-export function generateBoltzKeypair(): {
-  privateKeyHex: string
-  publicKeyHex: string
-} {
-  const sk = secp256k1.utils.randomPrivateKey()
-  const pkCompressed = secp256k1.getPublicKey(sk, true)
-  return {
-    privateKeyHex: bytesToHex(sk),
-    publicKeyHex: bytesToHex(pkCompressed),
-  }
-}
-
-/**
- * Generates a 32-byte random secret preimage and its SHA-256 hash hex.
- */
-export function generateBoltzPreimage(): {
-  preimageHex: string
-  preimageHashHex: string
-} {
-  const preimage = new Uint8Array(32)
-  crypto.getRandomValues(preimage)
-  const hash = sha256(preimage)
-  return {
-    preimageHex: bytesToHex(preimage),
-    preimageHashHex: bytesToHex(hash),
-  }
 }
 
 async function boltzFetchJson<T>(
@@ -240,161 +206,6 @@ export async function fetchBoltzReversePair(
     lockupMinerFeeSats: Math.ceil(Number(pair.fees.minerFees?.lockup) || 0),
     claimMinerFeeSats: Math.ceil(Number(pair.fees.minerFees?.claim) || 0),
     fetchedAt: Date.now(),
-  }
-}
-
-interface RawSubmarineCreateResponse {
-  id: string
-  bip21?: string
-  address: string
-  swapTree?: BoltzSwapTree
-  claimPublicKey?: string
-  timeoutBlockHeight?: number
-  acceptZeroConf?: boolean
-  expectedAmount: number
-}
-
-/**
- * Creates a Boltz v2 Submarine Swap (`POST /v2/swap/submarine`) converting
- * an on-chain BTC deposit into payment of a Cashu NUT-04 Lightning mint quote.
- */
-export async function createBoltzSubmarineSwap(params: {
-  apiUrl?: string
-  invoice: string
-  mintUrl: string
-  mintQuoteId: string
-  amountSats: number
-  pairInfo?: BoltzSubmarinePairInfo
-}): Promise<BoltzSwapRecord> {
-  const base = normalizeBoltzApiUrl(params.apiUrl) ?? DEFAULT_BOLTZ_API_URL
-  const keypair = generateBoltzKeypair()
-
-  const body: Record<string, unknown> = {
-    from: 'BTC',
-    to: 'BTC',
-    invoice: params.invoice,
-    refundPublicKey: keypair.publicKeyHex,
-  }
-  if (params.pairInfo?.hash) {
-    body.pairHash = params.pairInfo.hash
-  }
-
-  const created = await boltzFetchJson<RawSubmarineCreateResponse>(`${base}/swap/submarine`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
-
-  if (!created?.id || !created?.address) {
-    throw new Error('Boltz submarine swap creation returned an incomplete response.')
-  }
-
-  const expectedOnchainSats = Math.max(
-    params.amountSats,
-    Math.ceil(Number(created.expectedAmount) || params.amountSats)
-  )
-  const feeSats = Math.max(0, expectedOnchainSats - params.amountSats)
-  const now = Date.now()
-
-  return {
-    id: created.id,
-    direction: 'submarine',
-    apiUrl: base,
-    mintUrl: params.mintUrl,
-    status: 'swap.created',
-    createdAt: now,
-    updatedAt: now,
-    amountSats: params.amountSats,
-    expectedOnchainSats,
-    feeSats,
-    invoice: params.invoice,
-    mintQuoteId: params.mintQuoteId,
-    mintClaimed: false,
-    address: created.address,
-    bip21: created.bip21 || buildBip21Uri(created.address, expectedOnchainSats),
-    timeoutBlockHeight: created.timeoutBlockHeight,
-    acceptZeroConf: Boolean(created.acceptZeroConf),
-    localKeyPrivateHex: keypair.privateKeyHex,
-    localKeyPublicHex: keypair.publicKeyHex,
-    boltzPublicKeyHex: created.claimPublicKey,
-    swapTree: created.swapTree,
-  }
-}
-
-interface RawReverseCreateResponse {
-  id: string
-  invoice: string
-  lockupAddress: string
-  onchainAmount: number
-  refundPublicKey?: string
-  timeoutBlockHeight?: number
-  swapTree?: BoltzSwapTree
-}
-
-/**
- * Creates a Boltz v2 Reverse Submarine Swap (`POST /v2/swap/reverse`) converting
- * a Cashu NUT-05 Lightning melt into an on-chain Bitcoin HTLC lockup.
- */
-export async function createBoltzReverseSwap(params: {
-  apiUrl?: string
-  destinationAddress: string
-  amountSats: number
-  mintUrl: string
-  pairInfo?: BoltzReversePairInfo
-}): Promise<BoltzSwapRecord> {
-  const dest = params.destinationAddress.trim()
-  if (!isValidBitcoinAddress(dest)) {
-    throw new Error('Enter a valid Bitcoin mainnet address (bc1..., 1..., or 3...).')
-  }
-
-  const base = normalizeBoltzApiUrl(params.apiUrl) ?? DEFAULT_BOLTZ_API_URL
-  const keypair = generateBoltzKeypair()
-  const { preimageHex, preimageHashHex } = generateBoltzPreimage()
-
-  const body: Record<string, unknown> = {
-    from: 'BTC',
-    to: 'BTC',
-    invoiceAmount: Math.floor(params.amountSats),
-    preimageHash: preimageHashHex,
-    claimPublicKey: keypair.publicKeyHex,
-  }
-  if (params.pairInfo?.hash) {
-    body.pairHash = params.pairInfo.hash
-  }
-
-  const created = await boltzFetchJson<RawReverseCreateResponse>(`${base}/swap/reverse`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
-
-  if (!created?.id || !created?.invoice || !created?.lockupAddress) {
-    throw new Error('Boltz reverse swap creation returned an incomplete response.')
-  }
-
-  const onchainAmount = Math.max(0, Math.floor(Number(created.onchainAmount) || 0))
-  const feeSats = Math.max(0, Math.floor(params.amountSats) - onchainAmount)
-  const now = Date.now()
-
-  return {
-    id: created.id,
-    direction: 'reverse',
-    apiUrl: base,
-    mintUrl: params.mintUrl,
-    status: 'swap.created',
-    createdAt: now,
-    updatedAt: now,
-    amountSats: Math.floor(params.amountSats),
-    expectedOnchainSats: onchainAmount,
-    feeSats,
-    invoice: created.invoice,
-    address: created.lockupAddress,
-    destinationAddress: dest,
-    timeoutBlockHeight: created.timeoutBlockHeight,
-    localKeyPrivateHex: keypair.privateKeyHex,
-    localKeyPublicHex: keypair.publicKeyHex,
-    boltzPublicKeyHex: created.refundPublicKey,
-    preimageHex,
-    preimageHashHex,
-    swapTree: created.swapTree,
   }
 }
 

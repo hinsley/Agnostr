@@ -4,6 +4,7 @@ import {
   MeltQuoteState,
   Mint,
   MintQuoteState,
+  OutputData,
   Wallet,
   getEncodedToken,
   getTokenMetadata,
@@ -13,30 +14,26 @@ import {
   type MintQuoteBolt11Response,
   type Proof,
   type ProofLike,
+  type SerializedOutputData,
 } from '@cashu/cashu-ts'
 import { sha256 } from '@noble/hashes/sha256'
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from '@scure/bip39'
 import { wordlist as englishWordlist } from '@scure/bip39/wordlists/english'
 import { getPublicKey } from 'nostr-tools'
-import type { WalletSyncExportInfo } from '../types/deviceSync.ts'
 import type {
-  BoltzSwapRecord,
   CashuMeltQuotePreview,
   CashuMintAccount,
   CashuMintInfoSummary,
   CashuMintQuoteRecord,
   CashuMintQuoteState,
   CashuSentTokenRecord,
-  CashuSentTokenStatus,
   CashuTokenPreview,
   StoredCashuProof,
   WalletBackupPayload,
   WalletDraftKeys,
   WalletImportMode,
-  WalletSyncPayload,
   WalletTransaction,
 } from '../types/wallet.ts'
-import { normalizeBoltzApiUrl } from './boltzSwap.ts'
 import {
   DEFAULT_ACTIVE_MINT_URL,
   DEFAULT_CASHU_MINTS,
@@ -52,6 +49,8 @@ import {
   parseSecretKey,
 } from './identity.ts'
 import { toCompressedP2pkPubkey } from './nutzaps.ts'
+import type { WalletCredentialEnvelope } from './walletCredentialVault.ts'
+import { decodeBolt11AmountMsats } from './zaps.ts'
 
 export const CASHU_WALLET_STORAGE_KEY = 'agnostr:v2:cashu_wallet'
 export const MAX_SPENT_PROOF_SECRETS = 2000
@@ -69,13 +68,27 @@ export interface PersistedCashuWalletState {
   updatedAt?: number
   mnemonic?: string
   privateKeyHex?: string
+  // Keep corrupt/unknown envelopes opaque so their presence still locks the wallet.
+  encryptedCredentials?: unknown
   keysetCounters: Record<string, number>
   activeMintUrl: string
   mints: CashuMintAccount[]
   proofsByMint: Record<string, StoredCashuProof[]>
   spentProofSecrets?: string[]
+  pendingLightningMelt?: PendingLightningMelt
+  lastLightningMeltId?: string
   history: WalletTransaction[]
   sentTokens: CashuSentTokenRecord[]
+}
+
+export interface PendingLightningMelt {
+  transaction: WalletTransaction
+  quoteId: string
+  expiry: number
+  feeReserveSats: number
+  inputFeeSats: number
+  inputs: StoredCashuProof[]
+  outputs: SerializedOutputData[]
 }
 
 /* --------------------------------------------------------------------------
@@ -479,6 +492,7 @@ export function loadPersistedCashuWallet(): PersistedCashuWalletState {
     const raw = localStorage.getItem(CASHU_WALLET_STORAGE_KEY)
     if (!raw) return fallback
     const parsed = JSON.parse(raw) as Partial<PersistedCashuWalletState>
+    const protectedCredentials = parsed.encryptedCredentials !== undefined
     if (!parsed || typeof parsed !== 'object') return fallback
 
     const mintMap = new Map<string, CashuMintAccount>()
@@ -545,11 +559,13 @@ export function loadPersistedCashuWallet(): PersistedCashuWalletState {
       : []
 
     const mnemonic =
-      typeof parsed.mnemonic === 'string' && isValidBip39Mnemonic(parsed.mnemonic)
+      !protectedCredentials &&
+      typeof parsed.mnemonic === 'string' &&
+      isValidBip39Mnemonic(parsed.mnemonic)
         ? normalizeMnemonicPhrase(parsed.mnemonic)
         : undefined
     const privateKeyHex =
-      typeof parsed.privateKeyHex === 'string'
+      !protectedCredentials && typeof parsed.privateKeyHex === 'string'
         ? parseWalletPrivateKeyHex(parsed.privateKeyHex) ?? undefined
         : mnemonic
           ? derivePrivateKeyHexFromSeed(mnemonicToSeedSync(mnemonic))
@@ -561,15 +577,15 @@ export function loadPersistedCashuWallet(): PersistedCashuWalletState {
       sentTokens.length > 0
 
     // Never lock out existing users who already have saved proofs or history
-    const initialized =
-      typeof parsed.initialized === 'boolean'
+    const initialized = protectedCredentials ||
+      (typeof parsed.initialized === 'boolean'
         ? parsed.initialized || hasExistingActivity
-        : hasExistingActivity || Boolean(mnemonic || privateKeyHex)
+        : hasExistingActivity || Boolean(mnemonic || privateKeyHex))
 
     // Seamlessly attach deterministic keys for upgraded legacy users with existing proofs/history
     let finalMnemonic = mnemonic
     let finalPrivKey = privateKeyHex
-    if (initialized && !finalMnemonic && !finalPrivKey) {
+    if (!protectedCredentials && initialized && !finalMnemonic && !finalPrivKey) {
       const fresh = generateCashuWalletKeys()
       finalMnemonic = fresh.mnemonic
       finalPrivKey = fresh.privateKeyHex
@@ -596,12 +612,15 @@ export function loadPersistedCashuWallet(): PersistedCashuWalletState {
       ...(updatedAt ? { updatedAt } : {}),
       ...(finalMnemonic ? { mnemonic: finalMnemonic } : {}),
       ...(finalPrivKey ? { privateKeyHex: finalPrivKey } : {}),
+      ...(protectedCredentials ? { encryptedCredentials: parsed.encryptedCredentials } : {}),
       keysetCounters: sanitizeCounters(parsed.keysetCounters),
       activeMintUrl,
       mints: Array.from(mintMap.values()),
       proofsByMint,
       spentProofSecrets,
       history,
+      ...(parsed.pendingLightningMelt ? { pendingLightningMelt: parsed.pendingLightningMelt } : {}),
+      ...(typeof parsed.lastLightningMeltId === 'string' ? { lastLightningMeltId: parsed.lastLightningMeltId } : {}),
       sentTokens,
     }
 
@@ -611,8 +630,64 @@ export function loadPersistedCashuWallet(): PersistedCashuWalletState {
   }
 }
 
-export function savePersistedCashuWallet(state: PersistedCashuWalletState): void {
+export function sameStoredWalletCredentialEnvelope(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+export function readStoredWalletCredentialEnvelope(): unknown {
+  const raw = localStorage.getItem(CASHU_WALLET_STORAGE_KEY)
+  const parsed = raw ? (JSON.parse(raw) as Partial<PersistedCashuWalletState>) : null
+  return parsed?.encryptedCredentials
+}
+
+/** Preserves the exact wallet record, writing a single replacement only after the caller
+ * encrypted/decrypted and verified the same credentials. The snapshot comparison aborts if
+ * another updated tab saved new wallet data while Web Crypto was running.
+ */
+export function replaceWalletCredentialsWithEnvelope(
+  expectedRaw: string,
+  envelope: WalletCredentialEnvelope
+): boolean {
   try {
+    if (localStorage.getItem(CASHU_WALLET_STORAGE_KEY) !== expectedRaw) return false
+    const state = JSON.parse(expectedRaw) as Partial<PersistedCashuWalletState>
+    if (state.encryptedCredentials !== undefined || state.pendingLightningMelt) return false
+    if (!state.mnemonic && !state.privateKeyHex) return false
+    delete state.mnemonic
+    delete state.privateKeyHex
+    const protectedState = JSON.stringify({ ...state, initialized: true, encryptedCredentials: envelope })
+    localStorage.setItem(CASHU_WALLET_STORAGE_KEY, protectedState)
+    return localStorage.getItem(CASHU_WALLET_STORAGE_KEY) === protectedState
+  } catch {
+    return false
+  }
+}
+
+export function savePersistedCashuWallet(
+  state: PersistedCashuWalletState,
+  transition?: { expectedPendingId: string | null; expectedUpdatedAt: number | undefined }
+): boolean {
+  try {
+    const raw = localStorage.getItem(CASHU_WALLET_STORAGE_KEY)
+    const disk = raw ? (JSON.parse(raw) as Partial<PersistedCashuWalletState>) : null
+    if (!sameStoredWalletCredentialEnvelope(disk?.encryptedCredentials, state.encryptedCredentials)) {
+      // An older tab cannot overwrite a new vault or recreate one after a profile change.
+      return false
+    }
+    const protectedCredentials = state.encryptedCredentials !== undefined
+    const diskPendingId = disk?.pendingLightningMelt?.transaction?.id ?? null
+    const nextPendingId = state.pendingLightningMelt?.transaction.id ?? null
+    if (transition) {
+      const diskUpdatedAt = disk?.updatedAt ?? (disk ? loadPersistedCashuWallet().updatedAt : undefined)
+      if (diskPendingId !== transition.expectedPendingId || diskUpdatedAt !== transition.expectedUpdatedAt) {
+        return false
+      }
+    } else if (diskPendingId !== nextPendingId || disk?.lastLightningMeltId !== state.lastLightningMeltId) {
+      // A stale tab must not overwrite or resurrect a reserved payment.
+      return false
+    }
+    if (state.pendingLightningMelt && disk?.updatedAt !== undefined &&
+        state.updatedAt !== undefined && state.updatedAt < disk.updatedAt) return false
     const cleanUpdatedAt =
       typeof state.updatedAt === 'number' && Number.isFinite(state.updatedAt) && state.updatedAt > 0
         ? Math.floor(state.updatedAt)
@@ -621,8 +696,9 @@ export function savePersistedCashuWallet(state: PersistedCashuWalletState): void
       version: 1,
       initialized: state.initialized,
       ...(cleanUpdatedAt ? { updatedAt: cleanUpdatedAt } : {}),
-      ...(state.mnemonic ? { mnemonic: state.mnemonic } : {}),
-      ...(state.privateKeyHex ? { privateKeyHex: state.privateKeyHex } : {}),
+      ...(!protectedCredentials && state.mnemonic ? { mnemonic: state.mnemonic } : {}),
+      ...(!protectedCredentials && state.privateKeyHex ? { privateKeyHex: state.privateKeyHex } : {}),
+      ...(protectedCredentials ? { encryptedCredentials: state.encryptedCredentials } : {}),
       keysetCounters: sanitizeCounters(state.keysetCounters),
       activeMintUrl: state.activeMintUrl,
       mints: state.mints,
@@ -630,10 +706,13 @@ export function savePersistedCashuWallet(state: PersistedCashuWalletState): void
       spentProofSecrets: sanitizeSpentProofSecrets(state.spentProofSecrets),
       history: state.history.slice(0, MAX_HISTORY_ITEMS),
       sentTokens: state.sentTokens.slice(0, MAX_SENT_TOKENS),
+      ...(state.pendingLightningMelt ? { pendingLightningMelt: state.pendingLightningMelt } : {}),
+      ...(state.lastLightningMeltId ? { lastLightningMeltId: state.lastLightningMeltId } : {}),
     }
     localStorage.setItem(CASHU_WALLET_STORAGE_KEY, JSON.stringify(trimmed))
+    return true
   } catch {
-    // Ignore storage quota errors
+    return false
   }
 }
 
@@ -642,9 +721,10 @@ export function savePersistedCashuWallet(state: PersistedCashuWalletState): void
    -------------------------------------------------------------------------- */
 
 const walletCache = new Map<string, Promise<Wallet>>()
-const activeMeltQuoteCache = new Map<string, MeltQuoteBolt11Response>()
 
 let activeSeedBytes: Uint8Array | undefined = undefined
+let activeWalletCredentialEnvelope: unknown
+let activeWalletCredentialsLocked = false
 let activeCountersMap: Record<string, number> = {}
 let countersChangedListener: ((snapshot: Record<string, number>) => void) | null = null
 
@@ -688,8 +768,12 @@ export function configureCashuWalletRuntime(opts: {
   mnemonic?: string | null
   privateKeyHex?: string | null
   counters: Record<string, number>
+  encryptedCredentials?: unknown
   onCountersChanged?: (snapshot: Record<string, number>) => void
 }): void {
+  activeWalletCredentialEnvelope = opts.encryptedCredentials
+  activeWalletCredentialsLocked =
+    opts.encryptedCredentials !== undefined && !opts.mnemonic && !opts.privateKeyHex
   const nextSeed = deriveNut13SeedBytes({
     mnemonic: opts.mnemonic,
     privateKeyHex: opts.privateKeyHex,
@@ -703,13 +787,11 @@ export function configureCashuWalletRuntime(opts: {
   if (prevHex !== nextHex) {
     activeSeedBytes = nextSeed
     walletCache.clear()
-    activeMeltQuoteCache.clear()
   }
 }
 
 export function clearCashuWalletInstanceCache(): void {
   walletCache.clear()
-  activeMeltQuoteCache.clear()
   activeSeedBytes = undefined
   activeCountersMap = {}
 }
@@ -718,6 +800,10 @@ export async function getLoadedCashuWallet(
   mintUrl: string,
   forceRefresh = false
 ): Promise<Wallet> {
+  if (activeWalletCredentialsLocked ||
+      !sameStoredWalletCredentialEnvelope(readStoredWalletCredentialEnvelope(), activeWalletCredentialEnvelope)) {
+    throw new Error('Unlock Agwallet in this tab before using the Cashu wallet.')
+  }
   const normalized = normalizeMintUrl(mintUrl)
   if (!normalized) {
     throw new Error('Invalid Cashu mint URL.')
@@ -1204,15 +1290,24 @@ export async function createCashuMeltQuote(params: {
 
   const wallet = await getLoadedCashuWallet(normalized)
   const quote = await wallet.createMeltQuoteBolt11(params.invoice)
-  activeMeltQuoteCache.set(`${normalized}:${quote.quote}`, quote)
+  if (quote.request && quote.request.toLowerCase() !== params.invoice.toLowerCase()) {
+    throw new Error('The mint returned a quote for a different Lightning invoice.')
+  }
 
   const amountSats = amountToNumberSafe(quote.amount)
   const feeReserveSats = amountToNumberSafe(quote.fee_reserve)
+  const invoiceMsats = decodeBolt11AmountMsats(params.invoice)
+  if (invoiceMsats === null || !Number.isSafeInteger(amountSats) ||
+      BigInt(amountSats) !== (invoiceMsats + 999n) / 1000n ||
+      !Number.isSafeInteger(feeReserveSats) || feeReserveSats < 0 ||
+      !Number.isSafeInteger(amountSats + feeReserveSats)) {
+    throw new Error('The mint quote does not match a valid fixed invoice amount.')
+  }
 
   return {
     quoteId: quote.quote,
     mintUrl: normalized,
-    invoice: quote.request || params.invoice,
+    invoice: params.invoice,
     amountSats,
     feeReserveSats,
     totalRequiredSats: amountSats + feeReserveSats,
@@ -1223,77 +1318,117 @@ export async function createCashuMeltQuote(params: {
   }
 }
 
+export type LightningMeltOutcome =
+  | { state: 'pending' }
+  | { state: 'paid'; change: StoredCashuProof[]; feePaidSats: number; preimage: string | null }
+  | { state: 'expired'; recoveredInputs: StoredCashuProof[] }
+
 /**
- * NUT-05: Executes a melt quote atomically with pre-melt keep-proof commit & NUT-07 recovery.
+ * Prepare the request without spending or swapping proofs. The caller must save
+ * the returned inputs and NUT-08 blinds before invoking submit().
  */
-export async function executeCashuMeltQuote(params: {
-  preview: CashuMeltQuotePreview
-  existingProofs: StoredCashuProof[]
-  onCommitKeep: (keepProofs: StoredCashuProof[]) => void
-}): Promise<{
-  paid: boolean
-  changeProofs: StoredCashuProof[]
-  recoveredProofs: StoredCashuProof[]
-  feePaidSats: number
-  preimage: string | null
-}> {
-  const { preview, existingProofs, onCommitKeep } = params
-  const available = sumStoredProofs(existingProofs)
-  if (available < preview.totalRequiredSats) {
-    throw new Error(
-      `Need at least ${preview.totalRequiredSats.toLocaleString()} sats (${preview.amountSats.toLocaleString()} + ${preview.feeReserveSats.toLocaleString()} fee reserve), but only ${available.toLocaleString()} sats available on this mint.`
-    )
+export async function prepareRecoverableLightningMelt(
+  preview: CashuMeltQuotePreview,
+  existingProofs: StoredCashuProof[],
+  transaction: WalletTransaction,
+  loadWallet = getLoadedCashuWallet
+): Promise<{ pending: PendingLightningMelt; submit: () => Promise<LightningMeltOutcome> }> {
+  const wallet = await loadWallet(preview.mintUrl)
+  const quote = await wallet.checkMeltQuoteBolt11(preview.quoteId)
+  const amount = amountToNumberSafe(quote.amount)
+  const reserve = amountToNumberSafe(quote.fee_reserve)
+  if (quote.quote !== preview.quoteId || quote.state !== MeltQuoteState.UNPAID ||
+      quote.unit !== 'sat' || !Number.isSafeInteger(amount) || amount <= 0 ||
+      !Number.isSafeInteger(reserve) || reserve < 0 ||
+      !Number.isSafeInteger(amount + reserve) || amount !== preview.amountSats ||
+      reserve !== preview.feeReserveSats || !Number.isSafeInteger(quote.expiry) ||
+      quote.expiry * 1000 <= Date.now() ||
+      (quote.request && quote.request.toLowerCase() !== preview.invoice.toLowerCase())) {
+    throw new Error('The Lightning quote changed or expired. Review a fresh quote before paying.')
   }
-
-  const wallet = await getLoadedCashuWallet(preview.mintUrl)
-  const cachedQuote =
-    activeMeltQuoteCache.get(`${preview.mintUrl}:${preview.quoteId}`) ??
-    (await wallet.checkMeltQuoteBolt11(preview.quoteId))
-
-  const targetTotal =
-    amountToNumberSafe(cachedQuote.amount) + amountToNumberSafe(cachedQuote.fee_reserve)
-  const proofInputs = existingProofs.map(toCashuProof)
-  const { keep, send } = await wallet.send(targetTotal, proofInputs, { includeFees: true })
-
-  const keepStored = deduplicateProofs(keep.map(toStoredProof))
-  const sendStored = deduplicateProofs(send.map(toStoredProof))
-
-  onCommitKeep(keepStored)
-
-  try {
-    const meltRes = await wallet.meltProofsBolt11(cachedQuote, send)
-    activeMeltQuoteCache.delete(`${preview.mintUrl}:${preview.quoteId}`)
-
-    const changeProofs = deduplicateProofs((meltRes.change ?? []).map(toStoredProof))
-    const keepSats = sumStoredProofs(keepStored)
-    const changeSats = sumStoredProofs(changeProofs)
-    const totalSpent = Math.max(0, available - keepSats - changeSats)
-    const feePaidSats = Math.max(0, totalSpent - preview.amountSats)
-
-    return {
-      paid: meltRes.quote.state === MeltQuoteState.PAID,
-      changeProofs,
-      recoveredProofs: [],
-      feePaidSats,
-      preimage: meltRes.quote.payment_preimage ?? null,
-    }
-  } catch (err) {
-    try {
-      const states = await wallet.checkProofsStates(send)
-      const recovered: StoredCashuProof[] = []
-      for (let i = 0; i < sendStored.length; i++) {
-        if (states[i]?.state === CheckStateEnum.UNSPENT) {
-          recovered.push(sendStored[i])
-        }
-      }
-      if (recovered.length > 0) {
-        onCommitKeep(deduplicateProofs([...keepStored, ...recovered]))
-      }
-    } catch {
-      onCommitKeep(deduplicateProofs([...keepStored, ...sendStored]))
-    }
-    throw err
+  const { send } = wallet.selectProofsToSend(existingProofs.map(toCashuProof), amount + reserve, true)
+  const inputs = deduplicateProofs(send.map(toStoredProof))
+  const inputSats = sumStoredProofs(inputs)
+  const inputFeeSats = amountToNumberSafe(wallet.getFeesForProofs(send))
+  if (!Number.isSafeInteger(inputSats) ||
+      !Number.isSafeInteger(inputFeeSats) || inputFeeSats < 0 ||
+      inputSats < amount + reserve + inputFeeSats) {
+    throw new Error('This mint does not have enough available Cashu proofs for the payment and fees.')
   }
+  const needsChange = inputSats > amount + inputFeeSats
+  if (needsChange && !wallet.getMintInfo().isSupported(8).supported) {
+    throw new Error('This mint does not advertise Lightning change recovery. No payment was submitted.')
+  }
+  const prepared = await wallet.prepareMelt('bolt11', quote, send, { nut08Change: needsChange })
+  const pending: PendingLightningMelt = {
+    transaction,
+    quoteId: quote.quote,
+    expiry: quote.expiry,
+    feeReserveSats: reserve,
+    inputFeeSats,
+    inputs,
+    outputs: prepared.outputData.map((output) => OutputData.serialize(output)),
+  }
+  return {
+    pending,
+    async submit() {
+      if (pending.expiry * 1000 <= Date.now()) return { state: 'pending' }
+      const result = await wallet.completeMelt(prepared, undefined, { preferAsync: true })
+      if (result.quote.quote !== pending.quoteId || result.quote.state !== MeltQuoteState.PAID) {
+        return { state: 'pending' }
+      }
+      return settlePaidLightningMelt(pending, result.quote, result.change)
+    },
+  }
+}
+
+function settlePaidLightningMelt(
+  pending: PendingLightningMelt,
+  quote: MeltQuoteBolt11Response,
+  change: Proof[]
+): LightningMeltOutcome {
+  const stored = deduplicateProofs(change.map(toStoredProof))
+  const feePaidSats = sumStoredProofs(pending.inputs) - pending.transaction.amountSats - sumStoredProofs(stored)
+  if (!Number.isSafeInteger(feePaidSats) || feePaidSats < pending.inputFeeSats ||
+      feePaidSats > pending.feeReserveSats + pending.inputFeeSats) {
+    throw new Error('The mint returned inconsistent Lightning change. The payment remains saved for recovery.')
+  }
+  return { state: 'paid', change: stored, feePaidSats, preimage: quote.payment_preimage ?? null }
+}
+
+/**
+ * Reconcile without creating another payment. Release inputs only after quote
+ * expiry, an UNPAID result, and a NUT-07 confirmation for every input.
+ */
+export async function reconcileLightningMelt(
+  pending: PendingLightningMelt,
+  loadWallet = getLoadedCashuWallet
+): Promise<LightningMeltOutcome> {
+  const wallet = await loadWallet(pending.transaction.mintUrl)
+  const quote = await wallet.checkMeltQuoteBolt11(pending.quoteId)
+  if (quote.quote !== pending.quoteId || quote.unit !== 'sat' ||
+      amountToNumberSafe(quote.amount) !== pending.transaction.amountSats) return { state: 'pending' }
+  if (quote.state === MeltQuoteState.PAID) {
+    const outputs = pending.outputs.map((output) => OutputData.deserialize(output))
+    const sigs = (quote.change ?? []).filter((signature) => !Amount.from(signature.amount).isZero())
+    if (sigs.length > 0) await wallet.ensureOperableKeysets(sigs.map((signature) => signature.id))
+    // A compliant mint may omit change when it consumed the full reserve.
+    // An overage above the maximum fee means change must have been returned.
+    if (quote.change === undefined &&
+        sumStoredProofs(pending.inputs) - pending.transaction.amountSats >
+          pending.feeReserveSats + pending.inputFeeSats) return { state: 'pending' }
+    return settlePaidLightningMelt(pending, quote, wallet.createMeltChangeProofs(outputs, sigs))
+  }
+  if (quote.state !== MeltQuoteState.UNPAID ||
+      !Number.isSafeInteger(quote.expiry) ||
+      Math.max(quote.expiry, pending.expiry) * 1000 >= Date.now()) {
+    return { state: 'pending' }
+  }
+  const states = await wallet.checkProofsStates(pending.inputs.map(toCashuProof))
+  return states.length === pending.inputs.length &&
+      states.every((entry) => entry.state === CheckStateEnum.UNSPENT)
+    ? { state: 'expired', recoveredInputs: pending.inputs }
+    : { state: 'pending' }
 }
 
 /**
@@ -1366,19 +1501,30 @@ export function parseWalletBackupJson(rawJson: string): WalletBackupPayload {
     throw new Error('Backup JSON must be an object.')
   }
   const obj = parsed as Partial<WalletBackupPayload>
+  if (Array.isArray(obj)) throw new Error('Backup JSON must be an object.')
 
-  const mnemonic =
-    typeof obj.mnemonic === 'string' && isValidBip39Mnemonic(obj.mnemonic)
-      ? normalizeMnemonicPhrase(obj.mnemonic)
-      : undefined
-  const privateKeyHex =
-    typeof obj.privateKeyHex === 'string'
-      ? parseWalletPrivateKeyHex(obj.privateKeyHex) ?? undefined
-      : mnemonic
-        ? derivePrivateKeyHexFromSeed(mnemonicToSeedSync(mnemonic))
-        : undefined
+  let mnemonic: string | undefined
+  if (obj.mnemonic != null) {
+    if (typeof obj.mnemonic !== 'string' || !isValidBip39Mnemonic(obj.mnemonic)) {
+      throw new Error('Backup contains an invalid wallet recovery phrase.')
+    }
+    mnemonic = normalizeMnemonicPhrase(obj.mnemonic)
+  }
+  let privateKeyHex: string | undefined
+  if (obj.privateKeyHex != null) {
+    const parsedKey =
+      typeof obj.privateKeyHex === 'string' ? parseWalletPrivateKeyHex(obj.privateKeyHex) : null
+    if (!parsedKey || !deriveWalletP2pkPubkeyHex(parsedKey)) {
+      throw new Error('Backup contains an invalid wallet private key.')
+    }
+    privateKeyHex = parsedKey
+  } else if (mnemonic) {
+    privateKeyHex = derivePrivateKeyHexFromSeed(mnemonicToSeedSync(mnemonic))
+  }
 
-  const hasProofsObj = Boolean(obj.proofsByMint && typeof obj.proofsByMint === 'object')
+  const hasProofsObj = Boolean(
+    obj.proofsByMint && typeof obj.proofsByMint === 'object' && !Array.isArray(obj.proofsByMint)
+  )
   if (!hasProofsObj && !mnemonic && !privateKeyHex) {
     throw new Error('Backup JSON must contain proofs, a recovery phrase, or a private key.')
   }
@@ -1432,633 +1578,5 @@ export function parseWalletBackupJson(rawJson: string): WalletBackupPayload {
     sentTokens: Array.isArray(obj.sentTokens) ? obj.sentTokens : [],
     boltzSwaps: Array.isArray(obj.boltzSwaps) ? obj.boltzSwaps : [],
     boltzApiUrl: typeof obj.boltzApiUrl === 'string' ? obj.boltzApiUrl : undefined,
-  }
-}
-
-/* --------------------------------------------------------------------------
-   Proof-Safe Multi-Device Sync Export, Strict Validation & CRDT Merge
-   -------------------------------------------------------------------------- */
-
-const MAX_SYNC_BOLTZ_SWAPS = 80
-
-const SENT_TOKEN_STATUS_RANK: Record<CashuSentTokenStatus, number> = {
-  unclaimed: 1,
-  claimed: 2,
-  reclaimed: 3,
-}
-
-const TX_STATUS_RANK: Record<WalletTransaction['status'], number> = {
-  pending: 1,
-  expired: 2,
-  failed: 3,
-  completed: 4,
-}
-
-/**
- * Builds a deterministic, compact `WalletSyncExportInfo` snapshot for NIP-44 self-encrypted
- * multi-device sync (`kind: 30078` checkpoints & `sync-wallet-chunk` transfers).
- * Strips verbose `mint.info` probe blobs so the wallet fits comfortably inside checkpoint budgets.
- */
-export function buildWalletSyncExport(
-  state: PersistedCashuWalletState,
-  boltzSwaps: BoltzSwapRecord[],
-  boltzApiUrl?: string
-): WalletSyncExportInfo | null {
-  if (!state.initialized) return null
-  const fingerprint = computeWalletFingerprint(state.mnemonic, state.privateKeyHex)
-  if (!fingerprint) return null
-
-  const updatedAt =
-    typeof state.updatedAt === 'number' && Number.isFinite(state.updatedAt) && state.updatedAt > 0
-      ? Math.floor(state.updatedAt)
-      : 1
-
-  const compactMints: CashuMintAccount[] = state.mints.map((m) => ({
-    url: m.url,
-    label: m.label,
-    ...(m.description ? { description: m.description } : {}),
-    addedAt: m.addedAt,
-  }))
-
-  const cleanApiUrl = boltzApiUrl ? normalizeBoltzApiUrl(boltzApiUrl) ?? undefined : undefined
-
-  const payload: WalletSyncPayload = {
-    version: 1,
-    initialized: true,
-    fingerprint,
-    updatedAt,
-    activeMintUrl: state.activeMintUrl,
-    ...(state.mnemonic ? { mnemonic: state.mnemonic } : {}),
-    ...(state.privateKeyHex ? { privateKeyHex: state.privateKeyHex } : {}),
-    keysetCounters: sanitizeCounters(state.keysetCounters),
-    mints: compactMints,
-    proofsByMint: state.proofsByMint,
-    spentProofSecrets: sanitizeSpentProofSecrets(state.spentProofSecrets),
-    history: state.history.slice(0, MAX_HISTORY_ITEMS),
-    sentTokens: state.sentTokens.slice(0, MAX_SENT_TOKENS),
-    boltzSwaps: boltzSwaps.slice(0, MAX_SYNC_BOLTZ_SWAPS),
-    ...(cleanApiUrl ? { boltzApiUrl: cleanApiUrl } : {}),
-  }
-
-  return {
-    initialized: true,
-    fingerprint,
-    updatedAt,
-    payload,
-  }
-}
-
-/**
- * Strictly validates an untrusted remote `WalletSyncPayload` and verifies its recomputed
- * cryptographic key fingerprint matches `payload.fingerprint`.
- */
-export function parseWalletSyncPayload(rawRemote: unknown): WalletSyncPayload | null {
-  if (!rawRemote || typeof rawRemote !== 'object' || Array.isArray(rawRemote)) {
-    return null
-  }
-  const obj = rawRemote as Partial<WalletSyncPayload>
-  if (obj.version !== 1 || obj.initialized !== true) return null
-  if (typeof obj.fingerprint !== 'string') return null
-  const claimedFp = obj.fingerprint.trim().toLowerCase()
-  if (!/^[0-9a-f]{16}$/.test(claimedFp)) return null
-
-  const mnemonic =
-    typeof obj.mnemonic === 'string' && isValidBip39Mnemonic(obj.mnemonic)
-      ? normalizeMnemonicPhrase(obj.mnemonic)
-      : undefined
-  const privateKeyHex =
-    typeof obj.privateKeyHex === 'string'
-      ? parseWalletPrivateKeyHex(obj.privateKeyHex) ?? undefined
-      : mnemonic
-        ? derivePrivateKeyHexFromSeed(mnemonicToSeedSync(mnemonic))
-        : undefined
-
-  if (!mnemonic && !privateKeyHex) return null
-  const recomputedFp = computeWalletFingerprint(mnemonic, privateKeyHex)
-  if (!recomputedFp || recomputedFp !== claimedFp) return null
-
-  if (!Array.isArray(obj.mints)) return null
-  if (!obj.proofsByMint || typeof obj.proofsByMint !== 'object' || Array.isArray(obj.proofsByMint)) {
-    return null
-  }
-
-  const mintMap = new Map<string, CashuMintAccount>()
-  for (const m of obj.mints) {
-    if (!m || typeof m !== 'object' || typeof m.url !== 'string') continue
-    const norm = normalizeMintUrl(m.url)
-    if (!norm || mintMap.has(norm)) continue
-    const catalog = findCatalogMint(norm)
-    mintMap.set(norm, {
-      url: norm,
-      label: (typeof m.label === 'string' && m.label.trim()) || catalog?.name || formatMintHost(norm),
-      description:
-        (typeof m.description === 'string' && m.description.trim()) || catalog?.description,
-      addedAt: typeof m.addedAt === 'number' && Number.isFinite(m.addedAt) ? m.addedAt : Date.now(),
-      ...(m.info && typeof m.info === 'object' ? { info: m.info } : {}),
-    })
-  }
-
-  const proofsByMint: Record<string, StoredCashuProof[]> = {}
-  for (const [rawUrl, list] of Object.entries(obj.proofsByMint)) {
-    const norm = normalizeMintUrl(rawUrl)
-    if (!norm || !Array.isArray(list)) continue
-    const cleaned = deduplicateProofs(list)
-    if (cleaned.length > 0) {
-      proofsByMint[norm] = cleaned
-      if (!mintMap.has(norm)) {
-        const catalog = findCatalogMint(norm)
-        mintMap.set(norm, {
-          url: norm,
-          label: catalog?.name || formatMintHost(norm),
-          description: catalog?.description,
-          addedAt: Date.now(),
-        })
-      }
-    }
-  }
-
-  const normActive =
-    typeof obj.activeMintUrl === 'string' ? normalizeMintUrl(obj.activeMintUrl) : null
-  const activeMintUrl =
-    (normActive && mintMap.has(normActive) ? normActive : Array.from(mintMap.keys())[0]) ??
-    DEFAULT_ACTIVE_MINT_URL
-
-  const history = Array.isArray(obj.history)
-    ? obj.history
-        .filter(
-          (tx): tx is WalletTransaction =>
-            Boolean(tx && typeof tx === 'object' && typeof tx.id === 'string' && tx.id)
-        )
-        .slice(0, MAX_HISTORY_ITEMS)
-    : []
-
-  const sentTokens = Array.isArray(obj.sentTokens)
-    ? obj.sentTokens
-        .filter(
-          (st): st is CashuSentTokenRecord =>
-            Boolean(
-              st &&
-                typeof st === 'object' &&
-                typeof st.id === 'string' &&
-                st.id &&
-                typeof st.token === 'string'
-            )
-        )
-        .slice(0, MAX_SENT_TOKENS)
-    : []
-
-  const boltzSwaps = Array.isArray(obj.boltzSwaps)
-    ? obj.boltzSwaps
-        .filter(
-          (sw): sw is BoltzSwapRecord =>
-            Boolean(
-              sw &&
-                typeof sw === 'object' &&
-                typeof sw.id === 'string' &&
-                sw.id &&
-                typeof sw.address === 'string'
-            )
-        )
-        .slice(0, MAX_SYNC_BOLTZ_SWAPS)
-    : []
-
-  const updatedAt =
-    typeof obj.updatedAt === 'number' && Number.isFinite(obj.updatedAt) && obj.updatedAt > 0
-      ? Math.floor(obj.updatedAt)
-      : 0
-
-  const boltzApiUrl =
-    typeof obj.boltzApiUrl === 'string' ? normalizeBoltzApiUrl(obj.boltzApiUrl) ?? undefined : undefined
-
-  return {
-    version: 1,
-    initialized: true,
-    fingerprint: claimedFp,
-    updatedAt,
-    activeMintUrl,
-    ...(mnemonic ? { mnemonic } : {}),
-    ...(privateKeyHex ? { privateKeyHex } : {}),
-    keysetCounters: sanitizeCounters(obj.keysetCounters),
-    mints: Array.from(mintMap.values()),
-    proofsByMint,
-    spentProofSecrets: sanitizeSpentProofSecrets(obj.spentProofSecrets),
-    history,
-    sentTokens,
-    boltzSwaps,
-    ...(boltzApiUrl ? { boltzApiUrl } : {}),
-  }
-}
-
-function sameStringList(a: readonly string[], b: readonly string[]): boolean {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false
-  }
-  return true
-}
-
-function sameCounters(a: Record<string, number>, b: Record<string, number>): boolean {
-  const keysA = Object.keys(a)
-  const keysB = Object.keys(b)
-  if (keysA.length !== keysB.length) return false
-  for (const k of keysA) {
-    if (a[k] !== b[k]) return false
-  }
-  return true
-}
-
-function sameProofsByMint(
-  a: Record<string, StoredCashuProof[]>,
-  b: Record<string, StoredCashuProof[]>
-): boolean {
-  const keysA = Object.keys(a).filter((k) => (a[k]?.length ?? 0) > 0)
-  const keysB = Object.keys(b).filter((k) => (b[k]?.length ?? 0) > 0)
-  if (keysA.length !== keysB.length) return false
-  for (const k of keysA) {
-    const listA = a[k] ?? []
-    const listB = b[k] ?? []
-    if (listA.length !== listB.length) return false
-    const setB = new Set(listB.map((p) => p.secret))
-    for (const p of listA) {
-      if (!setB.has(p.secret)) return false
-    }
-  }
-  return true
-}
-
-function sameHistory(a: readonly WalletTransaction[], b: readonly WalletTransaction[]): boolean {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    if (a[i].id !== b[i].id || a[i].status !== b[i].status || a[i].txid !== b[i].txid) {
-      return false
-    }
-  }
-  return true
-}
-
-function sameSentTokens(
-  a: readonly CashuSentTokenRecord[],
-  b: readonly CashuSentTokenRecord[]
-): boolean {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    if (a[i].id !== b[i].id || a[i].status !== b[i].status) {
-      return false
-    }
-  }
-  return true
-}
-
-function sameSwaps(a: readonly BoltzSwapRecord[], b: readonly BoltzSwapRecord[]): boolean {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    if (
-      a[i].id !== b[i].id ||
-      a[i].status !== b[i].status ||
-      Boolean(a[i].mintClaimed) !== Boolean(b[i].mintClaimed) ||
-      a[i].txid !== b[i].txid ||
-      a[i].updatedAt !== b[i].updatedAt
-    ) {
-      return false
-    }
-  }
-  return true
-}
-
-export interface MergedWalletSyncResult {
-  changed: boolean
-  adoptedNewWallet: boolean
-  stateChanged: boolean
-  swapsChanged: boolean
-  apiUrlChanged: boolean
-  nextState: PersistedCashuWalletState
-  nextSwaps: BoltzSwapRecord[]
-  nextBoltzApiUrl: string
-}
-
-/**
- * Pure proof-safe CRDT merger for multi-device Agwallet sync:
- * - Case A: Local uninitialized + Remote initialized -> adopt remote wallet completely.
- * - Case B: Local & Remote have DIFFERENT key fingerprints -> safe no-op (never overwrite!).
- * - Case C: Same key fingerprint -> union spent-proof tombstones, filter proofs, max counters,
- *   dedupe mints/history/sentTokens/Boltz swaps with deterministic precedence.
- */
-export function mergeSyncedWalletState(params: {
-  localState: PersistedCashuWalletState
-  localSwaps: BoltzSwapRecord[]
-  localBoltzApiUrl: string
-  rawRemote: unknown
-}): MergedWalletSyncResult {
-  const { localState, localSwaps, localBoltzApiUrl, rawRemote } = params
-  const noop: MergedWalletSyncResult = {
-    changed: false,
-    adoptedNewWallet: false,
-    stateChanged: false,
-    swapsChanged: false,
-    apiUrlChanged: false,
-    nextState: localState,
-    nextSwaps: localSwaps,
-    nextBoltzApiUrl: localBoltzApiUrl,
-  }
-
-  const remote = parseWalletSyncPayload(rawRemote)
-  if (!remote) return noop
-
-  const localFp = localState.initialized
-    ? computeWalletFingerprint(localState.mnemonic, localState.privateKeyHex)
-    : null
-
-  // Case A: Local has NO wallet set up -> adopt remote wallet completely
-  if (!localState.initialized || !localFp) {
-    const spentSet = new Set(remote.spentProofSecrets)
-    const filteredProofs: Record<string, StoredCashuProof[]> = {}
-    for (const [url, list] of Object.entries(remote.proofsByMint)) {
-      const kept = deduplicateProofs(list).filter((p) => !spentSet.has(p.secret))
-      if (kept.length > 0) {
-        filteredProofs[url] = kept
-      }
-    }
-
-    const mintMap = new Map<string, CashuMintAccount>()
-    for (const m of remote.mints) {
-      const cat = findCatalogMint(m.url)
-      mintMap.set(m.url, {
-        ...m,
-        description: m.description || cat?.description,
-        info:
-          m.info ??
-          (cat
-            ? {
-                url: cat.url,
-                name: cat.name,
-                description: cat.description,
-                version: cat.version,
-                nuts: [...cat.verifiedNuts],
-                feePpk: cat.feePpk,
-                activeSatKeysetId: null,
-                online: true,
-                lastCheckedAt: 0,
-              }
-            : undefined),
-      })
-    }
-    if (mintMap.size === 0) {
-      for (const def of buildDefaultMintsList()) {
-        mintMap.set(def.url, def)
-      }
-    }
-    const activeMintUrl = mintMap.has(remote.activeMintUrl)
-      ? remote.activeMintUrl
-      : Array.from(mintMap.keys())[0] ?? DEFAULT_ACTIVE_MINT_URL
-
-    const adoptedHistory = [...remote.history]
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, MAX_HISTORY_ITEMS)
-    const adoptedSent = [...remote.sentTokens]
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, MAX_SENT_TOKENS)
-    const adoptedSwaps = [...remote.boltzSwaps]
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, MAX_SYNC_BOLTZ_SWAPS)
-
-    const nextState: PersistedCashuWalletState = {
-      version: 1,
-      initialized: true,
-      updatedAt: remote.updatedAt || Date.now(),
-      ...(remote.mnemonic ? { mnemonic: remote.mnemonic } : {}),
-      ...(remote.privateKeyHex ? { privateKeyHex: remote.privateKeyHex } : {}),
-      keysetCounters: sanitizeCounters(remote.keysetCounters),
-      activeMintUrl,
-      mints: Array.from(mintMap.values()),
-      proofsByMint: filteredProofs,
-      spentProofSecrets: remote.spentProofSecrets,
-      history: adoptedHistory,
-      sentTokens: adoptedSent,
-    }
-
-    const nextBoltzApiUrl = remote.boltzApiUrl ?? localBoltzApiUrl
-    return {
-      changed: true,
-      adoptedNewWallet: true,
-      stateChanged: true,
-      swapsChanged: !sameSwaps(localSwaps, adoptedSwaps),
-      apiUrlChanged: nextBoltzApiUrl !== localBoltzApiUrl,
-      nextState,
-      nextSwaps: adoptedSwaps,
-      nextBoltzApiUrl,
-    }
-  }
-
-  // Case B: Both devices have DIFFERENT wallets -> safe no-op (never overwrite!)
-  if (localFp !== remote.fingerprint) {
-    return noop
-  }
-
-  // Case C: Same linked Agwallet -> proof-safe CRDT merge
-  const localSpent = sanitizeSpentProofSecrets(localState.spentProofSecrets)
-  const localSpentSet = new Set(localSpent)
-  const newlySpentFromRemote = remote.spentProofSecrets.filter((s) => !localSpentSet.has(s))
-  const mergedSpent =
-    newlySpentFromRemote.length > 0
-      ? sanitizeSpentProofSecrets([...localSpent, ...newlySpentFromRemote])
-      : localSpent
-  const spentSet = new Set(mergedSpent)
-
-  // Union mints by normalized URL (preserve local live-probed `info` if present)
-  const mintMap = new Map<string, CashuMintAccount>()
-  for (const m of localState.mints) {
-    const norm = normalizeMintUrl(m.url)
-    if (norm && !mintMap.has(norm)) {
-      mintMap.set(norm, { ...m, url: norm })
-    }
-  }
-  for (const m of remote.mints) {
-    if (!mintMap.has(m.url)) {
-      const cat = findCatalogMint(m.url)
-      mintMap.set(m.url, {
-        ...m,
-        description: m.description || cat?.description,
-        info:
-          m.info ??
-          (cat
-            ? {
-                url: cat.url,
-                name: cat.name,
-                description: cat.description,
-                version: cat.version,
-                nuts: [...cat.verifiedNuts],
-                feePpk: cat.feePpk,
-                activeSatKeysetId: null,
-                online: true,
-                lastCheckedAt: 0,
-              }
-            : undefined),
-      })
-    }
-  }
-
-  // Union proofs per mint & filter out all known spent-proof tombstones
-  const allMintUrls = new Set<string>([
-    ...Object.keys(localState.proofsByMint),
-    ...Object.keys(remote.proofsByMint),
-  ])
-  const mergedProofsByMint: Record<string, StoredCashuProof[]> = {}
-  for (const rawUrl of allMintUrls) {
-    const norm = normalizeMintUrl(rawUrl)
-    if (!norm) continue
-    const localList = localState.proofsByMint[rawUrl] ?? localState.proofsByMint[norm] ?? []
-    const remoteList = remote.proofsByMint[norm] ?? []
-    const cleaned = deduplicateProofs([...localList, ...remoteList]).filter(
-      (p) => !spentSet.has(p.secret)
-    )
-    if (cleaned.length > 0) {
-      mergedProofsByMint[norm] = cleaned
-      if (!mintMap.has(norm)) {
-        const cat = findCatalogMint(norm)
-        mintMap.set(norm, {
-          url: norm,
-          label: cat?.name || formatMintHost(norm),
-          description: cat?.description,
-          addedAt: Date.now(),
-        })
-      }
-    }
-  }
-
-  const mergedMints = Array.from(mintMap.values())
-  const localUpdatedAt = localState.updatedAt ?? 0
-  const remoteIsNewer = remote.updatedAt > localUpdatedAt
-  const mergedActiveMintUrl =
-    remoteIsNewer && mintMap.has(remote.activeMintUrl)
-      ? remote.activeMintUrl
-      : localState.activeMintUrl
-
-  // Keyset counters: monotonic per-keyset max
-  const mergedCounters: Record<string, number> = { ...localState.keysetCounters }
-  if (remote.keysetCounters) {
-    for (const [ksId, count] of Object.entries(remote.keysetCounters)) {
-      mergedCounters[ksId] = Math.max(mergedCounters[ksId] ?? 0, count)
-    }
-  }
-
-  // History: dedupe by id (prefer higher-rank status or entry with txid), newest-first, cap 250
-  const historyMap = new Map<string, WalletTransaction>()
-  for (const tx of localState.history) {
-    if (tx?.id) historyMap.set(tx.id, tx)
-  }
-  for (const rtx of remote.history) {
-    if (!rtx?.id) continue
-    const existing = historyMap.get(rtx.id)
-    if (!existing) {
-      historyMap.set(rtx.id, rtx)
-    } else {
-      const existingRank = TX_STATUS_RANK[existing.status] ?? 0
-      const remoteRank = TX_STATUS_RANK[rtx.status] ?? 0
-      if (remoteRank > existingRank || (remoteRank === existingRank && !existing.txid && rtx.txid)) {
-        historyMap.set(rtx.id, { ...existing, ...rtx })
-      }
-    }
-  }
-  const mergedHistory = Array.from(historyMap.values())
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, MAX_HISTORY_ITEMS)
-
-  // Sent tokens: dedupe by id (claimed/reclaimed > unclaimed), newest-first, cap 120
-  const sentMap = new Map<string, CashuSentTokenRecord>()
-  for (const st of localState.sentTokens) {
-    if (st?.id) sentMap.set(st.id, st)
-  }
-  for (const rst of remote.sentTokens) {
-    if (!rst?.id) continue
-    const existing = sentMap.get(rst.id)
-    if (!existing) {
-      sentMap.set(rst.id, rst)
-    } else {
-      const existingRank = SENT_TOKEN_STATUS_RANK[existing.status] ?? 0
-      const remoteRank = SENT_TOKEN_STATUS_RANK[rst.status] ?? 0
-      if (remoteRank > existingRank) {
-        sentMap.set(rst.id, { ...existing, status: rst.status })
-      }
-    }
-  }
-  const mergedSentTokens = Array.from(sentMap.values())
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, MAX_SENT_TOKENS)
-
-  // Boltz swaps: dedupe by id (prefer mintClaimed: true or higher updatedAt), newest-first, cap 80
-  const swapMap = new Map<string, BoltzSwapRecord>()
-  for (const sw of localSwaps) {
-    if (sw?.id) swapMap.set(sw.id, sw)
-  }
-  for (const rsw of remote.boltzSwaps) {
-    if (!rsw?.id) continue
-    const existing = swapMap.get(rsw.id)
-    if (!existing) {
-      swapMap.set(rsw.id, rsw)
-    } else {
-      const preferRemote =
-        (Boolean(rsw.mintClaimed) && !existing.mintClaimed) ||
-        (Boolean(rsw.mintClaimed) === Boolean(existing.mintClaimed) &&
-          (rsw.updatedAt ?? 0) > (existing.updatedAt ?? 0))
-      if (preferRemote) {
-        swapMap.set(rsw.id, rsw)
-      }
-    }
-  }
-  const mergedSwaps = Array.from(swapMap.values())
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, MAX_SYNC_BOLTZ_SWAPS)
-
-  const mergedMnemonic = localState.mnemonic || remote.mnemonic
-  const mergedPrivKey = localState.privateKeyHex || remote.privateKeyHex
-  const nextBoltzApiUrl =
-    remoteIsNewer && remote.boltzApiUrl ? remote.boltzApiUrl : localBoltzApiUrl
-
-  const localMintUrls = localState.mints.map((m) => m.url)
-  const mergedMintUrls = mergedMints.map((m) => m.url)
-
-  const stateChanged =
-    mergedMnemonic !== localState.mnemonic ||
-    mergedPrivKey !== localState.privateKeyHex ||
-    mergedActiveMintUrl !== localState.activeMintUrl ||
-    !sameStringList(localSpent, mergedSpent) ||
-    !sameStringList(localMintUrls, mergedMintUrls) ||
-    !sameCounters(localState.keysetCounters, mergedCounters) ||
-    !sameProofsByMint(localState.proofsByMint, mergedProofsByMint) ||
-    !sameHistory(localState.history, mergedHistory) ||
-    !sameSentTokens(localState.sentTokens, mergedSentTokens)
-
-  const swapsChanged = !sameSwaps(localSwaps, mergedSwaps)
-  const apiUrlChanged = nextBoltzApiUrl !== localBoltzApiUrl
-  const changed = stateChanged || swapsChanged || apiUrlChanged
-
-  if (!changed) {
-    return noop
-  }
-
-  const nextState: PersistedCashuWalletState = {
-    version: 1,
-    initialized: true,
-    updatedAt: Math.max(localUpdatedAt, remote.updatedAt) || Date.now(),
-    ...(mergedMnemonic ? { mnemonic: mergedMnemonic } : {}),
-    ...(mergedPrivKey ? { privateKeyHex: mergedPrivKey } : {}),
-    keysetCounters: mergedCounters,
-    activeMintUrl: mergedActiveMintUrl,
-    mints: mergedMints,
-    proofsByMint: mergedProofsByMint,
-    spentProofSecrets: mergedSpent,
-    history: mergedHistory,
-    sentTokens: mergedSentTokens,
-  }
-
-  return {
-    changed: true,
-    adoptedNewWallet: false,
-    stateChanged,
-    swapsChanged,
-    apiUrlChanged,
-    nextState,
-    nextSwaps: mergedSwaps,
-    nextBoltzApiUrl,
   }
 }

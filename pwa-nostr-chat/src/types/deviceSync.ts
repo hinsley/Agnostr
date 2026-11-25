@@ -49,27 +49,7 @@ export interface AmailSyncProvider {
   mergeSyncState: (remote: unknown) => Promise<boolean | number | void> | boolean | number | void
 }
 
-/** Exported metadata + snapshot from Agwallet for proof-safe multi-device sync */
-export interface WalletSyncExportInfo {
-  initialized: boolean
-  fingerprint: string
-  updatedAt: number
-  payload: unknown
-}
 
-/** Hook-in provider allowing Agwallet to ride multi-device encrypted sync */
-export interface WalletSyncProvider {
-  exportSyncState: () => Promise<WalletSyncExportInfo | null> | WalletSyncExportInfo | null
-  mergeSyncState: (remote: unknown) => Promise<boolean | number | void> | boolean | number | void
-}
-
-/** Optional Agwallet sync snapshot bundled with high priority inside encrypted checkpoints */
-export interface SyncedWalletState {
-  updatedAt: number
-  fingerprint: string
-  hash: string
-  payload: unknown
-}
 
 /** LWW-Element-Set record for a joined/left Server (Virtual E2EE/Public or NIP-29) */
 export interface SyncedServerRecord {
@@ -170,7 +150,6 @@ export interface DeviceSyncCrdtState {
   peerNotes?: Record<string, SyncedPeerNoteRecord>
   dmPeerNames?: Record<string, SyncedDmPeerNameRecord>
   devices?: Record<string, SyncedDeviceRecord>
-  wallet?: SyncedWalletState | null
   amail?: SyncedAmailState | null
   recentMessages?: SyncedRecentMessagesTail
 }
@@ -188,7 +167,6 @@ export interface DeviceSyncMsgDigests {
   server: Record<string, DeviceSyncScopeDigest>
   bitchat: Record<string, DeviceSyncScopeDigest>
   amail?: { updatedAt: number; hash: string } | null
-  wallet?: { initialized: boolean; fingerprint: string; updatedAt: number; hash: string } | null
 }
 
 export interface DeviceSyncScopeRequest {
@@ -229,7 +207,6 @@ export interface DeviceSyncMsgReqPacket {
   ts: number
   scopes: DeviceSyncScopeRequest[]
   wantAmail?: boolean
-  wantWallet?: boolean
 }
 
 export interface DeviceSyncMsgChunkPacket {
@@ -263,28 +240,12 @@ export interface DeviceSyncAmailChunkPacket {
   data: string
 }
 
-export interface DeviceSyncWalletChunkPacket {
-  v: 1
-  type: 'sync-wallet-chunk'
-  deviceId: string
-  targetDeviceId: string
-  ts: number
-  transferId: string
-  fingerprint: string
-  updatedAt: number
-  hash: string
-  chunkIndex: number
-  totalChunks: number
-  data: string
-}
-
 export type DeviceSyncWirePacket =
   | DeviceSyncHelloPacket
   | DeviceSyncStatePacket
   | DeviceSyncMsgReqPacket
   | DeviceSyncMsgChunkPacket
   | DeviceSyncAmailChunkPacket
-  | DeviceSyncWalletChunkPacket
 
 /** Diff flags returned by CRDT merges between same-key devices */
 export interface DeviceSyncMergeDiff {

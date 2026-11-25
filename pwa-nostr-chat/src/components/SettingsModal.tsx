@@ -1898,7 +1898,7 @@ export function SettingsModal({
                   <span>Encrypted Background Sync</span>
                 </span>
                 <span className="ag-set-toggle-desc">
-                  Sync groups, friends, notes, pins, Agmail, Agwallet, and messages automatically.
+                  Sync groups, friends, notes, pins, Agmail, and messages automatically. Agwallet stays on this device; use its backup tools to move it.
                 </span>
               </div>
               <input

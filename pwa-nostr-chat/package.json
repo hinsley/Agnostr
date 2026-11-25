@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test:solar-maps": "node scripts/check-solar-maps.mjs",
     "test:lunar-orientation": "node --experimental-strip-types --test scripts/check-lunar-orientation.mjs",
-    "test:room-roster": "node --experimental-strip-types --test scripts/check-room-roster.mjs"
+    "test:room-roster": "node --experimental-strip-types --test scripts/check-room-roster.mjs",
+    "test:agwallet": "node --test scripts/check-boltz-recovery-only.mjs scripts/check-lightning-melt-recovery.mjs scripts/check-native-bitcoin-send.mjs scripts/check-wallet-custody-boundary.mjs"
   },
   "dependencies": {
     "@cashu/cashu-ts": "^4.13.1",

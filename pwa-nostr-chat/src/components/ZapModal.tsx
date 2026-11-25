@@ -77,7 +77,7 @@ function ZapModalInner({
   const [amountInput, setAmountInput] = useState<string>('100')
   const [comment, setComment] = useState<string>('')
 
-  const [stage, setStage] = useState<'compose' | 'invoice' | 'paid'>('compose')
+  const [stage, setStage] = useState<'compose' | 'invoice' | 'paid' | 'pending'>('compose')
   const [working, setWorking] = useState<boolean>(false)
   const [error, setError] = useState<string | null>(null)
   const [invoiceResult, setInvoiceResult] = useState<ZapInvoiceResult | null>(null)
@@ -315,6 +315,11 @@ function ZapModalInner({
         mintUrl: bestMintUrl,
       })
 
+      if (!payRes.paid) {
+        setStage('pending')
+        return
+      }
+
       setPaidSummary({
         amountSats: payRes.amountSats,
         feePaidSats: payRes.feePaidSats,
@@ -492,6 +497,15 @@ function ZapModalInner({
                 Done
               </button>
             </div>
+          ) : stage === 'pending' ? (
+            <>
+              <p role="status" className="ag-wallet-subtitle">
+                Zap payment pending. Check Agwallet activity before sending again.
+              </p>
+              <button type="button" className="ag-wbtn ag-wbtn-primary ag-wbtn-full" onClick={onClose}>
+                Done
+              </button>
+            </>
           ) : stage === 'invoice' && invoiceResult ? (
             <>
               <div className="ag-wallet-qr-wrap">

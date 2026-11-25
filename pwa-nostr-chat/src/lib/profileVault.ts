@@ -128,7 +128,7 @@ function openVaultDb(): Promise<IDBDatabase | null> {
   })
 }
 
-async function writeBucket(bucket: StoredProfileBucket): Promise<void> {
+async function writeBucket(bucket: StoredProfileBucket): Promise<boolean> {
   memoryFallbackBuckets.set(bucket.id, bucket)
   const db = await openVaultDb()
   if (db) {
@@ -149,12 +149,17 @@ async function writeBucket(bucket: StoredProfileBucket): Promise<void> {
       // Ignore close errors
     }
     if (ok) {
-      safeRemove(`${FALLBACK_BUCKET_PREFIX}${bucket.id}`)
-      return
+      const oldFallback = `${FALLBACK_BUCKET_PREFIX}${bucket.id}`
+      safeRemove(oldFallback)
+      return safeGet(oldFallback) === null
     }
   }
   // Graceful fallback ONLY when IndexedDB is unavailable or failed
-  safeSet(`${FALLBACK_BUCKET_PREFIX}${bucket.id}`, JSON.stringify(bucket))
+  const fallbackKey = `${FALLBACK_BUCKET_PREFIX}${bucket.id}`
+  const serialized = JSON.stringify(bucket)
+  safeSet(fallbackKey, serialized)
+  // If IndexedDB exists but couldn't be written, a previous snapshot may still be there.
+  return typeof indexedDB === 'undefined' && safeGet(fallbackKey) === serialized
 }
 
 async function readBucket(id: string): Promise<StoredProfileBucket | null> {
@@ -520,11 +525,17 @@ export function clearProfileNotificationEntry(
   return next
 }
 
-export async function snapshotCurrentProfileToVault(activePubkey: string): Promise<void> {
+export async function snapshotCurrentProfileToVault(
+  activePubkey: string,
+  requiredEntry?: readonly [key: string, value: string],
+): Promise<boolean> {
   const pk = normalizePubkey(activePubkey)
-  if (!pk) return
+  if (!pk) return false
   const entries = collectCurrentProfileEntries()
-  await writeBucket({
+  if (requiredEntry && (getActiveProfileId() !== pk || entries[requiredEntry[0]] !== requiredEntry[1])) {
+    return false
+  }
+  return await writeBucket({
     id: pk,
     entries,
     updatedAt: Date.now(),

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { mnemonicToSeedSync } from '@scure/bip39'
-import type { WalletSyncExportInfo } from '../types/deviceSync.ts'
 import type { ToastLevel } from '../types/protocol.ts'
 import type {
   BoltzReversePairInfo,
@@ -21,20 +20,22 @@ import type {
   WalletTransaction,
 } from '../types/wallet.ts'
 import {
-  broadcastBitcoinRawTx,
-  buildAndSignP2wpkhTx,
   deriveNativeBtcWallet,
-  fetchBitcoinFeeRates,
   fetchBitcoinOnchainState,
   type NativeBtcWalletKeys,
 } from '../lib/bitcoinOnchain.ts'
+import {
+  createNativeBitcoinSend,
+  nativeBitcoinSendJournalKey,
+  type NativeBitcoinPendingSend,
+  type NativeBitcoinSendReview,
+} from '../lib/nativeBitcoinSend.ts'
 import {
   BOLTZ_API_URL_STORAGE_KEY,
   BOLTZ_SWAPS_STORAGE_KEY,
   DEFAULT_BOLTZ_API_URL,
   buildBoltzSwapRescueJson,
-  createBoltzReverseSwap,
-  createBoltzSubmarineSwap,
+  BOLTZ_NEW_SWAPS_PAUSED_MESSAGE,
   fetchBoltzReversePair as fetchBoltzReversePairApi,
   fetchBoltzSubmarinePair as fetchBoltzSubmarinePairApi,
   fetchBoltzSwapStatus,
@@ -47,7 +48,6 @@ import {
 import { findCatalogMint, formatMintHost, normalizeMintUrl } from '../lib/cashuMints.ts'
 import {
   CASHU_WALLET_STORAGE_KEY,
-  buildWalletSyncExport,
   checkAndMintCashuQuote,
   checkCashuSentTokenClaimed,
   claimCashuTokenProofs,
@@ -63,16 +63,19 @@ import {
   derivePrivateKeyHexFromSeed,
   deriveWalletP2pkPubkeyHex,
   detectWalletImportFormat,
-  executeCashuMeltQuote,
   generateCashuWalletKeys,
   inspectCashuMint,
   isValidBip39Mnemonic,
   loadPersistedCashuWallet,
-  mergeSyncedWalletState,
   normalizeMintError,
   normalizeMnemonicPhrase,
   parseWalletBackupJson,
   parseWalletPrivateKeyHex,
+  readStoredWalletCredentialEnvelope,
+  replaceWalletCredentialsWithEnvelope,
+  sameStoredWalletCredentialEnvelope,
+  prepareRecoverableLightningMelt,
+  reconcileLightningMelt,
   restoreCashuProofsFromMint,
   sanitizeSpentProofSecrets,
   savePersistedCashuWallet,
@@ -81,12 +84,18 @@ import {
   sumStoredProofs,
   verifyCashuProofsOnMint,
   type PersistedCashuWalletState,
+  type PendingLightningMelt,
+  type LightningMeltOutcome,
 } from '../lib/cashuWallet.ts'
 import {
   fetchLnurlPayInvoice,
   parseLightningPayload,
   resolveLnurlPay,
 } from '../lib/zaps.ts'
+
+import { getActiveProfileId, snapshotCurrentProfileToVault } from '../lib/profileVault.ts'
+import { decryptWalletCredentials, encryptWalletCredentials } from '../lib/walletCredentialVault.ts'
+import { selectWalletRestoreCredentials } from '../lib/walletRestoreIdentity.ts'
 
 export interface UseCashuWalletOptions {
   pushToast?: (level: ToastLevel, title: string, detail?: string) => void
@@ -118,6 +127,19 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     loadPersistedCashuWallet()
   )
   const stateRef = useRef<PersistedCashuWalletState>(walletState)
+  const vaultTransitionRef = useRef(false)
+  const requireWalletUnlocked = useCallback(() => {
+    const current = stateRef.current
+    if (
+      vaultTransitionRef.current ||
+      (current.encryptedCredentials !== undefined && !current.mnemonic && !current.privateKeyHex) ||
+      !sameStoredWalletCredentialEnvelope(
+        readStoredWalletCredentialEnvelope(), current.encryptedCredentials
+      )
+    ) {
+      throw new Error('Unlock Agwallet in this tab before continuing.')
+    }
+  }, [])
 
   const [boltzSwaps, setBoltzSwaps] = useState<BoltzSwapRecord[]>(() => loadStoredBoltzSwaps())
   const boltzSwapsRef = useRef<BoltzSwapRecord[]>(boltzSwaps)
@@ -145,11 +167,29 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
   const commitState = useCallback(
     (
       updater: (prev: PersistedCashuWalletState) => PersistedCashuWalletState,
-      opts?: { fromRemoteSync?: boolean; resetSpentSecrets?: boolean }
+      opts?: { fromRemoteSync?: boolean; resetSpentSecrets?: boolean; persistLightningTransition?: boolean }
     ) => {
+      requireWalletUnlocked()
       const prev = stateRef.current
-      const rawNext = updater(prev)
+      let rawNext = updater(prev)
       if (rawNext === prev) return prev
+
+      const pending = rawNext.pendingLightningMelt
+      const previousPending = prev.pendingLightningMelt
+      const reservedSecrets = new Set(pending?.inputs.map((proof) => proof.secret))
+      if (pending) {
+        // Manual/seed restores and inbound tokens must not reintroduce reserved inputs.
+        const { mintUrl } = pending.transaction
+        rawNext = {
+          ...rawNext,
+          proofsByMint: {
+            ...rawNext.proofsByMint,
+            [mintUrl]: (rawNext.proofsByMint[mintUrl] ?? []).filter(
+              (proof) => !reservedSecrets.has(proof.secret)
+            ),
+          },
+        }
+      }
 
       let spentProofSecrets = sanitizeSpentProofSecrets(
         rawNext.spentProofSecrets ?? (opts?.resetSpentSecrets ? [] : (prev.spentProofSecrets ?? []))
@@ -165,7 +205,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         const removedSecrets: string[] = []
         for (const list of Object.values(prev.proofsByMint)) {
           for (const p of list) {
-            if (p?.secret && !nextSecrets.has(p.secret)) {
+            if (p?.secret && !nextSecrets.has(p.secret) && !reservedSecrets.has(p.secret)) {
               removedSecrets.push(p.secret)
             }
           }
@@ -186,10 +226,21 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         ...rawNext,
         updatedAt,
         spentProofSecrets,
+        lastLightningMeltId: pending?.transaction.id ?? prev.lastLightningMeltId,
       }
 
+      if (opts?.persistLightningTransition) {
+        const saved = savePersistedCashuWallet(next, {
+          expectedPendingId: previousPending?.transaction.id ?? null,
+          expectedUpdatedAt: prev.updatedAt,
+        })
+        if (!saved) {
+          throw new Error('Could not safely save the Lightning payment. Close other wallet tabs or free browser storage.')
+        }
+      } else if (!savePersistedCashuWallet(next)) {
+        throw new Error('Could not save Agwallet. Reload this tab or check browser storage.')
+      }
       stateRef.current = next
-      savePersistedCashuWallet(next)
       setWalletState(next)
 
       if (!opts?.fromRemoteSync && next.initialized) {
@@ -197,7 +248,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       }
       return next
     },
-    [scheduleNotifyLocalWalletChanged]
+    [requireWalletUnlocked, scheduleNotifyLocalWalletChanged]
   )
 
   const syncRuntimeSeed = useCallback(
@@ -206,14 +257,17 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         mnemonic: state.mnemonic,
         privateKeyHex: state.privateKeyHex,
         counters: state.keysetCounters,
+        encryptedCredentials: state.encryptedCredentials,
         onCountersChanged: (snapshot) => {
           const cur = stateRef.current
           const next: PersistedCashuWalletState = {
             ...cur,
             keysetCounters: snapshot,
           }
+          if (!savePersistedCashuWallet(next)) {
+            throw new Error('Could not save the wallet counter in this tab.')
+          }
           stateRef.current = next
-          savePersistedCashuWallet(next)
         },
       })
     },
@@ -258,6 +312,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
   }, [])
 
   const ensureInitializedWithKeys = useCallback(() => {
+    requireWalletUnlocked()
     const cur = stateRef.current
     if (cur.initialized && cur.privateKeyHex) return
     const derivedFromMnemonic =
@@ -272,7 +327,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       privateKeyHex: prev.privateKeyHex ?? derivedFromMnemonic ?? fresh?.privateKeyHex,
     }))
     syncRuntimeSeed(next)
-  }, [commitState, syncRuntimeSeed])
+  }, [commitState, requireWalletUnlocked, syncRuntimeSeed])
 
   const appendProofsToMint = useCallback(
     (mintUrl: string, newProofs: StoredCashuProof[], labelHint?: string) => {
@@ -374,6 +429,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
   const createNewWallet = useCallback(
     (opts?: { mnemonic?: string; privateKeyHex?: string; mintUrl?: string }) => {
+      requireWalletUnlocked()
       const draft =
         opts?.mnemonic && isValidBip39Mnemonic(opts.mnemonic)
           ? {
@@ -391,6 +447,13 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
               }
             : generateCashuWalletKeys()
 
+      const existing = stateRef.current
+      if (existing.pendingLightningMelt) {
+        throw new Error('Resolve the pending Lightning payment before creating a wallet.')
+      }
+      const credentials = selectWalletRestoreCredentials(existing, draft)
+      if (credentials === existing) return
+
       clearCashuWalletInstanceCache()
       setActiveQuoteSynced(null)
       setLastError(null)
@@ -405,31 +468,28 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
               ? requestedMint
               : prev.activeMintUrl
           return {
-            version: 1,
+            ...prev,
+            ...credentials,
             initialized: true,
-            ...(draft.mnemonic ? { mnemonic: draft.mnemonic } : {}),
-            privateKeyHex: draft.privateKeyHex,
-            keysetCounters: {},
             activeMintUrl,
             mints,
-            proofsByMint: {},
-            spentProofSecrets: [],
-            history: [],
-            sentTokens: [],
           }
-        },
-        { resetSpentSecrets: true }
+        }
       )
 
       syncRuntimeSeed(next)
       pushToastRef.current?.('success', 'Agwallet created', formatMintHost(next.activeMintUrl))
     },
-    [commitState, setActiveQuoteSynced, syncRuntimeSeed]
+    [commitState, requireWalletUnlocked, setActiveQuoteSynced, syncRuntimeSeed]
   )
 
   const restoreProofsFromSeed = useCallback(
     async (mintUrl?: string): Promise<{ restoredSats: number; restoredProofs: number }> => {
-      const targetUrl = normalizeMintUrl(mintUrl ?? stateRef.current.activeMintUrl)
+      const restoring = stateRef.current
+      if (restoring.pendingLightningMelt) {
+        throw new Error('Resolve the pending Lightning payment before restoring Agwallet.')
+      }
+      const targetUrl = normalizeMintUrl(mintUrl ?? restoring.activeMintUrl)
       if (!targetUrl) throw new Error('No mint selected.')
       if (!stateRef.current.mnemonic && !stateRef.current.privateKeyHex) {
         throw new Error('No recovery phrase or private key configured.')
@@ -444,14 +504,29 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         let addedCount = 0
         let addedSats = 0
         commitState((prev) => {
+          if (
+            !prev.initialized ||
+            prev.mnemonic !== restoring.mnemonic ||
+            prev.privateKeyHex !== restoring.privateKeyHex ||
+            prev.pendingLightningMelt
+          ) {
+            return prev
+          }
           const existing = prev.proofsByMint[targetUrl] ?? []
-          const existingSecrets = new Set(existing.map((p) => p.secret))
+          const existingSecrets = new Set([
+            ...existing.map((p) => p.secret),
+            ...(prev.spentProofSecrets ?? []),
+          ])
           const newlyFound = res.unspentProofs.filter((p) => !existingSecrets.has(p.secret))
+          const counters = { ...prev.keysetCounters }
+          for (const [id, value] of Object.entries(res.counters)) {
+            counters[id] = Math.max(counters[id] ?? 0, value)
+          }
           addedCount = newlyFound.length
           addedSats = sumStoredProofs(newlyFound)
           return {
             ...prev,
-            keysetCounters: { ...prev.keysetCounters, ...res.counters },
+            keysetCounters: counters,
             proofsByMint:
               newlyFound.length > 0
                 ? {
@@ -484,11 +559,17 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
   const importBackupJson = useCallback(
     async (rawJson: string) => {
       const backup = parseWalletBackupJson(rawJson)
+      const hasAccountCredentials = Boolean(backup.mnemonic || backup.privateKeyHex)
       let importedMints = 0
       let importedProofs = 0
       let totalSats = 0
 
       const nextState = commitState((prev) => {
+        if (prev.pendingLightningMelt) {
+          throw new Error('Resolve the pending Lightning payment before restoring Agwallet.')
+        }
+        const { mnemonic: adoptedMnemonic, privateKeyHex: adoptedPrivKey } =
+          selectWalletRestoreCredentials(prev, backup)
         const mintMap = new Map<string, CashuMintAccount>()
         for (const m of prev.mints) mintMap.set(m.url, m)
         for (const m of backup.mints) {
@@ -498,13 +579,23 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
           }
         }
 
-        const nextProofsByMint: Record<string, StoredCashuProof[]> = { ...prev.proofsByMint }
+        const mergedSpent = sanitizeSpentProofSecrets([
+          ...(prev.spentProofSecrets ?? []),
+          ...(hasAccountCredentials ? (backup.spentProofSecrets ?? []) : []),
+        ])
+        const spent = new Set(mergedSpent)
+        const nextProofsByMint: Record<string, StoredCashuProof[]> = {}
+        for (const [url, list] of Object.entries(prev.proofsByMint)) {
+          nextProofsByMint[url] = list.filter((proof) => !spent.has(proof.secret))
+        }
         for (const [url, incomingProofs] of Object.entries(backup.proofsByMint)) {
           const before = nextProofsByMint[url] ?? []
           const beforeSecrets = new Set(before.map((p) => p.secret))
-          const newlyAdded = incomingProofs.filter((p) => !beforeSecrets.has(p.secret))
+          const newlyAdded = incomingProofs.filter(
+            (p) => !beforeSecrets.has(p.secret) && !spent.has(p.secret)
+          )
           importedProofs += newlyAdded.length
-          nextProofsByMint[url] = deduplicateProofs([...before, ...incomingProofs])
+          nextProofsByMint[url] = deduplicateProofs([...before, ...newlyAdded])
           if (!mintMap.has(url)) {
             const cat = findCatalogMint(url)
             mintMap.set(url, {
@@ -524,7 +615,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         const historyIds = new Set(prev.history.map((h) => h.id))
         const mergedHistory = [
           ...prev.history,
-          ...backup.history.filter((h) => h && h.id && !historyIds.has(h.id)),
+          ...(hasAccountCredentials ? backup.history : []).filter((h) => h && h.id && !historyIds.has(h.id)),
         ]
           .sort((a, b) => b.createdAt - a.createdAt)
           .slice(0, 250)
@@ -532,24 +623,18 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         const sentIds = new Set(prev.sentTokens.map((s) => s.id))
         const mergedSent = [
           ...prev.sentTokens,
-          ...backup.sentTokens.filter((s) => s && s.id && !sentIds.has(s.id)),
+          ...(hasAccountCredentials ? backup.sentTokens : []).filter((s) => s && s.id && !sentIds.has(s.id)),
         ]
           .sort((a, b) => b.createdAt - a.createdAt)
           .slice(0, 100)
 
         const nextCounters: Record<string, number> = { ...prev.keysetCounters }
-        if (backup.keysetCounters) {
+        if (hasAccountCredentials && backup.keysetCounters) {
           for (const [ksId, c] of Object.entries(backup.keysetCounters)) {
             nextCounters[ksId] = Math.max(nextCounters[ksId] ?? 0, c)
           }
         }
 
-        const adoptedMnemonic = backup.mnemonic ?? prev.mnemonic
-        const adoptedPrivKey = backup.privateKeyHex ?? prev.privateKeyHex
-        const mergedSpent = sanitizeSpentProofSecrets([
-          ...(prev.spentProofSecrets ?? []),
-          ...(backup.spentProofSecrets ?? []),
-        ])
 
         return {
           version: 1,
@@ -570,19 +655,13 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
 
       syncRuntimeSeed(nextState)
 
-      if (backup.boltzSwaps.length > 0) {
+      if (hasAccountCredentials && backup.boltzSwaps.length > 0) {
         commitSwaps((prev) => {
           const ids = new Set(prev.map((s) => s.id))
           return [...prev, ...backup.boltzSwaps.filter((s) => s && s.id && !ids.has(s.id))]
             .sort((a, b) => b.createdAt - a.createdAt)
             .slice(0, 40)
         })
-      }
-
-      if (backup.boltzApiUrl) {
-        const saved = saveStoredBoltzApiUrl(backup.boltzApiUrl)
-        boltzApiUrlRef.current = saved
-        setBoltzApiUrlState(saved)
       }
 
       pushToastRef.current?.(
@@ -631,56 +710,31 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       setBusy(true)
       setLastError(null)
       try {
-        clearCashuWalletInstanceCache()
-        setActiveQuoteSynced(null)
-
-        const targetMint =
-          (opts?.mintUrl && normalizeMintUrl(opts.mintUrl)) || stateRef.current.activeMintUrl
-
-        if (detected.mode === 'mnemonic') {
-          const mnemonic = normalizeMnemonicPhrase(rawInput)
-          const privateKeyHex = derivePrivateKeyHexFromSeed(mnemonicToSeedSync(mnemonic))
-          const next = commitState(
-            (prev) => ({
-              version: 1,
-              initialized: true,
-              mnemonic,
-              privateKeyHex,
-              keysetCounters: {},
-              activeMintUrl: prev.mints.some((m) => m.url === targetMint)
-                ? targetMint
-                : prev.activeMintUrl,
-              mints: prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints,
-              proofsByMint: {},
-              spentProofSecrets: [],
-              history: [],
-              sentTokens: [],
-            }),
-            { resetSpentSecrets: true }
-          )
-          syncRuntimeSeed(next)
-        } else {
-          const privateKeyHex = parseWalletPrivateKeyHex(rawInput)
-          if (!privateKeyHex) {
-            throw new Error('Invalid private key.')
-          }
-          const next = commitState(
-            (prev) => ({
-              version: 1,
-              initialized: true,
-              privateKeyHex,
-              keysetCounters: {},
-              activeMintUrl: prev.mints.some((m) => m.url === targetMint)
-                ? targetMint
-                : prev.activeMintUrl,
-              mints: prev.mints.length > 0 ? prev.mints : createEmptyWalletState().mints,
-              proofsByMint: {},
-              spentProofSecrets: [],
-              history: [],
-              sentTokens: [],
-            }),
-            { resetSpentSecrets: true }
-          )
+        const current = stateRef.current
+        if (current.pendingLightningMelt) {
+          throw new Error('Resolve the pending Lightning payment before restoring Agwallet.')
+        }
+        const proposed =
+          detected.mode === 'mnemonic'
+            ? { mnemonic: normalizeMnemonicPhrase(rawInput) }
+            : { privateKeyHex: parseWalletPrivateKeyHex(rawInput) ?? undefined }
+        if (!proposed.mnemonic && !proposed.privateKeyHex) {
+          throw new Error('Invalid private key.')
+        }
+        const credentials = selectWalletRestoreCredentials(current, proposed)
+        if (credentials !== current) {
+          clearCashuWalletInstanceCache()
+          setActiveQuoteSynced(null)
+          const targetMint =
+            (opts?.mintUrl && normalizeMintUrl(opts.mintUrl)) || current.activeMintUrl
+          const next = commitState((prev) => ({
+            ...prev,
+            ...credentials,
+            initialized: true,
+            activeMintUrl: prev.mints.some((m) => m.url === targetMint)
+              ? targetMint
+              : prev.activeMintUrl,
+          }))
           syncRuntimeSeed(next)
         }
 
@@ -688,20 +742,39 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
         let restoredProofs = 0
         if (opts?.scanMints !== false) {
           try {
-            const scan = await restoreCashuProofsFromMint(stateRef.current.activeMintUrl)
-            restoredSats = scan.restoredSats
-            restoredProofs = scan.unspentProofs.length
-            commitState((prev) => ({
-              ...prev,
-              keysetCounters: { ...prev.keysetCounters, ...scan.counters },
-              proofsByMint:
-                scan.unspentProofs.length > 0
-                  ? {
-                      ...prev.proofsByMint,
-                      [prev.activeMintUrl]: scan.unspentProofs,
-                    }
-                  : prev.proofsByMint,
-            }))
+            const restoring = stateRef.current
+            const mintUrl = restoring.activeMintUrl
+            const scan = await restoreCashuProofsFromMint(mintUrl)
+            commitState((prev) => {
+              if (
+                !prev.initialized ||
+                prev.mnemonic !== restoring.mnemonic ||
+                prev.privateKeyHex !== restoring.privateKeyHex ||
+                prev.pendingLightningMelt
+              ) {
+                return prev
+              }
+              const existing = prev.proofsByMint[mintUrl] ?? []
+              const present = new Set(existing.map((proof) => proof.secret))
+              const spent = new Set(prev.spentProofSecrets ?? [])
+              const extra = scan.unspentProofs.filter(
+                (proof) => !present.has(proof.secret) && !spent.has(proof.secret)
+              )
+              restoredSats = sumStoredProofs(extra)
+              restoredProofs = extra.length
+              const counters = { ...prev.keysetCounters }
+              for (const [id, value] of Object.entries(scan.counters)) {
+                counters[id] = Math.max(counters[id] ?? 0, value)
+              }
+              return {
+                ...prev,
+                keysetCounters: counters,
+                proofsByMint: {
+                  ...prev.proofsByMint,
+                  [mintUrl]: deduplicateProofs([...existing, ...extra]),
+                },
+              }
+            })
           } catch {
             // Mint may be unreachable during import; wallet keys are still safely imported
           }
@@ -727,6 +800,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
   )
 
   const exportBackupJson = useCallback((): string => {
+    requireWalletUnlocked()
     const cur = stateRef.current
     const spentProofSecrets = sanitizeSpentProofSecrets(cur.spentProofSecrets)
     const payload: WalletBackupPayload = {
@@ -746,7 +820,7 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       boltzApiUrl: boltzApiUrlRef.current,
     }
     return JSON.stringify(payload, null, 2)
-  }, [])
+  }, [requireWalletUnlocked])
 
   const exportWalletKeyJson = useCallback((): string => {
     return exportBackupJson()
@@ -1400,69 +1474,143 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     []
   )
 
+  const applyLightningOutcome = useCallback(
+    (pending: PendingLightningMelt, outcome: LightningMeltOutcome) => {
+      if (outcome.state === 'pending') return
+      commitState((prev) => {
+        if (prev.pendingLightningMelt?.transaction.id !== pending.transaction.id) return prev
+        const mintUrl = pending.transaction.mintUrl
+        const credited = outcome.state === 'paid' ? outcome.change : outcome.recoveredInputs
+        const creditedSecrets = new Set(credited.map((proof) => proof.secret))
+        const spent = outcome.state === 'paid'
+          ? [...(prev.spentProofSecrets ?? []), ...pending.inputs.map((proof) => proof.secret)]
+          : (prev.spentProofSecrets ?? []).filter((secret) => !creditedSecrets.has(secret))
+        const finalTransaction: WalletTransaction = {
+          ...pending.transaction,
+          status: outcome.state === 'paid' ? 'completed' : 'expired',
+          ...(outcome.state === 'paid' ? { feeSats: outcome.feePaidSats } : {}),
+        }
+        return {
+          ...prev,
+          pendingLightningMelt: undefined,
+          spentProofSecrets: sanitizeSpentProofSecrets(spent),
+          proofsByMint: {
+            ...prev.proofsByMint,
+            [mintUrl]: deduplicateProofs([...(prev.proofsByMint[mintUrl] ?? []), ...credited]),
+          },
+          history: [finalTransaction, ...prev.history.filter((tx) => tx.id !== finalTransaction.id)].slice(0, 250),
+        }
+      }, { persistLightningTransition: true })
+      pushToastRef.current?.(
+        outcome.state === 'paid' ? 'success' : 'info',
+        outcome.state === 'paid'
+          ? `Paid ${pending.transaction.amountSats.toLocaleString()} sats`
+          : 'Lightning quote expired; the mint confirmed your inputs were restored',
+        outcome.state === 'paid' && outcome.feePaidSats > 0
+          ? `Total fees: ${outcome.feePaidSats} sats`
+          : undefined
+      )
+    },
+    [commitState]
+  )
+
+  useEffect(() => {
+    if (!walletState.pendingLightningMelt || !navigator.locks) return
+    const poll = () => {
+      void navigator.locks.request('agnostr:agwallet:lightning-melt', { ifAvailable: true }, async (lock) => {
+        const pending = stateRef.current.pendingLightningMelt
+        if (!lock || !pending) return
+        const disk = loadPersistedCashuWallet()
+        if (disk.pendingLightningMelt?.transaction.id !== pending.transaction.id) return
+        const outcome = await reconcileLightningMelt(pending)
+        applyLightningOutcome(pending, outcome)
+      }).catch(() => {
+        // Keep the paid/pending journal on any ambiguous mint or storage response.
+      })
+    }
+    const timer = window.setInterval(poll, 5000)
+    poll()
+    return () => window.clearInterval(timer)
+  }, [walletState.pendingLightningMelt, applyLightningOutcome])
+
+  useEffect(() => {
+    const observeMeltTransition = (event: StorageEvent) => {
+      if (event.key !== CASHU_WALLET_STORAGE_KEY) return
+      const disk = loadPersistedCashuWallet()
+      if (disk.pendingLightningMelt?.transaction.id === stateRef.current.pendingLightningMelt?.transaction.id &&
+          disk.lastLightningMeltId === stateRef.current.lastLightningMeltId) return
+      if (disk.mnemonic !== stateRef.current.mnemonic || disk.privateKeyHex !== stateRef.current.privateKeyHex) return
+      stateRef.current = disk
+      setWalletState(disk)
+    }
+    window.addEventListener('storage', observeMeltTransition)
+    return () => window.removeEventListener('storage', observeMeltTransition)
+  }, [])
+
   const payLightningQuote = useCallback(
     async (
       preview: CashuMeltQuotePreview,
       meta?: { counterparty?: string; memo?: string; txType?: 'send_ln' | 'zap_out' }
     ) => {
+      if (!navigator.locks) throw new Error('Lightning sending requires a browser that can lock the wallet across tabs.')
       setBusy(true)
       setLastError(null)
       try {
-        const existingProofs = stateRef.current.proofsByMint[preview.mintUrl] ?? []
-        const result = await executeCashuMeltQuote({
-          preview,
-          existingProofs,
-          onCommitKeep: (keepProofs) => {
-            commitState((prev) => ({
-              ...prev,
-              proofsByMint: {
-                ...prev.proofsByMint,
-                [preview.mintUrl]: keepProofs,
-              },
-            }))
-          },
+        return await navigator.locks.request('agnostr:agwallet:lightning-melt', async () => {
+          const base = stateRef.current
+          if (base.pendingLightningMelt) throw new Error('A Lightning payment is still pending. Check Agwallet activity before sending again.')
+          if (base.history.some((tx) => (
+            (tx.type === 'send_ln' || tx.type === 'zap_out') &&
+            (tx.status === 'pending' || tx.status === 'completed') &&
+            tx.invoice?.toLowerCase() === preview.invoice.toLowerCase()
+          ))) throw new Error('This invoice already has a pending or completed payment in Agwallet.')
+          const transaction: WalletTransaction = {
+            id: makeId('lnmelt'),
+            createdAt: Date.now(),
+            type: meta?.txType ?? 'send_ln',
+            status: 'pending',
+            amountSats: preview.amountSats,
+            mintUrl: preview.mintUrl,
+            counterparty: meta?.counterparty ?? preview.recipient,
+            memo: meta?.memo ?? preview.memo,
+            invoice: preview.invoice,
+          }
+          const { pending, submit } = await prepareRecoverableLightningMelt(
+            preview, base.proofsByMint[preview.mintUrl] ?? [], transaction
+          )
+          commitState((prev) => {
+            const currentProofs = new Map((prev.proofsByMint[preview.mintUrl] ?? []).map((proof) => [proof.secret, proof]))
+            if (prev.pendingLightningMelt || prev.mnemonic !== base.mnemonic ||
+                prev.privateKeyHex !== base.privateKeyHex ||
+                !pending.inputs.every((proof) => {
+                  const current = currentProofs.get(proof.secret)
+                  return current?.C === proof.C && current.id === proof.id && current.amount === proof.amount
+                })) throw new Error('The wallet changed. Review a fresh Lightning quote.')
+            return { ...prev, pendingLightningMelt: pending, history: [transaction, ...prev.history].slice(0, 250) }
+          }, { persistLightningTransition: true })
+
+          try {
+            const outcome = await submit()
+            if (outcome.state === 'paid') {
+              applyLightningOutcome(pending, outcome)
+              return { paid: true, feePaidSats: outcome.feePaidSats, preimage: outcome.preimage }
+            }
+          } catch {
+            // A lost response is not a failed payment. The same quote and all
+            // inputs and change data are on disk; polling is read-only.
+          }
+          pushToastRef.current?.('info', 'Lightning payment pending', 'Check Agwallet activity before sending again.')
+          return { paid: false, feePaidSats: 0, preimage: null }
         })
-
-        if (result.changeProofs.length > 0) {
-          appendProofsToMint(preview.mintUrl, result.changeProofs)
-        }
-
-        const txType = meta?.txType ?? 'send_ln'
-        recordTransaction({
-          type: txType,
-          status: result.paid ? 'completed' : 'pending',
-          amountSats: preview.amountSats,
-          feeSats: result.feePaidSats,
-          mintUrl: preview.mintUrl,
-          counterparty: meta?.counterparty ?? preview.recipient,
-          memo: meta?.memo ?? preview.memo,
-          invoice: preview.invoice,
-        })
-
-        pushToastRef.current?.(
-          'success',
-          txType === 'zap_out'
-            ? `Zapped ${preview.amountSats.toLocaleString()} sats`
-            : `Paid ${preview.amountSats.toLocaleString()} sats`,
-          result.feePaidSats > 0
-            ? `Fee: ${result.feePaidSats} sat${result.feePaidSats === 1 ? '' : 's'}`
-            : 'Zero routing fee'
-        )
-
-        return {
-          paid: result.paid,
-          feePaidSats: result.feePaidSats,
-          preimage: result.preimage,
-        }
       } catch (err) {
-        const msg = normalizeMintError(err, 'Lightning payment failed.')
+        const msg = normalizeMintError(err, 'Could not submit Lightning payment.')
         setLastError(msg)
         throw new Error(msg)
       } finally {
         setBusy(false)
       }
     },
-    [appendProofsToMint, commitState, recordTransaction]
+    [applyLightningOutcome, commitState]
   )
 
   const payBolt11Invoice = useCallback(
@@ -1523,174 +1671,15 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     return await fetchBoltzReversePairApi(boltzApiUrlRef.current)
   }, [])
 
-  const createOnchainReceiveSwap = useCallback(
-    async (amountSats: number, mintUrl?: string): Promise<BoltzSwapRecord> => {
-      ensureInitializedWithKeys()
-      const targetUrl = normalizeMintUrl(mintUrl ?? stateRef.current.activeMintUrl)
-      if (!targetUrl) throw new Error('No mint selected.')
-      const cleanSats = Math.floor(amountSats)
-      if (!Number.isFinite(cleanSats) || cleanSats <= 0) {
-        throw new Error('Enter a valid satoshi amount.')
-      }
+  // Keep the recovery surface available without allowing new deposits or melts
+  // against an unverified swap that we cannot locally claim or refund.
+  const createOnchainReceiveSwap = useCallback(async (): Promise<BoltzSwapRecord> => {
+    throw new Error(BOLTZ_NEW_SWAPS_PAUSED_MESSAGE)
+  }, [])
 
-      setBusy(true)
-      setLastError(null)
-      try {
-        const pairInfo = await fetchBoltzSubmarinePairApi(boltzApiUrlRef.current)
-        if (cleanSats < pairInfo.minSats || cleanSats > pairInfo.maxSats) {
-          throw new Error(
-            `Boltz on-chain receive requires ${pairInfo.minSats.toLocaleString()}–${pairInfo.maxSats.toLocaleString()} sats.`
-          )
-        }
-
-        const mintQuote = await createCashuMintQuote(
-          targetUrl,
-          cleanSats,
-          'Boltz on-chain BTC deposit'
-        )
-        const swap = await createBoltzSubmarineSwap({
-          apiUrl: boltzApiUrlRef.current,
-          invoice: mintQuote.invoice,
-          mintUrl: targetUrl,
-          mintQuoteId: mintQuote.quoteId,
-          amountSats: cleanSats,
-          pairInfo,
-        })
-
-        commitSwaps((prev) => [swap, ...prev].slice(0, 40))
-        recordTransaction({
-          type: 'receive_btc',
-          status: 'pending',
-          amountSats: cleanSats,
-          feeSats: swap.feeSats,
-          mintUrl: targetUrl,
-          memo: `Boltz BTC deposit (${swap.id})`,
-          swapId: swap.id,
-        })
-        pushToastRef.current?.(
-          'info',
-          'On-chain BTC deposit address ready',
-          `Send exactly ${swap.expectedOnchainSats.toLocaleString()} sats`
-        )
-        return swap
-      } catch (err) {
-        const msg = normalizeMintError(err, 'Failed to create on-chain BTC receive swap.')
-        setLastError(msg)
-        throw new Error(msg)
-      } finally {
-        setBusy(false)
-      }
-    },
-    [commitSwaps, ensureInitializedWithKeys, recordTransaction]
-  )
-
-  const createOnchainSendSwap = useCallback(
-    async (
-      destinationAddress: string,
-      amountSats: number,
-      mintUrl?: string
-    ): Promise<BoltzSwapRecord> => {
-      const targetUrl = normalizeMintUrl(mintUrl ?? stateRef.current.activeMintUrl)
-      if (!targetUrl) throw new Error('No mint selected.')
-      const cleanSats = Math.floor(amountSats)
-      if (!Number.isFinite(cleanSats) || cleanSats <= 0) {
-        throw new Error('Enter a valid satoshi amount.')
-      }
-
-      setBusy(true)
-      setLastError(null)
-      try {
-        const pairInfo = await fetchBoltzReversePairApi(boltzApiUrlRef.current)
-        if (cleanSats < pairInfo.minSats || cleanSats > pairInfo.maxSats) {
-          throw new Error(
-            `Boltz on-chain send requires ${pairInfo.minSats.toLocaleString()}–${pairInfo.maxSats.toLocaleString()} sats.`
-          )
-        }
-
-        const available = sumStoredProofs(stateRef.current.proofsByMint[targetUrl])
-        if (available < cleanSats) {
-          throw new Error(`Insufficient balance (${available.toLocaleString()} sats on selected mint).`)
-        }
-
-        const swap = await createBoltzReverseSwap({
-          apiUrl: boltzApiUrlRef.current,
-          destinationAddress,
-          amountSats: cleanSats,
-          mintUrl: targetUrl,
-          pairInfo,
-        })
-        commitSwaps((prev) => [swap, ...prev].slice(0, 40))
-
-        try {
-          const meltPreview = await createCashuMeltQuote({
-            mintUrl: targetUrl,
-            invoice: swap.invoice,
-            recipient: destinationAddress.trim(),
-            memo: `Boltz on-chain BTC send (${swap.id})`,
-          })
-
-          const existingProofs = stateRef.current.proofsByMint[targetUrl] ?? []
-          const meltResult = await executeCashuMeltQuote({
-            preview: meltPreview,
-            existingProofs,
-            onCommitKeep: (keepProofs) => {
-              commitState((prev) => ({
-                ...prev,
-                proofsByMint: {
-                  ...prev.proofsByMint,
-                  [targetUrl]: keepProofs,
-                },
-              }))
-            },
-          })
-
-          if (meltResult.changeProofs.length > 0) {
-            appendProofsToMint(targetUrl, meltResult.changeProofs)
-          }
-
-          const updatedSwap: BoltzSwapRecord = {
-            ...swap,
-            status: meltResult.paid ? 'invoice.paid' : 'invoice.pending',
-            updatedAt: Date.now(),
-          }
-          commitSwaps((prev) => prev.map((s) => (s.id === swap.id ? updatedSwap : s)))
-          recordTransaction({
-            type: 'send_btc',
-            status: 'pending',
-            amountSats: cleanSats,
-            feeSats: swap.feeSats + meltResult.feePaidSats,
-            mintUrl: targetUrl,
-            counterparty: destinationAddress.trim(),
-            memo: `Boltz BTC swap (${swap.id})`,
-            swapId: swap.id,
-          })
-          pushToastRef.current?.(
-            'success',
-            'Reverse BTC swap initiated',
-            `Swap ${swap.id} · Save rescue JSON until claimed`
-          )
-          return updatedSwap
-        } catch (meltErr) {
-          const meltMsg = normalizeMintError(meltErr, 'Mint melt payment to Boltz failed.')
-          commitSwaps((prev) =>
-            prev.map((s) =>
-              s.id === swap.id
-                ? { ...s, status: 'invoice.failedToPay', error: meltMsg, updatedAt: Date.now() }
-                : s
-            )
-          )
-          throw new Error(meltMsg)
-        }
-      } catch (err) {
-        const msg = normalizeMintError(err, 'Failed to create on-chain BTC send swap.')
-        setLastError(msg)
-        throw new Error(msg)
-      } finally {
-        setBusy(false)
-      }
-    },
-    [appendProofsToMint, commitState, commitSwaps, recordTransaction]
-  )
+  const createOnchainSendSwap = useCallback(async (): Promise<BoltzSwapRecord> => {
+    throw new Error(BOLTZ_NEW_SWAPS_PAUSED_MESSAGE)
+  }, [])
 
   const refreshBoltzSwap = useCallback(
     async (swapId: string): Promise<BoltzSwapRecord | null> => {
@@ -1859,144 +1848,216 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     void refreshOnchainBtcBalance()
   }, [btcAddress, refreshOnchainBtcBalance])
 
-  const sendNativeOnchainBtc = useCallback(
-    async (
-      toAddress: string,
-      amountSats: number,
-      feeRateSatVb?: number
-    ): Promise<{ txid: string; feeSats: number; sentSats: number }> => {
-      const keys = nativeBtcRef.current
-      if (!keys) {
-        throw new Error('Create or import an Agwallet first to send Core Bitcoin.')
-      }
+  const bitcoinSender = useMemo(
+    () => createNativeBitcoinSend(() => {
+      requireWalletUnlocked()
+      return nativeBtcRef.current
+    }),
+    [requireWalletUnlocked]
+  )
+  const [btcPendingSend, setBtcPendingSend] = useState<NativeBitcoinPendingSend | null>(null)
+  const updateBtcPendingSend = useCallback(() => {
+    const address = btcAddressRef.current
+    try {
+      setBtcPendingSend(address ? bitcoinSender.pending(address) : null)
+    } catch (error) {
+      setBtcPendingSend(null)
+      setBtcError(error instanceof Error ? error.message : 'Could not read Bitcoin send recovery data.')
+    }
+  }, [bitcoinSender])
 
+  useEffect(() => {
+    updateBtcPendingSend()
+    if (!btcAddress) return
+    const storageChanged = (event: StorageEvent) => {
+      if (event.key === null || event.key === nativeBitcoinSendJournalKey(btcAddress)) updateBtcPendingSend()
+    }
+    window.addEventListener('storage', storageChanged)
+    return () => window.removeEventListener('storage', storageChanged)
+  }, [btcAddress, updateBtcPendingSend])
+
+  const prepareNativeOnchainBtc = useCallback(
+    (toAddress: string, amountSats: number, feeRateSatVb: number) =>
+      bitcoinSender.prepare(toAddress, amountSats, feeRateSatVb),
+    [bitcoinSender]
+  )
+
+  const finishNativeOnchainBtc = useCallback(
+    async (operation: () => Promise<NativeBitcoinPendingSend>) => {
       setBusy(true)
       setLastError(null)
       setBtcError(null)
       try {
-        const liveState = await fetchBitcoinOnchainState(keys.address)
-        if (btcAddressRef.current === keys.address) {
-          setBtcBalanceConfirmedSats(liveState.confirmedSats)
-          setBtcBalanceUnconfirmedSats(liveState.unconfirmedSats)
-          setBtcUtxoCount(liveState.utxos.length)
-          setBtcLastUpdatedAt(liveState.fetchedAt)
+        const sent = await operation()
+        if (btcAddressRef.current === sent.fromAddress) {
+          recordTransaction({
+            id: `bitcoin:onchain:${sent.txid}`,
+            type: 'send_btc',
+            status: 'pending',
+            amountSats: sent.amountSats,
+            feeSats: sent.feeSats,
+            mintUrl: 'bitcoin:onchain',
+            counterparty: sent.toAddress,
+            memo: 'Core Bitcoin (BIP-84) send',
+            txid: sent.txid,
+          })
+          void refreshOnchainBtcBalance()
         }
-
-        const resolvedFeeRate =
-          typeof feeRateSatVb === 'number' && Number.isFinite(feeRateSatVb) && feeRateSatVb >= 1
-            ? Math.ceil(feeRateSatVb)
-            : (await fetchBitcoinFeeRates()).halfHourFee
-
-        const built = buildAndSignP2wpkhTx({
-          wallet: keys,
-          utxos: liveState.utxos,
-          toAddress: toAddress.trim(),
-          amountSats,
-          feeRateSatVb: resolvedFeeRate,
-        })
-
-        const txid = await broadcastBitcoinRawTx(built.rawTxHex)
-
-        recordTransaction({
-          type: 'send_btc',
-          status: 'pending',
-          amountSats: built.sentSats,
-          feeSats: built.feeSats,
-          mintUrl: 'bitcoin:onchain',
-          counterparty: toAddress.trim(),
-          memo: 'Core Bitcoin (BIP-84) send',
-          txid,
-        })
-
-        pushToastRef.current?.(
-          'success',
-          `Sent ${built.sentSats.toLocaleString()} sats on-chain`,
-          `Fee: ${built.feeSats.toLocaleString()} sats · ${txid.slice(0, 10)}…`
-        )
-
-        void refreshOnchainBtcBalance()
-        return { txid, feeSats: built.feeSats, sentSats: built.sentSats }
+        return sent
       } catch (err) {
-        const msg =
-          err instanceof Error ? err.message : 'Failed to broadcast Core Bitcoin transaction.'
+        const msg = err instanceof Error ? err.message : 'Could not send Bitcoin transaction.'
         setLastError(msg)
         setBtcError(msg)
         throw new Error(msg)
       } finally {
+        updateBtcPendingSend()
         setBusy(false)
       }
     },
-    [recordTransaction, refreshOnchainBtcBalance]
+    [recordTransaction, refreshOnchainBtcBalance, updateBtcPendingSend]
   )
 
-  /* ------------------------------------------------------------------------
-     Proof-Safe Encrypted Multi-Device Sync (`exportSyncState` / `mergeSyncState`)
-     ------------------------------------------------------------------------ */
+  const sendNativeOnchainBtc = useCallback(
+    (review: NativeBitcoinSendReview) => finishNativeOnchainBtc(() => bitcoinSender.confirm(review)),
+    [bitcoinSender, finishNativeOnchainBtc]
+  )
 
-  const exportSyncState = useCallback((): WalletSyncExportInfo | null => {
-    return buildWalletSyncExport(stateRef.current, boltzSwapsRef.current, boltzApiUrlRef.current)
-  }, [])
+  const retryNativeOnchainBtc = useCallback(
+    (txid: string) => finishNativeOnchainBtc(() => bitcoinSender.retry(txid)),
+    [bitcoinSender, finishNativeOnchainBtc]
+  )
 
-  const mergeSyncState = useCallback(
-    (rawRemote: unknown): boolean => {
-      const merged = mergeSyncedWalletState({
-        localState: stateRef.current,
-        localSwaps: boltzSwapsRef.current,
-        localBoltzApiUrl: boltzApiUrlRef.current,
-        rawRemote,
-      })
-      if (!merged.changed) return false
-
-      if (merged.adoptedNewWallet) {
-        clearCashuWalletInstanceCache()
-        setActiveQuoteSynced(null)
-        commitState(() => merged.nextState, { fromRemoteSync: true, resetSpentSecrets: true })
-        syncRuntimeSeed(merged.nextState)
-
-        if (merged.swapsChanged) {
-          commitSwaps(() => merged.nextSwaps, { fromRemoteSync: true })
-        }
-        if (merged.apiUrlChanged) {
-          const saved = saveStoredBoltzApiUrl(merged.nextBoltzApiUrl)
-          boltzApiUrlRef.current = saved
-          setBoltzApiUrlState(saved)
-        }
-
-        let totalSats = 0
-        for (const list of Object.values(merged.nextState.proofsByMint)) {
-          totalSats += sumStoredProofs(list)
-        }
-        const host = formatMintHost(merged.nextState.activeMintUrl)
-        pushToastRef.current?.(
-          'info',
-          'Agwallet synced from linked device',
-          totalSats > 0 ? `${totalSats.toLocaleString()} sats · ${host}` : host
-        )
-        return true
-      }
-
-      if (merged.stateChanged) {
-        commitState(() => merged.nextState, { fromRemoteSync: true })
-        syncRuntimeSeed(merged.nextState)
-      }
-      if (merged.swapsChanged) {
-        commitSwaps(() => merged.nextSwaps, { fromRemoteSync: true })
-      }
-      if (merged.apiUrlChanged) {
-        const saved = saveStoredBoltzApiUrl(merged.nextBoltzApiUrl)
-        boltzApiUrlRef.current = saved
-        setBoltzApiUrlState(saved)
-      }
-      return true
+  const dismissNativeOnchainBtc = useCallback(
+    async (txid: string) => {
+      await retryNativeOnchainBtc(txid)
+      await bitcoinSender.dismiss(txid)
+      updateBtcPendingSend()
     },
-    [commitState, commitSwaps, setActiveQuoteSynced, syncRuntimeSeed]
+    [bitcoinSender, retryNativeOnchainBtc, updateBtcPendingSend]
   )
+
+  const publishLockedState = useCallback((state: PersistedCashuWalletState) => {
+    const closed = { ...state }
+    delete closed.mnemonic
+    delete closed.privateKeyHex
+    nativeBtcRef.current?.privateKey.fill(0)
+    nativeBtcRef.current = null
+    clearCashuWalletInstanceCache()
+    setActiveQuoteSynced(null)
+    stateRef.current = closed
+    syncRuntimeSeed(closed)
+    setWalletState(closed)
+  }, [setActiveQuoteSynced, syncRuntimeSeed])
+
+  const protectWalletCredentials = useCallback(async (passphrase: string, backupConfirmed: boolean) => {
+    if (!backupConfirmed) throw new Error('Save and verify an offline wallet backup first.')
+    if (busy || vaultTransitionRef.current) throw new Error('Wait for the current wallet action to finish.')
+    const current = stateRef.current
+    if (current.pendingLightningMelt) {
+      throw new Error('Resolve the pending Lightning payment before securing the wallet.')
+    }
+    requireWalletUnlocked()
+    if (current.encryptedCredentials !== undefined) throw new Error('Wallet credentials are already encrypted.')
+    const original = localStorage.getItem(CASHU_WALLET_STORAGE_KEY)
+    if (!original) throw new Error('No saved wallet credentials to encrypt.')
+    const disk = loadPersistedCashuWallet()
+    if (
+      disk.mnemonic !== current.mnemonic ||
+      disk.privateKeyHex !== current.privateKeyHex ||
+      !deriveNativeBtcWallet(disk)
+    ) {
+      throw new Error('The saved wallet changed. Reload before securing it.')
+    }
+
+    const profile = getActiveProfileId()
+    vaultTransitionRef.current = true
+    try {
+      const envelope = await encryptWalletCredentials(disk, passphrase)
+      const check = await decryptWalletCredentials(envelope, passphrase)
+      if (check.mnemonic !== current.mnemonic || check.privateKeyHex !== current.privateKeyHex) {
+        throw new Error('Wallet encryption did not pass its recovery check. No keys were changed.')
+      }
+      if (
+        profile !== getActiveProfileId() ||
+        stateRef.current !== current ||
+        !replaceWalletCredentialsWithEnvelope(original, envelope)
+      ) {
+        throw new Error('Could not replace the saved credentials safely. Check browser storage and close other wallet tabs before retrying.')
+      }
+
+      publishLockedState({ ...disk, encryptedCredentials: envelope })
+      const saved = localStorage.getItem(CASHU_WALLET_STORAGE_KEY)
+      const snapshotVerified = Boolean(
+        profile && saved && await snapshotCurrentProfileToVault(profile, [CASHU_WALLET_STORAGE_KEY, saved])
+      )
+      return { snapshotVerified }
+    } finally {
+      vaultTransitionRef.current = false
+    }
+  }, [busy, publishLockedState, requireWalletUnlocked])
+
+  const unlockWalletCredentials = useCallback(async (passphrase: string) => {
+    const current = stateRef.current
+    const envelope = current.encryptedCredentials
+    if (envelope === undefined || current.mnemonic || current.privateKeyHex) return
+    if (vaultTransitionRef.current) throw new Error('Wait for the current wallet action to finish.')
+    const profile = getActiveProfileId()
+    vaultTransitionRef.current = true
+    try {
+      const credentials = await decryptWalletCredentials(envelope, passphrase)
+      if (
+        profile !== getActiveProfileId() ||
+        stateRef.current !== current ||
+        !sameStoredWalletCredentialEnvelope(readStoredWalletCredentialEnvelope(), envelope)
+      ) {
+        throw new Error('The saved wallet changed. Reload before unlocking.')
+      }
+      if (!deriveNativeBtcWallet(credentials)) throw new Error('Encrypted wallet credentials are invalid.')
+      const next = { ...loadPersistedCashuWallet(), ...credentials }
+      stateRef.current = next
+      syncRuntimeSeed(next)
+      setWalletState(next)
+    } finally {
+      vaultTransitionRef.current = false
+    }
+  }, [syncRuntimeSeed])
+
+  const lockWalletCredentials = useCallback(() => {
+    const current = stateRef.current
+    if (current.encryptedCredentials === undefined) return
+    if (busy || vaultTransitionRef.current || current.pendingLightningMelt) {
+      throw new Error('Finish the pending wallet activity before locking.')
+    }
+    publishLockedState(current)
+  }, [busy, publishLockedState])
+
+  useEffect(() => {
+    const checkRemoteVault = (event: StorageEvent) => {
+      if (event.key !== CASHU_WALLET_STORAGE_KEY && event.key !== null) return
+      try {
+        const current = stateRef.current
+        const diskEnvelope = readStoredWalletCredentialEnvelope()
+        if (!sameStoredWalletCredentialEnvelope(diskEnvelope, current.encryptedCredentials)) {
+          if (diskEnvelope !== undefined) publishLockedState(loadPersistedCashuWallet())
+          else if (current.encryptedCredentials !== undefined) publishLockedState(current)
+        }
+      } catch {
+        if (stateRef.current.encryptedCredentials !== undefined) publishLockedState(stateRef.current)
+      }
+    }
+    window.addEventListener('storage', checkRemoteVault)
+    return () => window.removeEventListener('storage', checkRemoteVault)
+  }, [publishLockedState])
 
   const clearHistory = useCallback(() => {
-    commitState((prev) => ({ ...prev, history: [] }))
+    commitState((prev) => ({ ...prev, history: prev.pendingLightningMelt ? [prev.pendingLightningMelt.transaction] : [] }))
   }, [commitState])
 
   const resetAll = useCallback(() => {
+    requireWalletUnlocked()
+    if (stateRef.current.pendingLightningMelt) {
+      throw new Error('Resolve the pending Lightning payment before resetting Agwallet.')
+    }
     clearCashuWalletInstanceCache()
     try {
       localStorage.removeItem(CASHU_WALLET_STORAGE_KEY)
@@ -2025,11 +2086,17 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     setBtcRefreshing(false)
     setBtcLastUpdatedAt(null)
     setBtcError(null)
-  }, [setActiveQuoteSynced])
+  }, [requireWalletUnlocked, setActiveQuoteSynced])
 
   return useMemo<WalletEngine>(
     () => ({
       initialized: walletState.initialized,
+      credentialsEncrypted: walletState.encryptedCredentials !== undefined,
+      credentialsLocked: walletState.encryptedCredentials !== undefined &&
+        !walletState.mnemonic && !walletState.privateKeyHex,
+      protectWalletCredentials,
+      unlockWalletCredentials,
+      lockWalletCredentials,
       mnemonic: walletState.mnemonic ?? null,
       privateKeyHex: walletState.privateKeyHex ?? null,
       nutzapP2pkPubkeyHex,
@@ -2056,7 +2123,11 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       btcLastUpdatedAt,
       btcError,
       refreshOnchainBtcBalance,
+      btcPendingSend,
+      prepareNativeOnchainBtc,
       sendNativeOnchainBtc,
+      retryNativeOnchainBtc,
+      dismissNativeOnchainBtc,
       generateDraftWalletKeys,
       createNewWallet,
       importWalletKeyOrSeed,
@@ -2088,8 +2159,6 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       createOnchainSendSwap,
       refreshBoltzSwap,
       exportBoltzSwapRescueJson,
-      exportSyncState,
-      mergeSyncState,
       exportBackupJson,
       importBackupJson,
       clearHistory,
@@ -2097,6 +2166,10 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
     }),
     [
       walletState.initialized,
+      walletState.encryptedCredentials,
+      protectWalletCredentials,
+      unlockWalletCredentials,
+      lockWalletCredentials,
       walletState.mnemonic,
       walletState.privateKeyHex,
       nutzapP2pkPubkeyHex,
@@ -2123,7 +2196,11 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       btcLastUpdatedAt,
       btcError,
       refreshOnchainBtcBalance,
+      btcPendingSend,
+      prepareNativeOnchainBtc,
       sendNativeOnchainBtc,
+      retryNativeOnchainBtc,
+      dismissNativeOnchainBtc,
       generateDraftWalletKeys,
       createNewWallet,
       importWalletKeyOrSeed,
@@ -2155,8 +2232,6 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       createOnchainSendSwap,
       refreshBoltzSwap,
       exportBoltzSwapRescueJson,
-      exportSyncState,
-      mergeSyncState,
       exportBackupJson,
       importBackupJson,
       clearHistory,

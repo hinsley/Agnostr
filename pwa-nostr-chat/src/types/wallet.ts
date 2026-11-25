@@ -1,5 +1,5 @@
 import type { Event as NostrEvent } from 'nostr-tools'
-import type { WalletSyncExportInfo } from './deviceSync.ts'
+import type { NativeBitcoinPendingSend, NativeBitcoinSendReview } from '../lib/nativeBitcoinSend.ts'
 
 /* ==========================================================================
    Cashu Ecash Wallet, Boltz v2 On-Chain Swaps & NIP-57 Lightning Zaps Types
@@ -234,24 +234,6 @@ export interface WalletBackupPayload {
   boltzApiUrl?: string
 }
 
-export interface WalletSyncPayload {
-  version: 1
-  initialized: boolean
-  fingerprint: string
-  updatedAt: number
-  activeMintUrl: string
-  mnemonic?: string
-  privateKeyHex?: string
-  keysetCounters?: Record<string, number>
-  mints: CashuMintAccount[]
-  proofsByMint: Record<string, StoredCashuProof[]>
-  spentProofSecrets: string[]
-  history: WalletTransaction[]
-  sentTokens: CashuSentTokenRecord[]
-  boltzSwaps: BoltzSwapRecord[]
-  boltzApiUrl?: string
-}
-
 /* --------------------------------------------------------------------------
    NIP-57 Lightning Zaps & Lightning Address Discovery (lud16 / lnurl)
    -------------------------------------------------------------------------- */
@@ -403,6 +385,11 @@ export interface WalletEngine {
   lastError: string | null
 
   // Setup, seed & private key management
+  credentialsEncrypted: boolean
+  credentialsLocked: boolean
+  protectWalletCredentials: (passphrase: string, backupConfirmed: boolean) => Promise<{ snapshotVerified: boolean }>
+  unlockWalletCredentials: (passphrase: string) => Promise<void>
+  lockWalletCredentials: () => void
   generateDraftWalletKeys: () => WalletDraftKeys
   createNewWallet: (opts?: {
     mnemonic?: string
@@ -543,11 +530,15 @@ export interface WalletEngine {
   btcLastUpdatedAt: number | null
   btcError: string | null
   refreshOnchainBtcBalance: () => Promise<void>
-  sendNativeOnchainBtc: (
+  btcPendingSend: NativeBitcoinPendingSend | null
+  prepareNativeOnchainBtc: (
     toAddress: string,
     amountSats: number,
-    feeRateSatVb?: number
-  ) => Promise<{ txid: string; feeSats: number; sentSats: number }>
+    feeRateSatVb: number
+  ) => Promise<NativeBitcoinSendReview>
+  sendNativeOnchainBtc: (review: NativeBitcoinSendReview) => Promise<NativeBitcoinPendingSend>
+  retryNativeOnchainBtc: (txid: string) => Promise<NativeBitcoinPendingSend>
+  dismissNativeOnchainBtc: (txid: string) => Promise<void>
 
   // On-Chain BTC via Boltz v2 submarine & reverse submarine swaps
   setBoltzApiUrl: (url: string) => void
@@ -561,10 +552,6 @@ export interface WalletEngine {
   ) => Promise<BoltzSwapRecord>
   refreshBoltzSwap: (swapId: string) => Promise<BoltzSwapRecord | null>
   exportBoltzSwapRescueJson: (swapId: string) => string | null
-
-  // Encrypted multi-device sync
-  exportSyncState: () => WalletSyncExportInfo | null
-  mergeSyncState: (remote: unknown) => boolean
 
   // Backup, restore & Panic Wipe
   exportBackupJson: () => string

@@ -336,27 +336,42 @@ function estimateP2wpkhVbytes(
   return Math.ceil(10.5 + 68 * inputCount + destOutBytes + changeOutBytes)
 }
 
-/**
- * Builds and signs a consensus-valid BIP-143 SegWit v0 (`P2WPKH`) Bitcoin mainnet transaction
- * spending UTXOs controlled by `params.wallet`. Verifies every ECDSA signature locally via
- * `secp256k1.verify` before returning `{ rawTxHex, txid, feeSats, sentSats, changeSats }`.
- */
-export function buildAndSignP2wpkhTx(params: BuildP2wpkhTxParams): SignedP2wpkhTxResult {
-  const { wallet, toAddress, sendAll = false } = params
+const MAX_BITCOIN_SATS = 21_000_000 * 100_000_000
+
+export interface NativeBitcoinSendPlan {
+  readonly fromAddress: string
+  readonly toAddress: string
+  readonly inputs: readonly Readonly<BitcoinUtxo>[]
+  readonly amountSats: number
+  readonly feeSats: number
+  readonly changeSats: number
+  readonly feeRateSatVb: number
+}
+
+/** Select inputs and calculate exact outputs without accessing a signing key. */
+export function prepareNativeBitcoinSend(
+  params: Omit<BuildP2wpkhTxParams, 'wallet'> & { fromAddress: string }
+): NativeBitcoinSendPlan {
+  const { toAddress, sendAll = false } = params
   const destScript = encodeDestinationScriptPubKey(toAddress)
 
   const cleanFeeRate = Math.max(
     1,
     Math.min(1000, Math.ceil(Number.isFinite(params.feeRateSatVb) ? params.feeRateSatVb : 5))
   )
-  const requestedAmount = Math.floor(params.amountSats)
-  if (!sendAll && (!Number.isFinite(requestedAmount) || requestedAmount < BITCOIN_DUST_LIMIT_SATS)) {
-    throw new Error(
-      `Minimum on-chain Bitcoin send is ${BITCOIN_DUST_LIMIT_SATS} sats (dust threshold).`
-    )
+  const requestedAmount = params.amountSats
+  if (!sendAll && !Number.isSafeInteger(requestedAmount)) {
+    throw new Error('Bitcoin amount must be a whole number of sats.')
+  }
+  if (!sendAll && requestedAmount > MAX_BITCOIN_SATS) {
+    throw new Error('Bitcoin amount is above the supply limit.')
+  }
+  if (!sendAll && requestedAmount < BITCOIN_DUST_LIMIT_SATS) {
+    throw new Error(`Minimum on-chain Bitcoin send is ${BITCOIN_DUST_LIMIT_SATS} sats (dust threshold).`)
   }
 
   // Prefer confirmed UTXOs first, then largest value first
+  const seen = new Set<string>()
   const validUtxos = params.utxos
     .filter(
       (u) =>
@@ -365,14 +380,21 @@ export function buildAndSignP2wpkhTx(params: BuildP2wpkhTxParams): SignedP2wpkhT
         /^[0-9a-f]{64}$/i.test(u.txid) &&
         Number.isInteger(u.vout) &&
         u.vout >= 0 &&
-        Number.isFinite(u.value) &&
-        Math.floor(u.value) > 0
+        u.vout <= 0xffffffff &&
+        Number.isSafeInteger(u.value) &&
+        u.value > 0 &&
+        u.value <= MAX_BITCOIN_SATS
     )
     .map((u) => ({
       ...u,
       txid: u.txid.toLowerCase(),
-      value: Math.floor(u.value),
     }))
+    .filter((u) => {
+      const outpoint = `${u.txid}:${u.vout}`
+      if (seen.has(outpoint)) throw new Error('Duplicate Bitcoin outpoint in explorer response.')
+      seen.add(outpoint)
+      return true
+    })
     .sort((a, b) => {
       if (a.confirmed !== b.confirmed) return a.confirmed ? -1 : 1
       return b.value - a.value
@@ -392,6 +414,7 @@ export function buildAndSignP2wpkhTx(params: BuildP2wpkhTxParams): SignedP2wpkhT
     for (const u of validUtxos) {
       selected.push(u)
       totalIn += u.value
+      if (totalIn > MAX_BITCOIN_SATS) throw new Error('Bitcoin input total is above the supply limit.')
     }
     const estVbytes = estimateP2wpkhVbytes(selected.length, destScript.length, false)
     feeSats = estVbytes * cleanFeeRate
@@ -407,6 +430,7 @@ export function buildAndSignP2wpkhTx(params: BuildP2wpkhTxParams): SignedP2wpkhT
     for (const u of validUtxos) {
       selected.push(u)
       totalIn += u.value
+      if (totalIn > MAX_BITCOIN_SATS) throw new Error('Bitcoin input total is above the supply limit.')
 
       const feeWithChange =
         estimateP2wpkhVbytes(selected.length, destScript.length, true) * cleanFeeRate
@@ -437,6 +461,29 @@ export function buildAndSignP2wpkhTx(params: BuildP2wpkhTxParams): SignedP2wpkhT
       )
     }
   }
+
+  return Object.freeze({
+    fromAddress: params.fromAddress,
+    toAddress,
+    inputs: Object.freeze(selected.map((input) => Object.freeze(input))),
+    amountSats: sentSats,
+    feeSats,
+    changeSats,
+    feeRateSatVb: cleanFeeRate,
+  })
+}
+
+/** Sign exactly the inputs and outputs selected before user confirmation. */
+export function signNativeBitcoinSend(
+  wallet: NativeBtcWalletKeys,
+  plan: NativeBitcoinSendPlan
+): SignedP2wpkhTxResult {
+  if (wallet.address !== plan.fromAddress) throw new Error('Bitcoin wallet changed. Review a new send.')
+  const { inputs: selected, amountSats: sentSats, feeSats, changeSats, feeRateSatVb: cleanFeeRate } = plan
+  if (selected.reduce((total, input) => total + input.value, 0) !== sentSats + feeSats + changeSats) {
+    throw new Error('Bitcoin send plan amounts do not balance.')
+  }
+  const destScript = encodeDestinationScriptPubKey(plan.toAddress)
 
   // Construct outputs
   const outputs: Array<{ value: number; scriptPubKey: Uint8Array }> = [
@@ -551,6 +598,13 @@ export function buildAndSignP2wpkhTx(params: BuildP2wpkhTxParams): SignedP2wpkhT
   }
 }
 
+/** Convenience for non-interactive callers; the wallet UI uses the two steps above. */
+export function buildAndSignP2wpkhTx(params: BuildP2wpkhTxParams): SignedP2wpkhTxResult {
+  return signNativeBitcoinSend(params.wallet, prepareNativeBitcoinSend({
+    ...params, fromAddress: params.wallet.address,
+  }))
+}
+
 /* --------------------------------------------------------------------------
    Live Mainnet Esplora Client (mempool.space primary, blockstream.info fallback)
    -------------------------------------------------------------------------- */
@@ -595,7 +649,7 @@ export async function fetchBitcoinOnchainState(address: string): Promise<Bitcoin
     try {
       const res = await fetchWithTimeout(
         `${base}/address/${encodeURIComponent(cleanAddr)}/utxo`,
-        { method: 'GET', headers: { Accept: 'application/json' } }
+        { method: 'GET', cache: 'no-store', headers: { Accept: 'application/json' } }
       )
       if (!res.ok) {
         lastErr = new Error(`Bitcoin explorer returned HTTP ${res.status}.`)
@@ -619,14 +673,16 @@ export async function fetchBitcoinOnchainState(address: string): Promise<Bitcoin
           typeof item.vout !== 'number' ||
           !Number.isInteger(item.vout) ||
           item.vout < 0 ||
+          item.vout > 0xffffffff ||
           typeof item.value !== 'number' ||
-          !Number.isFinite(item.value) ||
-          item.value <= 0
+          !Number.isSafeInteger(item.value) ||
+          item.value <= 0 ||
+          item.value > MAX_BITCOIN_SATS
         ) {
           continue
         }
-        const value = Math.floor(item.value)
-        const confirmed = Boolean(item.status?.confirmed)
+        const value = item.value
+        const confirmed = item.status?.confirmed === true
         if (confirmed) {
           confirmedSats += value
         } else {
@@ -719,9 +775,10 @@ export async function fetchBitcoinFeeRates(): Promise<BitcoinFeeRates> {
  * Broadcasts a signed raw Bitcoin mainnet transaction hex via `mempool.space/api/tx`
  * with automatic fallback to `blockstream.info/api/tx`. Returns the 64-char hex `txid`.
  */
-export async function broadcastBitcoinRawTx(rawTxHex: string): Promise<string> {
+export async function broadcastBitcoinRawTx(rawTxHex: string, expectedTxid: string): Promise<string> {
   const cleanHex = rawTxHex.trim().toLowerCase()
-  if (!/^[0-9a-f]+$/.test(cleanHex) || cleanHex.length < 120) {
+  if (!/^[0-9a-f]+$/.test(cleanHex) || cleanHex.length < 120 || cleanHex.length % 2 ||
+    !/^[0-9a-f]{64}$/.test(expectedTxid)) {
     throw new Error('Invalid raw Bitcoin transaction hex.')
   }
 
@@ -738,10 +795,9 @@ export async function broadcastBitcoinRawTx(rawTxHex: string): Promise<string> {
         12_000
       )
       const text = (await res.text()).trim()
-      if (res.ok && /^[0-9a-f]{64}$/i.test(text)) {
-        return text.toLowerCase()
-      }
-      const errMsg = text || `Bitcoin broadcast rejected (HTTP ${res.status}).`
+      if (res.ok && text.toLowerCase() === expectedTxid) return expectedTxid
+      if (res.ok) throw new Error('Bitcoin explorer returned an unexpected transaction ID.')
+      const errMsg = `Bitcoin broadcast was not acknowledged (HTTP ${res.status}).`
       lastErr = new Error(errMsg)
       // On explicit consensus rejection (4xx), still try secondary endpoint once unless invalid
     } catch (err) {
@@ -750,4 +806,19 @@ export async function broadcastBitcoinRawTx(rawTxHex: string): Promise<string> {
   }
 
   throw lastErr ?? new Error('Unable to broadcast Bitcoin transaction.')
+}
+
+
+/** Check an earlier ambiguous broadcast against the exact signed bytes. */
+export async function hasBitcoinRawTx(txid: string, rawTxHex: string): Promise<boolean> {
+  if (!/^[0-9a-f]{64}$/.test(txid)) return false
+  for (const base of BITCOIN_API_ENDPOINTS) {
+    try {
+      const res = await fetchWithTimeout(`${base}/tx/${txid}/hex`, { cache: 'no-store' }, DEFAULT_TIMEOUT_MS)
+      if (res.ok && (await res.text()).trim().toLowerCase() === rawTxHex) return true
+    } catch {
+      // An unavailable explorer cannot prove a failed or successful broadcast.
+    }
+  }
+  return false
 }

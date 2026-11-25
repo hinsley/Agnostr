@@ -2456,13 +2456,8 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   // Client-side Cashu Ecash Wallet + Boltz Swaps + NIP-57 Lightning Zaps
-  const notifyWalletChangedRef = useRef<() => void>(() => {})
-  const handleLocalWalletChanged = useCallback(() => {
-    notifyWalletChangedRef.current()
-  }, [])
   const walletEngine = useCashuWallet({
     pushToast,
-    onLocalWalletChanged: handleLocalWalletChanged,
   })
 
   const getZapPublishRelayUrls = useCallback(
@@ -3168,8 +3163,6 @@ export function useAgnostrEngine(): AgnostrEngine {
     deviceSync: deviceSyncEngine,
     registerAmailSyncProvider,
     notifyAmailChanged,
-    registerWalletSyncProvider,
-    notifyWalletChanged,
   } = useDeviceSync({
     relayPool: pool,
     identityManager,
@@ -3208,10 +3201,6 @@ export function useAgnostrEngine(): AgnostrEngine {
     notifyAmailChangedRef.current = notifyAmailChanged
   }, [notifyAmailChanged])
 
-  useLayoutEffect(() => {
-    notifyWalletChangedRef.current = notifyWalletChanged
-  }, [notifyWalletChanged])
-
   const exportAmailSyncState = amailEngine.exportSyncState
   const mergeAmailSyncState = amailEngine.mergeSyncState
   useEffect(() => {
@@ -3224,18 +3213,6 @@ export function useAgnostrEngine(): AgnostrEngine {
       registerAmailSyncProvider(null)
     }
   }, [registerAmailSyncProvider, exportAmailSyncState, mergeAmailSyncState])
-
-  const exportWalletSyncState = walletEngine.exportSyncState
-  const mergeWalletSyncState = walletEngine.mergeSyncState
-  useEffect(() => {
-    registerWalletSyncProvider({
-      exportSyncState: exportWalletSyncState,
-      mergeSyncState: mergeWalletSyncState,
-    })
-    return () => {
-      registerWalletSyncProvider(null)
-    }
-  }, [registerWalletSyncProvider, exportWalletSyncState, mergeWalletSyncState])
 
   // Keep active geohash + DM + pulse + active server/NIP-29 + call signaling relays synced in RelayPool
   useLayoutEffect(() => {
@@ -5501,6 +5478,12 @@ export function useAgnostrEngine(): AgnostrEngine {
   )
 
   const panicWipe = useCallback(() => {
+    try {
+      walletEngine.resetAll()
+    } catch (error) {
+      pushToast('error', 'Wallet reset blocked', error instanceof Error ? error.message : undefined)
+      return
+    }
     const prevPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
     trustedSetRef.current = new Set()
     blockedSetRef.current = new Set()
@@ -5513,7 +5496,6 @@ export function useAgnostrEngine(): AgnostrEngine {
     replyingToRef.current = null
     contentFilterEngine.resetAll()
     translatorEngine.resetAll()
-    walletEngine.resetAll()
     zapsEngine.resetAll()
     deviceSyncEngine.resetAll()
     void amailEngine.resetAll()
