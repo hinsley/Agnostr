@@ -14,7 +14,6 @@ import {
   Plus,
   Search,
   Settings,
-  Users,
   Wallet,
 } from 'lucide-react'
 import type { AgnostrEngine } from '../types/protocol'
@@ -85,7 +84,6 @@ export const AppRail: React.FC<AppRailProps> = ({
   agoraUnread = 0,
   onSelectWorkspace,
   onSelectChatTab,
-  onSelectGroups,
   onSelectServer,
   onOpenServerHub,
   onOpenServerSettings,
@@ -186,15 +184,12 @@ export const AppRail: React.FC<AppRailProps> = ({
   const isAgoraActive = workspace === 'agora'
   const isBitchatActive = workspace === 'chat' && listTab === 'bitchat'
   const isPeopleActive = workspace === 'chat' && listTab === 'dms'
-  const isGroupsActive = workspace === 'chat' && listTab === 'servers'
   const isMailActive = workspace === 'mail'
   const isWalletActive = workspace === 'wallet'
 
   const bitchatMentions = engine.totalGeoMentions
   const bitchatUnread = engine.totalGeoUnread
   const dmUnread = engine.totalDmUnread
-  const serverMentions = engine.servers.totalServerMentions
-  const serverUnread = engine.servers.totalServerUnread
   const mailUnread = engine.amail.unreadInboxCount
   const walletSats = engine.wallet.totalBalanceSats
   const activeCall = engine.calls.activeCall
@@ -435,69 +430,7 @@ export const AppRail: React.FC<AppRailProps> = ({
           </button>
         </div>
 
-        {/* 4. Groups */}
-        <div className="ag-rail-slot" role="listitem">
-          <button
-            type="button"
-            className={`ag-rail-app-tile ag-rail-groups ${isGroupsActive ? 'active' : ''} ${serverUnread > 0 || serverMentions > 0 ? 'has-unread' : ''}`}
-            onClick={() => {
-              onPlaySound?.('click')
-              if (onSelectGroups) {
-                onSelectGroups()
-              } else {
-                if (workspace !== 'chat') onSelectWorkspace('chat')
-                onSelectChatTab('servers')
-              }
-            }}
-            onMouseEnter={(e) =>
-              showTooltip(
-                e.currentTarget,
-                'Groups',
-                serverMentions > 0
-                  ? `${serverMentions} ping${serverMentions === 1 ? '' : 's'}`
-                  : serverUnread > 0
-                    ? `${serverUnread} unread`
-                    : undefined
-              )
-            }
-            onMouseLeave={hideTooltip}
-            onFocus={(e) =>
-              showTooltip(
-                e.currentTarget,
-                'Groups',
-                serverMentions > 0
-                  ? `${serverMentions} ping${serverMentions === 1 ? '' : 's'}`
-                  : serverUnread > 0
-                    ? `${serverUnread} unread`
-                    : undefined
-              )
-            }
-            onBlur={hideTooltip}
-            aria-label={
-              serverMentions > 0
-                ? `Groups (${serverMentions} pings)`
-                : serverUnread > 0
-                  ? `Groups (${serverUnread} unread)`
-                  : 'Groups'
-            }
-            aria-current={isGroupsActive ? 'page' : undefined}
-          >
-            <span className="ag-rail-indicator" aria-hidden="true" />
-            <Users size={18} strokeWidth={isGroupsActive ? 2.15 : 1.8} />
-            <span className="ag-rail-app-label">Groups</span>
-            {serverMentions > 0 ? (
-              <span className="ag-rail-badge ping tabular">
-                {formatBadgeCount(serverMentions)}
-              </span>
-            ) : serverUnread > 0 ? (
-              <span className="ag-rail-badge unread tabular">
-                {formatBadgeCount(serverUnread)}
-              </span>
-            ) : null}
-          </button>
-        </div>
-
-        {/* 5. Agmail */}
+        {/* 4. Agmail */}
         <div className="ag-rail-slot" role="listitem">
           <button
             type="button"
@@ -534,7 +467,7 @@ export const AppRail: React.FC<AppRailProps> = ({
           </button>
         </div>
 
-        {/* 6. Agwallet */}
+        {/* 5. Agwallet */}
         <div className="ag-rail-slot" role="listitem">
           <button
             type="button"

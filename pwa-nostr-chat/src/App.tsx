@@ -11,8 +11,12 @@ import {
 import { createPortal } from 'react-dom'
 import {
   Loader2,
+  Lock,
+  MessageCircle,
   Phone,
+  QrCode,
   RefreshCw,
+  Search,
   ShieldAlert,
   ShieldCheck,
   Trash2,
@@ -117,6 +121,35 @@ interface PwaLaunchQueue {
   setConsumer: (consumer: (launchParams: PwaLaunchParams) => void) => void
 }
 
+const LAST_DM_PEER_STORAGE_PREFIX = 'agnostr_last_dm_peer_'
+
+function readLastDmPeer(masterPubkey: string): string | null {
+  if (typeof window === 'undefined' || !masterPubkey) return null
+  try {
+    const val = window.localStorage.getItem(
+      `${LAST_DM_PEER_STORAGE_PREFIX}${masterPubkey.toLowerCase()}`
+    )
+    const cleaned = val?.trim().toLowerCase()
+    return cleaned || null
+  } catch {
+    return null
+  }
+}
+
+function writeLastDmPeer(masterPubkey: string, peerPubkey: string | null): void {
+  if (typeof window === 'undefined' || !masterPubkey) return
+  const key = `${LAST_DM_PEER_STORAGE_PREFIX}${masterPubkey.toLowerCase()}`
+  try {
+    if (peerPubkey && peerPubkey.trim()) {
+      window.localStorage.setItem(key, peerPubkey.trim().toLowerCase())
+    } else {
+      window.localStorage.removeItem(key)
+    }
+  } catch {
+    // ignore storage quota / private-mode errors
+  }
+}
+
 function isAgoraLocationHash(hash: string): boolean {
   const raw = (hash || '').replace(/^#/, '').trim().toLowerCase()
   return (
@@ -150,6 +183,10 @@ export function App() {
   const isBitchatWorkspace = workspace === 'chat' && listTab === 'bitchat'
   const isBitchatGlobe = isBitchatWorkspace && bitchatView === 'globe'
   const isBitchatRoom = isBitchatWorkspace && bitchatView === 'room'
+  const lastDmPeerPubkeyRef = useRef<string | null>(
+    readLastDmPeer(engine.identity.masterPubkey)
+  )
+  const lastBitchatChannelRef = useRef<string>(engine.activeGeohash)
   const [agoraInitialCompose, setAgoraInitialCompose] = useState(false)
   const [selectedServerId, setSelectedServerId] = useState<string | null>(
     () => engine.servers.activeServer?.id ?? engine.servers.joinedServers[0]?.id ?? null
@@ -308,10 +345,24 @@ export function App() {
     cfRuntime === 'webgpu' ? 'WebGPU' : cfRuntime === 'wasm' ? 'WASM' : null
 
   const isDm = engine.activeView.type === 'dm' && engine.activeDmThread !== null
+  const isPeopleEmptyStage = workspace === 'chat' && listTab === 'dms' && !isDm
   const isServer =
     engine.activeView.type === 'server' &&
     engine.servers.activeServer !== null &&
     engine.servers.activeChannel !== null
+
+  // Keep per-profile last DM peer and last Bitchat channel synced with activeView
+  useEffect(() => {
+    if (engine.activeView.type === 'dm' && engine.activeView.peerPubkey) {
+      const pk = engine.activeView.peerPubkey.trim().toLowerCase()
+      if (pk) {
+        lastDmPeerPubkeyRef.current = pk
+        writeLastDmPeer(engine.identity.masterPubkey, pk)
+      }
+    } else if (engine.activeView.type === 'channel' && engine.activeView.geohash) {
+      lastBitchatChannelRef.current = engine.activeView.geohash
+    }
+  }, [engine.activeView, engine.identity.masterPubkey])
   const activeServer = engine.servers.activeServer
   const activeChannel = engine.servers.activeChannel
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
@@ -693,7 +744,7 @@ export function App() {
     prevDmUnreadRef.current = engine.totalDmUnread
   }, [engine.totalDmUnread])
 
-  // Detect identity panic wipe (masterPubkey changes) for subtle flash & modal teardown
+  // Detect identity panic wipe / profile switch (masterPubkey changes) for subtle flash & modal teardown
   const prevMasterPkRef = useRef(engine.identity.masterPubkey)
   useEffect(() => {
     if (
@@ -701,6 +752,8 @@ export function App() {
       engine.identity.masterPubkey &&
       prevMasterPkRef.current !== engine.identity.masterPubkey
     ) {
+      lastDmPeerPubkeyRef.current = readLastDmPeer(engine.identity.masterPubkey)
+      lastBitchatChannelRef.current = ''
       setWorkspace('chat')
       setListTab('bitchat')
       setBitchatView('globe')
@@ -940,6 +993,8 @@ export function App() {
   }, [])
 
   const handleSelectBitchat = useCallback(() => {
+    const isAlreadyInBitchatTab =
+      workspace === 'chat' && listTab === 'bitchat' && !settingsState.open
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
@@ -952,18 +1007,33 @@ export function App() {
     setAmailState({ section: 'inbox', composeTo: null })
     setWorkspace('chat')
     setListTab('bitchat')
-    setBitchatView('globe')
     setMobileScreen('chat')
-    if (engine.activeView.type !== 'channel') {
-      engine.tuneBitchatChannel(engine.activeGeohash)
+
+    if (isAlreadyInBitchatTab) {
+      if (bitchatView === 'room') {
+        setBitchatView('globe')
+      }
+      return
     }
-  }, [engine])
+
+    // Clicking Bitchat from outside the Bitchat tab returns to the last Bitchat room (not globe)
+    setBitchatView('room')
+    const targetChannel = lastBitchatChannelRef.current || engine.activeGeohash
+    if (
+      engine.activeView.type !== 'channel' ||
+      engine.activeView.geohash.toLowerCase() !== targetChannel.toLowerCase()
+    ) {
+      engine.tuneBitchatChannel(targetChannel)
+    }
+  }, [workspace, listTab, settingsState.open, bitchatView, engine])
 
   const handleSelectPeople = useCallback(() => {
     setRadarExpanded(false)
     setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
     setMobileUserListOpen(false)
     setRoomInfoOpen(false)
+    setSearchOpen(false)
+    setSearchQuery('')
     setZapTarget(null)
     setInspectedPeer(null)
     setWalletIntent(undefined)
@@ -971,10 +1041,38 @@ export function App() {
     setWorkspace('chat')
     setListTab('dms')
     setSidebarCollapsed(false)
-    if (isMobileViewport) {
+
+    const threads = engine.dmThreads
+    const currentDmPk =
+      engine.activeView.type === 'dm' ? engine.activeView.peerPubkey.toLowerCase() : null
+    let target = currentDmPk
+      ? threads.find((t) => t.peerPubkey.toLowerCase() === currentDmPk)
+      : undefined
+    if (!target && lastDmPeerPubkeyRef.current) {
+      const lastPk = lastDmPeerPubkeyRef.current.toLowerCase()
+      target = threads.find((t) => t.peerPubkey.toLowerCase() === lastPk)
+    }
+    if (!target && threads.length > 0) {
+      target = threads.reduce((best, cur) =>
+        (cur.lastMessageAt ?? 0) > (best.lastMessageAt ?? 0) ? cur : best
+      )
+    }
+
+    if (target) {
+      const targetPk = target.peerPubkey.toLowerCase()
+      lastDmPeerPubkeyRef.current = targetPk
+      writeLastDmPeer(engine.identity.masterPubkey, targetPk)
+      if (
+        engine.activeView.type !== 'dm' ||
+        engine.activeView.peerPubkey.toLowerCase() !== targetPk
+      ) {
+        engine.openDmThread(target.peerPubkey, target.peerNickname)
+      }
+      setMobileScreen('chat')
+    } else if (isMobileViewport) {
       setMobileScreen('list')
     }
-  }, [isMobileViewport])
+  }, [engine, isMobileViewport])
 
   const handleSelectGroups = useCallback(() => {
     setRadarExpanded(false)
@@ -1034,6 +1132,10 @@ export function App() {
         handleSelectBitchat()
         return
       }
+      if (tab === 'dms') {
+        handleSelectPeople()
+        return
+      }
       if (tab === 'servers') {
         handleSelectGroups()
         return
@@ -1048,7 +1150,7 @@ export function App() {
       setListTab(tab)
       setSidebarCollapsed(false)
     },
-    [handleSelectBitchat, handleSelectGroups]
+    [handleSelectBitchat, handleSelectPeople, handleSelectGroups]
   )
 
   const handleSelectServer = useCallback(
@@ -1172,7 +1274,7 @@ export function App() {
     isSwipingRight,
   } = useMobileSwipeDrawers({
     leftOpen: !isBitchatGlobe && mobileScreen === 'list',
-    rightOpen: mobileUserListOpen,
+    rightOpen: !isPeopleEmptyStage && mobileUserListOpen,
     disabled: swipeDisabled || roomInfoOpen || isBitchatGlobe,
     leftDisabled: isBitchatGlobe,
     onLeftOpenChange: handleLeftDrawerOpenChange,
@@ -1199,6 +1301,10 @@ export function App() {
         handleSelectBitchat()
         return
       }
+      if (tab === 'dms') {
+        handleSelectPeople()
+        return
+      }
       setWorkspace('chat')
       setAmailState({ section: 'inbox', composeTo: null })
       setWalletIntent(undefined)
@@ -1209,7 +1315,7 @@ export function App() {
       setListTab(tab)
       setMobileScreen('list')
     },
-    [handleSelectBitchat]
+    [handleSelectBitchat, handleSelectPeople]
   )
 
   const { pushToast } = engine
@@ -1424,19 +1530,23 @@ export function App() {
 
   const mobileNavActiveTab: ListTab = isBitchatWorkspace
     ? 'bitchat'
-    : mobileScreen === 'chat'
-      ? isDm
-        ? 'dms'
-        : isServer
-          ? 'servers'
-          : 'bitchat'
-      : listTab
+    : workspace === 'chat' && listTab === 'dms'
+      ? 'dms'
+      : mobileScreen === 'chat'
+        ? isDm
+          ? 'dms'
+          : isServer
+            ? 'servers'
+            : 'bitchat'
+        : listTab
 
   const handleTuneChannel = useCallback(
     (channelInput: string): boolean => {
       const resolved = parseQuickTuneInput(channelInput, 'geo')
-      const ok = engine.tuneBitchatChannel(resolved?.key ?? channelInput)
+      const targetKey = resolved?.key ?? channelInput
+      const ok = engine.tuneBitchatChannel(targetKey)
       if (ok) {
+        lastBitchatChannelRef.current = targetKey
         bitchatAudio.play('tune')
         setWorkspace('chat')
         setAmailState({ section: 'inbox', composeTo: null })
@@ -1701,6 +1811,11 @@ export function App() {
         setMobileUserListOpen(false)
         setRoomInfoOpen(false)
         setInspectedPeer(null)
+        const targetPk = target.pubkey.trim().toLowerCase()
+        if (targetPk) {
+          lastDmPeerPubkeyRef.current = targetPk
+          writeLastDmPeer(engine.identity.masterPubkey, targetPk)
+        }
         engine.openDmThread(target.pubkey, target.nickname)
         bitchatAudio.play('tune')
         setListTab('dms')
@@ -1836,6 +1951,11 @@ export function App() {
 
   const handleOpenDm = useCallback(
     (pubkey: string, nickname?: string) => {
+      const pk = pubkey.trim().toLowerCase()
+      if (pk) {
+        lastDmPeerPubkeyRef.current = pk
+        writeLastDmPeer(engine.identity.masterPubkey, pk)
+      }
       engine.openDmThread(pubkey, nickname)
       bitchatAudio.play('click')
       setWorkspace('chat')
@@ -1877,18 +1997,45 @@ export function App() {
     const wasActiveDm =
       engine.activeView.type === 'dm' &&
       engine.activeView.peerPubkey.toLowerCase() === targetPk
+    const remaining = engine.dmThreads.filter(
+      (t) => t.peerPubkey.toLowerCase() !== targetPk
+    )
     setPendingDeleteDm(null)
     bitchatAudio.play('click')
+    if (lastDmPeerPubkeyRef.current?.toLowerCase() === targetPk) {
+      lastDmPeerPubkeyRef.current = null
+      writeLastDmPeer(engine.identity.masterPubkey, null)
+    }
     engine.closeDmThread(pubkey)
     if (wasActiveDm) {
       setMobileUserListOpen(false)
       setRoomInfoOpen(false)
-      if (isMobileViewport) {
+      if (listTab === 'dms') {
+        if (remaining.length > 0) {
+          const nextThread = remaining.reduce((best, cur) =>
+            (cur.lastMessageAt ?? 0) > (best.lastMessageAt ?? 0) ? cur : best
+          )
+          const nextPk = nextThread.peerPubkey.toLowerCase()
+          lastDmPeerPubkeyRef.current = nextPk
+          writeLastDmPeer(engine.identity.masterPubkey, nextPk)
+          if (isMobileViewport) {
+            setListTab('dms')
+            setMobileScreen('list')
+          } else {
+            engine.openDmThread(nextThread.peerPubkey, nextThread.peerNickname)
+          }
+        } else {
+          setListTab('dms')
+          if (isMobileViewport) {
+            setMobileScreen('list')
+          }
+        }
+      } else if (isMobileViewport) {
         setListTab('dms')
         setMobileScreen('list')
       }
     }
-  }, [pendingDeleteDm, engine, isMobileViewport])
+  }, [pendingDeleteDm, engine, isMobileViewport, listTab])
 
   const handleOpenPeerNote = useCallback(
     (peer: { pubkey: string; nickname: string; displayHandle: string }) => {
@@ -2000,9 +2147,22 @@ export function App() {
   )
 
   const handleExpandRadar = useCallback(() => {
-    handleSelectBitchat()
+    setRadarExpanded(false)
+    setSettingsState((prev) => (prev.open ? { ...prev, open: false } : prev))
+    setMobileUserListOpen(false)
+    setRoomInfoOpen(false)
+    setSearchOpen(false)
+    setSearchQuery('')
+    setZapTarget(null)
+    setInspectedPeer(null)
+    setWalletIntent(undefined)
+    setAmailState({ section: 'inbox', composeTo: null })
+    setWorkspace('chat')
+    setListTab('bitchat')
+    setBitchatView('globe')
+    setMobileScreen('chat')
     bitchatAudio.play('click')
-  }, [handleSelectBitchat])
+  }, [])
 
   const handleOpenInstall = useCallback(() => {
     bitchatAudio.play('click')
@@ -2365,7 +2525,7 @@ export function App() {
                     isMobileViewport={isMobileViewport}
                     selectedServerId={selectedServerId}
                     onSelectServer={handleSelectServer}
-                    onTabChange={setListTab}
+                    onTabChange={handleSelectChatTab}
                     onTuneChannel={handleTuneChannel}
                     onOpenDm={handleOpenDm}
                     onCloseDmThread={handleCloseDmThread}
@@ -2402,223 +2562,260 @@ export function App() {
               </>
             )}
 
-            {/* Main Chat Stage */}
-            <main
-              className={`ag-main ${isDm ? 'dm-mode' : isServerE2ee ? 'server-e2ee-mode' : ''}`}
-            >
-              <ChannelHeader
-                engine={engine}
-                sidebarCollapsed={sidebarCollapsed}
-                userListOpen={isMobileViewport ? mobileUserListOpen : !userListCollapsed}
-                roomInfoOpen={roomInfoOpen}
-                searchOpen={searchOpen}
-                hasOtherUnread={totalUnreadBadge > 0}
-                onMobileBack={handleMobileBack}
-                onBackToGlobe={isBitchatRoom ? handleBackToBitchatGlobe : undefined}
-                onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
-                onToggleUserList={handleToggleUserList}
-                onOpenRoomInfo={handleOpenRoomInfo}
-                onOpenTrustedSettings={() => handleOpenSettings('privacy')}
-                onToggleSearch={() => {
-                  setSearchOpen((v) => {
-                    if (v) setSearchQuery('')
-                    return !v
-                  })
-                }}
-                onExpandRadar={handleExpandRadar}
-                onFocusActiveCall={() => setCallExpanded(true)}
-                onOpenZap={handleOpenZap}
-              />
-
-              {/* Compact PWA Offline & Update-Ready Status Strips */}
-              {pwa.isOffline && (
-                <div className="ag-pwa-banner offline" role="status" aria-live="polite">
-                  <div className="ag-pwa-banner-left">
-                    <WifiOff size={14} />
-                    <span>Offline · Viewing cached messages</span>
+            {/* Main Chat Stage (or Calm People Empty Stage when listTab === 'dms' and no active DM) */}
+            {isPeopleEmptyStage ? (
+              <main className="ag-main dm-mode ag-dm-empty-stage" aria-label="Direct Messages">
+                <div className="ag-dm-empty-card">
+                  <div className="ag-dm-empty-icon" aria-hidden="true">
+                    <MessageCircle size={26} strokeWidth={1.85} />
+                    <span className="ag-dm-empty-lock">
+                      <Lock size={11} strokeWidth={2.4} />
+                    </span>
                   </div>
-                </div>
-              )}
-
-              {pwa.updateAvailable && (
-                <div className="ag-pwa-banner update" role="status" aria-live="polite">
-                  <div className="ag-pwa-banner-left">
-                    <RefreshCw size={14} />
-                    <span>New version ready</span>
-                  </div>
-                  <div className="ag-pwa-banner-actions">
+                  <h2 className="ag-dm-empty-title">Direct Messages</h2>
+                  <p className="ag-dm-empty-sub">
+                    Pick a person on the left or start a new encrypted direct message.
+                  </p>
+                  <div className="ag-dm-empty-actions">
                     <button
                       type="button"
-                      className="ag-pwa-reload-btn"
-                      onClick={() => void pwa.applyUpdate()}
+                      className="ag-btn ag-btn-primary"
+                      onClick={handleOpenCommandPalette}
                     >
-                      Reload
+                      <Search size={14} />
+                      <span>Find Someone</span>
                     </button>
                     <button
                       type="button"
-                      className="ag-pwa-dismiss-btn"
-                      onClick={pwa.dismissUpdate}
-                      title="Dismiss update notice"
-                      aria-label="Dismiss update notice"
+                      className="ag-btn"
+                      onClick={handleOpenScanner}
                     >
-                      <X size={14} />
+                      <QrCode size={14} />
+                      <span>Scan QR</span>
                     </button>
                   </div>
                 </div>
-              )}
-
-              {/* Active P2P Voice & Video Call Stage (+ Post-Call Transcript Save Prompt) */}
-              {(activeCall || engine.transcription.endedCallTranscript) && (
-                <Suspense fallback={null}>
-                  <CallStage
-                    calls={engine.calls}
+              </main>
+            ) : (
+              <>
+                <main
+                  className={`ag-main ${isDm ? 'dm-mode' : isServerE2ee ? 'server-e2ee-mode' : ''}`}
+                >
+                  <ChannelHeader
                     engine={engine}
-                    expanded={callExpanded}
-                    compactFloating={callCompactFloating}
-                    onToggleExpand={() => setCallExpanded((v) => !v)}
+                    sidebarCollapsed={sidebarCollapsed}
+                    userListOpen={isMobileViewport ? mobileUserListOpen : !userListCollapsed}
+                    roomInfoOpen={roomInfoOpen}
+                    searchOpen={searchOpen}
+                    hasOtherUnread={totalUnreadBadge > 0}
+                    onMobileBack={handleMobileBack}
+                    onBackToGlobe={isBitchatRoom ? handleBackToBitchatGlobe : undefined}
+                    onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+                    onToggleUserList={handleToggleUserList}
+                    onOpenRoomInfo={handleOpenRoomInfo}
+                    onOpenTrustedSettings={() => handleOpenSettings('privacy')}
+                    onToggleSearch={() => {
+                      setSearchOpen((v) => {
+                        if (v) setSearchQuery('')
+                        return !v
+                      })
+                    }}
+                    onExpandRadar={handleExpandRadar}
+                    onFocusActiveCall={() => setCallExpanded(true)}
+                    onOpenZap={handleOpenZap}
+                  />
+
+                  {/* Compact PWA Offline & Update-Ready Status Strips */}
+                  {pwa.isOffline && (
+                    <div className="ag-pwa-banner offline" role="status" aria-live="polite">
+                      <div className="ag-pwa-banner-left">
+                        <WifiOff size={14} />
+                        <span>Offline · Viewing cached messages</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {pwa.updateAvailable && (
+                    <div className="ag-pwa-banner update" role="status" aria-live="polite">
+                      <div className="ag-pwa-banner-left">
+                        <RefreshCw size={14} />
+                        <span>New version ready</span>
+                      </div>
+                      <div className="ag-pwa-banner-actions">
+                        <button
+                          type="button"
+                          className="ag-pwa-reload-btn"
+                          onClick={() => void pwa.applyUpdate()}
+                        >
+                          Reload
+                        </button>
+                        <button
+                          type="button"
+                          className="ag-pwa-dismiss-btn"
+                          onClick={pwa.dismissUpdate}
+                          title="Dismiss update notice"
+                          aria-label="Dismiss update notice"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Active P2P Voice & Video Call Stage (+ Post-Call Transcript Save Prompt) */}
+                  {(activeCall || engine.transcription.endedCallTranscript) && (
+                    <Suspense fallback={null}>
+                      <CallStage
+                        calls={engine.calls}
+                        engine={engine}
+                        expanded={callExpanded}
+                        compactFloating={callCompactFloating}
+                        onToggleExpand={() => setCallExpanded((v) => !v)}
+                        onInspectPeer={setInspectedPeer}
+                        onOpenDm={handleOpenDm}
+                        onReturnToCall={handleReturnToActiveCall}
+                        onPlaySound={playSound}
+                      />
+                    </Suspense>
+                  )}
+
+                  {/* Live Bitchat Group Call Join Banner (shown when peers are in this room's call) */}
+                  {showGeoCallJoinBanner && (
+                    <div className="ag-geo-call-banner" role="region" aria-label="Active room call">
+                      <div className="ag-geo-call-banner-left">
+                        <span className="ag-live-dot" aria-hidden="true" />
+                        <span className="ag-geo-call-banner-count tabular">
+                          {activeGeoCallCount} in call
+                        </span>
+                        <span className="ag-geo-call-banner-peers truncate">
+                          {activeGeoCallPresence
+                            .slice(0, 2)
+                            .map((p) => p.nickname || p.displayHandle)
+                            .join(', ')}
+                          {activeGeoCallPresence.length > 2
+                            ? ` +${activeGeoCallPresence.length - 2}`
+                            : ''}
+                        </span>
+                      </div>
+                      <div className="ag-geo-call-banner-actions">
+                        <button
+                          type="button"
+                          className="ag-geo-call-join-btn primary"
+                          disabled={isActiveGeoCallFull}
+                          onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'audio')}
+                          title={
+                            isActiveGeoCallFull
+                              ? `Call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
+                              : `Join ${formatBitchatChannelLabel(engine.activeGeohash)} voice call`
+                          }
+                        >
+                          <Phone size={13} />
+                          <span>{isActiveGeoCallFull ? 'Full 6/6' : 'Join Voice'}</span>
+                        </button>
+                        {!isActiveGeoCallFull && (
+                          <button
+                            type="button"
+                            className="ag-geo-call-join-btn"
+                            onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'video')}
+                            title={`Join ${formatBitchatChannelLabel(engine.activeGeohash)} video call`}
+                            aria-label={`Join ${formatBitchatChannelLabel(engine.activeGeohash)} video call`}
+                          >
+                            <Video size={13} />
+                            <span>Video</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <SearchBar
+                    open={searchOpen}
+                    query={searchQuery}
+                    matchCount={searchMatchIds.length}
+                    activeMatchIndex={searchMatchIdx}
+                    onQueryChange={setSearchQuery}
+                    onPrev={() =>
+                      setSearchMatchIdx((i) =>
+                        searchMatchIds.length
+                          ? (i - 1 + searchMatchIds.length) % searchMatchIds.length
+                          : 0
+                      )
+                    }
+                    onNext={() =>
+                      setSearchMatchIdx((i) =>
+                        searchMatchIds.length ? (i + 1) % searchMatchIds.length : 0
+                      )
+                    }
+                    onClose={() => {
+                      setSearchOpen(false)
+                      setSearchQuery('')
+                    }}
+                  />
+
+                  <MessageStream
+                    engine={engine}
+                    searchQuery={searchOpen ? searchQuery : ''}
+                    activeSearchMessageId={activeSearchMessageId}
+                    onReply={handleReply}
+                    onReact={handleReact}
+                    onReplyServer={handleReplyServer}
+                    onReactServer={handleReactServer}
                     onInspectPeer={setInspectedPeer}
-                    onOpenDm={handleOpenDm}
-                    onReturnToCall={handleReturnToActiveCall}
+                    onStartDm={handleOpenDm}
+                    onMentionPeer={handleMentionPeer}
+                    onTuneChannel={handleTuneChannel}
+                    onClickMention={handleClickInlineMention}
+                    onLocateMe={() => void handleLocateMe()}
+                    onExpandRadar={handleExpandRadar}
+                    onOpenServerSettings={handleOpenServerSettings}
+                    onOpenLightbox={setLightboxImage}
+                    onOpenZap={handleOpenZap}
+                    onClaimCashuToken={handleClaimCashuToken}
+                  />
+
+                  <Composer
+                    engine={engine}
+                    externalDraftToken={externalDraftToken}
+                    onSent={(isEncrypted) => bitchatAudio.play(isEncrypted ? 'dm' : 'send')}
+                  />
+                </main>
+
+                {/* Dimmed Interactive Scrim behind Mobile Right Slide-Out User List Tray */}
+                <div
+                  className={`ag-right-drawer-scrim ${mobileUserListOpen ? 'active' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
+                  onClick={() => setMobileUserListOpen(false)}
+                  aria-hidden="true"
+                />
+
+                {/* Right Pane (Desktop User List) / Interactive Swipe-Left Slide-Out Tray (Mobile <868px) */}
+                <div
+                  className={`ag-users-col ${mobileUserListOpen ? 'open' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
+                  aria-hidden={
+                    isMobileViewport && !mobileUserListOpen && !isSwipingRight ? true : undefined
+                  }
+                >
+                  <UserListPane
+                    engine={engine}
+                    collapsed={userListCollapsed}
+                    onCloseMobile={() => setMobileUserListOpen(false)}
+                    onInspectPeer={setInspectedPeer}
+                    onStartDm={handleOpenDm}
+                    onMentionPeer={handleMentionPeer}
+                    onEditPeerNote={handleOpenPeerNote}
+                    onOpenZap={handleOpenZap}
+                    onOpenAmailCompose={({ pubkey, nickname }) =>
+                      handleOpenAmailCompose(pubkey, nickname)
+                    }
                     onPlaySound={playSound}
                   />
-                </Suspense>
-              )}
-
-              {/* Live Bitchat Group Call Join Banner (shown when peers are in this room's call) */}
-              {showGeoCallJoinBanner && (
-                <div className="ag-geo-call-banner" role="region" aria-label="Active room call">
-                  <div className="ag-geo-call-banner-left">
-                    <span className="ag-live-dot" aria-hidden="true" />
-                    <span className="ag-geo-call-banner-count tabular">
-                      {activeGeoCallCount} in call
-                    </span>
-                    <span className="ag-geo-call-banner-peers truncate">
-                      {activeGeoCallPresence
-                        .slice(0, 2)
-                        .map((p) => p.nickname || p.displayHandle)
-                        .join(', ')}
-                      {activeGeoCallPresence.length > 2
-                        ? ` +${activeGeoCallPresence.length - 2}`
-                        : ''}
-                    </span>
-                  </div>
-                  <div className="ag-geo-call-banner-actions">
-                    <button
-                      type="button"
-                      className="ag-geo-call-join-btn primary"
-                      disabled={isActiveGeoCallFull}
-                      onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'audio')}
-                      title={
-                        isActiveGeoCallFull
-                          ? `Call full (${engine.calls.maxParticipants}/${engine.calls.maxParticipants})`
-                          : `Join ${formatBitchatChannelLabel(engine.activeGeohash)} voice call`
-                      }
-                    >
-                      <Phone size={13} />
-                      <span>{isActiveGeoCallFull ? 'Full 6/6' : 'Join Voice'}</span>
-                    </button>
-                    {!isActiveGeoCallFull && (
-                      <button
-                        type="button"
-                        className="ag-geo-call-join-btn"
-                        onClick={() => void engine.calls.joinGeoCall(engine.activeGeohash, 'video')}
-                        title={`Join ${formatBitchatChannelLabel(engine.activeGeohash)} video call`}
-                        aria-label={`Join ${formatBitchatChannelLabel(engine.activeGeohash)} video call`}
-                      >
-                        <Video size={13} />
-                        <span>Video</span>
-                      </button>
-                    )}
-                  </div>
                 </div>
-              )}
-
-              <SearchBar
-                open={searchOpen}
-                query={searchQuery}
-                matchCount={searchMatchIds.length}
-                activeMatchIndex={searchMatchIdx}
-                onQueryChange={setSearchQuery}
-                onPrev={() =>
-                  setSearchMatchIdx((i) =>
-                    searchMatchIds.length
-                      ? (i - 1 + searchMatchIds.length) % searchMatchIds.length
-                      : 0
-                  )
-                }
-                onNext={() =>
-                  setSearchMatchIdx((i) =>
-                    searchMatchIds.length ? (i + 1) % searchMatchIds.length : 0
-                  )
-                }
-                onClose={() => {
-                  setSearchOpen(false)
-                  setSearchQuery('')
-                }}
-              />
-
-              <MessageStream
-                engine={engine}
-                searchQuery={searchOpen ? searchQuery : ''}
-                activeSearchMessageId={activeSearchMessageId}
-                onReply={handleReply}
-                onReact={handleReact}
-                onReplyServer={handleReplyServer}
-                onReactServer={handleReactServer}
-                onInspectPeer={setInspectedPeer}
-                onStartDm={handleOpenDm}
-                onMentionPeer={handleMentionPeer}
-                onTuneChannel={handleTuneChannel}
-                onClickMention={handleClickInlineMention}
-                onLocateMe={() => void handleLocateMe()}
-                onExpandRadar={handleExpandRadar}
-                onOpenServerSettings={handleOpenServerSettings}
-                onOpenLightbox={setLightboxImage}
-                onOpenZap={handleOpenZap}
-                onClaimCashuToken={handleClaimCashuToken}
-              />
-
-              <Composer
-                engine={engine}
-                externalDraftToken={externalDraftToken}
-                onSent={(isEncrypted) => bitchatAudio.play(isEncrypted ? 'dm' : 'send')}
-              />
-            </main>
-
-            {/* Dimmed Interactive Scrim behind Mobile Right Slide-Out User List Tray */}
-            <div
-              className={`ag-right-drawer-scrim ${mobileUserListOpen ? 'active' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
-              onClick={() => setMobileUserListOpen(false)}
-              aria-hidden="true"
-            />
-
-            {/* Right Pane (Desktop User List) / Interactive Swipe-Left Slide-Out Tray (Mobile <868px) */}
-            <div
-              className={`ag-users-col ${mobileUserListOpen ? 'open' : ''} ${isSwipingRight ? 'is-swiping' : ''}`}
-              aria-hidden={
-                isMobileViewport && !mobileUserListOpen && !isSwipingRight ? true : undefined
-              }
-            >
-              <UserListPane
-                engine={engine}
-                collapsed={userListCollapsed}
-                onCloseMobile={() => setMobileUserListOpen(false)}
-                onInspectPeer={setInspectedPeer}
-                onStartDm={handleOpenDm}
-                onMentionPeer={handleMentionPeer}
-                onEditPeerNote={handleOpenPeerNote}
-                onOpenZap={handleOpenZap}
-                onOpenAmailCompose={({ pubkey, nickname }) =>
-                  handleOpenAmailCompose(pubkey, nickname)
-                }
-                onPlaySound={playSound}
-              />
-            </div>
+              </>
+            )}
           </>
         )}
 
-        {/* Keep floating active call pill accessible when viewing Agora, Agmail, Agwallet, or Bitchat Globe */}
-        {(workspace !== 'chat' || isBitchatGlobe) &&
+        {/* Keep floating active call pill accessible when viewing Agora, Agmail, Agwallet, Bitchat Globe, or People empty stage */}
+        {(workspace !== 'chat' || isBitchatGlobe || isPeopleEmptyStage) &&
           (activeCall || engine.transcription.endedCallTranscript) && (
           <Suspense fallback={null}>
             <CallStage
