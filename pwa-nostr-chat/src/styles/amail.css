@@ -2691,3 +2691,114 @@
     min-height: 38px;
   }
 }
+
+/* Read-only ancestry inside the reply composer. */
+.ag-amail-history-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.22rem;
+}
+
+.ag-amail-reply-context {
+  min-width: 0;
+  flex: 0 0 auto;
+  margin-top: 0.7rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.ag-amail-reply-context > summary {
+  padding: 0.52rem 0.7rem;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ag-amail-reply-scroll {
+  max-height: min(15rem, 27dvh);
+  overflow-y: auto;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ag-amail-reply-chain,
+.ag-amail-reply-attachments {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ag-amail-reply-chain {
+  padding: 0.4rem 0.65rem 0.55rem;
+}
+
+.ag-amail-reply-chain > li {
+  padding: 0.48rem 0.6rem;
+  border-inline-start: 2px solid var(--border-subtle);
+  overflow-wrap: anywhere;
+}
+
+.ag-amail-reply-chain > .reply-target {
+  border-inline-start-color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+.ag-amail-reply-target-label {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ag-amail-reply-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.15rem 0.65rem;
+  font-size: 12px;
+}
+
+.ag-amail-reply-meta > span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.ag-amail-reply-subject {
+  margin-top: 0.18rem;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ag-amail-reply-body {
+  margin: 0.18rem 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.ag-amail-reply-attachments {
+  margin-top: 0.24rem;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.ag-amail-reply-attachments > li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.32rem;
+}
+
+.ag-amail-reply-attachments svg {
+  flex-shrink: 0;
+}
+
+.ag-amail-reply-note {
+  margin: 0;
+  padding: 0.45rem 0.7rem;
+  color: var(--text-muted);
+  font-size: 12px;
+}
