@@ -1,3 +1,4 @@
+import { sanitizeSyncedPinnedState } from './syncedPins.ts'
 import type { RecordingQualityPreset, TurnServerConfig } from '../types/calls.ts'
 import {
   DEFAULT_CONTENT_FILTER_SETTINGS,
@@ -1498,18 +1499,7 @@ export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
             return cleaned
           })()
         : {},
-    pinned:
-      rawCrdt.pinned &&
-      typeof rawCrdt.pinned === 'object' &&
-      Array.isArray(rawCrdt.pinned.items)
-        ? {
-            updatedAt:
-              typeof rawCrdt.pinned.updatedAt === 'number' && Number.isFinite(rawCrdt.pinned.updatedAt)
-                ? rawCrdt.pinned.updatedAt
-                : 0,
-            items: rawCrdt.pinned.items,
-          }
-        : { updatedAt: 0, items: [] },
+    pinned: sanitizeSyncedPinnedState(rawCrdt.pinned),
     dmClearedAt:
       rawCrdt.dmClearedAt &&
       typeof rawCrdt.dmClearedAt === 'object' &&

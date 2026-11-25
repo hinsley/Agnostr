@@ -1,9 +1,11 @@
+import { mergeSyncedPins, reconcileSyncedPins, sanitizeSyncedPinnedState } from './syncedPins.ts'
 import { sha256 } from '@noble/hashes/sha256'
 import {
   finalizeEvent,
   nip44,
   type Event as NostrEvent,
   type EventTemplate,
+  type Filter,
   type VerifiedEvent,
 } from 'nostr-tools'
 import type {
@@ -37,9 +39,7 @@ import type {
 } from '../types/protocol.ts'
 import type { ServerMessage, ServerSummary } from '../types/servers.ts'
 import { verifyEventCached } from './bitchatProtocol.ts'
-import { normalizeGeohash } from './geohash.ts'
 import { bytesToHex, encodeNpubSafe, type SigningKeyMaterial } from './identity.ts'
-import { isValidBitchatChannelKey, normalizeBitchatChannelKey } from './bitchatChannel.ts'
 
 /** Ephemeral Nostr kind for live silent sibling-device sync */
 export const KIND_DEVICE_SYNC_EPHEMERAL = 25055
@@ -52,6 +52,50 @@ export const DEVICE_SYNC_TAG = 'agnostr-device-sync'
 
 /** Replaceable `d` tag for the encrypted multi-device catch-up checkpoint */
 export const DEVICE_SYNC_CHECKPOINT_D_TAG = 'agnostr-device-sync-v1'
+const DEVICE_CHECKPOINT_TOPIC = 'agnostr-device-checkpoint-v2'
+const DEVICE_CHECKPOINT_PREFIX = 'agnostr-device-sync-v2:'
+
+/** Distinct, pseudonymous addresses prevent relays from replacing one browser's
+ * offline edit with another browser's independent checkpoint. */
+export function deviceCheckpointAddress(pubkey: string, deviceId: string): string {
+  const digest = bytesToHex(sha256(new TextEncoder().encode(JSON.stringify([pubkey.toLowerCase(), deviceId]))))
+  return DEVICE_CHECKPOINT_PREFIX + digest.slice(0, 32)
+}
+
+export function deviceCheckpointAddressOf(event: Pick<NostrEvent, 'kind' | 'tags'>): string | undefined {
+  if (event.kind !== KIND_DEVICE_SYNC_CHECKPOINT) return undefined
+  const d = event.tags.find(tag => tag[0] === 'd')?.[1]
+  if (d === DEVICE_SYNC_CHECKPOINT_D_TAG) return d
+  if (d?.startsWith(DEVICE_CHECKPOINT_PREFIX) &&
+      /^[0-9a-f]{32}$/.test(d.slice(DEVICE_CHECKPOINT_PREFIX.length)) &&
+      event.tags.some(tag => tag[0] === 't' && tag[1] === DEVICE_CHECKPOINT_TOPIC)) return d
+}
+
+export function deviceCheckpointFilters(pubkey: string): Filter[] {
+  const fields = { kinds: [KIND_DEVICE_SYNC_CHECKPOINT], authors: [pubkey.toLowerCase()] }
+  return [
+    { ...fields, '#d': [DEVICE_SYNC_CHECKPOINT_D_TAG], limit: 3 },
+    { ...fields, '#t': [DEVICE_CHECKPOINT_TOPIC], limit: MAX_SYNCED_DEVICES * 2 },
+  ]
+}
+
+/** Buffer one normal record + one divergent relay copy per address, bounded
+ * in total. Always retain the migration source even when multiple relays disagree. */
+export function collectDeviceCheckpoint(
+  candidates: Map<string, NostrEvent[]>,
+  event: NostrEvent
+): void {
+  const address = deviceCheckpointAddressOf(event)
+  if (!address || candidates.get(address)?.some(candidate => candidate.id === event.id)) return
+  const compare = (a: NostrEvent, b: NostrEvent) => b.created_at - a.created_at || a.id.localeCompare(b.id)
+  const copies = [...(candidates.get(address) ?? []), event].sort(compare).slice(0, 2)
+  candidates.set(address, copies)
+  if (candidates.size > MAX_SYNCED_DEVICES * 2 + 1) {
+    const oldest = [...candidates.entries()].filter(([d]) => d !== DEVICE_SYNC_CHECKPOINT_D_TAG)
+      .sort((a,b) => compare(b[1][0], a[1][0]))[0]
+    if (oldest) candidates.delete(oldest[0])
+  }
+}
 
 /** Heartbeat cadence & online threshold */
 export const DEVICE_SYNC_HELLO_INTERVAL_MS = 45_000
@@ -69,6 +113,11 @@ export const MAX_SYNCED_DM_PEER_NAMES = 60
 
 /** Strict cap for synced devices tracked per master keypair */
 export const MAX_SYNCED_DEVICES = 16
+
+// Locally advertised maxima: 30 DMs, 30 server channels, 16 BitChat channels.
+// New requests stay in 32-scope groups so older responders can handle them.
+const MAX_REQUEST_PACKET_SCOPES = 32
+const MAX_ADVERTISED_SYNC_SCOPES = 30 + 30 + 16
 
 const utf8Encoder = new TextEncoder()
 
@@ -447,31 +496,9 @@ export function reconcileLocalSnapshotIntoCrdt(
     }
   }
 
-  // 4. Pinned Bitchat Channels (LWW ordered list)
-  let nextPinned = prev.pinned
-  const cleanPinned: PinnedChannel[] = snapshot.pinnedChannels.map((c) => ({
-    geohash: normalizeBitchatChannelKey(c.geohash) ?? normalizeGeohash(c.geohash),
-    label: c.label,
-    pinnedAt: c.pinnedAt,
-    unreadCount: 0,
-    mentionCount: 0,
-  }))
-  if (!arePinnedListsEqual(prev.pinned.items, cleanPinned)) {
-    const seededTs =
-      isInitialSeed && cleanPinned.length === 0
-        ? 0
-        : isInitialSeed
-          ? Math.max(
-              1,
-              ...cleanPinned.map((c) => (typeof c.pinnedAt === 'number' ? c.pinnedAt : nowMs))
-            )
-          : Math.max(nowMs, prev.pinned.updatedAt + 1)
-    nextPinned = {
-      updatedAt: seededTs,
-      items: cleanPinned,
-    }
-    changed = true
-  }
+  // 4. Pin membership merges per channel; order remains a last-writer register.
+  const nextPinned = reconcileSyncedPins(prev.pinned, snapshot.pinnedChannels, nowMs, isInitialSeed)
+  if (nextPinned !== prev.pinned) changed = true
 
   // 5. DM Cleared-At tombstones (per-peer max timestamp)
   const nextDmCleared: Record<string, number> = { ...prev.dmClearedAt }
@@ -854,28 +881,11 @@ export function mergeCrdtStates(
     }
   }
 
-  // 4. Merge Pinned Bitchat Channels (LWW ordered list)
-  let mergedPinned = local.pinned
-  if (
-    remote.pinned.updatedAt > local.pinned.updatedAt ||
-    (remote.pinned.updatedAt === local.pinned.updatedAt &&
-      remote.pinned.updatedAt > 0 &&
-      JSON.stringify(remote.pinned.items) > JSON.stringify(local.pinned.items))
-  ) {
-    mergedPinned = {
-      updatedAt: remote.pinned.updatedAt,
-      items: remote.pinned.items.map((c) => ({
-        geohash: normalizeBitchatChannelKey(c.geohash) ?? normalizeGeohash(c.geohash),
-        label: c.label,
-        pinnedAt: c.pinnedAt,
-        unreadCount: 0,
-        mentionCount: 0,
-      })),
-    }
-    if (!arePinnedListsEqual(local.pinned.items, mergedPinned.items)) {
-      diff.pinnedChanged = true
-      diff.itemsUpdated += 1
-    }
+  // 4. Merge per-channel pin adds/removals, with an independent layout order.
+  const mergedPinned = mergeSyncedPins(local.pinned, remote.pinned)
+  if (!arePinnedListsEqual(local.pinned.items, mergedPinned.items)) {
+    diff.pinnedChanged = true
+    diff.itemsUpdated += 1
   }
 
   // 5. Merge DM Cleared-At Tombstones (per-peer max)
@@ -1266,7 +1276,9 @@ export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
         const b = crdt.blocked[k]
         return [k, b.addedAt, b.removedAt, b.label ?? '']
       }),
-    pinned: [crdt.pinned.updatedAt, crdt.pinned.items.map((p) => `${p.geohash}:${p.label ?? ''}`)],
+    pinned: [crdt.pinned.updatedAt, crdt.pinned.items.map((p) => `${p.geohash}:${p.label ?? ''}`),
+      crdt.pinned.order, Object.entries(crdt.pinned.records ?? {}).sort(([a],[b]) => a.localeCompare(b))
+        .map(([k,r]) => [k,r.addedAt,r.removedAt,r.pinnedAt,r.label])],
     dmClearedAt: Object.keys(crdt.dmClearedAt)
       .sort()
       .map((k) => [k, crdt.dmClearedAt[k]]),
@@ -1330,11 +1342,16 @@ export function buildMessageRequestPackets(packet: DeviceSyncMsgReqPacket): Devi
   let next = { ...packet, scopes: [] as DeviceSyncScopeRequest[] }
   for (const scope of packet.scopes) {
     const candidate = { ...next, scopes: [...next.scopes, scope] }
-    if (next.scopes.length >= 32 || utf8ByteLength(JSON.stringify(candidate)) > MAX_NIP44_CHUNK_BYTES) {
+    if (next.scopes.length >= MAX_REQUEST_PACKET_SCOPES || utf8ByteLength(JSON.stringify(candidate)) > MAX_NIP44_CHUNK_BYTES) {
       if (next.scopes.length || next.wantAmail) result.push(next)
       next = { ...packet, scopes: [], wantAmail: undefined }
     }
-    next.scopes.push(scope)
+    const fallback = { ...scope, knownIds: [] }
+    if (utf8ByteLength(JSON.stringify({ ...next, scopes: [...next.scopes, scope] })) <= MAX_NIP44_CHUNK_BYTES) {
+      next.scopes.push(scope)
+    } else if (utf8ByteLength(JSON.stringify({ ...next, scopes: [fallback] })) <= MAX_NIP44_CHUNK_BYTES) {
+      next.scopes.push(fallback)
+    }
   }
   if (next.scopes.length || next.wantAmail) result.push(next)
   return result
@@ -1350,8 +1367,9 @@ export function computeJsonDigest(value: unknown): string {
 
 /**
  * Fits a CRDT checkpoint (plus optional Amail snapshot,
- * and bounded recent messages tail) strictly within `MAX_NIP44_CHUNK_BYTES` so NIP-44 encryption
- * can never overflow.
+ * and bounded recent messages tail) within the budget if possible. An
+ * oversized core is returned unmodified so callers can surface an error
+ * instead of silently discarding tombstones or other required profile state.
  */
 export function fitCheckpointStateWithinBudget(
   crdt: DeviceSyncCrdtState,
@@ -1467,6 +1485,7 @@ export function buildMessageChunkPackets(params: {
   const groups: Array<Array<DmMessage | ServerMessage | GeoMessage>> = []
   let current: Array<DmMessage | ServerMessage | GeoMessage> = []
 
+  const ts = Date.now()
   const makeDraft = (
     slice: Array<DmMessage | ServerMessage | GeoMessage>,
     chunkIndex: number,
@@ -1476,7 +1495,7 @@ export function buildMessageChunkPackets(params: {
     type: 'sync-msg-chunk',
     deviceId: params.deviceId,
     targetDeviceId: params.targetDeviceId,
-    ts: Date.now(),
+    ts,
     chunkIndex,
     totalChunks,
     scopeKind: params.scopeKind,
@@ -1487,7 +1506,7 @@ export function buildMessageChunkPackets(params: {
 
   for (const msg of params.messages) {
     const candidate = [...current, msg]
-    const draft = makeDraft(candidate, groups.length, groups.length + 1)
+    const draft = makeDraft(candidate, params.messages.length - 1, params.messages.length)
     if (utf8ByteLength(JSON.stringify(draft)) <= maxBytes) {
       current = candidate
       continue
@@ -1496,7 +1515,7 @@ export function buildMessageChunkPackets(params: {
       groups.push(current)
       current = []
     }
-    const singleDraft = makeDraft([msg], groups.length, groups.length + 1)
+    const singleDraft = makeDraft([msg], params.messages.length - 1, params.messages.length)
     if (utf8ByteLength(JSON.stringify(singleDraft)) <= maxBytes) {
       current = [msg]
     }
@@ -1620,6 +1639,7 @@ export async function buildSignedDeviceSyncEphemeralEvent(
     safePacket = safeReq
   }
   const plaintext = JSON.stringify(safePacket)
+  if (utf8ByteLength(plaintext) > MAX_NIP44_CHUNK_BYTES) return null
   const ciphertext = await encryptSelfPayload(plaintext, material, allowExtensionPrompt)
   if (!ciphertext) return null
 
@@ -1658,9 +1678,11 @@ function projectWireState(state: DeviceSyncCrdtState): DeviceSyncCrdtState {
 export async function buildSignedDeviceSyncCheckpointEvent(
   state: DeviceSyncCrdtState,
   material: SigningKeyMaterial,
-  allowExtensionPrompt = false
+  allowExtensionPrompt = false,
+  deviceId?: string
 ): Promise<VerifiedEvent | null> {
   const plaintext = JSON.stringify(projectWireState(state))
+  if (utf8ByteLength(plaintext) > MAX_NIP44_CHUNK_BYTES) return null
   const ciphertext = await encryptSelfPayload(plaintext, material, allowExtensionPrompt)
   if (!ciphertext) return null
 
@@ -1668,8 +1690,8 @@ export async function buildSignedDeviceSyncCheckpointEvent(
     kind: KIND_DEVICE_SYNC_CHECKPOINT,
     created_at: Math.floor(Date.now() / 1000),
     tags: [
-      ['d', DEVICE_SYNC_CHECKPOINT_D_TAG],
-      ['t', DEVICE_SYNC_TAG],
+      ['d', deviceId ? deviceCheckpointAddress(material.pubkey, deviceId) : DEVICE_SYNC_CHECKPOINT_D_TAG],
+      ['t', deviceId ? DEVICE_CHECKPOINT_TOPIC : DEVICE_SYNC_TAG],
     ],
     content: ciphertext,
   }
@@ -1750,32 +1772,7 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     }
   }
 
-  const pinnedItems: PinnedChannel[] = []
-  let pinnedUpdatedAt = 0
-  if (isRecord(raw.pinned)) {
-    pinnedUpdatedAt =
-      typeof raw.pinned.updatedAt === 'number' && Number.isFinite(raw.pinned.updatedAt)
-        ? raw.pinned.updatedAt
-        : 0
-    if (Array.isArray(raw.pinned.items)) {
-      const seen = new Set<string>()
-      for (const item of raw.pinned.items) {
-        if (!isRecord(item) || typeof item.geohash !== 'string' || !isValidBitchatChannelKey(item.geohash)) {
-          continue
-        }
-        const key = normalizeBitchatChannelKey(item.geohash) ?? normalizeGeohash(item.geohash)
-        if (seen.has(key)) continue
-        seen.add(key)
-        pinnedItems.push({
-          geohash: key,
-          label: typeof item.label === 'string' ? item.label.slice(0, 48) : undefined,
-          pinnedAt: typeof item.pinnedAt === 'number' && Number.isFinite(item.pinnedAt) ? item.pinnedAt : Date.now(),
-          unreadCount: 0,
-          mentionCount: 0,
-        })
-      }
-    }
-  }
+  const pinned = sanitizeSyncedPinnedState(raw.pinned)
 
   const dmClearedAt: Record<string, number> = {}
   if (isRecord(raw.dmClearedAt)) {
@@ -1865,7 +1862,7 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     serverOrder,
     trusted,
     blocked,
-    pinned: { updatedAt: pinnedUpdatedAt, items: pinnedItems },
+    pinned,
     dmClearedAt,
     lud16,
     nickname,
@@ -1953,9 +1950,14 @@ export async function parseDeviceSyncEphemeralEvent(
     case 'sync-msg-req': {
       if (typeof parsed.targetDeviceId !== 'string' || !Array.isArray(parsed.scopes)) return null
       const scopes: DeviceSyncScopeRequest[] = []
+      const seenScopes = new Set<string>()
       for (const s of parsed.scopes) {
+        if (scopes.length >= MAX_ADVERTISED_SYNC_SCOPES) break
         if (!isRecord(s) || typeof s.key !== 'string' || !Array.isArray(s.knownIds)) continue
         if (s.kind !== 'dm' && s.kind !== 'server' && s.kind !== 'bitchat') continue
+        const scopeId = JSON.stringify([s.kind, s.key])
+        if (seenScopes.has(scopeId)) continue
+        seenScopes.add(scopeId)
         scopes.push({
           kind: s.kind,
           key: s.key,
@@ -2050,10 +2052,7 @@ export async function parseDeviceSyncCheckpointEvent(
 ): Promise<DeviceSyncCrdtState | null> {
   if (ev.kind !== KIND_DEVICE_SYNC_CHECKPOINT) return null
   if (ev.pubkey.toLowerCase() !== material.pubkey.toLowerCase()) return null
-  const hasDTag = ev.tags.some(
-    (t) => t[0] === 'd' && t[1] === DEVICE_SYNC_CHECKPOINT_D_TAG
-  )
-  if (!hasDTag) return null
+  if (!deviceCheckpointAddressOf(ev)) return null
   if (!verifyEventCached(ev)) return null
 
   const plaintext = await decryptSelfPayload(ev.content, material, allowExtensionPrompt)

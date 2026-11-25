@@ -38,7 +38,8 @@ import {
   computeScopeDigest,
   createEmptyCrdtState,
   detectDeviceLabel,
-  DEVICE_SYNC_CHECKPOINT_D_TAG,
+  deviceCheckpointFilters,
+  collectDeviceCheckpoint,
   DEVICE_SYNC_CHECKPOINT_DEBOUNCE_MS,
   DEVICE_SYNC_HELLO_INTERVAL_MS,
   DEVICE_SYNC_ONLINE_TTL_MS,
@@ -160,13 +161,6 @@ function savePendingCheckpoint(owner: string, pending: boolean) {
     if (pending) localStorage.setItem(CHECKPOINT_PENDING_KEY, owner)
     else if (hasPendingCheckpoint(owner)) localStorage.removeItem(CHECKPOINT_PENDING_KEY)
   } catch { /* sync still works without persistent browser storage */ }
-}
-
-function rememberCheckpoint(candidates: Map<string, NostrEvent>, event: NostrEvent) {
-  candidates.set(event.id, event)
-  if (candidates.size <= 16) return
-  const oldest = [...candidates.values()].sort((a,b) => a.created_at - b.created_at || a.id.localeCompare(b.id))[0]
-  candidates.delete(oldest.id)
 }
 
 function sortLinkedDevices(list: LinkedDeviceInfo[]): LinkedDeviceInfo[] {
@@ -536,6 +530,11 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       (labelOverride ?? deviceLabelRef.current).trim().slice(0, 48) || detectDeviceLabel()
     const prevDevices = sanitizeSyncedDevicesMap(crdtRef.current.devices)
     const existing = prevDevices[selfId]
+    // Inventory metadata should not itself trigger a round of divergent state
+    // on every message or checkpoint; the UI tracks live sync separately.
+    if (!labelOverride && existing && existing.label === cleanLabel &&
+        (existing.removedAt ?? 0) < existing.updatedAt &&
+        nowMs - existing.lastSyncedAt < SELF_CHECKPOINT_STALE_MS) return
     const minNextTs = Math.max(
       nowMs,
       existing?.lastSyncedAt ?? 0,
@@ -853,13 +852,23 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           issue = 'too-large'
           return false
         }
-        const signed = await buildSignedDeviceSyncCheckpointEvent(bounded, material, allowExtensionPrompt)
+        const signed = await buildSignedDeviceSyncCheckpointEvent(bounded, material, allowExtensionPrompt, device)
         if (!signed || !isCurrent()) return false
         seenEventIdsRef.current.add(signed.id)
         const res = await relayPool.publish(relays, signed, 4500)
         if (!isCurrent() || res.acceptedRelays.length === 0) return false
         accepted = true
         recordSyncedActivity(0)
+        // Maintain the legacy migration address for local-key clients. Relays
+        // may overwrite this mirror, but the independent addresses remain.
+        // Extension mode never requests a second signing prompt for the mirror.
+        if (material.secretKey) {
+          const mirror = await buildSignedDeviceSyncCheckpointEvent(bounded, material)
+          if (mirror && isCurrent()) {
+            seenEventIdsRef.current.add(mirror.id)
+            void relayPool.publish(relays, mirror, 3500).catch(() => {})
+          }
+        }
         return true
       } catch {
         return false
@@ -941,12 +950,6 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       if (identityManager.getMasterKeyMaterial().pubkey !== owner) return false
       upsertSelfDeviceRecord(now)
       persistLocalJournal()
-      const statePayload = fitCheckpointStateWithinBudget(
-        crdtRef.current,
-        amailInfo,
-        undefined,
-        MAX_NIP44_CHUNK_BYTES
-      )
       const packet: DeviceSyncStatePacket = {
         v: 1,
         type: 'sync-state',
@@ -955,8 +958,12 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         nickname: snapshotRef.current.nickname,
         ...(targetDeviceId ? { targetDeviceId } : {}),
         ts: now,
-        state: statePayload,
+        state: createEmptyCrdtState(),
       }
+      const envelopeBytes = utf8ByteLength(JSON.stringify(packet)) -
+        utf8ByteLength(JSON.stringify(packet.state))
+      packet.state = fitCheckpointStateWithinBudget(crdtRef.current, amailInfo, undefined,
+        MAX_NIP44_CHUNK_BYTES - envelopeBytes)
       return await publishEphemeralPacket(packet, allowExtensionPrompt)
     },
     [
@@ -1245,7 +1252,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       if (packet.type === 'sync-msg-req') {
         touchSiblingDevice(packet.deviceId)
         const { dmMap, serverMap, bitchatMap } = collectLocalMessageBuckets()
-        for (const req of packet.scopes.slice(0, 32)) {
+        for (const req of packet.scopes) {
           const known = new Set(req.knownIds)
           if (req.kind === 'dm') {
             const bucket = dmMap.get(req.key.toLowerCase())
@@ -1596,23 +1603,29 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
 
     let cancelled = false
     checkpointHydratedRef.current = false
-    const checkpoints = new Map<string, NostrEvent>()
+    const checkpoints = new Map<string, NostrEvent[]>()
     const checkpointEoses = new Set<string>()
     let checkpointEoseDone = false
+    let hydrating = false
 
     const applyHydratedCheckpoint = async () => {
-      if (cancelled || checkpointHydratedRef.current) return
-      checkpointHydratedRef.current = true
-      const events = [...checkpoints.values()].sort((a,b) => b.created_at - a.created_at || a.id.localeCompare(b.id))
+      if (cancelled || checkpointHydratedRef.current || hydrating) return
+      hydrating = true
+      const events = [...checkpoints.values()].flat().sort((a,b) => b.created_at - a.created_at || a.id.localeCompare(b.id))
       for (const event of events) {
         if (cancelled || identityManager.getMasterKeyMaterial().pubkey !== material.pubkey) return
         seenEventIdsRef.current.add(event.id)
-        const parsed = await parseDeviceSyncCheckpointEvent(event, material, false)
-        if (!cancelled && parsed && identityManager.getMasterKeyMaterial().pubkey === material.pubkey) {
-          await applyMergedRemoteCrdt(parsed)
+        try {
+          const parsed = await parseDeviceSyncCheckpointEvent(event, material, false)
+          if (!cancelled && parsed && identityManager.getMasterKeyMaterial().pubkey === material.pubkey) {
+            await applyMergedRemoteCrdt(parsed)
+          }
+        } catch {
+          // A malformed or incompatible snapshot must not block other devices' recovery.
         }
       }
       if (!cancelled) {
+        checkpointHydratedRef.current = true
         const selfId = deviceIdRef.current
         const selfRec = crdtRef.current.devices?.[selfId]
         const needsSelfRegistration =
@@ -1640,28 +1653,21 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     const unsubCheckpoint = relayPool.subscribe(
       `agnostr-devsync-ckpt-${seq}`,
       relays,
-      [
-        {
-          kinds: [KIND_DEVICE_SYNC_CHECKPOINT],
-          authors: [pk],
-          '#d': [DEVICE_SYNC_CHECKPOINT_D_TAG],
-          limit: 3,
-        },
-      ],
+      deviceCheckpointFilters(pk),
       {
         onEvent: (ev) => {
           if (cancelled || ev.kind !== KIND_DEVICE_SYNC_CHECKPOINT) return
           if (seenEventIdsRef.current.has(ev.id)) return
-          if (!checkpointHydratedRef.current) {
-            rememberCheckpoint(checkpoints, ev)
+          if (!checkpointHydratedRef.current && !hydrating) {
+            collectDeviceCheckpoint(checkpoints, ev)
             return
           }
           seenEventIdsRef.current.add(ev.id)
           void parseDeviceSyncCheckpointEvent(ev, material, false).then((parsed) => {
             if (!cancelled && parsed && identityManager.getMasterKeyMaterial().pubkey === pk) {
-              void applyMergedRemoteCrdt(parsed)
+              void applyMergedRemoteCrdt(parsed).catch(() => {})
             }
-          })
+          }).catch(() => {})
         },
         onEose: (relay) => {
           if (cancelled || checkpointEoseDone) return
@@ -1880,9 +1886,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     setIsSyncing(true)
     try {
       const allowExt = material.mode === 'extension'
-      // 1. Pull latest kind:30078 checkpoint
+      // 1. Pull the retained kind:30078 checkpoints from all devices.
       const fetchedCheckpoint = await new Promise<NostrEvent[]>((resolve) => {
-        const candidates = new Map<string, NostrEvent>()
+        const candidates = new Map<string, NostrEvent[]>()
         const eoses = new Set<string>()
         let settled = false
         let unsub: (() => void) | null = null
@@ -1891,24 +1897,17 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           settled = true
           window.clearTimeout(timer)
           unsub?.()
-          resolve([...candidates.values()].sort((a,b) => b.created_at - a.created_at || a.id.localeCompare(b.id)))
+          resolve([...candidates.values()].flat().sort((a,b) => b.created_at - a.created_at || a.id.localeCompare(b.id)))
         }
         const timer = window.setTimeout(finish, 2500)
         unsub = relayPool.subscribe(
           `agnostr-devsync-manual-${++subSeqRef.current}`,
           relays,
-          [
-            {
-              kinds: [KIND_DEVICE_SYNC_CHECKPOINT],
-              authors: [material.pubkey.toLowerCase()],
-              '#d': [DEVICE_SYNC_CHECKPOINT_D_TAG],
-              limit: 3,
-            },
-          ],
+          deviceCheckpointFilters(material.pubkey),
           {
             onEvent: (ev) => {
               if (ev.kind === KIND_DEVICE_SYNC_CHECKPOINT) {
-                rememberCheckpoint(candidates, ev)
+                collectDeviceCheckpoint(candidates, ev)
               }
             },
             onEose: relay => {
@@ -1922,8 +1921,12 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       const isCurrent = () => enabledRef.current && identityManager.getMasterKeyMaterial().pubkey === material.pubkey
       for (const event of fetchedCheckpoint) {
         if (!isCurrent()) return
-        const parsed = await parseDeviceSyncCheckpointEvent(event, material, allowExt)
-        if (parsed && isCurrent()) await applyMergedRemoteCrdt(parsed)
+        try {
+          const parsed = await parseDeviceSyncCheckpointEvent(event, material, allowExt)
+          if (parsed && isCurrent()) await applyMergedRemoteCrdt(parsed)
+        } catch {
+          // Ignore an unavailable snapshot but continue merging other devices.
+        }
       }
       if (!isCurrent()) return
       checkpointHydratedRef.current = true

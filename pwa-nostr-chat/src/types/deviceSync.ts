@@ -86,10 +86,19 @@ export interface SyncedServerOrderState {
   ids: string[]
 }
 
-/** LWW-Register for ordered Pinned Bitchat Channels */
+export interface SyncedPinRecord {
+  addedAt: number
+  removedAt: number
+  pinnedAt: number
+  label?: string
+}
+
+/** Per-channel membership plus an LWW order. Older clients read the items projection. */
 export interface SyncedPinnedState {
   updatedAt: number
   items: PinnedChannel[]
+  order?: string[]
+  records?: Record<string, SyncedPinRecord>
 }
 
 /** LWW-Register for Lightning Address (`lud16`) */

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools'
-import { decryptSelfPayload } from '../src/lib/deviceSync.ts'
+import { decryptSelfPayload, deviceCheckpointAddressOf } from '../src/lib/deviceSync.ts'
 
 const url = new URL(process.argv[2] || 'http://127.0.0.1:4173/')
 assert.equal(url.hostname, '127.0.0.1')
@@ -14,7 +14,7 @@ const peer = getPublicKey(generateSecretKey())
 const id = 'synthetic-local-dm'
 const secret = Buffer.from(secretKey).toString('hex')
 const contexts = [], frames = [], checkpoints = new Map()
-let failCheckpoint = true, passCheckpointBacklog = false
+let failCheckpoint = true, passCheckpointBacklog = false, isolated = true
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 function fixture({secret, pk, npub, own, id, a, now}) {
@@ -36,6 +36,7 @@ function fixture({secret, pk, npub, own, id, a, now}) {
   set('device_seed',secret)
   set('sign_mode','auto')
   set('nickname',a?'Synthetic source':'Synthetic sibling')
+  if (a !== null) set('pinned_channels',JSON.stringify([{geohash:a?'topic:desktop-pin':'topic:phone-pin',pinnedAt:now*1000,unreadCount:0,mentionCount:0}]))
   set('translator_prefs',JSON.stringify({model:a?'opus':'m2m100'}))
   const msg = {id, peerPubkey:pk, senderPubkey:own, content:'Same message on both devices',
     createdAt:now-10,isOwn:true,protocol:'nip17',deliveryStatus:a?'read':'sent'}
@@ -73,8 +74,15 @@ async function relay(from, raw) {
   frames.push({side:from.side,event,accept})
   await from.send(socket,['OK',event.id,accept,accept?'':'synthetic offline'])
   if (!accept) return
-  if (event.kind===30078) checkpoints.set(event.pubkey,event)
+  if (event.kind===30078) {
+    const key = event.pubkey + ':' + deviceCheckpointAddressOf(event)
+    const prior=checkpoints.get(key)
+    if (!prior || event.created_at>prior.created_at || (event.created_at===prior.created_at&&event.id<prior.id)) {
+      checkpoints.set(key,event)
+    }
+  }
   for (const context of contexts) for (const sub of context.subs.values()) {
+    if (isolated && context!==from) continue
     if (sub.filters.some(filter=>matches(event,filter))) await context.send(sub.socket,['EVENT',sub.id,event])
   }
 }
@@ -84,7 +92,7 @@ async function browser(port, a) {
   const proc=spawn(process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',[
     '--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--no-proxy-server',
     '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--window-size=1200,960','--remote-debugging-port='+port,'--user-data-dir='+dir],{stdio:'ignore'})
-  const state={side:a?'A':'B',subs:new Map(),proc,dir};contexts.push(state)
+  const state={side:a===null?'C':a?'A':'B',subs:new Map(),proc,dir};contexts.push(state)
   let target
   for(let i=0;i<100&&!target;i++){
     try {target=(await (await fetch('http://127.0.0.1:'+port+'/json/list')).json()).find(x=>x.type==='page')} catch {}
@@ -131,6 +139,18 @@ try {
   await wait(()=>frames.some(f=>f.side==='A'&&f.event.kind===30078&&f.accept),'pending checkpoint retried after reload')
   await wait(()=>a.run(()=>localStorage.getItem('agnostr:v2:device_sync_checkpoint_pending')===null),'durable pending marker cleared only after an accepted publish')
   const b=await browser(9479,false)
+  const durable = side => frames.find(f=>f.side===side&&f.accept&&deviceCheckpointAddressOf(f.event)?.startsWith('agnostr-device-sync-v2:'))?.event
+  await wait(()=>durable('B'),'second offline device publishes an independent checkpoint')
+  assert.notEqual(deviceCheckpointAddressOf(durable('A')),deviceCheckpointAddressOf(durable('B')))
+  passCheckpointBacklog=true
+  const c=await browser(9480,null)
+  await wait(()=>c.run(()=> {
+    const pins = JSON.parse(localStorage.getItem('agnostr:v2:pinned_channels') ?? '[]').map(x=>x.geohash)
+    return pins.includes('topic:desktop-pin') && pins.includes('topic:phone-pin')
+  }), 'cold client restored both offline edits')
+  passCheckpointBacklog=false
+  isolated=false
+  await a.run(()=>location.reload())
   await wait(()=>b.run(()=>document.querySelector('#msg-synthetic-local-dm .ag-reaction-pill')?.textContent.includes('🧪')),'the sibling receives reaction metadata for an existing row')
   assert.equal(await b.run(()=>JSON.parse(localStorage.getItem('agnostr:v2:dm_threads'))[0].messages[0].deliveryStatus),'read')
   for (const [context,wanted] of [[a,'opus'],[b,'m2m100']]) assert.equal(await context.run(()=>JSON.parse(localStorage.getItem('agnostr:v2:translator_prefs')).model),wanted)
@@ -141,7 +161,7 @@ try {
   passCheckpointBacklog=true
   await b.run(()=>{ localStorage.removeItem('agnostr:v2:dm_threads'); location.reload() })
   await wait(()=>b.run(()=>localStorage.getItem('agnostr:v2:dm_threads')?.includes('shared-wire-id')),'cold restore of the checkpoint tail')
-  console.log('PASS: two real sibling clients, failed checkpoint retry after restart, live same-ID metadata convergence, offline history restore, device-local model selection.')
+  console.log('PASS: cold third client merged disjoint offline edits; failed checkpoint retry after restart, live same-ID metadata convergence, offline history restore, device-local model selection.')
 } finally {
   closed = true
   for(const c of contexts){c.ws?.close();c.proc.kill()}
