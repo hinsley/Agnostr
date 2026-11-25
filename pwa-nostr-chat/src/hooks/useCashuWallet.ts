@@ -1977,18 +1977,17 @@ export function useCashuWallet(options: UseCashuWalletOptions = {}): WalletEngin
       if (check.mnemonic !== current.mnemonic || check.privateKeyHex !== current.privateKeyHex) {
         throw new Error('Wallet encryption did not pass its recovery check. No keys were changed.')
       }
-      if (
-        profile !== getActiveProfileId() ||
-        stateRef.current !== current ||
-        !replaceWalletCredentialsWithEnvelope(original, envelope)
-      ) {
+      const saved =
+        profile === getActiveProfileId() && stateRef.current === current
+          ? replaceWalletCredentialsWithEnvelope(original, envelope)
+          : null
+      if (!saved) {
         throw new Error('Could not replace the saved credentials safely. Check browser storage and close other wallet tabs before retrying.')
       }
 
       publishLockedState({ ...disk, encryptedCredentials: envelope })
-      const saved = localStorage.getItem(CASHU_WALLET_STORAGE_KEY)
       const snapshotVerified = Boolean(
-        profile && saved && await snapshotCurrentProfileToVault(profile, [CASHU_WALLET_STORAGE_KEY, saved])
+        profile && await snapshotCurrentProfileToVault(profile, [CASHU_WALLET_STORAGE_KEY, saved])
       )
       return { snapshotVerified }
     } finally {

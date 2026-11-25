@@ -647,19 +647,19 @@ export function readStoredWalletCredentialEnvelope(): unknown {
 export function replaceWalletCredentialsWithEnvelope(
   expectedRaw: string,
   envelope: WalletCredentialEnvelope
-): boolean {
+): string | null {
   try {
-    if (localStorage.getItem(CASHU_WALLET_STORAGE_KEY) !== expectedRaw) return false
+    if (localStorage.getItem(CASHU_WALLET_STORAGE_KEY) !== expectedRaw) return null
     const state = JSON.parse(expectedRaw) as Partial<PersistedCashuWalletState>
-    if (state.encryptedCredentials !== undefined || state.pendingLightningMelt) return false
-    if (!state.mnemonic && !state.privateKeyHex) return false
+    if (state.encryptedCredentials !== undefined || state.pendingLightningMelt) return null
+    if (!state.mnemonic && !state.privateKeyHex) return null
     delete state.mnemonic
     delete state.privateKeyHex
     const protectedState = JSON.stringify({ ...state, initialized: true, encryptedCredentials: envelope })
     localStorage.setItem(CASHU_WALLET_STORAGE_KEY, protectedState)
-    return localStorage.getItem(CASHU_WALLET_STORAGE_KEY) === protectedState
+    return localStorage.getItem(CASHU_WALLET_STORAGE_KEY) === protectedState ? protectedState : null
   } catch {
-    return false
+    return null
   }
 }
 
