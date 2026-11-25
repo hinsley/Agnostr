@@ -2648,17 +2648,16 @@ export function App() {
             {isBitchatWorkspace ? (
               isMobileViewport && (
                 <>
-                  {/* Dimmed Interactive Scrim behind Mobile Bitchat Channel Overview Drawer */}
+                  {/* Mobile Bitchat channel switcher and dismiss scrim. */}
                   <div
                     className={`ag-drawer-scrim ${mobileScreen === 'list' ? 'active' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
                     onClick={() => setMobileScreen('chat')}
                     aria-hidden="true"
                   />
-
-                  {/* Mobile-Only Bitchat Channel Overview + Bottom Multi-Profile Drawer */}
                   <div
                     className={`ag-conv-col ${mobileScreen === 'list' ? 'open' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
                     aria-hidden={mobileScreen === 'chat' && !isSwipingLeft ? true : undefined}
+                    inert={mobileScreen === 'chat' && !isSwipingLeft}
                   >
                     <BitchatChannelDrawer
                       engine={engine}
@@ -2787,6 +2786,10 @@ export function App() {
                     searchOpen={searchOpen}
                     hasOtherUnread={totalUnreadBadge > 0}
                     onMobileBack={handleMobileBack}
+                    onOpenBitchatChannels={
+                      isMobileViewport && isBitchatRoom ? () => handleLeftDrawerOpenChange(true) : undefined
+                    }
+                    bitchatChannelsOpen={mobileScreen === 'list'}
                     onBackToGlobe={isBitchatRoom ? handleBackToBitchatGlobe : undefined}
                     onTuneChannel={handleTuneChannel}
                     onToggleSidebar={() => setSidebarCollapsed((v) => !v)}

@@ -79,6 +79,8 @@ export interface ChannelHeaderProps {
   searchOpen: boolean
   hasOtherUnread?: boolean
   onMobileBack: () => void
+  onOpenBitchatChannels?: () => void
+  bitchatChannelsOpen?: boolean
   onToggleSidebar: () => void
   onToggleUserList?: () => void
   onOpenRoomInfo: () => void
@@ -100,6 +102,8 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   searchOpen,
   hasOtherUnread = false,
   onMobileBack,
+  onOpenBitchatChannels,
+  bitchatChannelsOpen,
   onToggleSidebar,
   onToggleUserList,
   onOpenRoomInfo,
@@ -522,11 +526,17 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                 type="button"
                 className={`ag-header-identity ag-header-switcher-btn ${switcherOpen ? 'is-open' : ''}`}
                 onClick={() => {
+                  if (onOpenBitchatChannels) {
+                    setSwitcherOpen(false)
+                    onOpenBitchatChannels()
+                    return
+                  }
                   setSwitcherNowMs(Date.now())
                   setSwitcherOpen((v) => !v)
                 }}
-                aria-haspopup="dialog"
-                aria-expanded={switcherOpen}
+                aria-haspopup={onOpenBitchatChannels ? undefined : 'dialog'}
+                aria-controls={onOpenBitchatChannels ? 'ag-bitchat-channels' : undefined}
+                aria-expanded={onOpenBitchatChannels ? bitchatChannelsOpen : switcherOpen}
                 aria-label="Switch Bitchat channel"
               >
                 <div
