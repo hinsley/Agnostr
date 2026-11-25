@@ -1,7 +1,9 @@
-import { useEffect } from 'react'
-import { Download, Lock, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Check, Copy, Download, Image as ImageIcon, Lock, X } from 'lucide-react'
 import type { ImageAttachment } from '../types/protocol.ts'
 import { formatImageBytes } from '../lib/imageProcessor.ts'
+import { copyImageToClipboard } from '../utils/clipboardImage.ts'
+import { useContextMenu } from './ContextMenu.tsx'
 
 export interface LightboxImagePayload {
   blobUrl: string
@@ -32,6 +34,19 @@ function buildDownloadFilename(image: ImageAttachment): string {
 }
 
 export function ImageLightboxModal({ payload, onClose }: ImageLightboxModalProps) {
+  const { openContextMenu } = useContextMenu()
+  const imgRef = useRef<HTMLImageElement | null>(null)
+  const copyTimerRef = useRef<number | null>(null)
+  const [copiedForUrl, setCopiedForUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current)
+      }
+    }
+  }, [])
+
   useEffect(() => {
     if (!payload) return
     const onKeyDown = (e: KeyboardEvent) => {
@@ -49,11 +64,27 @@ export function ImageLightboxModal({ payload, onClose }: ImageLightboxModalProps
   if (!payload) return null
 
   const { blobUrl, image, senderDisplayHandle, caption } = payload
+  const isCopied = copiedForUrl === blobUrl
   const isE2ee = Boolean(image.encryption)
   const dimText = image.width > 0 && image.height > 0 ? `${image.width}×${image.height}` : ''
   const sizeText = image.size > 0 ? formatImageBytes(image.size) : ''
   const metaSummary = [dimText, sizeText].filter(Boolean).join(' · ')
   const cleanCaption = caption?.trim() || ''
+
+  const handleCopyImage = () => {
+    const source = imgRef.current ?? blobUrl
+    void copyImageToClipboard(source).then((res) => {
+      if (!res.ok) return
+      setCopiedForUrl(blobUrl)
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current)
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopiedForUrl(null)
+        copyTimerRef.current = null
+      }, 2000)
+    })
+  }
 
   const handleDownload = () => {
     const a = document.createElement('a')
@@ -91,6 +122,16 @@ export function ImageLightboxModal({ payload, onClose }: ImageLightboxModalProps
           <button
             type="button"
             className="ag-lightbox-btn"
+            onClick={handleCopyImage}
+            title={isCopied ? 'Image copied' : 'Copy image'}
+            aria-label={isCopied ? 'Image copied' : 'Copy image'}
+          >
+            {isCopied ? <Check size={15} /> : <Copy size={15} />}
+            <span className="ag-hide-xs">{isCopied ? 'Copied' : 'Copy'}</span>
+          </button>
+          <button
+            type="button"
+            className="ag-lightbox-btn"
             onClick={handleDownload}
             title="Download image"
             aria-label="Download image"
@@ -113,10 +154,29 @@ export function ImageLightboxModal({ payload, onClose }: ImageLightboxModalProps
       {/* Full-Resolution Image Stage */}
       <div className="ag-lightbox-stage">
         <img
+          ref={imgRef}
           src={blobUrl}
           alt={image.alt || cleanCaption || `Image from ${senderDisplayHandle}`}
           className="ag-lightbox-img"
           onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => {
+            openContextMenu(e, {
+              items: [
+                {
+                  id: 'lightbox-copy-image',
+                  label: 'Copy Image',
+                  icon: <ImageIcon size={14} />,
+                  onSelect: handleCopyImage,
+                },
+                {
+                  id: 'lightbox-download-image',
+                  label: 'Download Image',
+                  icon: <Download size={14} />,
+                  onSelect: handleDownload,
+                },
+              ],
+            })
+          }}
         />
       </div>
 

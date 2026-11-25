@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import { Component, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import {
   ArrowLeft,
+  ArrowUpRight,
   Check,
+  ChevronDown,
+  ChevronUp,
   Crosshair,
   Globe,
   Grid3x3,
   Hash,
+  ListTree,
   Loader2,
   MapPin,
   MessageSquare,
@@ -50,11 +54,57 @@ import {
   isGeohashableBodyId,
   type GeohashableBodyId,
 } from '../lib/solarSystem.ts'
-import {
-  TacticalGeohashMap,
-  type PrecisionSelection,
-  type TacticalGeohashMapHandle,
-} from './TacticalGeohashMap.tsx'
+import type { PrecisionSelection, TacticalGeohashMapHandle } from './TacticalGeohashMap.tsx'
+import { BitchatHierarchyFallback } from './BitchatHierarchyFallback.tsx'
+
+const LazyTacticalGeohashMap = lazy(() => import('./TacticalGeohashMap.tsx'))
+
+class GlobeErrorBoundary extends Component<
+  { onError: () => void; children: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false }
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true }
+  }
+
+  componentDidCatch() {
+    this.props.onError()
+  }
+
+  render() {
+    if (this.state.hasError) return null
+    return this.props.children
+  }
+}
+
+const RADAR_VIEW_MODE_KEY = 'agnostr_bitchat_radar_mode'
+
+function detectWebglSupport(): boolean {
+  if (typeof document === 'undefined') return false
+  try {
+    const canvas = document.createElement('canvas')
+    const gl =
+      canvas.getContext('webgl2', { failIfMajorPerformanceCaveat: false }) ??
+      canvas.getContext('webgl', { failIfMajorPerformanceCaveat: false }) ??
+      canvas.getContext('experimental-webgl')
+    if (!gl) return false
+    const loseExt = (gl as WebGLRenderingContext).getExtension?.('WEBGL_lose_context')
+    loseExt?.loseContext()
+    return true
+  } catch {
+    return false
+  }
+}
+
+function readPreferredViewMode(): 'globe' | 'list' {
+  try {
+    return window.localStorage.getItem(RADAR_VIEW_MODE_KEY) === 'list' ? 'list' : 'globe'
+  } catch {
+    return 'globe'
+  }
+}
 
 export interface ExpandedRadarModalProps {
   open: boolean
@@ -70,6 +120,53 @@ export interface ExpandedRadarModalProps {
 
 type GlobePopover = 'world' | 'asteroids' | 'pulse' | null
 type PulsePopoverTab = 'live' | 'pinned'
+type LiveWarmthTier = 'hot' | 'warm' | 'recent'
+
+interface LiveDockItem {
+  channelKey: string
+  displayTag: string
+  isTopic: boolean
+  bodyColor: string | null
+  bodyName: string | null
+  subLabel: string
+  peerCount: number
+  lastActivityAt: number
+  warmth: LiveWarmthTier
+  unreadCount: number
+  isPinned: boolean
+  snippetSender: string
+  snippetText: string
+}
+
+const LIVE_DOCK_COLLAPSED_KEY = 'agnostr_globe_live_dock_collapsed'
+const LIVE_WARMTH_HOT_MS = 5 * 60 * 1000
+const LIVE_WARMTH_WARM_MS = 60 * 60 * 1000
+
+function readLiveDockCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(LIVE_DOCK_COLLAPSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function getLiveWarmthTier(tsMs: number, nowMs: number): LiveWarmthTier {
+  const ageMs = Math.max(0, nowMs - tsMs)
+  if (ageMs < LIVE_WARMTH_HOT_MS) return 'hot'
+  if (ageMs < LIVE_WARMTH_WARM_MS) return 'warm'
+  return 'recent'
+}
+
+function formatCompactLiveAge(tsMs: number, nowMs: number): string {
+  const diffSec = Math.max(0, Math.floor((nowMs - tsMs) / 1000))
+  if (diffSec < 5) return 'now'
+  if (diffSec < 60) return `${diffSec}s`
+  const mins = Math.floor(diffSec / 60)
+  if (mins < 60) return `${mins}m`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h`
+  return `${Math.floor(hrs / 24)}d`
+}
 
 function formatPulseAge(tsMs: number): string {
   const diffSec = Math.max(0, Math.floor((Date.now() - tsMs) / 1000))
@@ -184,6 +281,38 @@ export function ExpandedRadarModal({
     return counts
   }, [pinnedChannels])
 
+  const [webglAvailable, setWebglAvailable] = useState<boolean>(() => detectWebglSupport())
+  const [preferredViewMode, setPreferredViewMode] = useState<'globe' | 'list'>(() =>
+    readPreferredViewMode(),
+  )
+  const effectiveViewMode: 'globe' | 'list' = webglAvailable ? preferredViewMode : 'list'
+
+  const handleWebglUnavailable = useCallback(() => {
+    setWebglAvailable(false)
+  }, [])
+
+  const handleSwitchToList = useCallback(() => {
+    onPlaySound?.('click')
+    setActivePopover(null)
+    setPreferredViewMode('list')
+    try {
+      window.localStorage.setItem(RADAR_VIEW_MODE_KEY, 'list')
+    } catch {
+      // Ignore storage write errors in restricted browsing contexts
+    }
+  }, [onPlaySound])
+
+  const handleSwitchToGlobe = useCallback(() => {
+    if (!webglAvailable) return
+    onPlaySound?.('click')
+    setPreferredViewMode('globe')
+    try {
+      window.localStorage.setItem(RADAR_VIEW_MODE_KEY, 'globe')
+    } catch {
+      // Ignore storage write errors in restricted browsing contexts
+    }
+  }, [webglAvailable, onPlaySound])
+
   const [focusedBodyId, setFocusedBodyId] = useState<GeohashableBodyId>(initialBodyId)
   const [selectedChannel, setSelectedChannel] = useState<string>(initialChannelKey)
   const [precisionMode, setPrecisionMode] = useState<PrecisionSelection>('auto')
@@ -191,6 +320,11 @@ export function ExpandedRadarModal({
   const [showBubbles, setShowBubbles] = useState(true)
   const [activePopover, setActivePopover] = useState<GlobePopover>(null)
   const [pulseTab, setPulseTab] = useState<PulsePopoverTab>('live')
+  const [liveDockCollapsed, setLiveDockCollapsed] = useState<boolean>(() => readLiveDockCollapsed())
+  const [liveDockTab, setLiveDockTab] = useState<PulsePopoverTab>('live')
+  const [visibleLiveCount, setVisibleLiveCount] = useState<number | null>(null)
+  const [quietChipDismissed, setQuietChipDismissed] = useState(false)
+  const [liveNowMs, setLiveNowMs] = useState<number>(() => Date.now())
   const [searchDraft, setSearchDraft] = useState('')
   const [searchError, setSearchError] = useState<string | null>(null)
   const [topicJumpDraft, setTopicJumpDraft] = useState('')
@@ -206,6 +340,18 @@ export function ExpandedRadarModal({
     setSearchError(null)
     setTopicJumpError(null)
   }, [open, initialBodyId, initialChannelKey])
+
+  // Keep relative ages and 3-tier warmth dots fresh while globe is visible
+  useEffect(() => {
+    if (!open) {
+      setVisibleLiveCount(null)
+      setQuietChipDismissed(false)
+      return
+    }
+    setLiveNowMs(Date.now())
+    const timer = window.setInterval(() => setLiveNowMs(Date.now()), 15_000)
+    return () => window.clearInterval(timer)
+  }, [open])
 
   // Escape closes open popovers first; closes modal ONLY when not embedded
   useEffect(() => {
@@ -321,6 +467,218 @@ export function ExpandedRadarModal({
   }, [extraTopicKeys, pinnedTopics, topicPulseRooms])
 
   const totalLiveCount = celestialPulseRooms.length + topicPulseRooms.length
+  const prevTotalLiveRef = useRef(totalLiveCount)
+
+  useEffect(() => {
+    if (visibleLiveCount !== null && visibleLiveCount > 0) {
+      setQuietChipDismissed(false)
+    }
+  }, [visibleLiveCount])
+
+  useEffect(() => {
+    const prev = prevTotalLiveRef.current
+    prevTotalLiveRef.current = totalLiveCount
+    if (prev === 0 && totalLiveCount > 0) {
+      setQuietChipDismissed(false)
+    }
+  }, [totalLiveCount])
+
+  const handleToggleLiveDock = useCallback(() => {
+    onPlaySound?.('click')
+    setLiveDockCollapsed((prev) => {
+      const next = !prev
+      try {
+        window.localStorage.setItem(LIVE_DOCK_COLLAPSED_KEY, next ? '1' : '0')
+      } catch {
+        // Ignore storage write errors in restricted browsing contexts
+      }
+      return next
+    })
+  }, [onPlaySound])
+
+  const liveRoomByKey = useMemo(() => {
+    const map = new Map<string, PulseRoom>()
+    for (const room of celestialPulseRooms) {
+      map.set(room.geohash.toLowerCase(), room)
+    }
+    for (const room of topicPulseRooms) {
+      map.set(room.geohash.toLowerCase(), room)
+    }
+    return map
+  }, [celestialPulseRooms, topicPulseRooms])
+
+  const pinnedKeySet = useMemo(
+    () => new Set(pinnedChannels.map((p) => p.geohash.toLowerCase())),
+    [pinnedChannels],
+  )
+
+  const liveDockItems = useMemo<LiveDockItem[]>(() => {
+    const seen = new Set<string>()
+    const items: LiveDockItem[] = []
+
+    const pushRoom = (room: PulseRoom) => {
+      const keyLower = room.geohash.toLowerCase()
+      if (seen.has(keyLower)) return
+      seen.add(keyLower)
+
+      const isTopic = isTopicChannel(room.geohash)
+      const slug = isTopic ? (getTopicSlug(room.geohash) ?? room.geohash) : null
+      const parsed = isTopic ? null : parseCelestialChannelKey(room.geohash)
+      const bodyDef = parsed && parsed.bodyId !== 'earth' ? getBodyDef(parsed.bodyId) : null
+      const unread = (unreadCounts[keyLower] ?? 0) + (mentionCounts[keyLower] ?? 0)
+
+      let subLabel = ''
+      if (isTopic) {
+        subLabel = 'Asteroid'
+      } else if (bodyDef && parsed) {
+        const landmark =
+          room.nearestCity ||
+          findNearestCelestialLandmark(parsed.bodyId, room.center.lat, room.center.lon)
+        subLabel = landmark || bodyDef.name
+      } else {
+        subLabel = room.nearestCity || formatCoords(room.center)
+      }
+
+      items.push({
+        channelKey: room.geohash,
+        displayTag: isTopic ? `#${slug}` : `#${room.geohash}`,
+        isTopic,
+        bodyColor: bodyDef?.palette.primary ?? null,
+        bodyName: bodyDef?.name ?? null,
+        subLabel,
+        peerCount: room.peerCount,
+        lastActivityAt: room.lastActivityAt,
+        warmth: getLiveWarmthTier(room.lastActivityAt, liveNowMs),
+        unreadCount: unread,
+        isPinned: pinnedKeySet.has(keyLower),
+        snippetSender: room.lastSender?.trim().replace(/^@+/, '') || '',
+        snippetText: room.lastPreview ? formatInspectSnippet(room.lastPreview) : '',
+      })
+    }
+
+    for (const room of celestialPulseRooms) pushRoom(room)
+    for (const room of topicPulseRooms) pushRoom(room)
+
+    // Include pinned channels with unread messages so nothing urgent is missed in the Live view
+    for (const pin of pinnedChannels) {
+      const keyLower = pin.geohash.toLowerCase()
+      if (seen.has(keyLower)) continue
+      const unread = (unreadCounts[keyLower] ?? 0) + (mentionCounts[keyLower] ?? 0)
+      if (unread <= 0) continue
+      seen.add(keyLower)
+
+      const isTopic = isTopicChannel(pin.geohash)
+      const slug = isTopic ? (getTopicSlug(pin.geohash) ?? pin.geohash) : null
+      const parsed = isTopic ? null : parseCelestialChannelKey(pin.geohash)
+      const bodyDef = parsed && parsed.bodyId !== 'earth' ? getBodyDef(parsed.bodyId) : null
+      const cleanLabel = pin.label?.replace(/^#/, '').trim() ?? ''
+
+      items.push({
+        channelKey: pin.geohash,
+        displayTag: isTopic ? `#${slug}` : `#${pin.geohash}`,
+        isTopic,
+        bodyColor: bodyDef?.palette.primary ?? null,
+        bodyName: bodyDef?.name ?? null,
+        subLabel: isTopic ? 'Asteroid' : cleanLabel || bodyDef?.name || '',
+        peerCount: 0,
+        lastActivityAt: 0,
+        warmth: 'recent',
+        unreadCount: unread,
+        isPinned: true,
+        snippetSender: '',
+        snippetText: '',
+      })
+    }
+
+    items.sort((a, b) => {
+      if (b.unreadCount !== a.unreadCount) return b.unreadCount - a.unreadCount
+      if (b.lastActivityAt !== a.lastActivityAt) return b.lastActivityAt - a.lastActivityAt
+      return b.peerCount - a.peerCount
+    })
+    return items
+  }, [
+    celestialPulseRooms,
+    topicPulseRooms,
+    pinnedChannels,
+    pinnedKeySet,
+    unreadCounts,
+    mentionCounts,
+    liveNowMs,
+  ])
+
+  const pinnedDockItems = useMemo<LiveDockItem[]>(() => {
+    const items: LiveDockItem[] = pinnedChannels.map((pin) => {
+      const keyLower = pin.geohash.toLowerCase()
+      const room = liveRoomByKey.get(keyLower)
+      const isTopic = isTopicChannel(pin.geohash)
+      const slug = isTopic ? (getTopicSlug(pin.geohash) ?? pin.geohash) : null
+      const parsed = isTopic ? null : parseCelestialChannelKey(pin.geohash)
+      const bodyDef = parsed && parsed.bodyId !== 'earth' ? getBodyDef(parsed.bodyId) : null
+      const unread = (unreadCounts[keyLower] ?? 0) + (mentionCounts[keyLower] ?? 0)
+
+      let subLabel = pin.label?.replace(/^#/, '').trim() ?? ''
+      if (isTopic) {
+        subLabel = 'Asteroid'
+      } else if (bodyDef) {
+        const prefix = `${bodyDef.name} · `
+        if (subLabel.toLowerCase() === bodyDef.name.toLowerCase()) {
+          subLabel = bodyDef.name
+        } else if (subLabel.startsWith(prefix)) {
+          subLabel = subLabel.slice(prefix.length)
+        } else if (!subLabel && parsed) {
+          const center = decodeCenter(parsed.geohash)
+          subLabel =
+            findNearestCelestialLandmark(parsed.bodyId, center.lat, center.lon) ?? bodyDef.name
+        }
+      } else if (!subLabel && room?.nearestCity) {
+        subLabel = room.nearestCity
+      }
+
+      return {
+        channelKey: pin.geohash,
+        displayTag: isTopic ? `#${slug}` : `#${pin.geohash}`,
+        isTopic,
+        bodyColor: bodyDef?.palette.primary ?? null,
+        bodyName: bodyDef?.name ?? null,
+        subLabel,
+        peerCount: room?.peerCount ?? 0,
+        lastActivityAt: room?.lastActivityAt ?? 0,
+        warmth: room ? getLiveWarmthTier(room.lastActivityAt, liveNowMs) : 'recent',
+        unreadCount: unread,
+        isPinned: true,
+        snippetSender: room?.lastSender?.trim().replace(/^@+/, '') || '',
+        snippetText: room?.lastPreview ? formatInspectSnippet(room.lastPreview) : '',
+      }
+    })
+
+    items.sort((a, b) => {
+      if (b.unreadCount !== a.unreadCount) return b.unreadCount - a.unreadCount
+      if (b.lastActivityAt !== a.lastActivityAt) return b.lastActivityAt - a.lastActivityAt
+      return b.peerCount - a.peerCount
+    })
+    return items
+  }, [pinnedChannels, liveRoomByKey, unreadCounts, mentionCounts, liveNowMs])
+
+  const hottestLiveItem = useMemo<LiveDockItem | null>(() => {
+    let best: LiveDockItem | null = null
+    for (const item of liveDockItems) {
+      if (item.lastActivityAt <= 0) continue
+      if (
+        !best ||
+        item.lastActivityAt > best.lastActivityAt ||
+        (item.lastActivityAt === best.lastActivityAt && item.peerCount > best.peerCount)
+      ) {
+        best = item
+      }
+    }
+    return best
+  }, [liveDockItems])
+
+  const totalDockUnread = useMemo(() => {
+    let sum = 0
+    for (const item of liveDockItems) sum += item.unreadCount
+    return sum
+  }, [liveDockItems])
 
   const matchingPulse: PulseRoom | null = useMemo(() => {
     if (isSelectedTopic) {
@@ -777,34 +1135,70 @@ export function ExpandedRadarModal({
     )
   }
 
-  const stageContent = (
-    <>
-      {/* Full-bleed 3D Solar System, Planets, Moons & Topic Asteroids Globe */}
-      <TacticalGeohashMap
-        ref={mapRef}
-        mode="expanded"
-        theme={settings.theme}
-        focusedBodyId={focusedBodyId}
-        onFocusBodyChange={handleGlobeFocusBodyChange}
-        activeGeohash={activeRawGeoForFocusedBody}
-        selectedGeohash={inspectedRawHash}
-        precisionMode={precisionMode}
-        showSubZones={showSubZones}
-        showPulse={true}
-        showBubbles={showBubbles}
-        pulseRooms={celestialPulseRooms}
-        pinnedChannels={pinnedChannels}
-        topicRooms={topicPulseRooms}
-        extraTopicKeys={extraTopicKeys}
-        activeChannelKey={activeGeohash}
-        selectedChannelKey={selectedChannel}
-        userCoords={location.coords}
-        isTeleported={engine.isTeleported}
-        onSelectGeohash={handleSelectZone}
-        onTuneGeohash={handleTuneGeohash}
-        onSelectChannel={handleSelectChannel}
-        onTuneChannel={handleTuneAndClose}
+  const effectiveDockTab: PulsePopoverTab = pinnedChannels.length > 0 ? liveDockTab : 'live'
+  const dockSourceItems = effectiveDockTab === 'pinned' ? pinnedDockItems : liveDockItems
+  const dockVisibleItems = dockSourceItems.slice(0, 5)
+  const dockOverflowCount =
+    effectiveDockTab === 'live'
+      ? Math.max(0, totalLiveCount - 5)
+      : Math.max(0, pinnedChannels.length - 5)
+  const mobileStripItems = (liveDockItems.length > 0 ? liveDockItems : pinnedDockItems).slice(0, 8)
+  const hasBottomSnippet = Boolean(
+    matchingPulseSnippet || (isSelectedTopic && selectedTopicDescription),
+  )
+
+  const stageContent =
+    effectiveViewMode === 'list' ? (
+      <BitchatHierarchyFallback
+        engine={engine}
+        onTuneChannel={onTuneChannel}
+        onClose={onClose}
+        onPlaySound={onPlaySound}
+        embedded={embedded}
+        webglAvailable={webglAvailable}
+        onSwitchToGlobe={webglAvailable ? handleSwitchToGlobe : undefined}
       />
+    ) : (
+      <>
+        {/* Full-bleed 3D Solar System, Planets, Moons & Topic Asteroids Globe (lazy-loaded) */}
+        <GlobeErrorBoundary onError={handleWebglUnavailable}>
+          <Suspense
+            fallback={
+              <div className="ag-radar-globe-loading" role="status" aria-live="polite">
+                <Loader2 size={20} className="ag-spin" aria-hidden="true" />
+                <span className="mono">Loading 3D Globe…</span>
+              </div>
+            }
+          >
+            <LazyTacticalGeohashMap
+              ref={mapRef}
+              mode="expanded"
+              theme={settings.theme}
+              focusedBodyId={focusedBodyId}
+              onFocusBodyChange={handleGlobeFocusBodyChange}
+              activeGeohash={activeRawGeoForFocusedBody}
+              selectedGeohash={inspectedRawHash}
+              precisionMode={precisionMode}
+              showSubZones={showSubZones}
+              showPulse={true}
+              showBubbles={showBubbles}
+              pulseRooms={celestialPulseRooms}
+              pinnedChannels={pinnedChannels}
+              topicRooms={topicPulseRooms}
+              extraTopicKeys={extraTopicKeys}
+              activeChannelKey={activeGeohash}
+              selectedChannelKey={selectedChannel}
+              userCoords={location.coords}
+              isTeleported={engine.isTeleported}
+              onSelectGeohash={handleSelectZone}
+              onTuneGeohash={handleTuneGeohash}
+              onSelectChannel={handleSelectChannel}
+              onTuneChannel={handleTuneAndClose}
+              onVisibleLiveCountChange={setVisibleLiveCount}
+              onWebglError={handleWebglUnavailable}
+            />
+          </Suspense>
+        </GlobeErrorBoundary>
 
       {/* Single Sleek Floating Top Row */}
       <div className="ag-radar-top-bar">
@@ -899,6 +1293,17 @@ export function ExpandedRadarModal({
             <span className="ag-radar-bubble-toggle-label">Bubbles</span>
           </button>
 
+          <button
+            type="button"
+            className="ag-radar-top-pill ag-radar-list-toggle-pill mono"
+            onClick={handleSwitchToList}
+            aria-label="Switch to Hierarchy List View"
+            title="Switch to Hierarchy List View"
+          >
+            <ListTree size={13} aria-hidden="true" />
+            <span className="ag-radar-list-toggle-label">List</span>
+          </button>
+
           {!embedded && (
             <button
               type="button"
@@ -918,6 +1323,56 @@ export function ExpandedRadarModal({
           </div>
         )}
       </div>
+
+      {/* Smart "Jump to Active" Chip when focused hemisphere is quiet */}
+      {totalLiveCount > 0 &&
+        visibleLiveCount === 0 &&
+        activePopover === null &&
+        !quietChipDismissed &&
+        hottestLiveItem && (
+          <div className="ag-radar-jump-active-chip" role="status" aria-live="polite">
+            <button
+              type="button"
+              className="ag-radar-jump-active-btn"
+              onClick={() => flyToAnyChannel(hottestLiveItem.channelKey)}
+              title={`Fly to active channel ${hottestLiveItem.displayTag}`}
+            >
+              <span
+                className={`ag-radar-warmth-dot is-${hottestLiveItem.warmth}`}
+                aria-hidden="true"
+              />
+              <span className="ag-radar-jump-active-label">Jump to active</span>
+              <span className="ag-radar-jump-active-sep" aria-hidden="true">
+                ·
+              </span>
+              <span
+                className={`ag-radar-jump-active-tag mono${
+                  hottestLiveItem.isTopic ? ' is-topic' : ''
+                }`}
+              >
+                {hottestLiveItem.displayTag}
+              </span>
+              <span className="ag-radar-jump-active-sep" aria-hidden="true">
+                ·
+              </span>
+              <span className="ag-radar-jump-active-age mono tabular">
+                {formatCompactLiveAge(hottestLiveItem.lastActivityAt, liveNowMs)}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="ag-radar-jump-active-dismiss"
+              onClick={() => {
+                onPlaySound?.('click')
+                setQuietChipDismissed(true)
+              }}
+              aria-label="Dismiss jump to active suggestion"
+              title="Dismiss"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
 
       {/* Solar System & Moons Focus Navigator Popover */}
       {activePopover === 'world' && (
@@ -1404,6 +1859,319 @@ export function ExpandedRadarModal({
         </div>
       </div>
 
+      {/* Desktop Collapsible "Live Pulse" Floating Dock */}
+      {totalLiveCount === 0 && pinnedChannels.length === 0 ? (
+        <div className="ag-radar-live-dock-pill is-idle" role="status">
+          <span className="ag-led ag-led-ok ag-led-pulse" aria-hidden="true" />
+          <span className="ag-radar-live-dock-idle-text">Listening for live rooms…</span>
+        </div>
+      ) : liveDockCollapsed ? (
+        <button
+          type="button"
+          className="ag-radar-live-dock-pill"
+          onClick={handleToggleLiveDock}
+          aria-expanded={false}
+          aria-label={`Expand Live Pulse dock (${totalLiveCount} live channels)`}
+          title="Expand Live Pulse dock"
+        >
+          <span
+            className={`ag-radar-warmth-dot ${totalLiveCount > 0 ? 'is-hot' : 'is-recent'}`}
+            aria-hidden="true"
+          />
+          <span className="ag-radar-live-dock-pill-label">Live Pulse</span>
+          <span className="ag-radar-live-dock-pill-sep" aria-hidden="true">
+            ·
+          </span>
+          <span className="ag-radar-live-dock-pill-count mono tabular">
+            {totalLiveCount > 0 ? totalLiveCount : pinnedChannels.length}
+          </span>
+          {totalDockUnread > 0 && (
+            <span className="ag-radar-live-dock-unread mono tabular">
+              {totalDockUnread > 99 ? '99+' : totalDockUnread}
+            </span>
+          )}
+          <ChevronUp size={13} className="ag-radar-live-dock-chevron" aria-hidden="true" />
+        </button>
+      ) : (
+        <aside className="ag-radar-live-dock" aria-label="Live Pulse channels">
+          <div className="ag-radar-live-dock-head">
+            <div className="ag-radar-live-dock-title-wrap">
+              <span
+                className={`ag-radar-warmth-dot ${totalLiveCount > 0 ? 'is-hot' : 'is-recent'}`}
+                aria-hidden="true"
+              />
+              <span className="ag-radar-live-dock-title">Live Pulse</span>
+              <span className="ag-radar-live-dock-count mono tabular">{totalLiveCount}</span>
+            </div>
+
+            <div className="ag-radar-live-dock-head-actions">
+              {pinnedChannels.length > 0 && (
+                <div
+                  className="ag-radar-live-dock-tabs"
+                  role="tablist"
+                  aria-label="Live dock filter"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={effectiveDockTab === 'live'}
+                    className={`ag-radar-live-dock-tab${
+                      effectiveDockTab === 'live' ? ' active' : ''
+                    }`}
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      setLiveDockTab('live')
+                    }}
+                  >
+                    Live
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={effectiveDockTab === 'pinned'}
+                    className={`ag-radar-live-dock-tab is-pinned${
+                      effectiveDockTab === 'pinned' ? ' active' : ''
+                    }`}
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      setLiveDockTab('pinned')
+                    }}
+                  >
+                    Pinned
+                  </button>
+                </div>
+              )}
+              <button
+                type="button"
+                className="ag-radar-live-dock-collapse-btn"
+                onClick={handleToggleLiveDock}
+                aria-expanded={true}
+                aria-label="Collapse Live Pulse dock"
+                title="Collapse Live Pulse dock"
+              >
+                <ChevronDown size={13} />
+              </button>
+            </div>
+          </div>
+
+          <div className="ag-radar-live-dock-body">
+            {dockVisibleItems.length === 0 ? (
+              <p className="ag-radar-live-dock-empty">
+                {effectiveDockTab === 'live'
+                  ? 'Listening for active channels…'
+                  : 'No pinned channels yet.'}
+              </p>
+            ) : (
+              dockVisibleItems.map((item) => {
+                const isSel = item.channelKey.toLowerCase() === selectedChannel.toLowerCase()
+                const ageLabel =
+                  item.lastActivityAt > 0
+                    ? formatCompactLiveAge(item.lastActivityAt, liveNowMs)
+                    : null
+                return (
+                  <div
+                    key={item.channelKey}
+                    className={`ag-radar-live-dock-row${isSel ? ' active' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="ag-radar-live-dock-row-main"
+                      onClick={() => flyToAnyChannel(item.channelKey)}
+                      title={`Fly to ${item.displayTag}${item.subLabel ? ` · ${item.subLabel}` : ''}`}
+                    >
+                      <div className="ag-radar-live-dock-row-top">
+                        {item.lastActivityAt > 0 ? (
+                          <span
+                            className={`ag-radar-warmth-dot is-${item.warmth}`}
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <Pin size={10} className="ag-radar-pin-icon-red" aria-hidden="true" />
+                        )}
+                        {item.bodyColor && (
+                          <span
+                            className="ag-radar-world-dot"
+                            style={{ backgroundColor: item.bodyColor }}
+                            aria-hidden="true"
+                          />
+                        )}
+                        <span
+                          className={`ag-radar-live-dock-tag mono${
+                            item.isTopic ? ' is-topic' : ''
+                          }`}
+                        >
+                          {item.displayTag}
+                        </span>
+                        {item.subLabel && (
+                          <span className="ag-radar-live-dock-sub truncate">{item.subLabel}</span>
+                        )}
+                        <span className="ag-radar-live-dock-meta mono tabular">
+                          {ageLabel && <span>{ageLabel}</span>}
+                          {item.peerCount > 0 && <span>{item.peerCount}p</span>}
+                        </span>
+                        {item.unreadCount > 0 && (
+                          <span className="ag-radar-live-dock-unread mono tabular">
+                            {item.unreadCount > 99 ? '99+' : item.unreadCount}
+                          </span>
+                        )}
+                      </div>
+                      {item.snippetText && (
+                        <div className="ag-radar-live-dock-snippet truncate">
+                          {item.snippetSender && (
+                            <span className="ag-radar-live-dock-snippet-sender">
+                              {item.snippetSender}:{' '}
+                            </span>
+                          )}
+                          <span>{item.snippetText}</span>
+                        </div>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-radar-live-dock-join"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleTuneAndClose(item.channelKey)
+                      }}
+                      aria-label={`Join ${item.displayTag}`}
+                      title={`Join ${item.displayTag}`}
+                    >
+                      <span>Join</span>
+                      <ArrowUpRight size={11} aria-hidden="true" />
+                    </button>
+                  </div>
+                )
+              })
+            )}
+          </div>
+
+          {dockOverflowCount > 0 && (
+            <div className="ag-radar-live-dock-foot">
+              <button
+                type="button"
+                className="ag-radar-live-dock-all-btn mono"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  setPulseTab(effectiveDockTab)
+                  setActivePopover('pulse')
+                }}
+              >
+                {effectiveDockTab === 'live'
+                  ? `All ${totalLiveCount} live`
+                  : `All ${pinnedChannels.length} pinned`}
+              </button>
+            </div>
+          )}
+        </aside>
+      )}
+
+      {/* Mobile Slim Horizontal Scrollable Live Strip (<= 867px) */}
+      {(totalLiveCount > 0 || pinnedChannels.length > 0) && (
+        <div
+          className={`ag-radar-live-strip${liveDockCollapsed ? ' is-collapsed' : ''}${
+            hasBottomSnippet ? ' has-snippet' : ''
+          }`}
+          role="region"
+          aria-label="Live channels strip"
+        >
+          <button
+            type="button"
+            className="ag-radar-live-strip-toggle mono"
+            onClick={handleToggleLiveDock}
+            aria-expanded={!liveDockCollapsed}
+            aria-label={
+              liveDockCollapsed ? 'Expand live channels strip' : 'Collapse live channels strip'
+            }
+          >
+            <span
+              className={`ag-radar-warmth-dot ${totalLiveCount > 0 ? 'is-hot' : 'is-recent'}`}
+              aria-hidden="true"
+            />
+            <span>Live</span>
+            <span className="ag-radar-live-strip-sep" aria-hidden="true">
+              ·
+            </span>
+            <span className="tabular">
+              {totalLiveCount > 0 ? totalLiveCount : pinnedChannels.length}
+            </span>
+          </button>
+
+          {!liveDockCollapsed && (
+            <div className="ag-radar-live-strip-scroll">
+              {mobileStripItems.map((item) => {
+                const isSel = item.channelKey.toLowerCase() === selectedChannel.toLowerCase()
+                const ageLabel =
+                  item.lastActivityAt > 0
+                    ? formatCompactLiveAge(item.lastActivityAt, liveNowMs)
+                    : null
+                return (
+                  <button
+                    key={item.channelKey}
+                    type="button"
+                    className={`ag-radar-live-strip-pill mono${isSel ? ' active' : ''}${
+                      item.isTopic ? ' is-topic' : ''
+                    }`}
+                    onClick={() => flyToAnyChannel(item.channelKey)}
+                    title={`Fly to ${item.displayTag}`}
+                  >
+                    {item.lastActivityAt > 0 ? (
+                      <span
+                        className={`ag-radar-warmth-dot is-${item.warmth}`}
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Pin size={10} className="ag-radar-pin-icon-red" aria-hidden="true" />
+                    )}
+                    {item.bodyColor && (
+                      <span
+                        className="ag-radar-world-dot"
+                        style={{ backgroundColor: item.bodyColor }}
+                        aria-hidden="true"
+                      />
+                    )}
+                    <span className="ag-radar-live-strip-tag">{item.displayTag}</span>
+                    {ageLabel && (
+                      <>
+                        <span className="ag-radar-live-strip-sep" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="ag-radar-live-strip-meta tabular">{ageLabel}</span>
+                      </>
+                    )}
+                    {item.peerCount > 0 && (
+                      <>
+                        <span className="ag-radar-live-strip-sep" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="ag-radar-live-strip-meta tabular">{item.peerCount}p</span>
+                      </>
+                    )}
+                    {item.unreadCount > 0 && (
+                      <span className="ag-radar-live-dock-unread tabular">
+                        {item.unreadCount > 99 ? '99+' : item.unreadCount}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+              {totalLiveCount > mobileStripItems.length && (
+                <button
+                  type="button"
+                  className="ag-radar-live-strip-pill ag-radar-live-strip-more mono"
+                  onClick={() => {
+                    onPlaySound?.('click')
+                    setPulseTab('live')
+                    setActivePopover('pulse')
+                  }}
+                >
+                  All {totalLiveCount}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Compact Bottom Selected-Channel Card (Earth, Planets & Moons, or Topic Asteroids) */}
       <div className="ag-radar-bottom-card">
         <div className="ag-radar-bottom-info">
@@ -1547,15 +2315,15 @@ export function ExpandedRadarModal({
           </button>
         </div>
       </div>
-    </>
-  )
+      </>
+    )
 
   if (embedded) {
     return (
       <div
-        className="ag-radar-embedded"
+        className={`ag-radar-embedded${effectiveViewMode === 'list' ? ' is-hierarchy-mode' : ''}`}
         role="region"
-        aria-label="Bitchat 3D Globe"
+        aria-label={effectiveViewMode === 'list' ? 'Bitchat Channel Hierarchy' : 'Bitchat 3D Globe'}
         data-no-swipe="true"
       >
         {stageContent}
@@ -1571,10 +2339,12 @@ export function ExpandedRadarModal({
       data-no-swipe="true"
     >
       <div
-        className="ag-radar-modal"
+        className={`ag-radar-modal${effectiveViewMode === 'list' ? ' is-hierarchy-mode' : ''}`}
         role="dialog"
         aria-modal="true"
-        aria-label="Expanded Geohash Globe Map"
+        aria-label={
+          effectiveViewMode === 'list' ? 'Bitchat Channel Hierarchy' : 'Expanded Geohash Globe Map'
+        }
         onClick={(e) => e.stopPropagation()}
       >
         {stageContent}

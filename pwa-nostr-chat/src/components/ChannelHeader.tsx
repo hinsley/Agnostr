@@ -1,7 +1,9 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
   ArrowLeft,
+  Check,
+  ChevronDown,
   Globe,
   Hash,
   Info,
@@ -9,12 +11,13 @@ import {
   Lock,
   PanelLeft,
   Phone,
+  Pin,
   Search,
   ShieldCheck,
   Users,
   Zap,
 } from 'lucide-react'
-import type { AgnostrEngine } from '../types/protocol'
+import type { AgnostrEngine, PulseRoom } from '../types/protocol'
 import type { ZapTarget } from '../types/wallet'
 import {
   formatBitchatChannelLabel,
@@ -22,8 +25,49 @@ import {
   isTopicChannel,
   parseCelestialChannelKey,
 } from '../lib/bitchatChannel'
+import { getBodyDef } from '../lib/solarSystem'
 import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import { AvatarImg } from './AvatarImg'
+
+function formatCompactAgeMs(tsMs: number, nowMs: number): string {
+  const diffSec = Math.max(0, Math.floor((nowMs - tsMs) / 1000))
+  if (diffSec < 5) return 'now'
+  if (diffSec < 60) return `${diffSec}s`
+  const mins = Math.floor(diffSec / 60)
+  if (mins < 60) return `${mins}m`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h`
+  return `${Math.floor(hrs / 24)}d`
+}
+
+function getRoomWarmth(lastActivityAtMs: number, nowMs: number): 'hot' | 'warm' | 'cool' {
+  const ageMs = Math.max(0, nowMs - lastActivityAtMs)
+  if (ageMs < 5 * 60_000) return 'hot'
+  if (ageMs < 60 * 60_000) return 'warm'
+  return 'cool'
+}
+
+function resolveChannelMeta(
+  channelKey: string,
+  nearestCity?: string | null,
+  pinLabel?: string
+): { isTopic: boolean; bodyColor: string | null; subtitle: string | null } {
+  if (isTopicChannel(channelKey)) {
+    return { isTopic: true, bodyColor: null, subtitle: 'Asteroid' }
+  }
+  const celestial = parseCelestialChannelKey(channelKey)
+  if (celestial && celestial.bodyId !== 'earth') {
+    const def = getBodyDef(celestial.bodyId)
+    const city = nearestCity?.trim() || pinLabel?.trim() || ''
+    const subtitle = city && city !== def.name ? `${def.name} · ${city}` : def.name
+    return { isTopic: false, bodyColor: def.palette.primary, subtitle }
+  }
+  return {
+    isTopic: false,
+    bodyColor: null,
+    subtitle: nearestCity?.trim() || pinLabel?.trim() || null,
+  }
+}
 
 export interface ChannelHeaderProps {
   engine: AgnostrEngine
@@ -40,6 +84,7 @@ export interface ChannelHeaderProps {
   onToggleSearch: () => void
   onExpandRadar: () => void
   onBackToGlobe?: () => void
+  onTuneChannel?: (channelKey: string) => boolean | void
   onFocusActiveCall?: () => void
   onOpenZap?: (target: ZapTarget) => void
 }
@@ -59,6 +104,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   onToggleSearch,
   onExpandRadar,
   onBackToGlobe,
+  onTuneChannel,
   onFocusActiveCall,
   onOpenZap,
 }) => {
@@ -136,6 +182,121 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   const isGeoCallFull =
     !isDm && !isServer && !inThisGeoCall && geoCallCount >= engine.calls.maxParticipants
   const isDisconnected = engine.connectedRelayCount === 0
+  const isBitchatChannel = !isDm && !isServer
+
+  const [switcherOpen, setSwitcherOpen] = useState(false)
+  const [switcherNowMs, setSwitcherNowMs] = useState(() => Date.now())
+  const switcherWrapRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    setSwitcherOpen(false)
+  }, [activeGeoKey, isDm, isServer])
+
+  useEffect(() => {
+    if (!switcherOpen) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        setSwitcherOpen(false)
+      }
+    }
+    const onPointerDown = (e: PointerEvent) => {
+      const wrap = switcherWrapRef.current
+      if (wrap && e.target instanceof Node && !wrap.contains(e.target)) {
+        setSwitcherOpen(false)
+      }
+    }
+    const tickId = window.setInterval(() => setSwitcherNowMs(Date.now()), 15_000)
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('pointerdown', onPointerDown, true)
+    return () => {
+      window.clearInterval(tickId)
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('pointerdown', onPointerDown, true)
+    }
+  }, [switcherOpen])
+
+  const { pinnedRoomRows, activeNowRows, hasOtherLiveRooms } = useMemo(() => {
+    if (!isBitchatChannel) {
+      return { pinnedRoomRows: [], activeNowRows: [], hasOtherLiveRooms: false }
+    }
+    const pulseByKey = new Map<string, PulseRoom>()
+    let otherLive = false
+    for (const room of engine.pulseRooms) {
+      const keyLower = room.geohash.toLowerCase()
+      pulseByKey.set(keyLower, room)
+      if (keyLower !== activeGeoKey) otherLive = true
+    }
+
+    const pinnedKeys = new Set<string>()
+    const pinned = engine.pinnedChannels.map((pin) => {
+      const keyLower = pin.geohash.toLowerCase()
+      pinnedKeys.add(keyLower)
+      const liveRoom = pulseByKey.get(keyLower)
+      const meta = resolveChannelMeta(pin.geohash, liveRoom?.nearestCity, pin.label)
+      const unread = engine.unreadCounts[keyLower] ?? 0
+      const mentions = engine.mentionCounts[keyLower] ?? 0
+      return {
+        key: pin.geohash,
+        keyLower,
+        label: formatBitchatChannelLabel(pin.geohash),
+        meta,
+        unread,
+        mentions,
+        livePeers: liveRoom?.peerCount ?? 0,
+        isActive: keyLower === activeGeoKey,
+      }
+    })
+
+    const activeNow = engine.pulseRooms
+      .filter((room) => !pinnedKeys.has(room.geohash.toLowerCase()))
+      .slice()
+      .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
+      .slice(0, 8)
+      .map((room) => {
+        const keyLower = room.geohash.toLowerCase()
+        const meta = resolveChannelMeta(room.geohash, room.nearestCity)
+        const cachedPrev = engine.channelPreviews[keyLower]
+        const rawPreview = room.lastPreview?.trim() || cachedPrev?.preview?.trim() || ''
+        const rawSender = room.lastSender?.trim() || cachedPrev?.sender?.trim() || ''
+        const previewLine = rawPreview
+          ? rawSender
+            ? `${rawSender}: ${rawPreview}`
+            : rawPreview
+          : ''
+        return {
+          room,
+          keyLower,
+          label: formatBitchatChannelLabel(room.geohash),
+          meta,
+          previewLine,
+          isActive: keyLower === activeGeoKey,
+        }
+      })
+
+    return {
+      pinnedRoomRows: pinned,
+      activeNowRows: activeNow,
+      hasOtherLiveRooms: otherLive,
+    }
+  }, [
+    isBitchatChannel,
+    engine.pulseRooms,
+    engine.pinnedChannels,
+    engine.unreadCounts,
+    engine.mentionCounts,
+    engine.channelPreviews,
+    activeGeoKey,
+  ])
+
+  const handleSelectSwitcherRoom = (channelKey: string) => {
+    setSwitcherOpen(false)
+    if (onTuneChannel) {
+      onTuneChannel(channelKey)
+    } else {
+      engine.tuneBitchatChannel(channelKey)
+    }
+  }
 
   const handleDmCallClick = () => {
     if (!dmThread) return
@@ -243,90 +404,105 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
             )
           )}
 
-          {/* Clickable Chat Identity Area -> Opens RoomInfoSheet */}
-          <button
-            type="button"
-            className="ag-header-identity"
-            onClick={onOpenRoomInfo}
-            aria-label="Open chat info"
-          >
-            {isDm && dmThread ? (
-              <>
-                <AvatarImg
-                  pubkey={dmThread.peerPubkey}
-                  pictureUrl={engine.getProfilePicture(dmThread.peerPubkey)}
-                  alt=""
-                  width={36}
-                  height={36}
-                  className="ag-header-avatar-img"
-                />
-                <div className="ag-header-text">
-                  <div className="ag-header-title-row">
-                    <span className="ag-header-title truncate">{dmThread.peerNickname}</span>
-                    {dmPeerTrusted && (
-                      <ShieldCheck
-                        size={14}
-                        className="ag-trusted-shield-icon"
-                        aria-label="Trusted peer"
-                      />
-                    )}
-                  </div>
-                  <div className="ag-header-sub truncate">
-                    {isDisconnected && <span className="ag-offline-dot" aria-hidden="true" />}
-                    <span>
-                      {isDisconnected
-                        ? 'Offline · Encrypted DM'
-                        : dmPeerTrusted
-                          ? 'Encrypted DM · Trusted'
-                          : 'Encrypted DM'}
-                    </span>
-                  </div>
-                </div>
-              </>
-            ) : isServer && activeServer && activeChannel ? (
-              <>
-                <div
-                  className="ag-header-avatar server"
-                  style={
-                    {
-                      '--srv-accent': activeServer.accentColor || 'var(--accent)',
-                    } as CSSProperties
-                  }
-                  aria-hidden="true"
-                >
-                  {showServerPicture ? (
-                    <img
-                      src={activeServerPicture}
-                      alt=""
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      onError={() => setFailedServerPictureUrl(activeServerPicture)}
+          {/* Clickable Chat Identity Area -> Opens RoomInfoSheet (DM/Group) or Pinned & Live Switcher (Bitchat) */}
+          {isDm && dmThread ? (
+            <button
+              type="button"
+              className="ag-header-identity"
+              onClick={onOpenRoomInfo}
+              aria-label="Open chat info"
+            >
+              <AvatarImg
+                pubkey={dmThread.peerPubkey}
+                pictureUrl={engine.getProfilePicture(dmThread.peerPubkey)}
+                alt=""
+                width={36}
+                height={36}
+                className="ag-header-avatar-img"
+              />
+              <div className="ag-header-text">
+                <div className="ag-header-title-row">
+                  <span className="ag-header-title truncate">{dmThread.peerNickname}</span>
+                  {dmPeerTrusted && (
+                    <ShieldCheck
+                      size={14}
+                      className="ag-trusted-shield-icon"
+                      aria-label="Trusted peer"
                     />
-                  ) : (
-                    <span className="mono">
-                      {getGroupSpecifier(activeServer.name, activeServer.icon)}
-                    </span>
                   )}
                 </div>
-                <div className="ag-header-text">
-                  <div className="ag-header-title-row">
-                    <span className="ag-header-title truncate">#{activeChannel.name}</span>
-                    {activeServer.encrypted && (
-                      <Lock size={13} className="ag-header-lock-icon" aria-label="Encrypted" />
-                    )}
-                  </div>
-                  <div className="ag-header-sub truncate">
-                    {isDisconnected && <span className="ag-offline-dot" aria-hidden="true" />}
-                    <span>
-                      {isDisconnected
-                        ? `Offline · ${activeServer.name}`
-                        : activeServer.name}
-                    </span>
-                  </div>
+                <div className="ag-header-sub truncate">
+                  {isDisconnected && <span className="ag-offline-dot" aria-hidden="true" />}
+                  <span>
+                    {isDisconnected
+                      ? 'Offline · Encrypted DM'
+                      : dmPeerTrusted
+                        ? 'Encrypted DM · Trusted'
+                        : 'Encrypted DM'}
+                  </span>
                 </div>
-              </>
-            ) : (
-              <>
+              </div>
+            </button>
+          ) : isServer && activeServer && activeChannel ? (
+            <button
+              type="button"
+              className="ag-header-identity"
+              onClick={onOpenRoomInfo}
+              aria-label="Open chat info"
+            >
+              <div
+                className="ag-header-avatar server"
+                style={
+                  {
+                    '--srv-accent': activeServer.accentColor || 'var(--accent)',
+                  } as CSSProperties
+                }
+                aria-hidden="true"
+              >
+                {showServerPicture ? (
+                  <img
+                    src={activeServerPicture}
+                    alt=""
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
+                    onError={() => setFailedServerPictureUrl(activeServerPicture)}
+                  />
+                ) : (
+                  <span className="mono">
+                    {getGroupSpecifier(activeServer.name, activeServer.icon)}
+                  </span>
+                )}
+              </div>
+              <div className="ag-header-text">
+                <div className="ag-header-title-row">
+                  <span className="ag-header-title truncate">#{activeChannel.name}</span>
+                  {activeServer.encrypted && (
+                    <Lock size={13} className="ag-header-lock-icon" aria-label="Encrypted" />
+                  )}
+                </div>
+                <div className="ag-header-sub truncate">
+                  {isDisconnected && <span className="ag-offline-dot" aria-hidden="true" />}
+                  <span>
+                    {isDisconnected
+                      ? `Offline · ${activeServer.name}`
+                      : activeServer.name}
+                  </span>
+                </div>
+              </div>
+            </button>
+          ) : (
+            <div ref={switcherWrapRef} className="ag-header-switcher-wrap">
+              <button
+                type="button"
+                className={`ag-header-identity ag-header-switcher-btn ${switcherOpen ? 'is-open' : ''}`}
+                onClick={() => {
+                  setSwitcherNowMs(Date.now())
+                  setSwitcherOpen((v) => !v)
+                }}
+                aria-haspopup="dialog"
+                aria-expanded={switcherOpen}
+                aria-label="Switch Bitchat channel"
+              >
                 <div
                   className={`ag-header-avatar ${isTopicBitchat ? 'topic' : 'bitchat'}`}
                   aria-hidden="true"
@@ -354,15 +530,197 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
                         Topic
                       </span>
                     )}
+                    {hasOtherLiveRooms && (
+                      <span
+                        className="ag-header-switcher-live-dot"
+                        aria-hidden="true"
+                        title="Other active Bitchat rooms"
+                      />
+                    )}
+                    <ChevronDown
+                      size={14}
+                      className="ag-header-switcher-chevron"
+                      aria-hidden="true"
+                    />
                   </div>
                   <div className="ag-header-sub truncate">
                     {isDisconnected && <span className="ag-offline-dot" aria-hidden="true" />}
                     <span>{isDisconnected ? 'Offline · Reconnecting…' : onlineSubtitle}</span>
                   </div>
                 </div>
-              </>
-            )}
-          </button>
+              </button>
+
+              {switcherOpen && (
+                <div
+                  className="ag-room-switcher-popover"
+                  role="dialog"
+                  aria-label="Pinned and active Bitchat rooms"
+                >
+                  <div className="ag-room-switcher-list">
+                    {pinnedRoomRows.length > 0 && (
+                      <div className="ag-room-switcher-section">
+                        <div className="ag-room-switcher-kicker">
+                          <span>Pinned Rooms</span>
+                          <span className="ag-room-switcher-count tabular">
+                            {pinnedRoomRows.length}
+                          </span>
+                        </div>
+                        {pinnedRoomRows.map((item) => (
+                          <button
+                            key={item.keyLower}
+                            type="button"
+                            className={`ag-room-switcher-row ${item.isActive ? 'is-active' : ''}`}
+                            onClick={() => handleSelectSwitcherRoom(item.key)}
+                            aria-current={item.isActive ? 'page' : undefined}
+                          >
+                            <span className="ag-room-switcher-leading" aria-hidden="true">
+                              <Pin size={13} className="ag-room-switcher-pin-icon" />
+                            </span>
+                            <span className="ag-room-switcher-main">
+                              <span className="ag-room-switcher-top">
+                                <span className="ag-room-switcher-label mono truncate">
+                                  {item.label}
+                                </span>
+                                {item.meta.isTopic ? (
+                                  <span
+                                    className="ag-room-switcher-kind-badge"
+                                    title="Topic Asteroid"
+                                  >
+                                    <Hash size={10} aria-hidden="true" />
+                                  </span>
+                                ) : item.meta.bodyColor ? (
+                                  <span
+                                    className="ag-room-switcher-world-dot"
+                                    style={{ backgroundColor: item.meta.bodyColor }}
+                                    aria-hidden="true"
+                                  />
+                                ) : null}
+                                {item.meta.subtitle && (
+                                  <span className="ag-room-switcher-sub truncate">
+                                    {item.meta.subtitle}
+                                  </span>
+                                )}
+                              </span>
+                            </span>
+                            <span className="ag-room-switcher-trailing">
+                              {item.livePeers > 0 && (
+                                <span className="ag-room-switcher-peers tabular">
+                                  {item.livePeers}p
+                                </span>
+                              )}
+                              {(item.unread > 0 || item.mentions > 0) && (
+                                <span
+                                  className={`ag-room-switcher-unread tabular ${item.mentions > 0 ? 'is-ping' : ''}`}
+                                >
+                                  {item.unread > 99 ? '99+' : item.unread || item.mentions}
+                                </span>
+                              )}
+                              {item.isActive && (
+                                <Check
+                                  size={14}
+                                  className="ag-room-switcher-check"
+                                  aria-label="Current channel"
+                                />
+                              )}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {activeNowRows.length > 0 && (
+                      <div className="ag-room-switcher-section">
+                        <div className="ag-room-switcher-kicker">
+                          <span>Active Now</span>
+                          <span className="ag-room-switcher-count tabular">
+                            {activeNowRows.length}
+                          </span>
+                        </div>
+                        {activeNowRows.map((item) => {
+                          const warmth = getRoomWarmth(item.room.lastActivityAt, switcherNowMs)
+                          const age = formatCompactAgeMs(item.room.lastActivityAt, switcherNowMs)
+                          return (
+                            <button
+                              key={item.keyLower}
+                              type="button"
+                              className={`ag-room-switcher-row ${item.isActive ? 'is-active' : ''}`}
+                              onClick={() => handleSelectSwitcherRoom(item.room.geohash)}
+                              aria-current={item.isActive ? 'page' : undefined}
+                            >
+                              <span className="ag-room-switcher-leading" aria-hidden="true">
+                                <span className={`ag-room-warmth-dot is-${warmth}`} />
+                              </span>
+                              <span className="ag-room-switcher-main">
+                                <span className="ag-room-switcher-top">
+                                  <span className="ag-room-switcher-label mono truncate">
+                                    {item.label}
+                                  </span>
+                                  {item.meta.isTopic ? (
+                                    <span className="ag-room-switcher-badge">Asteroid</span>
+                                  ) : item.meta.bodyColor ? (
+                                    <span
+                                      className="ag-room-switcher-world-dot"
+                                      style={{ backgroundColor: item.meta.bodyColor }}
+                                      aria-hidden="true"
+                                    />
+                                  ) : null}
+                                  {!item.meta.isTopic && item.meta.subtitle && (
+                                    <span className="ag-room-switcher-sub truncate">
+                                      {item.meta.subtitle}
+                                    </span>
+                                  )}
+                                </span>
+                                {item.previewLine && (
+                                  <span className="ag-room-switcher-preview truncate">
+                                    {item.previewLine}
+                                  </span>
+                                )}
+                              </span>
+                              <span className="ag-room-switcher-trailing">
+                                {item.room.peerCount > 0 && (
+                                  <span className="ag-room-switcher-peers tabular">
+                                    {item.room.peerCount}p
+                                  </span>
+                                )}
+                                <span className="ag-room-switcher-age mono tabular">{age}</span>
+                                {item.isActive && (
+                                  <Check
+                                    size={14}
+                                    className="ag-room-switcher-check"
+                                    aria-label="Current channel"
+                                  />
+                                )}
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+
+                    {pinnedRoomRows.length === 0 && activeNowRows.length === 0 && (
+                      <div className="ag-room-switcher-empty">
+                        Listening for active rooms across relays…
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="ag-room-switcher-footer">
+                    <button
+                      type="button"
+                      className="ag-room-switcher-globe-btn"
+                      onClick={() => {
+                        setSwitcherOpen(false)
+                        ;(onBackToGlobe ?? onExpandRadar)()
+                      }}
+                    >
+                      <Globe size={14} aria-hidden="true" />
+                      <span>Explore 3D Globe</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Subtle Trusted Only Pill — shown ONLY when strict mode is enabled */}
           {engine.strictWhitelistMode && (

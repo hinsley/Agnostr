@@ -7768,3 +7768,455 @@ a.ag-untrusted-link {
   gap: 0.55rem;
   margin-top: 0.45rem;
 }
+
+/* --------------------------------------------------------------------------
+   18. Bitchat Inline Room Switcher Popover & Mobile Drawer "Active Now"
+   -------------------------------------------------------------------------- */
+.ag-header {
+  position: relative;
+}
+
+.ag-header-switcher-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-header-switcher-btn {
+  max-width: 100%;
+  cursor: pointer;
+}
+
+.ag-header-switcher-btn.is-open {
+  background-color: var(--bg-hover);
+}
+
+.ag-header-switcher-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition:
+    transform var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-header-switcher-btn:hover .ag-header-switcher-chevron,
+.ag-header-switcher-btn.is-open .ag-header-switcher-chevron {
+  color: var(--text-primary);
+}
+
+.ag-header-switcher-btn.is-open .ag-header-switcher-chevron {
+  transform: rotate(180deg);
+}
+
+.ag-header-switcher-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background-color: var(--status-ok, #22c55e);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-ok, #22c55e) 22%, transparent);
+}
+
+.ag-room-switcher-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 348px;
+  max-width: min(348px, calc(100vw - 24px));
+  max-height: min(460px, calc(var(--ag-vvh, 100dvh) - 110px));
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg, 0 18px 44px rgba(0, 0, 0, 0.36));
+  z-index: calc(var(--z-sticky) + 20);
+  overflow: hidden;
+  animation: ag-switcher-pop var(--dur-fast) ease-out;
+}
+
+@keyframes ag-switcher-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ag-room-switcher-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ag-room-switcher-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-room-switcher-kicker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px 3px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.ag-room-switcher-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ag-room-switcher-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 40px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background-color: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-room-switcher-row:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-room-switcher-row.is-active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-room-switcher-leading {
+  width: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ag-room-switcher-pin-icon {
+  color: #ef4444;
+  flex-shrink: 0;
+}
+
+.ag-room-warmth-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.ag-room-warmth-dot.is-hot {
+  background-color: var(--status-ok, #22c55e);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-ok, #22c55e) 22%, transparent);
+}
+
+.ag-room-warmth-dot.is-warm {
+  background-color: var(--status-warn, #f59e0b);
+}
+
+.ag-room-warmth-dot.is-cool {
+  background-color: var(--text-muted);
+  opacity: 0.65;
+}
+
+.ag-room-switcher-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ag-room-switcher-top {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ag-room-switcher-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+  max-width: 62%;
+}
+
+.ag-room-switcher-world-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.ag-room-switcher-kind-badge,
+.ag-room-switcher-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent-secondary-soft);
+  color: var(--accent-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.ag-room-switcher-sub {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.ag-room-switcher-preview {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+.ag-room-switcher-trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ag-room-switcher-peers {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+}
+
+.ag-room-switcher-age {
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.ag-room-switcher-unread {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-active);
+  color: var(--text-primary);
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ag-room-switcher-unread.is-ping {
+  background-color: #ef4444;
+  color: #ffffff;
+}
+
+.ag-room-switcher-check {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-room-switcher-empty {
+  padding: 18px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.ag-room-switcher-footer {
+  flex: 0 0 auto;
+  padding: 6px;
+  border-top: 1px solid var(--border-subtle);
+  background-color: var(--bg-elevated);
+}
+
+.ag-room-switcher-globe-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-room-switcher-globe-btn:hover {
+  border-color: var(--border-accent);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Mobile Bitchat Drawer — "Active Now" Live Feed */
+.ag-bitchat-drawer-live-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.36rem;
+}
+
+.ag-bitchat-drawer-live-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.14rem;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.48rem 0.56rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-bitchat-drawer-live-row:hover {
+  border-color: var(--border-accent);
+  background-color: var(--bg-elevated);
+}
+
+.ag-bitchat-drawer-live-row.is-active {
+  background-color: var(--accent-soft);
+  border-color: var(--border-accent);
+}
+
+.ag-bitchat-drawer-live-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.ag-bitchat-drawer-live-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+}
+
+.ag-bitchat-drawer-live-tag {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-bitchat-drawer-live-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  flex-shrink: 0;
+}
+
+.ag-bitchat-drawer-live-peers {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+}
+
+.ag-bitchat-drawer-live-age {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.ag-bitchat-drawer-live-check {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-bitchat-drawer-live-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.25;
+}
+
+.ag-bitchat-drawer-live-preview {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+.ag-bitchat-drawer-live-empty {
+  padding: 0.45rem 0.2rem;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+[data-theme='daylight'] .ag-room-switcher-popover {
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.14);
+}
+
+[data-theme='daylight'] .ag-room-warmth-dot.is-hot,
+[data-theme='daylight'] .ag-header-switcher-live-dot {
+  background-color: #16a34a;
+}
+
+[data-theme='daylight'] .ag-room-warmth-dot.is-warm {
+  background-color: #d97706;
+}
+
+@media (max-width: 867px) {
+  .ag-header-switcher-wrap {
+    position: static;
+  }
+
+  .ag-room-switcher-popover {
+    left: 10px;
+    right: 10px;
+    width: auto;
+    max-width: none;
+  }
+
+  .ag-room-switcher-row {
+    min-height: 44px;
+    padding: 8px 10px;
+  }
+
+  .ag-room-switcher-globe-btn {
+    min-height: 44px;
+  }
+}

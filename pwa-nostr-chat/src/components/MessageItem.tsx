@@ -11,6 +11,7 @@ import {
   CornerUpLeft,
   ExternalLink,
   Hash,
+  Image as ImageIcon,
   Languages,
   Link2,
   Loader2,
@@ -39,6 +40,7 @@ import { clientAvatarRingClass } from '../lib/bitchatProtocol'
 import { decodeCashuTokenPreview, extractCashuTokensFromText } from '../lib/cashuWallet'
 import { usePinnedReactions } from '../lib/reactionEmojis'
 import { parseAgoraShareUrl } from '../lib/shareLinks'
+import { copyImageToClipboard, isCopyableImageElement } from '../utils/clipboardImage'
 import { pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
 import { AvatarImg } from './AvatarImg'
@@ -730,8 +732,20 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       }
 
       // Trusted image attachment actions
+      const rawClickedImg = targetEl?.closest('img')
+      const copyableClickedImg =
+        rawClickedImg instanceof HTMLImageElement && isCopyableImageElement(rawClickedImg)
+          ? rawClickedImg
+          : null
+
       if (message.imageAttachment && isSenderTrusted) {
         const img = message.imageAttachment
+        const cardImgEl =
+          copyableClickedImg?.classList.contains('ag-img-media')
+            ? copyableClickedImg
+            : (e.currentTarget.querySelector('img.ag-img-media') as HTMLImageElement | null)
+        const readyAttachmentImg = isCopyableImageElement(cardImgEl) ? cardImgEl : null
+
         items.push(
           {
             id: 'msg-view-image',
@@ -751,6 +765,18 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             },
           },
           {
+            id: 'msg-copy-image',
+            label: 'Copy Image',
+            icon: <ImageIcon size={15} />,
+            onSelect: () => {
+              const source =
+                readyAttachmentImg ?? (() => fetchImageAttachmentBlob(img, message.pubkey))
+              void copyImageToClipboard(source).then((res) => {
+                onNotify?.(res.ok ? 'Image copied' : 'Could not copy image')
+              })
+            },
+          },
+          {
             id: 'msg-copy-image-link',
             label: 'Copy Image Link',
             icon: <Link2 size={15} />,
@@ -760,6 +786,17 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             },
           }
         )
+      } else if (copyableClickedImg) {
+        items.push({
+          id: 'msg-copy-image',
+          label: 'Copy Image',
+          icon: <ImageIcon size={15} />,
+          onSelect: () => {
+            void copyImageToClipboard(copyableClickedImg).then((res) => {
+              onNotify?.(res.ok ? 'Image copied' : 'Could not copy image')
+            })
+          },
+        })
       }
 
       if (!isDmMode && onMentionAuthor) {

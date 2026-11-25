@@ -24,6 +24,15 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          // Keep Rollup/Vite virtual helpers in a dedicated tiny precached chunk so lazy
+          // chunks (jsqr, mathjax, qrcode, globe) never swallow helpers imported by index.js.
+          if (
+            id.includes('commonjsHelpers') ||
+            id.includes('commonjs-dynamic-modules') ||
+            id.includes('vite/preload-helper')
+          ) {
+            return 'vendor-helpers'
+          }
           if (id.includes('/node_modules/mathjax-full/')) {
             return 'mathjax'
           }

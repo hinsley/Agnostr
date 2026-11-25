@@ -87,6 +87,8 @@ export interface TacticalGeohashMapProps {
   onSelectChannel?: (channelKey: string) => void
   onTuneChannel?: (channelKey: string) => void
   onViewportInfoChange?: (info: { zoom: number; effectivePrecision: number }) => void
+  onVisibleLiveCountChange?: (count: number) => void
+  onWebglError?: () => void
   className?: string
 }
 
@@ -114,9 +116,11 @@ const ESRI_TOPO_URL =
 const MAX_CACHED_PATCH_TILES = 64
 const MAX_VISIBLE_PATCH_TILES = 12
 const MAX_BUBBLES_PER_GEOHASH = 4
-const BUBBLE_DEMOTE_LIFETIME_MS = 5_000
+const BUBBLE_DEMOTE_LIFETIME_MS = 18_000
 const BUBBLE_FADE_DURATION_MS = 380
-const RECENT_BUBBLE_WINDOW_MS = 120_000
+const RECENT_BUBBLE_WINDOW_MS = 10 * 60_000
+const HOT_BEACON_WINDOW_MS = 5 * 60_000
+const WARM_BEACON_WINDOW_MS = 60 * 60_000
 const VIEWPORT_DEBOUNCE_MS = 130
 const SUN_REFRESH_INTERVAL_MS = 30_000
 
@@ -471,6 +475,25 @@ function formatBubbleAge(tsMs: number, nowMs: number): string {
   if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`
   return `${Math.floor(diffSec / 86400)}d ago`
+}
+
+function formatCompactAge(tsMs: number, nowMs: number): string {
+  if (!Number.isFinite(tsMs) || tsMs <= 0) return 'now'
+  const diffSec = Math.max(0, Math.floor((nowMs - tsMs) / 1000))
+  if (diffSec < 5) return 'now'
+  if (diffSec < 60) return `${diffSec}s`
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m`
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h`
+  return `${Math.floor(diffSec / 86400)}d`
+}
+
+type BeaconWarmthClass = 'is-hot' | 'is-warm' | 'is-recent'
+
+function getBeaconWarmthClass(tsMs: number, nowMs: number): BeaconWarmthClass {
+  const ageMs = Math.max(0, nowMs - tsMs)
+  if (ageMs < HOT_BEACON_WINDOW_MS) return 'is-hot'
+  if (ageMs < WARM_BEACON_WINDOW_MS) return 'is-warm'
+  return 'is-recent'
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,9 +1371,11 @@ interface QueuedGlobeBubble {
 
 interface GlobeBubbleStackRender {
   geohash: string // canonical channelKey ('9q8y', 'mars:s000', or 'topic:nostr')
-  rawGeohash: string // bare base32 geohash on focused body (empty for topics)
-  displayTag: string // '#9q8y', '#mars:s000', or '#nostr'
+  rawGeohash: string // bare base32 geohash (or rolled-up parent prefix) on focused body
+  targetChannelKey: string
+  displayTag: string // '#9q8y', '#dr (3)', '#mars:s000', or '#nostr'
   isTopic: boolean
+  isRollup: boolean
   center: GeoCoords
   bubbles: QueuedGlobeBubble[]
   latestTsMs: number
@@ -1359,6 +1384,107 @@ interface GlobeBubbleStackRender {
 
 interface PulseRoomOnBody extends PulseRoom {
   rawGeohash: string
+}
+
+interface DisplayPulseRoom extends PulseRoomOnBody {
+  targetChannelKey: string
+  isRollup: boolean
+  rollupCount: number
+}
+
+function buildRolledUpPulseRooms(
+  rooms: PulseRoomOnBody[],
+  bodyId: GeohashableBodyId,
+  maxPrecision: number,
+): DisplayPulseRoom[] {
+  if (rooms.length === 0 || maxPrecision <= 0) return []
+  if (maxPrecision >= 9) {
+    return rooms.map((r) => ({
+      ...r,
+      targetChannelKey: r.geohash,
+      isRollup: false,
+      rollupCount: 1,
+    }))
+  }
+
+  const buckets = new Map<string, PulseRoomOnBody[]>()
+  for (const r of rooms) {
+    if (!r.rawGeohash) continue
+    const parentGh =
+      r.rawGeohash.length > maxPrecision ? r.rawGeohash.slice(0, maxPrecision) : r.rawGeohash
+    const list = buckets.get(parentGh)
+    if (list) list.push(r)
+    else buckets.set(parentGh, [r])
+  }
+
+  const out: DisplayPulseRoom[] = []
+  for (const [parentGh, members] of buckets.entries()) {
+    members.sort(
+      (a, b) => (b.lastMessageAt ?? b.lastActivityAt) - (a.lastMessageAt ?? a.lastActivityAt),
+    )
+    const freshest = members[0]
+    const hasDeepChild = members.some((m) => m.rawGeohash.length > maxPrecision)
+
+    if (!hasDeepChild && members.length === 1) {
+      out.push({
+        ...freshest,
+        targetChannelKey: freshest.geohash,
+        isRollup: false,
+        rollupCount: 1,
+      })
+      continue
+    }
+
+    if (members.length === 1) {
+      // Single deep child rolled up into parentGh: keep real city center & fly directly to child
+      out.push({
+        ...freshest,
+        rawGeohash: parentGh,
+        peerCount: Math.max(1, freshest.peerCount),
+        targetChannelKey: freshest.geohash,
+        isRollup: true,
+        rollupCount: 1,
+      })
+      continue
+    }
+
+    // 2+ rooms merged under parentGh (children +/- direct parent room)
+    const parentCanonical = makeCelestialChannelKey(bodyId, parentGh) ?? parentGh
+    let totalPeers = 0
+    let totalMessages = 0
+    let maxActivity = 0
+    let maxMessageAt: number | undefined
+    for (const m of members) {
+      totalPeers += Math.max(0, m.peerCount)
+      totalMessages += Math.max(0, m.messageCount)
+      if (m.lastActivityAt > maxActivity) maxActivity = m.lastActivityAt
+      if (
+        m.lastMessageAt !== undefined &&
+        (maxMessageAt === undefined || m.lastMessageAt > maxMessageAt)
+      ) {
+        maxMessageAt = m.lastMessageAt
+      }
+    }
+
+    out.push({
+      ...freshest,
+      geohash: parentCanonical,
+      rawGeohash: parentGh,
+      center: decodeCenter(parentGh),
+      peerCount: Math.max(1, totalPeers),
+      messageCount: Math.max(freshest.messageCount, totalMessages),
+      lastActivityAt: maxActivity || freshest.lastActivityAt,
+      lastMessageAt: maxMessageAt ?? freshest.lastMessageAt,
+      targetChannelKey: parentCanonical,
+      isRollup: true,
+      rollupCount: members.length,
+    })
+  }
+
+  out.sort(
+    (a, b) => (b.lastMessageAt ?? b.lastActivityAt) - (a.lastMessageAt ?? a.lastActivityAt),
+  )
+  return out
 }
 
 interface EarthPinRenderItem {
@@ -1487,6 +1613,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       onSelectChannel,
       onTuneChannel,
       onViewportInfoChange,
+      onVisibleLiveCountChange,
+      onWebglError,
       className = '',
     },
     ref,
@@ -1534,6 +1662,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     const onSelectChannelRef = useRef(onSelectChannel)
     const onTuneChannelRef = useRef(onTuneChannel)
     const onViewportInfoRef = useRef(onViewportInfoChange)
+    const onVisibleLiveCountRef = useRef(onVisibleLiveCountChange)
+    const onWebglErrorRef = useRef(onWebglError)
     const onFocusBodyChangeRef = useRef(onFocusBodyChange)
     const precisionModeRef = useRef(precisionMode)
     const modeRef = useRef(mode)
@@ -1557,6 +1687,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       onSelectChannelRef.current = onSelectChannel
       onTuneChannelRef.current = onTuneChannel
       onViewportInfoRef.current = onViewportInfoChange
+      onVisibleLiveCountRef.current = onVisibleLiveCountChange
+      onWebglErrorRef.current = onWebglError
       onFocusBodyChangeRef.current = onFocusBodyChange
       precisionModeRef.current = precisionMode
       modeRef.current = mode
@@ -1576,6 +1708,8 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       onSelectChannel,
       onTuneChannel,
       onViewportInfoChange,
+      onVisibleLiveCountChange,
+      onWebglError,
       onFocusBodyChange,
       precisionMode,
       mode,
@@ -1618,6 +1752,12 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       MIN_VIRTUAL_ZOOM,
       MAX_VIRTUAL_ZOOM,
     )
+    const [surfaceLodPrecision, setSurfaceLodPrecision] = useState<number>(() =>
+      getMaxVisibleSurfacePrecision(initialCamZoom),
+    )
+    const lastSurfaceLodRef = useRef<number>(getMaxVisibleSurfacePrecision(initialCamZoom))
+    const lastVisibleLiveCountRef = useRef<number>(-1)
+
     const cameraStateRef = useRef<CameraState>({
       lat: initialCamCenter.lat,
       lon: initialCamCenter.lon,
@@ -1697,8 +1837,46 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
     const activePillElRef = useRef<HTMLDivElement | null>(null)
     const selectedPillElRef = useRef<HTMLDivElement | null>(null)
     const gpsBeaconElRef = useRef<HTMLDivElement | null>(null)
+    const rimLayerRef = useRef<HTMLDivElement | null>(null)
+    const rimLeftBtnRef = useRef<HTMLButtonElement | null>(null)
+    const rimLeftDotRef = useRef<HTMLSpanElement | null>(null)
+    const rimLeftTagRef = useRef<HTMLSpanElement | null>(null)
+    const rimLeftMetaRef = useRef<HTMLSpanElement | null>(null)
+    const rimLeftMoreRef = useRef<HTMLSpanElement | null>(null)
+    const rimRightBtnRef = useRef<HTMLButtonElement | null>(null)
+    const rimRightDotRef = useRef<HTMLSpanElement | null>(null)
+    const rimRightTagRef = useRef<HTMLSpanElement | null>(null)
+    const rimRightMetaRef = useRef<HTMLSpanElement | null>(null)
+    const rimRightMoreRef = useRef<HTMLSpanElement | null>(null)
+    const rimTargetKeyRef = useRef<{ left: string; right: string }>({ left: '', right: '' })
+    const rimRenderCacheRef = useRef<{
+      left: {
+        visible: boolean
+        topPx: number
+        warmth: BeaconWarmthClass | ''
+        tag: string
+        meta: string
+        more: string
+        key: string
+        count: number
+      }
+      right: {
+        visible: boolean
+        topPx: number
+        warmth: BeaconWarmthClass | ''
+        tag: string
+        meta: string
+        more: string
+        key: string
+        count: number
+      }
+    }>({
+      left: { visible: false, topPx: -1, warmth: '', tag: '', meta: '', more: '', key: '', count: 0 },
+      right: { visible: false, topPx: -1, warmth: '', tag: '', meta: '', more: '', key: '', count: 0 },
+    })
     const bubbleStacksRef = useRef<GlobeBubbleStackRender[]>([])
-    const visiblePulseRoomsRef = useRef<PulseRoomOnBody[]>([])
+    const rawPulseRoomsRef = useRef<PulseRoomOnBody[]>([])
+    const visiblePulseRoomsRef = useRef<DisplayPulseRoom[]>([])
 
     // Per-channel queue state for upward-sliding speech bubbles (Earth geohashes + Topic asteroids)
     const bubbleQueuesRef = useRef<Map<string, QueuedGlobeBubble[]>>(new Map())
@@ -1856,9 +2034,18 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       extraTopicKeys,
     ])
 
+    const displayPulseRooms = useMemo<DisplayPulseRoom[]>(
+      () => buildRolledUpPulseRooms(validPulseRooms, activeBodyId, surfaceLodPrecision),
+      [validPulseRooms, activeBodyId, surfaceLodPrecision],
+    )
+
     useEffect(() => {
-      visiblePulseRoomsRef.current = validPulseRooms
+      rawPulseRoomsRef.current = validPulseRooms
     }, [validPulseRooms])
+
+    useEffect(() => {
+      visiblePulseRoomsRef.current = displayPulseRooms
+    }, [displayPulseRooms])
 
     useEffect(() => {
       bubbleStacksRef.current = bubbleStacks
@@ -1870,18 +2057,18 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       return candidate && candidate.length < 9 ? candidate : null
     }, [showSubZones, selectedGeohashOnBody, activeGeohashOnBody])
 
-    const allBubbleSourceRooms = useMemo(
-      () => [...validPulseRooms, ...validTopicRooms],
-      [validPulseRooms, validTopicRooms],
+    const allBubbleSourceRooms = useMemo<Array<DisplayPulseRoom | PulseRoom>>(
+      () => [...displayPulseRooms, ...validTopicRooms],
+      [displayPulseRooms, validTopicRooms],
     )
-    const allBubbleSourceRoomsRef = useRef<PulseRoom[]>(allBubbleSourceRooms)
+    const allBubbleSourceRoomsRef = useRef<Array<DisplayPulseRoom | PulseRoom>>(allBubbleSourceRooms)
     useEffect(() => {
       allBubbleSourceRoomsRef.current = allBubbleSourceRooms
     }, [allBubbleSourceRooms])
 
     const buildRenderStacks = useCallback(
-      (rooms: PulseRoom[]): GlobeBubbleStackRender[] => {
-        const roomByKey = new Map<string, PulseRoom>()
+      (rooms: Array<DisplayPulseRoom | PulseRoom>): GlobeBubbleStackRender[] => {
+        const roomByKey = new Map<string, DisplayPulseRoom | PulseRoom>()
         for (const r of rooms) roomByKey.set(r.geohash, r)
 
         const out: GlobeBubbleStackRender[] = []
@@ -1891,16 +2078,31 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           const room = roomByKey.get(key)
           if (!room) continue
           const isTopic = isTopicChannel(key)
-          const rawGh = isTopic ? '' : (getChannelRawGeohash(key) ?? '')
-          if (!isTopic && subZoneParent === rawGh) continue
+          const displayRoom = 'isRollup' in room ? room : null
+          const rawGh = isTopic ? '' : (displayRoom?.rawGeohash ?? getChannelRawGeohash(key) ?? '')
+          const targetKey = displayRoom?.targetChannelKey ?? key
+          const targetRawGh = isTopic ? '' : (getChannelRawGeohash(targetKey) ?? rawGh)
+          if (!isTopic && subZoneParent === targetRawGh) continue
           const latest = list[list.length - 1]
-          const isFocused = key === effectiveActiveKey || key === effectiveSelectedKey
+          const isFocused =
+            key === effectiveActiveKey ||
+            key === effectiveSelectedKey ||
+            targetKey === effectiveActiveKey ||
+            targetKey === effectiveSelectedKey
           const slug = isTopic ? getTopicSlug(key) : null
+          const isMultiRollup = Boolean(displayRoom && displayRoom.isRollup && displayRoom.rollupCount >= 2)
+          const displayTag = slug
+            ? `#${slug}`
+            : isMultiRollup && displayRoom
+              ? `#${key} (${displayRoom.rollupCount})`
+              : `#${key}`
           out.push({
             geohash: key,
             rawGeohash: rawGh,
-            displayTag: slug ? `#${slug}` : `#${key}`,
+            targetChannelKey: targetKey,
+            displayTag,
             isTopic,
+            isRollup: Boolean(displayRoom?.isRollup),
             center: room.center,
             bubbles: list.map((b) => ({ ...b })),
             latestTsMs: latest.tsMs,
@@ -1947,6 +2149,18 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       for (const room of allBubbleSourceRooms) {
         const key = room.geohash
+        const isTopic = isTopicChannel(key)
+        const targetKey = 'targetChannelKey' in room ? room.targetChannelKey : key
+        const isFocused =
+          key === effectiveActiveKey ||
+          key === effectiveSelectedKey ||
+          targetKey === effectiveActiveKey ||
+          targetKey === effectiveSelectedKey
+        const roomTs = room.lastMessageAt ?? room.lastActivityAt
+        if (!isTopic && !isFocused && now - roomTs >= RECENT_BUBBLE_WINDOW_MS) {
+          queues.delete(key)
+          continue
+        }
         const incoming: Array<{ key: string; sender: string; snippet: string; tsMs: number }> = []
 
         if (room.recentMessages && room.recentMessages.length > 0) {
@@ -2063,19 +2277,26 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       setBubbleNowMs(now)
       setBubbleStacks(buildRenderStacks(allBubbleSourceRooms))
-    }, [showPulse, showBubbles, allBubbleSourceRooms, buildRenderStacks])
+    }, [
+      showPulse,
+      showBubbles,
+      allBubbleSourceRooms,
+      buildRenderStacks,
+      effectiveActiveKey,
+      effectiveSelectedKey,
+    ])
 
-    // Live relative-age clock for activity bubbles (ticks every 5s only while bubbles are present)
-    const hasAnyBubbles = bubbleStacks.length > 0
+    // Live relative-age & warmth clock (ticks every 5s while bubbles or pulse rooms exist)
+    const hasAnyLiveIndicators = bubbleStacks.length > 0 || validPulseRooms.length > 0
     useEffect(() => {
-      if (!hasAnyBubbles) return
+      if (!hasAnyLiveIndicators) return
       const timer = window.setInterval(() => {
         setBubbleNowMs(Date.now())
       }, 5_000)
       return () => window.clearInterval(timer)
-    }, [hasAnyBubbles])
+    }, [hasAnyLiveIndicators])
 
-    // 5s post-demotion fadeout & eviction ticker
+    // 18s post-demotion fadeout & eviction ticker
     const hasDemotedBubbles = useMemo(
       () => bubbleStacks.some((s) => s.bubbles.some((b) => b.demotedAtMs !== null)),
       [bubbleStacks],
@@ -2335,15 +2556,42 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
       const wrap = canvasWrapRef.current
       if (!wrap) return
 
+      let reportedWebglFailure = false
+      const reportWebglFailure = () => {
+        if (reportedWebglFailure) return
+        reportedWebglFailure = true
+        setWebglError(true)
+        onWebglErrorRef.current?.()
+      }
+
       let renderer: THREE.WebGLRenderer
       try {
+        const initCanvas = document.createElement('canvas')
+        const glCtx =
+          initCanvas.getContext('webgl2', {
+            alpha: true,
+            antialias: true,
+            powerPreference: 'high-performance',
+          }) || initCanvas.getContext('webgl2')
+        if (!glCtx || glCtx.isContextLost()) {
+          reportWebglFailure()
+          return
+        }
         renderer = new THREE.WebGLRenderer({
+          canvas: initCanvas,
+          context: glCtx as unknown as WebGLRenderingContext,
           antialias: true,
           alpha: false,
           powerPreference: 'high-performance',
         })
+        const activeCtx = renderer.getContext()
+        if (!activeCtx || activeCtx.isContextLost()) {
+          renderer.dispose()
+          reportWebglFailure()
+          return
+        }
       } catch {
-        setWebglError(true)
+        reportWebglFailure()
         return
       }
 
@@ -3676,7 +3924,7 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
 
       const onContextLost = (e: Event) => {
         e.preventDefault()
-        setWebglError(true)
+        reportWebglFailure()
       }
 
       const wheelTarget: HTMLElement = hostRef.current ?? canvas
@@ -3887,9 +4135,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         const horizonCos = clamp(EARTH_RADIUS / Math.max(EARTH_RADIUS + 0.00001, dist), 0.01, 0.996)
         const visibleHorizonDot = horizonCos + 0.008
         const maxVisiblePrecision = getMaxVisibleSurfacePrecision(cam.zoom)
+        if (maxVisiblePrecision !== lastSurfaceLodRef.current) {
+          lastSurfaceLodRef.current = maxVisiblePrecision
+          setSurfaceLodPrecision(maxVisiblePrecision)
+        }
         const focusedBody = activeBodyIdRef.current
         const isEarthFocused = focusedBody === 'earth'
         const inDeepSpaceView = cam.zoom < -1.8
+        const wallNowMs = Date.now()
 
         // Smoothly fade planetary orbital ellipses as user zooms out into Solar System view
         const orbitFade = cam.zoom < 0.8 ? clamp((0.8 - cam.zoom) / 3.2, 0, 1) : 0
@@ -3968,7 +4221,14 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
         }
 
-        renderer.render(scene, camera)
+        try {
+          renderer.render(scene, camera)
+        } catch {
+          isDisposed = true
+          window.cancelAnimationFrame(rafId)
+          reportWebglFailure()
+          return
+        }
 
         // Project 3D anchors -> 2D screen coordinates for DOM overlays
         const viewW = lastW
@@ -4132,7 +4392,11 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
               continue
             }
           } else {
-            if (stack.rawGeohash.length === 0 || stack.rawGeohash.length > maxVisiblePrecision) {
+            if (
+              stack.rawGeohash.length === 0 ||
+              stack.rawGeohash.length > maxVisiblePrecision ||
+              (!stack.isFocused && wallNowMs - stack.latestTsMs >= RECENT_BUBBLE_WINDOW_MS)
+            ) {
               hideEl(el)
               continue
             }
@@ -4187,17 +4451,19 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           showElAt(el, p.x, p.y - tailOffset, 'bottom-center')
         }
 
-        // 6. Live Pulse Surface Sonar Beacons (Dead-centered on exact lat/lon + Precision-LOD + Exact Horizon!)
+        // 6. Live Pulse Surface Sonar Beacons (Dead-centered on exact lat/lon + Zoom Rollups + Exact Horizon!)
         const rooms = visiblePulseRoomsRef.current
         for (const room of rooms) {
           const el = beaconElsRef.current.get(room.geohash)
           if (!el) continue
+          const targetRaw = getChannelRawGeohash(room.targetChannelKey) ?? room.rawGeohash
           if (
             !showPulseRef.current ||
+            inDeepSpaceView ||
             room.rawGeohash.length === 0 ||
             room.rawGeohash.length > maxVisiblePrecision ||
-            activeSubParent === room.rawGeohash ||
-            pinEntries.has(room.geohash)
+            activeSubParent === targetRaw ||
+            (!(room.isRollup && room.rollupCount >= 2) && pinEntries.has(room.targetChannelKey))
           ) {
             hideEl(el)
             continue
@@ -4215,6 +4481,186 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
           }
           showElAt(el, p.x, p.y)
         }
+
+        // 6b. On-Screen Live Room Count (onVisibleLiveCountChange) & Off-Screen Horizon Rim Pills
+        const rawRooms = rawPulseRoomsRef.current
+        const visMinY = isCompact ? 12 : 64
+        const visMaxY = isCompact ? Math.max(24, viewH - 12) : Math.max(visMinY + 24, viewH - 120)
+
+        let visibleLiveCount = 0
+        let leftCount = 0
+        let rightCount = 0
+        let bestLeft: {
+          room: PulseRoomOnBody
+          ts: number
+          underHour: boolean
+          dotUp: number
+        } | null = null
+        let bestRight: {
+          room: PulseRoomOnBody
+          ts: number
+          underHour: boolean
+          dotUp: number
+        } | null = null
+
+        if (!inDeepSpaceView && showPulseRef.current && rawRooms.length > 0) {
+          const camPhi = cam.lat * DEG2RAD
+          const camLam = cam.lon * DEG2RAD
+          const sinPhi = Math.sin(camPhi)
+          const cosPhi = Math.cos(camPhi)
+          const sinLam = Math.sin(camLam)
+          const cosLam = Math.cos(camLam)
+          // Orthonormal camera basis: camRight = (-sinλ, 0, -cosλ), camUp = (-sinφ cosλ, cosφ, sinφ sinλ)
+          const camRightX = -sinLam
+          const camRightZ = -cosLam
+          const camUpX = -sinPhi * cosLam
+          const camUpY = cosPhi
+          const camUpZ = sinPhi * sinLam
+          const rimMaxY = Math.max(88, viewH - 120)
+
+          for (const room of rawRooms) {
+            const [ux, uy, uz] = latLonToUnitVec3(room.center.lat, room.center.lon)
+            const facing = ux * camDir.x + uy * camDir.y + uz * camDir.z
+            let screenX = 0
+            let screenY = 0
+            let projectedFront = false
+            if (facing > visibleHorizonDot) {
+              tmpVec.set(ux * EARTH_RADIUS, uy * EARTH_RADIUS, uz * EARTH_RADIUS)
+              const p = projectWorldVecToScreen(tmpVec, viewW, viewH)
+              if (p.visible) {
+                projectedFront = true
+                screenX = p.x
+                screenY = p.y
+              }
+            }
+
+            if (
+              projectedFront &&
+              screenX >= 16 &&
+              screenX <= viewW - 16 &&
+              screenY >= visMinY &&
+              screenY <= visMaxY
+            ) {
+              visibleLiveCount += 1
+            }
+
+            const onScreenForRim =
+              projectedFront &&
+              screenX >= 20 &&
+              screenX <= viewW - 20 &&
+              screenY >= 64 &&
+              screenY <= rimMaxY
+
+            if (!isCompact && !onScreenForRim) {
+              const dotRight = ux * camRightX + uz * camRightZ
+              const dotUp = ux * camUpX + uy * camUpY + uz * camUpZ
+              const ts = room.lastMessageAt ?? room.lastActivityAt
+              const underHour = wallNowMs - ts < WARM_BEACON_WINDOW_MS
+
+              if (dotRight < 0) {
+                leftCount += 1
+                if (
+                  !bestLeft ||
+                  (underHour && !bestLeft.underHour) ||
+                  (underHour === bestLeft.underHour && ts > bestLeft.ts)
+                ) {
+                  bestLeft = { room, ts, underHour, dotUp }
+                }
+              } else {
+                rightCount += 1
+                if (
+                  !bestRight ||
+                  (underHour && !bestRight.underHour) ||
+                  (underHour === bestRight.underHour && ts > bestRight.ts)
+                ) {
+                  bestRight = { room, ts, underHour, dotUp }
+                }
+              }
+            }
+          }
+        }
+
+        if (visibleLiveCount !== lastVisibleLiveCountRef.current) {
+          lastVisibleLiveCountRef.current = visibleLiveCount
+          onVisibleLiveCountRef.current?.(visibleLiveCount)
+        }
+
+        const updateRimPill = (
+          side: 'left' | 'right',
+          candidate: { room: PulseRoomOnBody; ts: number; dotUp: number } | null,
+          count: number,
+        ) => {
+          const btn = side === 'left' ? rimLeftBtnRef.current : rimRightBtnRef.current
+          const dot = side === 'left' ? rimLeftDotRef.current : rimRightDotRef.current
+          const tag = side === 'left' ? rimLeftTagRef.current : rimRightTagRef.current
+          const metaEl = side === 'left' ? rimLeftMetaRef.current : rimRightMetaRef.current
+          const moreEl = side === 'left' ? rimLeftMoreRef.current : rimRightMoreRef.current
+          const cache = rimRenderCacheRef.current[side]
+          if (!btn || !dot || !tag || !metaEl || !moreEl) return
+
+          if (!candidate || count <= 0 || inDeepSpaceView || isCompact || viewH < 240) {
+            if (cache.visible) {
+              cache.visible = false
+              cache.key = ''
+              cache.count = 0
+              rimTargetKeyRef.current[side] = ''
+              btn.style.visibility = 'hidden'
+              btn.style.opacity = '0'
+              btn.style.pointerEvents = 'none'
+            }
+            return
+          }
+
+          const topPx = Math.round(
+            clamp(viewH * 0.5 - candidate.dotUp * (viewH * 0.28), 96, Math.max(120, viewH - 220)),
+          )
+          const nextKey = candidate.room.geohash
+          const nextTag = `#${nextKey}`
+          const nextMeta = formatCompactAge(candidate.ts, wallNowMs)
+          const nextMore = count > 1 ? `+${count - 1}` : ''
+          const nextWarmth = getBeaconWarmthClass(candidate.ts, wallNowMs)
+
+          rimTargetKeyRef.current[side] = nextKey
+          if (!cache.visible) {
+            cache.visible = true
+            btn.style.visibility = 'visible'
+            btn.style.opacity = '1'
+            btn.style.pointerEvents = 'auto'
+          }
+          if (cache.topPx !== topPx) {
+            cache.topPx = topPx
+            btn.style.top = `${topPx}px`
+          }
+          if (cache.warmth !== nextWarmth) {
+            cache.warmth = nextWarmth
+            dot.className = `ag-globe-rim-dot ${nextWarmth}`
+          }
+          if (cache.tag !== nextTag) {
+            cache.tag = nextTag
+            tag.textContent = nextTag
+          }
+          const metaChanged = cache.meta !== nextMeta
+          if (metaChanged) {
+            cache.meta = nextMeta
+            metaEl.textContent = nextMeta
+          }
+          if (cache.more !== nextMore) {
+            cache.more = nextMore
+            moreEl.textContent = nextMore
+            moreEl.style.display = nextMore ? '' : 'none'
+          }
+          if (cache.key !== nextKey || cache.count !== count || metaChanged) {
+            cache.key = nextKey
+            cache.count = count
+            const cityPart = candidate.room.nearestCity ? ` · ${candidate.room.nearestCity}` : ''
+            const morePart = count > 1 ? ` (+${count - 1} more ${side})` : ''
+            btn.title = `${nextTag}${cityPart} · ${nextMeta}${morePart} — click to fly`
+            btn.setAttribute('aria-label', `Fly to ${nextTag}, active ${nextMeta} ago${morePart}`)
+          }
+        }
+
+        updateRimPill('left', bestLeft, leftCount)
+        updateRimPill('right', bestRight, rightCount)
 
         // 7. Projected Clickable Solar System Planet, Moon, Sun & Focused-World Chips (.ag-globe-body-chip)
         const placedBodyBoxes: Array<{ l: number; r: number; t: number; b: number }> = []
@@ -5228,84 +5674,69 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
         {/* Projected 3D -> 2D Interactive Overlay Layer (Exact Horizon & Limb Occluded in rAF) */}
         {!webglError && (
           <div className="ag-globe-bubble-layer" aria-hidden={false}>
-            {/* Live Pulse Surface Sonar Beacons (Dot Dead-Centered on Exact lat/lon; Pill Floats Beside It) */}
+            {/* Live Pulse Surface Sonar Beacons (Dot Dead-Centered on Exact lat/lon; 3-Tier Warmth + Rollups) */}
             {showPulse &&
-              validPulseRooms.map((room) => {
+              displayPulseRooms.map((room) => {
+                const lastTs = room.lastMessageAt ?? room.lastActivityAt
+                const warmth = getBeaconWarmthClass(lastTs, bubbleNowMs)
                 const isFocused =
-                  room.geohash === effectiveActiveKey || room.geohash === effectiveSelectedKey
-                const hasBubble = showBubbles && placedBubbleKeySet.has(room.geohash)
-                const showPill = !isFocused && !hasBubble && mode === 'expanded' && room.peerCount >= 2
-                const countTag = room.peerCount > 0 ? `${room.peerCount}p` : `${room.messageCount}m`
+                  room.geohash === effectiveActiveKey ||
+                  room.geohash === effectiveSelectedKey ||
+                  room.targetChannelKey === effectiveActiveKey ||
+                  room.targetChannelKey === effectiveSelectedKey
+                const hasBubble =
+                  showBubbles &&
+                  placedBubbleKeySet.has(room.geohash) &&
+                  (isFocused || bubbleNowMs - lastTs < RECENT_BUBBLE_WINDOW_MS)
+                const isMultiRollup = room.isRollup && room.rollupCount >= 2
+                const showPill =
+                  !isFocused &&
+                  !hasBubble &&
+                  mode === 'expanded' &&
+                  (isMultiRollup ||
+                    warmth === 'is-warm' ||
+                    (warmth === 'is-hot' && (room.peerCount >= 1 || room.isRollup)))
+                const ageTag = formatCompactAge(lastTs, bubbleNowMs)
+                const peerTag = room.peerCount > 0 ? `${room.peerCount}p` : `${room.messageCount}m`
+                const pillSummary = isMultiRollup
+                  ? `(${room.rollupCount}) · ${peerTag}`
+                  : warmth === 'is-warm'
+                    ? `${ageTag} · ${peerTag}`
+                    : peerTag
+                const titleDetail = isMultiRollup
+                  ? `#${room.geohash} · ${room.rollupCount} active rooms (${room.peerCount} ${room.peerCount === 1 ? 'peer' : 'peers'}) — click to zoom in`
+                  : `#${room.targetChannelKey}${room.nearestCity ? ` · ${room.nearestCity}` : ''} · ${ageTag} (${room.peerCount} ${room.peerCount === 1 ? 'peer' : 'peers'})`
                 return (
                   <button
                     key={room.geohash}
                     ref={(node) => setBeaconEl(room.geohash, node)}
                     type="button"
+                    className={`ag-globe-beacon ${warmth}${room.isRollup ? ' is-rollup' : ''}`}
                     style={{
-                      position: 'absolute',
-                      left: 0,
-                      top: 0,
-                      width: 14,
-                      height: 14,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      padding: 0,
-                      border: 'none',
-                      background: 'transparent',
-                      cursor: 'pointer',
-                      pointerEvents: 'auto',
-                      overflow: 'visible',
-                      zIndex: 6,
                       visibility: 'hidden',
                       opacity: 0,
                     }}
-                    title={`#${room.geohash}${room.nearestCity ? ` · ${room.nearestCity}` : ''} (${room.peerCount} ${room.peerCount === 1 ? 'peer' : 'peers'})`}
+                    title={titleDetail}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation()
-                      emitSelectChannel(room.geohash)
+                      emitSelectChannel(room.targetChannelKey)
+                      if (room.isRollup) {
+                        flyToCellInternal(room.targetChannelKey, { animate: true })
+                      }
                     }}
                     onDoubleClick={(e) => {
                       e.stopPropagation()
                       if (modeRef.current === 'expanded') {
-                        emitTuneChannel(room.geohash)
+                        emitTuneChannel(room.targetChannelKey)
                       }
                     }}
                   >
-                    <span
-                      style={{
-                        width: 10,
-                        height: 10,
-                        borderRadius: '999px',
-                        backgroundColor: 'var(--accent)',
-                        border: '2px solid var(--bg-canvas)',
-                        boxShadow:
-                          '0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 10px var(--accent)',
-                        flexShrink: 0,
-                      }}
-                    />
+                    <span className={`ag-globe-beacon-dot ${warmth}`} />
                     {showPill && (
-                      <span
-                        className="mono"
-                        style={{
-                          position: 'absolute',
-                          left: 'calc(100% + 5px)',
-                          top: '50%',
-                          transform: 'translateY(-50%)',
-                          padding: '1px 6px',
-                          borderRadius: '999px',
-                          backgroundColor: 'color-mix(in srgb, var(--bg-surface) 92%, transparent)',
-                          border: '1px solid color-mix(in srgb, var(--accent) 52%, transparent)',
-                          color: 'var(--text-primary)',
-                          fontSize: 10,
-                          fontWeight: 600,
-                          whiteSpace: 'nowrap',
-                          boxShadow: 'var(--shadow-sm)',
-                        }}
-                      >
+                      <span className="ag-globe-beacon-pill mono">
                         #{room.geohash}{' '}
-                        <b style={{ color: 'var(--accent)', fontWeight: 700 }}>{countTag}</b>
+                        <b style={{ color: 'var(--accent)', fontWeight: 700 }}>{pillSummary}</b>
                       </span>
                     )}
                   </button>
@@ -5599,20 +6030,25 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                         onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation()
-                          emitSelectChannel(stack.geohash)
+                          emitSelectChannel(stack.targetChannelKey)
                           if (stack.isTopic) {
-                            flyToTopicInternal(stack.geohash, { animate: true })
+                            flyToTopicInternal(stack.targetChannelKey, { animate: true })
+                          } else if (stack.isRollup) {
+                            flyToCellInternal(stack.targetChannelKey, { animate: true })
                           }
                         }}
                         onDoubleClick={(e) => {
                           e.stopPropagation()
-                          emitTuneChannel(stack.geohash)
+                          emitTuneChannel(stack.targetChannelKey)
                         }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault()
                             e.stopPropagation()
-                            emitSelectChannel(stack.geohash)
+                            emitSelectChannel(stack.targetChannelKey)
+                            if (stack.isRollup && !stack.isTopic) {
+                              flyToCellInternal(stack.targetChannelKey, { animate: true })
+                            }
                           }
                         }}
                       >
@@ -5632,6 +6068,68 @@ export const TacticalGeohashMap = forwardRef<TacticalGeohashMapHandle, TacticalG
                   })}
                 </div>
               ))}
+          </div>
+        )}
+
+        {/* Off-Screen / Far-Side Horizon Rim Directional Pills (2 Pooled Buttons Updated Imperatively in rAF) */}
+        {!webglError && (
+          <div
+            ref={rimLayerRef}
+            className="ag-globe-rim-layer"
+            aria-label="Off-screen active channels"
+          >
+            <button
+              ref={rimLeftBtnRef}
+              type="button"
+              className="ag-globe-rim-pill is-left"
+              style={{ visibility: 'hidden', opacity: 0, pointerEvents: 'none' }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                const targetKey = rimTargetKeyRef.current.left
+                if (!targetKey) return
+                flyToCellInternal(targetKey, { animate: true })
+                emitSelectChannel(targetKey)
+              }}
+            >
+              <span className="ag-globe-rim-arrow" aria-hidden="true">
+                ←
+              </span>
+              <span ref={rimLeftDotRef} className="ag-globe-rim-dot is-hot" aria-hidden="true" />
+              <span ref={rimLeftTagRef} className="ag-globe-rim-tag mono" />
+              <span ref={rimLeftMetaRef} className="ag-globe-rim-meta mono" />
+              <span
+                ref={rimLeftMoreRef}
+                className="ag-globe-rim-more mono"
+                style={{ display: 'none' }}
+              />
+            </button>
+            <button
+              ref={rimRightBtnRef}
+              type="button"
+              className="ag-globe-rim-pill is-right"
+              style={{ visibility: 'hidden', opacity: 0, pointerEvents: 'none' }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                const targetKey = rimTargetKeyRef.current.right
+                if (!targetKey) return
+                flyToCellInternal(targetKey, { animate: true })
+                emitSelectChannel(targetKey)
+              }}
+            >
+              <span ref={rimRightDotRef} className="ag-globe-rim-dot is-hot" aria-hidden="true" />
+              <span ref={rimRightTagRef} className="ag-globe-rim-tag mono" />
+              <span ref={rimRightMetaRef} className="ag-globe-rim-meta mono" />
+              <span
+                ref={rimRightMoreRef}
+                className="ag-globe-rim-more mono"
+                style={{ display: 'none' }}
+              />
+              <span className="ag-globe-rim-arrow" aria-hidden="true">
+                →
+              </span>
+            </button>
           </div>
         )}
 

@@ -2610,6 +2610,7 @@ export function App() {
                     hasOtherUnread={totalUnreadBadge > 0}
                     onMobileBack={handleMobileBack}
                     onBackToGlobe={isBitchatRoom ? handleBackToBitchatGlobe : undefined}
+                    onTuneChannel={handleTuneChannel}
                     onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
                     onToggleUserList={handleToggleUserList}
                     onOpenRoomInfo={handleOpenRoomInfo}

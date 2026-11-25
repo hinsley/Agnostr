@@ -13,12 +13,14 @@ import {
   Clipboard,
   Copy,
   ExternalLink,
+  Image as ImageIcon,
   Link2,
   Plus,
   Scissors,
   TextSelect,
 } from 'lucide-react'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
+import { copyImageToClipboard, isCopyableImageElement } from '../utils/clipboardImage.ts'
 import '../styles/contextMenu.css'
 
 export interface ContextMenuItem {
@@ -164,6 +166,67 @@ function findEditableControl(
 }
 
 function buildGenericMenuSpec(target: EventTarget | null): ContextMenuSpec | null {
+  // 0. Loaded, visible, unblurred <img> anywhere in the app (including inside links/cards)
+  if (target instanceof Element) {
+    const rawImg = target.closest('img')
+    if (rawImg instanceof HTMLImageElement && isCopyableImageElement(rawImg)) {
+      const items: ContextMenuItem[] = [
+        {
+          id: 'generic-copy-image',
+          label: 'Copy Image',
+          icon: <ImageIcon size={14} />,
+          onSelect: () => {
+            void copyImageToClipboard(rawImg)
+          },
+        },
+      ]
+
+      const imgSrc = (rawImg.currentSrc || rawImg.src || '').trim()
+      if (/^https?:\/\//i.test(imgSrc)) {
+        items.push({
+          id: 'generic-copy-image-link',
+          label: 'Copy Image Link',
+          icon: <Link2 size={14} />,
+          onSelect: () => {
+            copyTextSafe(imgSrc)
+          },
+        })
+      }
+
+      const anchor = rawImg.closest('a[href]')
+      if (anchor instanceof HTMLAnchorElement) {
+        const safeLink = resolveSafeAnchorTarget(anchor)
+        if (safeLink) {
+          items.push(
+            {
+              id: 'generic-open-link',
+              label: 'Open Link',
+              icon: <ExternalLink size={14} />,
+              dividerBefore: true,
+              onSelect: () => {
+                if (safeLink.isInternalHash) {
+                  window.location.hash = safeLink.openUrl
+                } else {
+                  window.open(safeLink.openUrl, '_blank', 'noopener,noreferrer')
+                }
+              },
+            },
+            {
+              id: 'generic-copy-link',
+              label: 'Copy Link Address',
+              icon: <Link2 size={14} />,
+              onSelect: () => {
+                copyTextSafe(safeLink.copyUrl)
+              },
+            }
+          )
+        }
+      }
+
+      return { items }
+    }
+  }
+
   // 1. Safe <a href> link
   if (target instanceof Element) {
     const anchor = target.closest('a[href]')

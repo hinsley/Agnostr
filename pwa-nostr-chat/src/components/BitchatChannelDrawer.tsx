@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check,
   Globe,
@@ -51,6 +51,24 @@ function formatCompactNoteAge(tsSec: number): string {
   return `${Math.floor(hrs / 24)}d`
 }
 
+function formatLiveAgeMs(tsMs: number, nowMs: number): string {
+  const diffSec = Math.max(0, Math.floor((nowMs - tsMs) / 1000))
+  if (diffSec < 5) return 'now'
+  if (diffSec < 60) return `${diffSec}s`
+  const mins = Math.floor(diffSec / 60)
+  if (mins < 60) return `${mins}m`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h`
+  return `${Math.floor(hrs / 24)}d`
+}
+
+function getLiveWarmth(tsMs: number, nowMs: number): 'hot' | 'warm' | 'cool' {
+  const ageMs = Math.max(0, nowMs - tsMs)
+  if (ageMs < 5 * 60_000) return 'hot'
+  if (ageMs < 60 * 60_000) return 'warm'
+  return 'cool'
+}
+
 export const BitchatChannelDrawer: React.FC<BitchatChannelDrawerProps> = ({
   engine,
   isMobileViewport = true,
@@ -65,10 +83,13 @@ export const BitchatChannelDrawer: React.FC<BitchatChannelDrawerProps> = ({
   onPlaySound,
 }) => {
   const [copiedShare, setCopiedShare] = useState(false)
+  const [liveNowMs, setLiveNowMs] = useState(() => Date.now())
   const copyTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
+    const tickId = window.setInterval(() => setLiveNowMs(Date.now()), 15_000)
     return () => {
+      window.clearInterval(tickId)
       if (copyTimerRef.current !== null) {
         window.clearTimeout(copyTimerRef.current)
       }
@@ -158,6 +179,46 @@ export const BitchatChannelDrawer: React.FC<BitchatChannelDrawerProps> = ({
     : `${presence.onlineCount} ${presence.onlineCount === 1 ? 'peer online' : 'peers online'}`
 
   const previewNotes = locationNotes.slice(0, 3)
+
+  const activeGeoLower = activeGeohash.toLowerCase()
+  const activeNowRooms = useMemo(() => {
+    return engine.pulseRooms
+      .slice()
+      .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
+      .slice(0, 6)
+      .map((room) => {
+        const keyLower = room.geohash.toLowerCase()
+        const roomIsTopic = isTopicChannel(room.geohash)
+        const roomCelestial = roomIsTopic ? null : parseCelestialChannelKey(room.geohash)
+        const roomNonEarth = Boolean(roomCelestial && roomCelestial.bodyId !== 'earth')
+        const roomBodyDef = roomCelestial ? getBodyDef(roomCelestial.bodyId) : null
+        const subtitle = roomIsTopic
+          ? 'Asteroid'
+          : roomNonEarth && roomBodyDef
+            ? room.nearestCity && room.nearestCity !== roomBodyDef.name
+              ? `${roomBodyDef.name} · ${room.nearestCity}`
+              : roomBodyDef.name
+            : (room.nearestCity ?? 'Earth')
+        const cachedPrev = engine.channelPreviews[keyLower]
+        const rawPreview = room.lastPreview?.trim() || cachedPrev?.preview?.trim() || ''
+        const rawSender = room.lastSender?.trim() || cachedPrev?.sender?.trim() || ''
+        const previewLine = rawPreview
+          ? rawSender
+            ? `${rawSender}: ${rawPreview}`
+            : rawPreview
+          : ''
+        return {
+          room,
+          keyLower,
+          label: formatBitchatChannelLabel(room.geohash),
+          subtitle,
+          bodyColor: roomNonEarth && roomBodyDef ? roomBodyDef.palette.primary : null,
+          isTopic: roomIsTopic,
+          previewLine,
+          isActive: keyLower === activeGeoLower,
+        }
+      })
+  }, [engine.pulseRooms, engine.channelPreviews, activeGeoLower])
 
   return (
     <aside
@@ -387,6 +448,85 @@ export const BitchatChannelDrawer: React.FC<BitchatChannelDrawerProps> = ({
             </div>
           </section>
         )}
+
+        {/* Active Now Live Rooms Feed */}
+        <section className="ag-bitchat-drawer-card" aria-label="Active now">
+          <div className="ag-bitchat-drawer-card-head">
+            <span className="ag-bitchat-drawer-kicker ag-bitchat-drawer-kicker-icon">
+              <span className="ag-room-warmth-dot is-hot" aria-hidden="true" />
+              <span>Active Now</span>
+            </span>
+            {activeNowRooms.length > 0 && (
+              <span className="ag-bitchat-drawer-kicker-meta mono tabular">
+                {activeNowRooms.length} live
+              </span>
+            )}
+          </div>
+
+          {activeNowRooms.length > 0 ? (
+            <div className="ag-bitchat-drawer-live-list" role="list">
+              {activeNowRooms.map((item) => {
+                const warmth = getLiveWarmth(item.room.lastActivityAt, liveNowMs)
+                const age = formatLiveAgeMs(item.room.lastActivityAt, liveNowMs)
+                return (
+                  <button
+                    key={item.keyLower}
+                    type="button"
+                    role="listitem"
+                    className={`ag-bitchat-drawer-live-row${item.isActive ? ' is-active' : ''}`}
+                    aria-current={item.isActive ? 'page' : undefined}
+                    onClick={() => {
+                      onPlaySound?.('tune')
+                      onTuneChannel(item.room.geohash)
+                      onClose()
+                    }}
+                  >
+                    <div className="ag-bitchat-drawer-live-head">
+                      <span className="ag-bitchat-drawer-live-title-wrap">
+                        <span className={`ag-room-warmth-dot is-${warmth}`} aria-hidden="true" />
+                        <span className="ag-bitchat-drawer-live-tag mono truncate">
+                          {item.label}
+                        </span>
+                        {item.bodyColor && (
+                          <span
+                            className="ag-bitchat-drawer-world-dot"
+                            style={{ backgroundColor: item.bodyColor }}
+                            aria-hidden="true"
+                          />
+                        )}
+                      </span>
+                      <span className="ag-bitchat-drawer-live-meta">
+                        {item.room.peerCount > 0 && (
+                          <span className="ag-bitchat-drawer-live-peers tabular">
+                            {item.room.peerCount}p
+                          </span>
+                        )}
+                        <span className="ag-bitchat-drawer-live-age mono tabular">{age}</span>
+                        {item.isActive && (
+                          <Check
+                            size={13}
+                            className="ag-bitchat-drawer-live-check"
+                            aria-label="Current channel"
+                          />
+                        )}
+                      </span>
+                    </div>
+                    <div className="ag-bitchat-drawer-live-sub truncate">{item.subtitle}</div>
+                    {item.previewLine && (
+                      <div className="ag-bitchat-drawer-live-preview truncate">
+                        {item.previewLine}
+                      </div>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="ag-bitchat-drawer-live-empty">
+              Listening for active rooms across relays…
+            </div>
+          )}
+        </section>
 
         {/* Channel Notes Summary */}
         {previewNotes.length > 0 && (
