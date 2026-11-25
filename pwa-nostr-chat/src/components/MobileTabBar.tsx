@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import {
+  Bell,
   Globe,
   Landmark,
   Mail,
@@ -27,6 +28,7 @@ export interface MobileTabBarProps {
   onSelectMail: () => void
   onSelectWallet: () => void
   onOpenSettings: () => void
+  onOpenNotificationOptions?: () => void
 }
 
 function formatBadgeCount(count: number): string {
@@ -49,6 +51,7 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
   onSelectMail,
   onSelectWallet,
   onOpenSettings,
+  onOpenNotificationOptions,
 }) => {
   const navRef = useRef<HTMLElement | null>(null)
   const hasMountedRef = useRef(false)
@@ -95,10 +98,23 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
   return (
     <nav
       ref={navRef}
-      className="ag-mobile-tabbar"
+      className={onOpenNotificationOptions ? 'ag-mobile-tabbar has-notification-shortcut' : 'ag-mobile-tabbar'}
       data-no-swipe="true"
       aria-label="Primary navigation"
     >
+      {onOpenNotificationOptions && (
+        <button
+          type="button"
+          className="ag-mtab-btn ag-notification-shortcut"
+          onClick={onOpenNotificationOptions}
+          aria-label="Notification options"
+          aria-haspopup="dialog"
+        >
+          <Bell size={18} aria-hidden="true" />
+          <span className="ag-mtab-label">Alerts</span>
+        </button>
+      )}
+
       {/* 1. Agora */}
       <button
         type="button"

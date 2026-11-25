@@ -71,6 +71,7 @@ import ConversationList, { type ListTab } from './components/ConversationList'
 import BitchatChannelDrawer from './components/BitchatChannelDrawer'
 import UserListPane from './components/UserListPane'
 import MobileTabBar from './components/MobileTabBar'
+import { shouldOfferNotificationOptions } from './lib/notificationShortcut'
 import ChannelHeader from './components/ChannelHeader'
 import SearchBar from './components/SearchBar'
 import MessageStream from './components/MessageStream'
@@ -245,7 +246,7 @@ export function App() {
     mql.addEventListener('change', sync)
     return () => mql.removeEventListener('change', sync)
   }, [])
-  const [settingsState, setSettingsState] = useState<{ open: boolean; tab?: SettingsTab }>({
+  const [settingsState, setSettingsState] = useState<{ open: boolean; tab?: SettingsTab; notificationsOnly?: boolean }>({
     open: false,
     tab: undefined,
   })
@@ -1352,6 +1353,14 @@ export function App() {
     setRoomInfoOpen(false)
     setSettingsState({ open: true, tab })
   }, [])
+
+  const handleOpenNotificationOptions = useCallback(() => {
+    setRadarExpanded(false)
+    setMobileUserListOpen(false)
+    setRoomInfoOpen(false)
+    setSettingsState({ open: true, tab: 'notifications', notificationsOnly: true })
+  }, [])
+  const offerNotificationOptions = shouldOfferNotificationOptions(engine.notifications)
 
   const handleOpenRoomInfo = useCallback(() => {
     setMobileUserListOpen(false)
@@ -2537,6 +2546,9 @@ export function App() {
             listTab={listTab}
             selectedServerId={selectedServerId}
             settingsActive={settingsState.open}
+            onOpenNotificationOptions={
+              offerNotificationOptions ? handleOpenNotificationOptions : undefined
+            }
             pwa={pwa}
             agoraUnread={engine.agora.unreadNotificationCount}
             onSelectWorkspace={handleSelectWorkspace}
@@ -3105,6 +3117,7 @@ export function App() {
               engine={engine}
               pwa={pwa}
               initialTab={settingsState.tab}
+              notificationsOnly={settingsState.notificationsOnly}
               onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
               onOpenInstall={handleOpenInstall}
               onShowQr={setQrShareTarget}
@@ -3126,7 +3139,8 @@ export function App() {
         serverUnread={engine.servers.totalServerUnread}
         serverMentions={engine.servers.totalServerMentions}
         mailUnread={engine.amail.unreadInboxCount}
-        settingsActive={settingsState.open}
+        settingsActive={settingsState.open && !settingsState.notificationsOnly}
+        onOpenNotificationOptions={offerNotificationOptions ? handleOpenNotificationOptions : undefined}
         onSelectAgora={() => {
           bitchatAudio.play('click')
           handleSelectAgora()
@@ -3155,6 +3169,7 @@ export function App() {
             engine={engine}
             pwa={pwa}
             initialTab={settingsState.tab}
+            notificationsOnly={settingsState.notificationsOnly}
             onClose={() => setSettingsState((prev) => ({ ...prev, open: false }))}
             onOpenInstall={handleOpenInstall}
             onShowQr={setQrShareTarget}

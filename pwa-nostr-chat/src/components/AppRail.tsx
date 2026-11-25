@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import {
   ArrowDown,
   ArrowUp,
+  Bell,
   Download,
   Globe,
   Landmark,
@@ -47,6 +48,7 @@ export interface AppRailProps {
   onOpenServerSettings: (serverId: string, tab?: ServerSettingsTab) => void
   onOpenSearch?: () => void
   onOpenSettings: (tab?: SettingsTab) => void
+  onOpenNotificationOptions?: () => void
   onOpenOwnAgoraProfile?: () => void
   onOpenInstall?: () => void
   onPlaySound?: (cue: SoundCue) => void
@@ -89,6 +91,7 @@ export const AppRail: React.FC<AppRailProps> = ({
   onOpenServerSettings,
   onOpenSearch,
   onOpenSettings,
+  onOpenNotificationOptions,
   onOpenOwnAgoraProfile,
   onOpenInstall,
   onPlaySound,
@@ -340,6 +343,22 @@ export const AppRail: React.FC<AppRailProps> = ({
 
       {/* Always-Visible All-Apps Stack */}
       <div className="ag-rail-group" role="list" aria-label="Agnostr apps">
+        {onOpenNotificationOptions && (
+          <div className="ag-rail-slot" role="listitem">
+            <button
+              type="button"
+              className="ag-rail-app-tile ag-notification-shortcut"
+              onClick={onOpenNotificationOptions}
+              aria-label="Notification options"
+              aria-haspopup="dialog"
+              title="Notification options"
+            >
+              <Bell size={18} aria-hidden="true" />
+              <span className="ag-rail-app-label">Alerts</span>
+            </button>
+          </div>
+        )}
+
         {/* 1. Agora */}
         <div className="ag-rail-slot" role="listitem">
           <button

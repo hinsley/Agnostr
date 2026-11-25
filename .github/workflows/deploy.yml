@@ -40,6 +40,10 @@ jobs:
         working-directory: pwa-nostr-chat
         run: npm run test:push
 
+      - name: Notification shortcut tests
+        working-directory: pwa-nostr-chat
+        run: npm run test:notification-shortcut
+
       - name: Poker governance regression tests
         working-directory: pwa-nostr-chat
         run: npm run test:poker

@@ -96,6 +96,7 @@ export interface SettingsModalProps {
   engine: AgnostrEngine
   pwa: PwaState
   initialTab?: SettingsTab
+  notificationsOnly?: boolean
   onClose: () => void
   onOpenInstall: () => void
   onPlaySound?: (cue: SoundCue) => void
@@ -453,6 +454,7 @@ export function SettingsModal({
   engine,
   pwa,
   initialTab,
+  notificationsOnly = false,
   onClose,
   onOpenInstall,
   onPlaySound,
@@ -473,9 +475,12 @@ export function SettingsModal({
     blossomServers,
   } = engine
 
-  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab ?? 'profile')
+  const [activeTab, setActiveTab] = useState<SettingsTab>(
+    notificationsOnly ? 'notifications' : (initialTab ?? 'profile'),
+  )
+  const modalRef = useRef<HTMLDivElement>(null)
   const [mobileScreen, setMobileScreen] = useState<'menu' | 'detail'>(
-    initialTab ? 'detail' : 'menu',
+    initialTab || notificationsOnly ? 'detail' : 'menu',
   )
   const [searchQuery, setSearchQuery] = useState('')
 
@@ -789,13 +794,26 @@ export function SettingsModal({
   // Sync open / initialTab changes
   useEffect(() => {
     if (!open) return
-    if (initialTab) {
-      setActiveTab(initialTab)
+    if (notificationsOnly || initialTab) {
+      setActiveTab(notificationsOnly ? 'notifications' : (initialTab ?? 'profile'))
       setMobileScreen('detail')
     } else {
       setMobileScreen('menu')
     }
-  }, [open, initialTab])
+  }, [open, initialTab, notificationsOnly])
+
+  useEffect(() => {
+    if (!open || !notificationsOnly) return
+    const dialog = modalRef.current
+    const trigger = document.activeElement
+    const firstClose = Array.from(
+      dialog?.querySelectorAll<HTMLButtonElement>('[data-notification-close]') ?? [],
+    ).find((el) => el.getClientRects().length > 0)
+    firstClose?.focus()
+    return () => {
+      if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus()
+    }
+  }, [open, notificationsOnly])
 
   useEffect(() => {
     setNickDraft(identity.nickname)
@@ -4952,14 +4970,17 @@ export function SettingsModal({
     >
       <div
         className={`ag-settings-modal ${mobileScreen === 'detail' ? 'mobile-detail' : 'mobile-menu'}`}
+        ref={modalRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Settings"
+        aria-label={notificationsOnly ? 'Notifications' : 'Settings'}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Mobile Header */}
         <header className="ag-set-mobile-bar">
-          {mobileScreen === 'detail' ? (
+          {notificationsOnly ? (
+            <span className="ag-set-mobile-title">Notifications</span>
+          ) : mobileScreen === 'detail' ? (
             <button
               type="button"
               className="ag-sheet-back-btn"
@@ -4975,7 +4996,7 @@ export function SettingsModal({
             <span className="ag-set-mobile-title">Settings</span>
           )}
 
-          {mobileScreen === 'detail' && (
+          {!notificationsOnly && mobileScreen === 'detail' && (
             <span className="ag-set-mobile-section truncate">{activeNavMeta.label}</span>
           )}
 
@@ -4983,103 +5004,106 @@ export function SettingsModal({
             type="button"
             className="ag-sheet-close-btn"
             onClick={onClose}
-            aria-label="Close Settings"
+            aria-label={notificationsOnly ? 'Close Notifications' : 'Close Settings'}
+            data-notification-close={notificationsOnly ? true : undefined}
           >
             <X size={18} />
           </button>
         </header>
 
-        <div className="ag-set-layout">
+        <div className={notificationsOnly ? 'ag-set-layout notifications-only' : 'ag-set-layout'}>
           {/* Left Navigation Column (Desktop Sidebar / Mobile Root Menu) */}
-          <nav className="ag-set-nav" aria-label="Settings sections">
-            <div className="ag-set-nav-head">
-              <span className="ag-set-nav-title">Settings</span>
-            </div>
+          {!notificationsOnly && (
+            <nav className="ag-set-nav" aria-label="Settings sections">
+              <div className="ag-set-nav-head">
+                <span className="ag-set-nav-title">Settings</span>
+              </div>
 
-            {/* Instant Settings Search */}
-            <div className="ag-set-search-wrap">
-              <div className="ag-set-search">
-                <Search size={14} className="ag-set-search-icon" aria-hidden="true" />
-                <input
-                  type="search"
-                  className="ag-set-search-input"
-                  placeholder="Search settings…"
-                  aria-label="Search settings"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && filteredNavItems.length > 0) {
-                      e.preventDefault()
-                      onPlaySound?.('click')
-                      setActiveTab(filteredNavItems[0].id)
-                      setMobileScreen('detail')
-                    } else if (e.key === 'Escape' && searchQuery) {
-                      e.preventDefault()
-                      e.stopPropagation()
-                      setSearchQuery('')
-                    }
-                  }}
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    className="ag-set-search-clear"
-                    onClick={() => setSearchQuery('')}
-                    aria-label="Clear settings search"
-                    title="Clear search"
-                  >
-                    <X size={13} />
-                  </button>
+              {/* Instant Settings Search */}
+              <div className="ag-set-search-wrap">
+                <div className="ag-set-search">
+                  <Search size={14} className="ag-set-search-icon" aria-hidden="true" />
+                  <input
+                    type="search"
+                    className="ag-set-search-input"
+                    placeholder="Search settings…"
+                    aria-label="Search settings"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && filteredNavItems.length > 0) {
+                        e.preventDefault()
+                        onPlaySound?.('click')
+                        setActiveTab(filteredNavItems[0].id)
+                        setMobileScreen('detail')
+                      } else if (e.key === 'Escape' && searchQuery) {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        setSearchQuery('')
+                      }
+                    }}
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      className="ag-set-search-clear"
+                      onClick={() => setSearchQuery('')}
+                      aria-label="Clear settings search"
+                      title="Clear search"
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="ag-set-nav-list">
+                {groupedNavSections.length === 0 ? (
+                  <div className="ag-set-nav-empty">
+                    <p>No settings match &ldquo;{searchQuery.trim()}&rdquo;</p>
+                    <button
+                      type="button"
+                      className="ag-btn ag-btn-secondary ag-btn-xs"
+                      onClick={() => setSearchQuery('')}
+                    >
+                      Clear search
+                    </button>
+                  </div>
+                ) : (
+                  groupedNavSections.map((group) => (
+                    <div key={group.category} className="ag-set-nav-group">
+                      <span className="ag-set-nav-group-label">{group.category}</span>
+                      <div className="ag-set-nav-group-items">
+                        {group.items.map((item) => {
+                          const active = activeTab === item.id
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              className={`ag-set-nav-item ${active ? 'active' : ''}`}
+                              aria-current={active ? 'page' : undefined}
+                              onClick={() => {
+                                onPlaySound?.('click')
+                                setActiveTab(item.id)
+                                setMobileScreen('detail')
+                              }}
+                            >
+                              <span className="ag-set-nav-icon">{renderTabIcon(item.id)}</span>
+                              <span className="ag-set-nav-text">
+                                <span className="ag-set-nav-label">{item.label}</span>
+                                <span className="ag-set-nav-sub">{item.subtitle}</span>
+                              </span>
+                              <ChevronRight size={16} className="ag-set-nav-chevron" />
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))
                 )}
               </div>
-            </div>
-
-            <div className="ag-set-nav-list">
-              {groupedNavSections.length === 0 ? (
-                <div className="ag-set-nav-empty">
-                  <p>No settings match &ldquo;{searchQuery.trim()}&rdquo;</p>
-                  <button
-                    type="button"
-                    className="ag-btn ag-btn-secondary ag-btn-xs"
-                    onClick={() => setSearchQuery('')}
-                  >
-                    Clear search
-                  </button>
-                </div>
-              ) : (
-                groupedNavSections.map((group) => (
-                  <div key={group.category} className="ag-set-nav-group">
-                    <span className="ag-set-nav-group-label">{group.category}</span>
-                    <div className="ag-set-nav-group-items">
-                      {group.items.map((item) => {
-                        const active = activeTab === item.id
-                        return (
-                          <button
-                            key={item.id}
-                            type="button"
-                            className={`ag-set-nav-item ${active ? 'active' : ''}`}
-                            aria-current={active ? 'page' : undefined}
-                            onClick={() => {
-                              onPlaySound?.('click')
-                              setActiveTab(item.id)
-                              setMobileScreen('detail')
-                            }}
-                          >
-                            <span className="ag-set-nav-icon">{renderTabIcon(item.id)}</span>
-                            <span className="ag-set-nav-text">
-                              <span className="ag-set-nav-label">{item.label}</span>
-                              <span className="ag-set-nav-sub">{item.subtitle}</span>
-                            </span>
-                            <ChevronRight size={16} className="ag-set-nav-chevron" />
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </nav>
+            </nav>
+          )}
 
           {/* Right Detail Pane */}
           <div className="ag-set-detail">
@@ -5092,7 +5116,8 @@ export function SettingsModal({
                 type="button"
                 className="ag-sheet-close-btn"
                 onClick={onClose}
-                aria-label="Close Settings"
+                aria-label={notificationsOnly ? 'Close Notifications' : 'Close Settings'}
+                data-notification-close={notificationsOnly ? true : undefined}
                 title="Close (Esc)"
               >
                 <X size={18} />
