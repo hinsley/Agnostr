@@ -2,7 +2,6 @@
    Agnostr Realtime Multiplayer Games (Chess, Go, Texas Hold'em Poker)
    Ultra-Sleek Modern Minimal Aesthetic — 4 Themes (phosphor, indigo, amber, daylight)
    Z-index layering:
-     - .ag-game-modal-backdrop: 62 (strictly below Call Pill / Video PiP at 68)
      - .ag-game-setup-backdrop: 64
      - Minimized games and calls share the activity dock at 68.
    ========================================================================== */
@@ -700,47 +699,21 @@
 }
 
 /* --------------------------------------------------------------------------
-   Active Game Stage Modal (z-index: 62 — strictly below Call Pill at 68!)
+   Game board panel, used in the chat layout and on the call stage
    -------------------------------------------------------------------------- */
-.ag-game-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 62;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 14px;
-  background: var(--bg-overlay);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  animation: ag-game-fade-in 150ms var(--ease-out);
-}
-
-.ag-game-modal-frame {
+.ag-game-stage-panel {
   width: 100%;
   max-width: 560px;
-  max-height: calc(100dvh - 28px);
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
-  border-radius: 18px;
-  box-shadow: 0 28px 72px -18px rgba(0, 0, 0, 0.62);
+  border-radius: var(--radius-md);
   overflow: hidden;
-  animation: ag-game-scale-in 180ms var(--ease-spring);
 }
-
-[data-theme='daylight'] .ag-game-modal-frame {
-  box-shadow: 0 24px 60px -16px rgba(15, 23, 42, 0.22);
-}
-
-.ag-game-modal-frame.is-go {
-  max-width: 600px;
-}
-
-.ag-game-modal-frame.is-poker {
-  max-width: min(920px, calc(100vw - 28px));
-}
+.ag-game-stage-panel.is-go { max-width: 600px; }
+.ag-game-stage-panel.is-poker { max-width: 920px; }
 
 /* Flush Transparent Stage Header (Single Row on Desktop & Mobile!) */
 .ag-game-stage-head {
@@ -772,11 +745,11 @@
   flex-shrink: 0;
 }
 
-.ag-game-modal-frame.is-poker .ag-game-stage-icon {
+.ag-game-stage-panel.is-poker .ag-game-stage-icon {
   color: #34d399;
 }
 
-[data-theme='daylight'] .ag-game-modal-frame.is-poker .ag-game-stage-icon {
+[data-theme='daylight'] .ag-game-stage-panel.is-poker .ag-game-stage-icon {
   color: #059669;
 }
 
@@ -3211,14 +3184,8 @@
    Mobile Responsive (< 868px, <= 640px & <= 420px — Single-Row Header, 0px Overflow)
    -------------------------------------------------------------------------- */
 @media (max-width: 867px) {
-  .ag-game-modal-backdrop,
   .ag-game-setup-backdrop {
     padding: 8px;
-  }
-
-  .ag-game-modal-frame {
-    max-height: calc(100dvh - 16px);
-    border-radius: 16px;
   }
 
   .ag-game-stage-head {
@@ -3438,10 +3405,8 @@
   padding: .45rem;
 }
 .ag-call-game-surface { flex: 1; min-width: 0; min-height: 0; display: flex; justify-content: center; }
-.ag-game-embedded.ag-game-modal-frame {
+.ag-game-embedded.ag-game-stage-panel {
   max-height: 100%;
-  box-shadow: none;
-  animation: none;
 }
 .ag-call-game-filmstrip {
   flex: 0 0 clamp(110px, 18%, 220px);
@@ -3474,4 +3439,37 @@
 .is-stage-tile .ag-call-game-feed-label {
   position: absolute; bottom: .4rem; left: .4rem; border-radius: var(--radius-full);
   padding: .2rem .45rem; color: #fff; background: rgba(12, 18, 17, .85);
+}
+
+/* Inline board and composer have separate scroll areas; neither is a modal. */
+.ag-chat-game-lanes, .ag-chat-message-lane, .ag-game-chat-slot {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.ag-game-chat-slot {
+  flex: 0 1 50%;
+  margin: .25rem .5rem;
+}
+.ag-game-chat-slot:empty { display: none; }
+.ag-game-in-chat.ag-game-stage-panel {
+  flex: 1;
+  max-width: none;
+  max-height: none;
+  min-height: 0;
+  border-radius: var(--radius-md);
+}
+.ag-game-in-chat .ag-game-stage-body {
+  overscroll-behavior-y: contain;
+}
+@media (min-width: 1180px) {
+  .ag-chat-game-lanes { flex-direction: row; }
+  .ag-game-chat-slot { flex: 0 1 52%; }
+  .ag-game-chat-slot:not(:empty) + .ag-chat-message-lane { flex: 1 1 44%; }
+}
+@media (max-width: 867px) {
+  .ag-game-chat-slot { margin: .2rem .35rem; }
+  html[data-keyboard-open='true'] .ag-game-chat-slot { flex-basis: 29%; }
 }

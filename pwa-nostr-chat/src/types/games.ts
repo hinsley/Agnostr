@@ -456,6 +456,7 @@ export interface GameEngine {
     targetId: string,
     options: PokerSetupOptions,
   ) => Promise<boolean>
+  watchPokerTable: (scope: RoomGameScope, targetId: string, tableId: string) => Promise<boolean>
   joinPokerTable: (
     scope: RoomGameScope,
     targetId: string,

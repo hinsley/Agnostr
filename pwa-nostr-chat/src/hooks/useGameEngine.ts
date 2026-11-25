@@ -1318,37 +1318,39 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
         tableId: session.tableId,
         displayName: myName,
         ts: Date.now(),
-      })
+      }, true)
     },
     [broadcastHostPokerUpdate, identityManager, publishRoomSignal, updateGameSession],
   )
 
-  const joinPokerTable = useCallback(
+  const openPokerTable = useCallback(
     async (
       scope: RoomGameScope,
       targetId: string,
-      tableIdOrLabel?: string,
+      tableId: string,
+      takeSeat: boolean,
     ): Promise<boolean> => {
       if (!isGameAllowedInScope(scope, 'poker')) return false
       const cleanTarget = scope === 'geo' ? normalizeGeoTarget(targetId) : targetId.trim()
       if (!cleanTarget) return false
       const scopeKey = makeGameScopeKey(scope, cleanTarget)
+      if (scope === 'server' && !serversRef.current.some((server) => server.id === cleanTarget)) return false
 
       const existing = activeGamesRef.current[scopeKey]
-      if (existing && existing.kind === 'poker' && existing.status !== 'finished') {
+      if (existing && existing.kind === 'poker' && existing.status !== 'finished' && existing.tableId === tableId) {
         setFocusedScopeKey(scopeKey)
         setMinimized(false)
         const alreadySeated = existing.pokerState.seats.some(
           (s) => s.pubkey.toLowerCase() === existing.localPubkey.toLowerCase(),
         )
-        if (!alreadySeated) {
+        if (takeSeat && !alreadySeated) {
           await sitInPokerTable(scopeKey)
         }
         return true
       }
 
       const announcement = roomPokerTablesRef.current[scopeKey]
-      if (!announcement) {
+      if (!announcement || announcement.tableId !== tableId) {
         pushToastRef.current('info', 'No active poker table found in this room')
         return false
       }
@@ -1359,7 +1361,6 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
         pushToastRef.current('info', 'You were voted out of this table')
         return false
       }
-      const myName = resolveSelfDisplayName(identityManager)
       const now = Date.now()
 
       const blinds = getRecommendedBlinds(announcement.fixedBuyIn)
@@ -1380,11 +1381,6 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
         scope === 'geo'
           ? formatBitchatChannelLabel(cleanTarget)
           : serversRef.current.find((s) => s.id === cleanTarget)?.name || cleanTarget
-      const displayLabel =
-        tableIdOrLabel && tableIdOrLabel !== announcement.tableId
-          ? tableIdOrLabel.trim() || fallbackLabel
-          : fallbackLabel
-
       const session = makePokerSession({
         gameId: announcement.tableId,
         tableId: announcement.tableId,
@@ -1392,7 +1388,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
         scope,
         scopeKey,
         targetId: cleanTarget,
-        title: `Poker · ${displayLabel}`,
+        title: `Poker · ${fallbackLabel}`,
         status: 'active',
         localPubkey: myPubkey,
         hostPubkey: announcement.hostPubkey,
@@ -1410,21 +1406,20 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       setFocusedScopeKey(scopeKey)
       setMinimized(false)
 
-      await publishRoomSignal(
-        scope,
-        cleanTarget,
-        {
-          v: 1,
-          type: 'poker-join',
-          tableId: announcement.tableId,
-          displayName: myName,
-          ts: now,
-        },
-        true,
-      )
+      if (takeSeat) await sitInPokerTable(scopeKey)
       return true
     },
-    [getMaterialForRoom, identityManager, publishRoomSignal, sitInPokerTable, updateGameSession],
+    [getMaterialForRoom, sitInPokerTable, updateGameSession],
+  )
+
+  // Spectating only uses the room's existing authenticated public snapshots.
+  const watchPokerTable = useCallback(
+    (scope: RoomGameScope, targetId: string, tableId: string) => openPokerTable(scope, targetId, tableId, false),
+    [openPokerTable],
+  )
+  const joinPokerTable = useCallback(
+    (scope: RoomGameScope, targetId: string, tableId: string) => openPokerTable(scope, targetId, tableId, true),
+    [openPokerTable],
   )
 
   const startPokerHand = useCallback(
@@ -2628,6 +2623,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       endGame: closeGame,
       createPokerTable,
       joinPokerTable,
+      watchPokerTable,
       leavePokerTable,
       startPokerHand,
       sendPokerAction: playPokerAction,
@@ -2676,6 +2672,7 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
       createPokerTable,
       startPokerTable,
       joinPokerTable,
+      watchPokerTable,
       sitInPokerTable,
       leavePokerTable,
       startPokerHand,

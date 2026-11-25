@@ -42,6 +42,8 @@ function Fixture() {
   const [focusedScopeKey, setFocusedScopeKey] = useState(null)
   const [expanded, setExpanded] = useState(false)
   const [activeCall, setActiveCall] = useState(call)
+  const [chatMounted, setChatMounted] = useState(true)
+  const [chatDock, setChatDock] = useState(null)
   const [lastMove, setLastMove] = useState('')
   const games = { activeGamesByScope: { [scopeKey]: board, [other.scopeKey]: other },
     minimized, focusedScopeKey, setMinimized, setFocusedScopeKey,
@@ -57,7 +59,18 @@ function Fixture() {
   return <ContextMenuProvider>
     <output id="sent">{lastMove}</output>
     <button id="stop-test-call" onClick={() => {setActiveCall(null); setExpanded(false)}}>End fixture call</button>
+    <button id="toggle-test-chat" onClick={() => setChatMounted(v => !v)}>Toggle fixture chat</button>
+    {chatMounted && <main className="ag-main" style={{height: '80dvh'}}>
+      <div className="ag-chat-game-lanes">
+        <div ref={setChatDock} className="ag-game-chat-slot" />
+        <div className="ag-chat-message-lane">
+          <div className="ag-stream-wrap"><div className="ag-stream-scroll">A message to read</div></div>
+          <div className="ag-composer-dock"><textarea id="fixture-composer" aria-label="Message" /></div>
+        </div>
+      </div>
+    </main>}
     <ActivityStages engine={engine} expanded={expanded} onSetExpanded={setExpanded}
+      gameChatDock={chatDock} onRequestGameChat={() => setChatMounted(true)}
       compactFloating dockContainer={null} floatingContext={scope === 'geo' ? 'globe' : 'chat'} />
   </ContextMenuProvider>
 }

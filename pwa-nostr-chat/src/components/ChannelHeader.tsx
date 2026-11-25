@@ -206,9 +206,9 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
       ? 'Incoming game invite'
       : 'Play Go or Chess'
   const roomGameTitle =
-    activeGameHere || pokerTableHere
-      ? "Open Texas Hold'em Poker"
-      : "Start Texas Hold'em Poker"
+    activeGameHere ? "Open Texas Hold'em Poker"
+      : pokerTableHere ? 'View poker table'
+        : "Start Texas Hold'em Poker"
 
   const [switcherOpen, setSwitcherOpen] = useState(false)
   const [switcherNowMs, setSwitcherNowMs] = useState(() => Date.now())

@@ -53,6 +53,7 @@ import {
 import type { GeoMessage, PeerInfo, ThemeId } from './types/protocol'
 import {
   makeGameScopeKey,
+  type ActiveGameSession,
   type ChessSetupOptions,
   type GameScope,
   type GoSetupOptions,
@@ -258,6 +259,7 @@ export function App() {
   const [installModalOpen, setInstallModalOpen] = useState(false)
   const [callExpanded, setCallExpanded] = useState(false)
   const [callDockSlotEl, setCallDockSlotEl] = useState<HTMLDivElement | null>(null)
+  const [gameChatDock, setGameChatDock] = useState<HTMLDivElement | null>(null)
   const [gameSetupOpen, setGameSetupOpen] = useState(false)
   const [lightboxImage, setLightboxImage] = useState<LightboxImagePayload | null>(null)
   const [qrShareTarget, setQrShareTarget] = useState<QrShareTarget | null>(null)
@@ -438,7 +440,7 @@ export function App() {
     currentGameScope !== 'dm' && currentGameScopeKey
       ? (engine.games.roomPokerTables[currentGameScopeKey] ?? null)
       : null
-  const showLivePokerJoinBanner = Boolean(
+  const showLivePokerBanner = Boolean(
     livePokerTableHere && !hasActiveGameInCurrentScope
   )
   const hasAnyActiveGame = Object.keys(engine.games.activeGamesByScope).length > 0
@@ -512,7 +514,7 @@ export function App() {
     if (currentGameScope !== 'dm') {
       const liveTable = engine.games.roomPokerTables[currentGameScopeKey]
       if (liveTable) {
-        void engine.games.joinPokerTable(
+        void engine.games.watchPokerTable(
           currentGameScope,
           currentGameTargetId,
           liveTable.tableId
@@ -2137,6 +2139,12 @@ export function App() {
     [engine]
   )
 
+  const handleOpenGameChat = useCallback((session: ActiveGameSession) => {
+    if (session.scope === 'geo') handleTuneChannel(session.targetId)
+    else if (session.scope === 'server') handleSelectServer(session.targetId)
+    else if (session.kind !== 'poker') handleOpenDm(session.opponentPubkey, session.opponentDisplayName)
+  }, [handleOpenDm, handleSelectServer, handleTuneChannel])
+
   const handleCloseDmThread = useCallback(
     (pubkey: string) => {
       const targetPk = pubkey.toLowerCase()
@@ -2944,8 +2952,8 @@ export function App() {
                     </div>
                   )}
 
-                  {/* Live Multiplayer Texas Hold'em Poker Table Join Banner (Bitchat Channels & Groups) */}
-                  {showLivePokerJoinBanner && livePokerTableHere && currentGameScope !== 'dm' && (
+                  {/* Viewing a room table never takes a seat or joins a call. */}
+                  {showLivePokerBanner && livePokerTableHere && currentGameScope !== 'dm' && (
                     <div
                       className="ag-game-banner is-poker"
                       role="region"
@@ -2973,14 +2981,14 @@ export function App() {
                           className="ag-game-banner-btn primary"
                           onClick={() => {
                             playSound('click')
-                            void engine.games.joinPokerTable(
+                            void engine.games.watchPokerTable(
                               currentGameScope,
                               livePokerTableHere.targetId,
                               livePokerTableHere.tableId
                             )
                           }}
                         >
-                          Join Table
+                          View table
                         </button>
                       </div>
                     </div>
@@ -3010,32 +3018,37 @@ export function App() {
                     }}
                   />
 
-                  <MessageStream
-                    engine={engine}
-                    searchQuery={searchOpen ? searchQuery : ''}
-                    activeSearchMessageId={activeSearchMessageId}
-                    onReply={handleReply}
-                    onReact={handleReact}
-                    onReplyServer={handleReplyServer}
-                    onReactServer={handleReactServer}
-                    onInspectPeer={setInspectedPeer}
-                    onStartDm={handleOpenDm}
-                    onMentionPeer={handleMentionPeer}
-                    onTuneChannel={handleTuneChannel}
-                    onClickMention={handleClickInlineMention}
-                    onLocateMe={() => void handleLocateMe()}
-                    onExpandRadar={handleExpandRadar}
-                    onOpenServerSettings={handleOpenServerSettings}
-                    onOpenLightbox={setLightboxImage}
-                    onOpenZap={handleOpenZap}
-                    onClaimCashuToken={handleClaimCashuToken}
-                  />
+                  <div className="ag-chat-game-lanes">
+                    <div ref={setGameChatDock} className="ag-game-chat-slot" />
+                    <div className="ag-chat-message-lane">
+                      <MessageStream
+                        engine={engine}
+                        searchQuery={searchOpen ? searchQuery : ''}
+                        activeSearchMessageId={activeSearchMessageId}
+                        onReply={handleReply}
+                        onReact={handleReact}
+                        onReplyServer={handleReplyServer}
+                        onReactServer={handleReactServer}
+                        onInspectPeer={setInspectedPeer}
+                        onStartDm={handleOpenDm}
+                        onMentionPeer={handleMentionPeer}
+                        onTuneChannel={handleTuneChannel}
+                        onClickMention={handleClickInlineMention}
+                        onLocateMe={() => void handleLocateMe()}
+                        onExpandRadar={handleExpandRadar}
+                        onOpenServerSettings={handleOpenServerSettings}
+                        onOpenLightbox={setLightboxImage}
+                        onOpenZap={handleOpenZap}
+                        onClaimCashuToken={handleClaimCashuToken}
+                      />
 
-                  <Composer
-                    engine={engine}
-                    externalDraftToken={externalDraftToken}
-                    onSent={(isEncrypted) => bitchatAudio.play(isEncrypted ? 'dm' : 'send')}
-                  />
+                      <Composer
+                        engine={engine}
+                        externalDraftToken={externalDraftToken}
+                        onSent={(isEncrypted) => bitchatAudio.play(isEncrypted ? 'dm' : 'send')}
+                      />
+                    </div>
+                  </div>
                 </main>
 
                 {/* Dimmed Interactive Scrim behind Mobile Right Slide-Out User List Tray */}
@@ -3603,6 +3616,7 @@ export function App() {
       {(activeCall || engine.transcription.endedCallTranscript || hasAnyActiveGame) && (
         <ActivityStages engine={engine} expanded={callExpanded} onSetExpanded={setCallExpanded}
           compactFloating={callCompactFloating} floatingContext={callFloatingContext}
+          gameChatDock={inChatRoomMain ? gameChatDock : null} onRequestGameChat={handleOpenGameChat}
           dockContainer={inChatRoomMain ? callDockSlotEl : null} onInspectPeer={setInspectedPeer}
           onOpenDm={handleOpenDm} onReturnToCall={handleReturnToActiveCall} onPlaySound={playSound} />
       )}
