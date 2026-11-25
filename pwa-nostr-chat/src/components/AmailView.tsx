@@ -1251,16 +1251,6 @@ export function AmailView({
     [amail.messages, composeInReplyTo, composing],
   )
 
-  const composeReplyScrollRef = useRef<HTMLDivElement | null>(null)
-  const replyTargetId = composeReplyChain?.messages.at(-1)?.id
-  useLayoutEffect(() => {
-    const scroll = composeReplyScrollRef.current
-    const target = scroll?.querySelector('.reply-target')
-    if (!scroll || !target) return
-    // Keep the reply target in view when the chain is taller than the preview.
-    scroll.scrollTop = target.getBoundingClientRect().top - scroll.getBoundingClientRect().top
-  }, [replyTargetId])
-
   const canonicalThreadMap = useMemo(
     () => buildCanonicalThreadMap(amail.messages),
     [amail.messages],
@@ -3833,58 +3823,6 @@ export function AmailView({
             />
           </div>
 
-          {composeReplyChain && (
-            <details key={composeInReplyTo} className="ag-amail-reply-context" open>
-              <summary>
-                Reply thread{composeReplyChain.messages.length > 0
-                  ? ` · ${composeReplyChain.messages.length} ${composeReplyChain.messages.length === 1 ? 'message' : 'messages'}`
-                  : ''}
-              </summary>
-              {composeReplyChain.messages.length === 0 ? (
-                <p className="ag-amail-reply-note">The message you’re replying to isn’t on this device.</p>
-              ) : (
-                <div className="ag-amail-reply-scroll"
-                  ref={composeReplyScrollRef}
-                  tabIndex={0}
-                  role="region"
-                  aria-label="Messages in this reply thread">
-                  {composeReplyChain.incomplete && (
-                    <p className="ag-amail-reply-note">Earlier thread history is incomplete on this device.</p>
-                  )}
-                  <ol className="ag-amail-reply-chain" role="list">
-                    {composeReplyChain.messages.map((message, index, chain) => {
-                      const isTarget = index === chain.length - 1
-                      const sender = message.fromPubkey.toLowerCase() === myPubkey
-                        ? `${message.fromName || myNickname} (You)`
-                        : message.fromName || shortPubkey(message.fromNpub || message.fromPubkey)
-                      return (
-                        <li key={message.id} className={isTarget ? 'reply-target' : undefined}>
-                          {isTarget && <span className="ag-amail-reply-target-label">Replying to this message</span>}
-                          <div className="ag-amail-reply-meta">
-                            <strong>{sender}</strong>
-                            <span className="mono">{formatFullDateTime(message.sentAt)}</span>
-                          </div>
-                          <div className="ag-amail-reply-subject">{formatThreadSubject(message.subject)}</div>
-                          {message.body.trim() && <p className="ag-amail-reply-body">{message.body}</p>}
-                          {message.attachments && message.attachments.length > 0 && (
-                            <ul className="ag-amail-reply-attachments" aria-label="Attachments">
-                              {message.attachments.map((attachment) => (
-                                <li key={attachment.id}>
-                                  <Paperclip size={12} aria-hidden="true" />
-                                  {sanitizeDisplayFilename(attachment.name, attachment.mime)}
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </li>
-                      )
-                    })}
-                  </ol>
-                </div>
-              )}
-            </details>
-          )}
-
           {/* Body Write | Preview */}
           <div className="ag-amail-body-field">
             <div className="ag-amail-body-toolbar">
@@ -3933,6 +3871,57 @@ export function AmailView({
               </div>
             )}
           </div>
+
+          {composeReplyChain && (
+            <details key={composeInReplyTo} className="ag-amail-reply-context" open>
+              <summary>
+                Reply thread{composeReplyChain.messages.length > 0
+                  ? ` · ${composeReplyChain.messages.length} ${composeReplyChain.messages.length === 1 ? 'message' : 'messages'}`
+                  : ''}
+              </summary>
+              {composeReplyChain.messages.length === 0 ? (
+                <p className="ag-amail-reply-note">The message you’re replying to isn’t on this device.</p>
+              ) : (
+                <div className="ag-amail-reply-scroll"
+                  tabIndex={0}
+                  role="region"
+                  aria-label="Messages in this reply thread">
+                  <ol className="ag-amail-reply-chain" role="list">
+                    {composeReplyChain.messages.map((message, index) => {
+                      const isTarget = index === 0
+                      const sender = message.fromPubkey.toLowerCase() === myPubkey
+                        ? `${message.fromName || myNickname} (You)`
+                        : message.fromName || shortPubkey(message.fromNpub || message.fromPubkey)
+                      return (
+                        <li key={message.id} className={isTarget ? 'reply-target' : undefined}>
+                          {isTarget && <span className="ag-amail-reply-target-label">Replying to this message</span>}
+                          <div className="ag-amail-reply-meta">
+                            <strong>{sender}</strong>
+                            <span className="mono">{formatFullDateTime(message.sentAt)}</span>
+                          </div>
+                          <div className="ag-amail-reply-subject">{formatThreadSubject(message.subject)}</div>
+                          {message.body.trim() && <p className="ag-amail-reply-body">{message.body}</p>}
+                          {message.attachments && message.attachments.length > 0 && (
+                            <ul className="ag-amail-reply-attachments" aria-label="Attachments">
+                              {message.attachments.map((attachment) => (
+                                <li key={attachment.id}>
+                                  <Paperclip size={12} aria-hidden="true" />
+                                  {sanitizeDisplayFilename(attachment.name, attachment.mime)}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </li>
+                      )
+                    })}
+                  </ol>
+                  {composeReplyChain.incomplete && (
+                    <p className="ag-amail-reply-note">Earlier thread history is incomplete on this device.</p>
+                  )}
+                </div>
+              )}
+            </details>
+          )}
 
           {/* Options Strip */}
           <div className="ag-amail-compose-opts">

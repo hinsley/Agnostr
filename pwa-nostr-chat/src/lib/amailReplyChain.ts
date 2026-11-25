@@ -4,7 +4,7 @@ export function baseMailId(id: string): string {
   return id.endsWith(':self') ? id.slice(0, -5) : id
 }
 
-/** Follow the explicit reply links, not the thread's display order or timestamps. */
+/** Follow explicit reply links from the target back through its ancestors. */
 export function buildAmailReplyChain(messages: readonly AmailMessage[], replyTo: string) {
   const byId = new Map<string, AmailMessage>()
   for (const message of messages) {
@@ -23,5 +23,5 @@ export function buildAmailReplyChain(messages: readonly AmailMessage[], replyTo:
     seen.add(baseId)
     nextId = message.inReplyTo?.trim() ?? ''
   }
-  return { messages: chain.reverse(), incomplete: Boolean(nextId) }
+  return { messages: chain, incomplete: Boolean(nextId) }
 }

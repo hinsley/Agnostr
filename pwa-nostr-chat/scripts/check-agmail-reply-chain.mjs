@@ -7,7 +7,7 @@ const mail = (id, inReplyTo, sentAt = 0, folder = 'inbox', threadId = 'thread') 
 })
 const ids = (chain) => chain.messages.map((m) => m.id)
 
-test('follows parents to the selected target, independent of times and folder', () => {
+test('follows parents from the selected target, independent of times and folder', () => {
   const messages = [
     mail('later', 'target', 210),
     mail('same-thread-but-no-reply-link'),
@@ -17,7 +17,7 @@ test('follows parents to the selected target, independent of times and folder', 
     mail('parent', 'root', 40, 'folder:research', 'older-client-thread-id'),
   ]
   const chain = buildAmailReplyChain(messages, 'target')
-  assert.deepEqual(ids(chain), ['root', 'parent', 'target'])
+  assert.deepEqual(ids(chain), ['target', 'parent', 'root'])
   assert.equal(chain.incomplete, false)
 })
 
@@ -25,8 +25,8 @@ test('picks the exact self-mail copy first, and resolves a missing copy either w
   const root = mail('root')
   const copy = mail('root:self')
   const target = mail('target', 'root:self')
-  assert.deepEqual(ids(buildAmailReplyChain([root, copy, target], 'target')), ['root:self', 'target'])
-  assert.deepEqual(ids(buildAmailReplyChain([root, target], 'target')), ['root', 'target'])
+  assert.deepEqual(ids(buildAmailReplyChain([root, copy, target], 'target')), ['target', 'root:self'])
+  assert.deepEqual(ids(buildAmailReplyChain([root, target], 'target')), ['target', 'root'])
   assert.deepEqual(ids(buildAmailReplyChain([copy], 'root')), ['root:self'])
 })
 
@@ -41,6 +41,6 @@ test('does not substitute drafts or unrelated messages for missing ancestors or 
 
 test('reports cyclic ancestry without repeating a message or its self copy', () => {
   const chain = buildAmailReplyChain([mail('target', 'root'), mail('root', 'target:self')], 'target')
-  assert.deepEqual(ids(chain), ['root', 'target'])
+  assert.deepEqual(ids(chain), ['target', 'root'])
   assert.equal(chain.incomplete, true)
 })
