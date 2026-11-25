@@ -20,11 +20,13 @@ import {
   isTopicChannel,
 } from '../lib/bitchatChannel.ts'
 import {
+  canUsePublicPinnedRoomFallback,
   closeCallNotificationsViaSw,
   getBrowserNotificationPermission,
   isWebPushSupported,
   normalizePushBridgeUrl,
   parseNotifyHash,
+  readCurrentPushEndpoint,
   registerWithPushBridge,
   requestBrowserNotificationPermission,
   sendPushPoke,
@@ -33,10 +35,10 @@ import {
   unregisterFromPushBridge,
 } from '../lib/notifications.ts'
 import { soundEngine } from '../lib/soundEngine.ts'
+import { getLiveDmPush, normalizePushIdentifier } from '../lib/pushDisplay.ts'
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
   DEFAULT_PUSH_BRIDGE_URL,
-  DEFAULT_VAPID_PUBLIC_KEY,
   loadNotificationSettings,
   saveNotificationSettings,
 } from '../lib/storage.ts'
@@ -49,6 +51,9 @@ import {
 const MAX_NOTIFIED_IDS = 500
 const LIVE_RECENCY_WINDOW_SEC = 180
 const NOTIFICATIONS_STORAGE_KEY = 'agnostr:v2:notifications'
+const PUSH_RECHECK_MS = 15 * 60_000
+const PUSH_REFRESH_MS = 12 * 60 * 60_000
+const PUBLIC_ROOM_PUSH_REFRESH_MS = 105 * 60_000
 const AUTO_PUSH_RETRY_DELAYS_MS = [5_000, 15_000, 45_000] as const
 
 function hasExplicitlyDisabledNotificationsInStorage(): boolean {
@@ -236,7 +241,13 @@ export function useNotifications(
   pushEndpointRef.current = pushEndpoint
   const pushErrorRef = useRef<string | null>(pushError)
   pushErrorRef.current = pushError
-  const pushRegisterInFlightRef = useRef<boolean>(false)
+  const pushRegisterInFlightRef = useRef<{
+    key: string
+    operation: Promise<boolean>
+  } | null>(null)
+  const lastPushRegistrationAtRef = useRef(0)
+  const pushRegistrationEpochRef = useRef(0)
+  const lastPokeErrorAtRef = useRef(0)
   const lastSyncedPushFingerprintRef = useRef<string | null>(null)
   const prefsFingerprintRef = useRef<string>('')
   const autoRetryAttemptRef = useRef<number>(0)
@@ -334,6 +345,9 @@ export function useNotifications(
   }, [])
 
   const updateSettings = useCallback((patch: Partial<NotificationSettings>) => {
+    if (patch.enabled === false || patch.backgroundPushEnabled === false) {
+      pushRegistrationEpochRef.current += 1
+    }
     if (patch.enabled === false) {
       explicitlyDisabledRef.current = true
     } else if (patch.enabled === true) {
@@ -355,6 +369,10 @@ export function useNotifications(
       permissionRef.current = next
       setPermission(next)
       if (next === 'denied' && settingsRef.current.enabled) {
+        pushRegistrationEpochRef.current += 1
+        lastSyncedPushFingerprintRef.current = null
+        setPushStatus('disconnected')
+        pushStatusRef.current = 'disconnected'
         setSettings((prev) => {
           const updated: NotificationSettings = { ...prev, enabled: false }
           settingsRef.current = updated
@@ -669,6 +687,7 @@ export function useNotifications(
             vibrate: cfg.vibrationEnabled ? [140, 80, 140] : undefined,
             data: {
               category: 'dm',
+              ...getLiveDmPush(msg),
               peerPubkey: thread.peerPubkey,
               callerNickname: thread.peerNickname,
             },
@@ -792,6 +811,8 @@ export function useNotifications(
           vibrate: cfg.vibrationEnabled ? [120, 70, 120] : undefined,
           data: {
             category: 'server-message',
+            deliveryEventId: normalizePushIdentifier(msg.id),
+            recipientPubkey: normalizePushIdentifier(masterPubkeyRef.current),
             serverId: activeServer.id,
             channelId: activeChannelId,
           },
@@ -1031,6 +1052,8 @@ export function useNotifications(
           vibrate: cfg.vibrationEnabled ? [120] : undefined,
           data: {
             category: 'geo-message',
+            deliveryEventId: normalizePushIdentifier(input.id),
+            recipientPubkey: normalizePushIdentifier(masterPubkeyRef.current),
             geohash: input.geohash,
           },
           onDirectClick: handleDirectNotificationClick,
@@ -1081,6 +1104,8 @@ export function useNotifications(
           vibrate: cfg.vibrationEnabled ? [110] : undefined,
           data: {
             category: 'location-note',
+            deliveryEventId: normalizePushIdentifier(input.id),
+            recipientPubkey: normalizePushIdentifier(masterPubkeyRef.current),
             geohash: input.geohash,
           },
           onDirectClick: handleDirectNotificationClick,
@@ -1135,6 +1160,8 @@ export function useNotifications(
           vibrate: cfg.vibrationEnabled ? [140, 80, 140] : undefined,
           data: {
             category: 'agmail',
+            deliveryEventId: normalizePushIdentifier(input.id),
+            recipientPubkey: normalizePushIdentifier(masterPubkeyRef.current),
             peerPubkey: input.senderPubkey,
           },
           onDirectClick: handleDirectNotificationClick,
@@ -1286,6 +1313,7 @@ export function useNotifications(
         vibrate: cfg.vibrationEnabled ? [120, 70, 120] : undefined,
         data: {
           category,
+          deliveryEventId: normalizePushIdentifier(input.id),
           noteId: cleanNoteId,
           peerPubkey: actor,
           recipientPubkey: masterPubkeyRef.current
@@ -1298,6 +1326,17 @@ export function useNotifications(
     [canSendOsNotification, handleDirectNotificationClick, rememberNotified]
   )
 
+  const publicPinnedRoomFallbackAvailable = canUsePublicPinnedRoomFallback({
+    canAutoSign,
+    geoMessages: settings.geoMessages,
+    hasBlockedPeers: blockedSet.size > 0,
+    strictWhitelistMode,
+    pinnedGeohashes,
+  })
+  const publicPinnedRoomFallback = settings.publicPinnedRoomFallback && publicPinnedRoomFallbackAvailable
+  const publicPinnedRoomFallbackRef = useRef(publicPinnedRoomFallback)
+  publicPinnedRoomFallbackRef.current = publicPinnedRoomFallback
+
   const registerBridgeInternal = useCallback(
     async (opts: {
       bridgeUrlOverride?: string
@@ -1306,6 +1345,7 @@ export function useNotifications(
       promptPermission?: boolean
       syncFingerprint?: string
       isFinalAutoRetry?: boolean
+      replaceSubscription?: boolean
     }): Promise<boolean> => {
       if (!isWebPushSupported()) {
         setPushStatus('unsupported')
@@ -1358,93 +1398,132 @@ export function useNotifications(
         return false
       }
 
-      if (pushRegisterInFlightRef.current) {
-        return pushStatusRef.current === 'connected'
-      }
-      pushRegisterInFlightRef.current = true
-      if (!opts.silent) {
-        setPushStatus('connecting')
-        pushStatusRef.current = 'connecting'
-        setPushError(null)
-        pushErrorRef.current = null
-      }
-
-      try {
-        const manualKey =
-          opts.vapidKeyOverride !== undefined
-            ? opts.vapidKeyOverride.trim()
-            : settingsRef.current.vapidPublicKey.trim()
-
-        const result = await registerWithPushBridge({
-          bridgeUrl: normalizedUrl,
-          vapidPublicKey: manualKey || undefined,
-          pubkey: masterPubkeyRef.current,
-          aliasPubkeys: aliasPubkeysRef.current,
-          relays: relayUrlsRef.current,
-          geohashes: pinnedGeohashesRef.current,
-          serverIds: joinedServersRef.current.map((s) => s.id),
-          settings: settingsRef.current,
-          signEvent: (tmpl) => signEventRef.current(tmpl),
-        })
-
-        const cur = settingsRef.current
-        if (
-          !cur.enabled ||
-          cur.pushBridgeUrl !== normalizedUrl ||
-          cur.vapidPublicKey !== result.vapidPublicKey
-        ) {
-          updateSettings({
-            enabled: true,
-            pushBridgeUrl: normalizedUrl,
-            vapidPublicKey: result.vapidPublicKey,
-          })
+      const startEpoch = pushRegistrationEpochRef.current
+      const pubkey = masterPubkeyRef.current
+      const signEvent = signEventRef.current
+      const requestedFingerprint = opts.syncFingerprint || prefsFingerprintRef.current
+      const key = JSON.stringify([pubkey, normalizedUrl, opts.vapidKeyOverride || '', !!opts.replaceSubscription])
+      while (pushRegisterInFlightRef.current) {
+        const running = pushRegisterInFlightRef.current
+        if (running.key === key || (opts.silent && !opts.bridgeUrlOverride)) {
+          return running.operation
         }
-        autoRetryAttemptRef.current = 0
-        if (autoRetryTimerRef.current !== null) {
-          window.clearTimeout(autoRetryTimerRef.current)
-          autoRetryTimerRef.current = null
-        }
-        setPushEndpoint(result.endpoint)
-        pushEndpointRef.current = result.endpoint
-        setPushStatus('connected')
-        pushStatusRef.current = 'connected'
-        setPushError(null)
-        pushErrorRef.current = null
-        const confirmedFingerprint =
-          opts.syncFingerprint || prefsFingerprintRef.current || result.endpoint
-        lastSyncedPushFingerprintRef.current = confirmedFingerprint
+        // An explicit Connect to a different bridge or key must not be
+        // mistaken for the success of an automatic registration elsewhere.
+        await running.operation
+        if (startEpoch !== pushRegistrationEpochRef.current ||
+            pubkey !== masterPubkeyRef.current) return false
+      }
+      const remainsCurrent = () =>
+        startEpoch === pushRegistrationEpochRef.current && pubkey === masterPubkeyRef.current
+      const operation = (async (): Promise<boolean> => {
         if (!opts.silent) {
-          pushToastRef.current(
-            'success',
-            'Background Web Push connected',
-            'Your device is registered to wake on closed-app notifications and DM calls.'
-          )
+          setPushStatus('connecting')
+          pushStatusRef.current = 'connecting'
+          setPushError(null)
+          pushErrorRef.current = null
         }
-        return true
-      } catch (err) {
-        const msg =
-          err instanceof Error
-            ? err.message
-            : 'Unable to register with push bridge.'
-        // Always record diagnostic error and NEVER cache syncFingerprint on failure so retries run cleanly
-        setPushError(msg)
-        pushErrorRef.current = msg
-        if (opts.silent) {
-          if (opts.isFinalAutoRetry) {
+
+        try {
+          const manualKey =
+            opts.vapidKeyOverride !== undefined
+              ? opts.vapidKeyOverride.trim()
+              : normalizedUrl === DEFAULT_PUSH_BRIDGE_URL
+                ? ''
+                : settingsRef.current.vapidPublicKey.trim()
+          const result = await registerWithPushBridge({
+            bridgeUrl: normalizedUrl,
+            vapidPublicKey: manualKey || undefined,
+            pubkey,
+            aliasPubkeys: aliasPubkeysRef.current,
+            relays: relayUrlsRef.current,
+            geohashes: pinnedGeohashesRef.current,
+            serverIds: joinedServersRef.current.map((s) => s.id),
+            settings: settingsRef.current,
+            publicPinnedRoomFallback: publicPinnedRoomFallbackRef.current,
+            replaceSubscription: opts.replaceSubscription,
+            signEvent: (tmpl) => {
+              if (!remainsCurrent()) return Promise.reject(new Error('Push account changed.'))
+              return signEvent(tmpl)
+            },
+          })
+
+          if (!remainsCurrent()) return false
+          lastPushRegistrationAtRef.current = Date.now()
+          const cur = settingsRef.current
+          if (
+            !cur.enabled ||
+            !cur.backgroundPushEnabled ||
+            cur.pushBridgeUrl !== normalizedUrl ||
+            cur.vapidPublicKey !== result.vapidPublicKey
+          ) {
+            updateSettings({
+              enabled: true,
+              backgroundPushEnabled: true,
+              pushBridgeUrl: normalizedUrl,
+              vapidPublicKey: result.vapidPublicKey,
+            })
+          }
+          autoRetryAttemptRef.current = 0
+          if (autoRetryTimerRef.current !== null) {
+            window.clearTimeout(autoRetryTimerRef.current)
+            autoRetryTimerRef.current = null
+          }
+          setPushEndpoint(result.endpoint)
+          pushEndpointRef.current = result.endpoint
+          setPushStatus('connected')
+          pushStatusRef.current = 'connected'
+          setPushError(null)
+          pushErrorRef.current = null
+          // Pin the preferences actually sent to the bridge, not the newest
+          // render after this async registration. Normalize a discovered key
+          // so updating it in settings doesn't immediately resync.
+          lastSyncedPushFingerprintRef.current = requestedFingerprint
+            ? JSON.stringify({
+                ...JSON.parse(requestedFingerprint),
+                url: normalizedUrl,
+                key: result.vapidPublicKey,
+              })
+            : result.endpoint
+          if (!opts.silent) {
+            pushToastRef.current(
+              'success',
+              'Background Web Push connected',
+              'Your device is registered to wake on closed-app notifications and DM calls.'
+            )
+          }
+          return true
+        } catch (err) {
+          if (!remainsCurrent()) return false
+          const msg =
+            err instanceof Error
+              ? err.message
+              : 'Unable to register with push bridge.'
+          // Always record diagnostic error and NEVER cache syncFingerprint on failure so retries run cleanly
+          setPushError(msg)
+          pushErrorRef.current = msg
+          if (opts.silent) {
+            if (opts.isFinalAutoRetry) {
+              setPushStatus('error')
+              pushStatusRef.current = 'error'
+            } else if (pushStatusRef.current !== 'connected') {
+              setPushStatus('disconnected')
+              pushStatusRef.current = 'disconnected'
+            }
+          } else {
             setPushStatus('error')
             pushStatusRef.current = 'error'
-          } else if (pushStatusRef.current !== 'connected') {
-            setPushStatus('disconnected')
-            pushStatusRef.current = 'disconnected'
+            pushToastRef.current('error', 'Push bridge connection failed', msg)
           }
-        } else {
-          setPushStatus('error')
-          pushStatusRef.current = 'error'
-          pushToastRef.current('error', 'Push bridge connection failed', msg)
+          return false
         }
-        return false
+      })()
+      const running = { key, operation }
+      pushRegisterInFlightRef.current = running
+      try {
+        return await operation
       } finally {
-        pushRegisterInFlightRef.current = false
+        if (pushRegisterInFlightRef.current === running) pushRegisterInFlightRef.current = null
       }
     },
     [updateSettings]
@@ -1466,11 +1545,13 @@ export function useNotifications(
         )
         if (
           isWebPushSupported() &&
+          settingsRef.current.backgroundPushEnabled &&
           normalizePushBridgeUrl(settingsRef.current.pushBridgeUrl)
         ) {
           void registerBridgeInternal({
             silent: true,
             promptPermission: false,
+            vapidKeyOverride: settingsRef.current.vapidPublicKey || undefined,
             syncFingerprint: prefsFingerprintRef.current || undefined,
           })
         }
@@ -1559,25 +1640,43 @@ export function useNotifications(
     [registerBridgeInternal]
   )
 
-  const disconnectPushBridge = useCallback(async (): Promise<void> => {
+  const disconnectPushBridge = useCallback(async (opts?: {
+    keepAutomaticRegistration?: boolean
+  }): Promise<void> => {
+    if (!opts?.keepAutomaticRegistration) updateSettings({ backgroundPushEnabled: false })
+    const pubkey = masterPubkeyRef.current
+    const bridgeUrl = settingsRef.current.pushBridgeUrl
+    const signEvent = signEventRef.current
+    await pushRegisterInFlightRef.current?.operation
+    if (pubkey !== masterPubkeyRef.current) return
     try {
       await unregisterFromPushBridge({
-        bridgeUrl: settingsRef.current.pushBridgeUrl,
-        pubkey: masterPubkeyRef.current,
-        signEvent: (tmpl) => signEventRef.current(tmpl),
+        bridgeUrl,
+        pubkey,
+        signEvent,
+        // Turning alerts off must never get stuck waiting on an interactive
+        // signer. Once the local endpoint is invalid it cannot receive pushes.
+        skipBridgeCleanup: opts?.keepAutomaticRegistration && !canAutoSignRef.current,
       })
     } finally {
-      lastSyncedPushFingerprintRef.current = null
-      setPushEndpoint(null)
-      pushEndpointRef.current = null
-      const nextStatus = isWebPushSupported() ? 'disconnected' : 'unsupported'
-      setPushStatus(nextStatus)
-      pushStatusRef.current = nextStatus
-      setPushError(null)
-      pushErrorRef.current = null
-      pushToastRef.current('info', 'Background Web Push disconnected')
+      if (pubkey === masterPubkeyRef.current) {
+        lastSyncedPushFingerprintRef.current = null
+        setPushEndpoint(null)
+        pushEndpointRef.current = null
+        const nextStatus = isWebPushSupported() ? 'disconnected' : 'unsupported'
+        setPushStatus(nextStatus)
+        pushStatusRef.current = nextStatus
+        setPushError(null)
+        pushErrorRef.current = null
+        if (!opts?.keepAutomaticRegistration) {
+          pushToastRef.current('info', 'Background Web Push disconnected')
+        } else if (settingsRef.current.enabled && canAutoSignRef.current) {
+          // A user may turn alerts back on while the old endpoint is disabling.
+          setAutoSyncTick(t => t + 1)
+        }
+      }
     }
-  }, [])
+  }, [updateSettings])
 
   const sendTestPush = useCallback(async (): Promise<{ ok: boolean; detail: string }> => {
     if (!isWebPushSupported()) {
@@ -1595,16 +1694,22 @@ export function useNotifications(
       return { ok: false, detail }
     }
 
+    const pubkey = masterPubkeyRef.current
+    const signEvent = signEventRef.current
+    const sign = (template: EventTemplate) => {
+      if (pubkey !== masterPubkeyRef.current) return Promise.reject(new Error('Push account changed.'))
+      return signEvent(template)
+    }
     const bridgeUrl =
       normalizePushBridgeUrl(settingsRef.current.pushBridgeUrl) || DEFAULT_PUSH_BRIDGE_URL
     const vapidKey =
-      settingsRef.current.vapidPublicKey.trim() ||
-      (bridgeUrl === DEFAULT_PUSH_BRIDGE_URL ? DEFAULT_VAPID_PUBLIC_KEY : '')
+      bridgeUrl === DEFAULT_PUSH_BRIDGE_URL ? '' : settingsRef.current.vapidPublicKey.trim()
 
     if (
       !lastSyncedPushFingerprintRef.current ||
       pushStatusRef.current !== 'connected' ||
-      !pushEndpointRef.current
+      !pushEndpointRef.current ||
+      (await readCurrentPushEndpoint().catch(() => null)) !== pushEndpointRef.current
     ) {
       const connected = await registerBridgeInternal({
         bridgeUrlOverride: bridgeUrl,
@@ -1623,31 +1728,33 @@ export function useNotifications(
 
     let res = await sendTestWebPush({
       bridgeUrl,
-      pubkey: masterPubkeyRef.current,
-      signEvent: (tmpl) => signEventRef.current(tmpl),
+      pubkey,
+      signEvent: sign,
     })
 
-    // If bridge KV lost/pruned registration (HTTP 404), auto re-register once and retry
-    if (!res.ok && res.status === 404) {
+    // A missing bridge record can be repaired without changing the browser
+    // endpoint. HTTP 410 means the provider invalidated that endpoint itself.
+    if (!res.ok && pubkey === masterPubkeyRef.current && (res.status === 404 || res.status === 410)) {
       lastSyncedPushFingerprintRef.current = null
       const reconnected = await registerBridgeInternal({
         bridgeUrlOverride: bridgeUrl,
         vapidKeyOverride: vapidKey || undefined,
         silent: true,
+        replaceSubscription: res.status === 410,
         promptPermission: false,
         syncFingerprint: prefsFingerprintRef.current || undefined,
       })
       if (reconnected) {
         res = await sendTestWebPush({
           bridgeUrl,
-          pubkey: masterPubkeyRef.current,
-          signEvent: (tmpl) => signEventRef.current(tmpl),
+          pubkey,
+          signEvent: sign,
         })
       }
     }
 
     if (res.ok) {
-      pushToastRef.current('success', 'Test background push sent', res.detail)
+      pushToastRef.current('success', 'Test push displayed on this device', res.detail)
     } else {
       pushToastRef.current('warning', 'Test background push failed', res.detail)
     }
@@ -1655,7 +1762,8 @@ export function useNotifications(
   }, [registerBridgeInternal, requestPermission])
 
   const pokeRecipients = useCallback((payload: PushPokePayload): void => {
-    if (!canAutoSignRef.current) return
+    const permitted = () => canAutoSignRef.current || settingsRef.current.extensionPushPokes
+    if (!permitted()) return
     const bridgeUrl = normalizePushBridgeUrl(settingsRef.current.pushBridgeUrl)
     if (!bridgeUrl) return
 
@@ -1668,13 +1776,25 @@ export function useNotifications(
     )
     if (recipients.length === 0) return
 
+    const pubkey = masterPubkeyRef.current
+    const signEvent = signEventRef.current
+    const shouldContinue = () =>
+      permitted() && masterPubkeyRef.current === pubkey &&
+      normalizePushBridgeUrl(settingsRef.current.pushBridgeUrl) === bridgeUrl
     void sendPushPoke({
       bridgeUrl,
-      signEvent: (tmpl) => signEventRef.current(tmpl),
+      signEvent,
+      shouldContinue,
       payload: {
         ...payload,
         recipientPubkeys: recipients,
       },
+    }).then((result) => {
+      if (result.kind !== 'failed' || !shouldContinue() ||
+          Date.now() - lastPokeErrorAtRef.current < 60_000) return
+      lastPokeErrorAtRef.current = Date.now()
+      pushToastRef.current('warning', 'Could not notify the recipient’s device',
+        'Your message was sent to Nostr. Its background push request did not complete.')
     })
   }, [])
 
@@ -1695,6 +1815,7 @@ export function useNotifications(
       serverMessages: settings.serverMessages,
       serverCalls: settings.serverCalls,
       geoMessages: settings.geoMessages,
+      publicPinnedRoomFallback,
       agoraRepliesMentions: settings.agoraRepliesMentions,
       agoraReactionsReposts: settings.agoraReactionsReposts,
       agoraZaps: settings.agoraZaps,
@@ -1709,6 +1830,7 @@ export function useNotifications(
     masterPubkey,
     normalizedAliasPubkeys,
     pinnedGeohashes,
+    publicPinnedRoomFallback,
     relayUrls,
     settings.agmail,
     settings.agmailCcBcc,
@@ -1729,6 +1851,19 @@ export function useNotifications(
   prefsFingerprintRef.current = prefsFingerprint
 
   useEffect(() => {
+    if (!canAutoSign && pushStatus === 'connected' &&
+        lastSyncedPushFingerprintRef.current !== prefsFingerprint) {
+      // An interactive signer must not be prompted in the background, and
+      // settings changes have not reached the bridge until they are signed.
+      const msg = 'Reconnect this device in Settings to apply push settings with your signer.'
+      setPushStatus('disconnected')
+      pushStatusRef.current = 'disconnected'
+      setPushError(msg)
+      pushErrorRef.current = msg
+    }
+  }, [canAutoSign, prefsFingerprint, pushStatus])
+
+  useEffect(() => {
     autoRetryAttemptRef.current = 0
     if (autoRetryTimerRef.current !== null) {
       window.clearTimeout(autoRetryTimerRef.current)
@@ -1740,6 +1875,7 @@ export function useNotifications(
     if (
       permission !== 'granted' ||
       !settings.enabled ||
+      !settings.backgroundPushEnabled ||
       !isPushSupported ||
       !canAutoSign ||
       !prefsFingerprint
@@ -1790,19 +1926,44 @@ export function useNotifications(
     prefsFingerprint,
     registerBridgeInternal,
     settings.enabled,
+    settings.backgroundPushEnabled,
   ])
 
-  // Re-trigger background push sync when connectivity, visibility, or SW controller recovers
+  // Reconcile the actual current browser subscription; a cached HTTP 200
+  // never proves the old endpoint still exists after an OS/browser reset.
   useEffect(() => {
     if (!isPushSupported) return
-    const triggerIfUnsynced = () => {
-      if (
-        permissionRef.current !== 'granted' ||
-        !settingsRef.current.enabled ||
-        !canAutoSignRef.current ||
-        !prefsFingerprintRef.current ||
-        lastSyncedPushFingerprintRef.current === prefsFingerprintRef.current
-      ) {
+    let cancelled = false
+    const recover = async (forceBrowserCheck = false) => {
+      if (permissionRef.current !== 'granted' || !settingsRef.current.enabled ||
+          !settingsRef.current.backgroundPushEnabled || !prefsFingerprintRef.current ||
+          pushRegisterInFlightRef.current) return
+      const fingerprint = prefsFingerprintRef.current
+      const epoch = pushRegistrationEpochRef.current
+      const endpoint = await readCurrentPushEndpoint().catch(() => undefined)
+      if (cancelled || epoch !== pushRegistrationEpochRef.current ||
+          fingerprint !== prefsFingerprintRef.current || pushRegisterInFlightRef.current) return
+      const changed = endpoint !== undefined && endpoint !== pushEndpointRef.current
+      const refreshMs = publicPinnedRoomFallbackRef.current
+        ? PUBLIC_ROOM_PUSH_REFRESH_MS : PUSH_REFRESH_MS
+      const stale = forceBrowserCheck || changed ||
+        Date.now() - lastPushRegistrationAtRef.current >= refreshMs
+      if (!stale && lastSyncedPushFingerprintRef.current === fingerprint) return
+      if (stale) {
+        lastSyncedPushFingerprintRef.current = null
+        if (changed) {
+          setPushEndpoint(endpoint ?? null)
+          pushEndpointRef.current = endpoint ?? null
+        }
+      }
+      if (!canAutoSignRef.current) {
+        if (stale && pushStatusRef.current === 'connected') {
+          setPushStatus('disconnected')
+          pushStatusRef.current = 'disconnected'
+          const msg = 'Reconnect this device in Settings to authorize background push with your signer.'
+          setPushError(msg)
+          pushErrorRef.current = msg
+        }
         return
       }
       if (autoRetryTimerRef.current !== null) {
@@ -1813,38 +1974,33 @@ export function useNotifications(
       setAutoSyncTick((t) => t + 1)
     }
 
+    const onOnline = () => void recover()
     const onVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        triggerIfUnsynced()
-      }
+      if (document.visibilityState === 'visible') void recover()
     }
-
-    window.addEventListener('online', triggerIfUnsynced)
+    const onController = () => void recover()
+    const onWorkerMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'agnostr:push-subscription-changed') void recover(true)
+    }
+    window.addEventListener('online', onOnline)
     document.addEventListener('visibilitychange', onVisibility)
-    const hasSw = typeof navigator !== 'undefined' && 'serviceWorker' in navigator
-    if (hasSw) {
-      navigator.serviceWorker.addEventListener('controllerchange', triggerIfUnsynced)
-    }
+    navigator.serviceWorker.addEventListener('controllerchange', onController)
+    navigator.serviceWorker.addEventListener('message', onWorkerMessage)
+    const periodic = window.setInterval(onVisibility, PUSH_RECHECK_MS)
 
     return () => {
-      window.removeEventListener('online', triggerIfUnsynced)
+      cancelled = true
+      window.clearInterval(periodic)
+      window.removeEventListener('online', onOnline)
       document.removeEventListener('visibilitychange', onVisibility)
-      if (hasSw) {
-        navigator.serviceWorker.removeEventListener('controllerchange', triggerIfUnsynced)
-      }
+      navigator.serviceWorker.removeEventListener('controllerchange', onController)
+      navigator.serviceWorker.removeEventListener('message', onWorkerMessage)
       if (autoRetryTimerRef.current !== null) {
         window.clearTimeout(autoRetryTimerRef.current)
         autoRetryTimerRef.current = null
       }
     }
   }, [isPushSupported])
-
-  // Stop sounds on unmount
-  useEffect(() => {
-    return () => {
-      soundEngine.stopAll()
-    }
-  }, [])
 
   const resetAllNotifications = useCallback(() => {
     soundEngine.stopAll()
@@ -1856,6 +2012,7 @@ export function useNotifications(
     })
     activeRingingCallIdRef.current = null
     lastSyncedPushFingerprintRef.current = null
+    pushRegistrationEpochRef.current += 1
     autoRetryAttemptRef.current = 0
     explicitlyDisabledRef.current = false
     if (autoRetryTimerRef.current !== null) {
@@ -1892,6 +2049,8 @@ export function useNotifications(
       permission,
       isSupported,
       isPushSupported,
+      usesExternalPushSigner: !canAutoSign,
+      publicPinnedRoomFallbackAvailable,
       isIosRequiresInstall,
       settings,
       updateSettings,
@@ -1916,6 +2075,8 @@ export function useNotifications(
       permission,
       isSupported,
       isPushSupported,
+      canAutoSign,
+      publicPinnedRoomFallbackAvailable,
       isIosRequiresInstall,
       settings,
       updateSettings,

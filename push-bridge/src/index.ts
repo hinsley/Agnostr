@@ -1,11 +1,12 @@
 import { verifyNip98Request } from './nip98.ts'
 import { runNostrPushCron } from './nostrCron.ts'
+import { addCounts, emptyCounts, queueJobs, type Target } from './delivery.ts'
+export { PushDelivery } from './delivery.ts'
 import {
   aliasKeyForPubkey,
   DEFAULT_PUSH_PREFERENCES,
   MAX_ALIAS_PUBKEYS,
   MAX_DEVICES_PER_PUBKEY,
-  PUBKEYS_INDEX_KEY,
   subKeyForPubkey,
   type Env,
   type IncomingPushPayload,
@@ -159,65 +160,19 @@ function validateSubscription(raw: unknown): WebPushSubscriptionJSON | null {
   }
 }
 
-async function readPubkeysIndex(kv: KVNamespace): Promise<string[]> {
-  const raw = await kv.get(PUBKEYS_INDEX_KEY, 'json')
-  if (!Array.isArray(raw)) return []
-  return Array.from(
-    new Set(
-      raw
-        .filter((x): x is string => isHex64(x))
-        .map((x) => x.toLowerCase())
-    )
-  )
-}
-
-async function syncPubkeysIndex(
-  kv: KVNamespace,
-  addPubkeys: string[],
-  removePubkeys: string[] = []
-): Promise<void> {
-  const list = await readPubkeysIndex(kv)
-  const set = new Set<string>(list)
-  let changed = false
-
-  for (const raw of removePubkeys) {
-    const pk = raw.toLowerCase()
-    if (set.delete(pk)) changed = true
-  }
-  for (const raw of addPubkeys) {
-    if (!isHex64(raw)) continue
-    const pk = raw.toLowerCase()
-    if (!set.has(pk)) {
-      set.add(pk)
-      changed = true
-    }
-  }
-
-  if (changed) {
-    await kv.put(PUBKEYS_INDEX_KEY, JSON.stringify(Array.from(set)))
-  }
-}
-
 async function deleteOwnedAliases(
   kv: KVNamespace,
   masterPubkey: string,
   aliases: string[]
-): Promise<string[]> {
+): Promise<void> {
   const owner = masterPubkey.toLowerCase()
-  const deleted: string[] = []
   for (const raw of aliases) {
     if (!isHex64(raw)) continue
     const aliasPk = raw.toLowerCase()
     const key = aliasKeyForPubkey(aliasPk)
     const current = await kv.get(key)
-    if (!current || current.toLowerCase() === owner) {
-      if (current) {
-        await kv.delete(key)
-      }
-      deleted.push(aliasPk)
-    }
+    if (current?.toLowerCase() === owner) await kv.delete(key)
   }
-  return deleted
 }
 
 async function deleteUserRecordAndAliases(
@@ -230,8 +185,7 @@ async function deleteUserRecordAndAliases(
     ? existingRecord.aliasPubkeys
     : []
   await kv.delete(subKeyForPubkey(pk))
-  const removedAliases = await deleteOwnedAliases(kv, pk, priorAliases)
-  await syncPubkeysIndex(kv, [], [pk, ...removedAliases])
+  await deleteOwnedAliases(kv, pk, priorAliases)
 }
 
 async function handlePostSubscribe(request: Request, env: Env): Promise<Response> {
@@ -245,6 +199,7 @@ async function handlePostSubscribe(request: Request, env: Env): Promise<Response
     subscription?: unknown
     relays?: unknown
     geohashes?: unknown
+    publicPinnedRoomFallback?: unknown
     serverIds?: unknown
     preferences?: unknown
   }
@@ -269,7 +224,8 @@ async function handlePostSubscribe(request: Request, env: Env): Promise<Response
     endpointHash,
     subscription,
     relays: normalizeStringList(body.relays, 12, 160),
-    geohashes: normalizeStringList(body.geohashes, 12, 32),
+    geohashes: normalizeStringList(body.geohashes, 12, 54),
+
     serverIds: normalizeStringList(body.serverIds, 20, 96),
     preferences: normalizePreferences(body.preferences),
     updatedAt: now,
@@ -278,6 +234,13 @@ async function handlePostSubscribe(request: Request, env: Env): Promise<Response
   const key = subKeyForPubkey(auth.pubkey)
   const existing = (await env.PUSH_KV.get(key, 'json')) as StoredUserRecord | null
   const priorDevices = Array.isArray(existing?.devices) ? existing.devices : []
+  const priorDevice = priorDevices.find((d) => d.endpointHash === endpointHash)
+  if (body.publicPinnedRoomFallback === true && device.preferences.geoMessages === 'all') {
+    device.publicPinnedRoomFallback = true
+    const sameRooms = priorDevice?.publicPinnedRoomFallback && JSON.stringify([...priorDevice.geohashes].sort())
+      === JSON.stringify([...device.geohashes].sort())
+    device.publicPinnedRoomSince = sameRooms ? (priorDevice?.publicPinnedRoomSince ?? now) : now
+  }
   const merged = priorDevices.filter(
     (d) => d.endpointHash !== endpointHash && d.subscription?.endpoint !== subscription.endpoint
   )
@@ -308,12 +271,7 @@ async function handlePostSubscribe(request: Request, env: Env): Promise<Response
   for (const aliasPk of addedAliases) {
     await env.PUSH_KV.put(aliasKeyForPubkey(aliasPk), auth.pubkey)
   }
-  const removedStaleAliases =
-    staleAliases.length > 0
-      ? await deleteOwnedAliases(env.PUSH_KV, auth.pubkey, staleAliases)
-      : []
-
-  await syncPubkeysIndex(env.PUSH_KV, [auth.pubkey, ...nextAliases], removedStaleAliases)
+  if (staleAliases.length > 0) await deleteOwnedAliases(env.PUSH_KV, auth.pubkey, staleAliases)
 
   return jsonResponse({ ok: true, devices: capped.length, aliases: nextAliases.length })
 }
@@ -369,81 +327,71 @@ async function handleTestPush(request: Request, env: Env): Promise<Response> {
   const auth = await verifyNip98Request(request, rawBody)
   if (!auth.ok) return jsonResponse({ ok: false, error: auth.error }, auth.status)
 
-  if (rawBody.trim()) {
-    let body: { pubkey?: unknown }
-    try {
-      body = JSON.parse(rawBody) as { pubkey?: unknown }
-    } catch {
+  let body: { pubkey?: unknown; endpoint?: unknown; testId?: unknown }
+  try {
+    const parsed: unknown = JSON.parse(rawBody)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return jsonResponse({ ok: false, error: 'Invalid JSON body.' }, 400)
     }
-    if (body.pubkey !== undefined && (!isHex64(body.pubkey) || body.pubkey.toLowerCase() !== auth.pubkey)) {
-      return jsonResponse({ ok: false, error: 'Pubkey mismatch with NIP-98 signer.' }, 403)
-    }
+    body = parsed
+  } catch {
+    return jsonResponse({ ok: false, error: 'Invalid JSON body.' }, 400)
+  }
+  if (body.pubkey !== undefined && (!isHex64(body.pubkey) || body.pubkey.toLowerCase() !== auth.pubkey)) {
+    return jsonResponse({ ok: false, error: 'Pubkey mismatch with NIP-98 signer.' }, 403)
+  }
+  if (typeof body.endpoint !== 'string' || body.endpoint.length > 4096 ||
+      typeof body.testId !== 'string' || !/^[a-f0-9]{32}$/.test(body.testId)) {
+    return jsonResponse({ ok: false, error: 'Update Agnostr and test the active device again.' }, 400)
   }
 
-  const key = subKeyForPubkey(auth.pubkey)
-  const record = (await env.PUSH_KV.get(key, 'json')) as StoredUserRecord | null
-  if (!record || !Array.isArray(record.devices) || record.devices.length === 0) {
-    return jsonResponse({ ok: false, error: 'No registered push devices for this pubkey.' }, 404)
+  const record = (await env.PUSH_KV.get(subKeyForPubkey(auth.pubkey), 'json')) as StoredUserRecord | null
+  // Select only a pre-existing subscription belonging to this signer. Never
+  // issue a provider request to a URL obtained directly from this request.
+  const device = Array.isArray(record?.devices)
+    ? record.devices.find((entry) => entry.subscription?.endpoint === body.endpoint)
+    : undefined
+  if (!device) {
+    return jsonResponse({ ok: false, error: 'This device is not registered. Reconnect push and try again.' }, 404)
   }
 
+  const testId = body.testId
+  const tag = `agnostr-test-${testId}`
   const payload: ProfileAwarePushPayload = {
-    title: 'Agnostr Push Active',
-    body: 'Background push notifications are connected on this device.',
-    tag: 'agnostr-test-push',
+    title: 'Agnostr Test Push',
+    body: 'This device received an Agnostr test notification.',
+    tag,
     forceShow: true,
     data: {
       category: 'test',
-      tag: 'agnostr-test-push',
+      tag,
+      testId,
       recipientPubkey: auth.pubkey,
     },
   }
-
-  const results: Array<{ status: number; ok: boolean; expired: boolean; error?: string }> = []
-  const surviving: StoredDeviceSubscription[] = []
-  let delivered = 0
-  let failed = 0
-  let pruned = false
-
-  for (const dev of record.devices) {
-    const res = await sendWebPushNotification({
-      subscription: dev.subscription,
-      payload,
-      vapidPublicKey: env.VAPID_PUBLIC_KEY,
-      vapidPrivateKey: env.VAPID_PRIVATE_KEY,
-      vapidSubject: env.VAPID_SUBJECT,
-      ttlSeconds: 300,
-      urgency: 'high',
-    })
-    results.push({ status: res.status, ok: res.ok, expired: res.expired, error: res.error })
-    if (res.ok) delivered += 1
-    else failed += 1
-    if (res.expired) pruned = true
-    else surviving.push(dev)
-  }
-
-  if (pruned) {
-    if (surviving.length === 0) {
-      await deleteUserRecordAndAliases(env.PUSH_KV, auth.pubkey, record)
-    } else {
-      await env.PUSH_KV.put(
-        key,
-        JSON.stringify({
-          pubkey: auth.pubkey,
-          devices: surviving,
-          aliasPubkeys: normalizeAliasPubkeys(record.aliasPubkeys, auth.pubkey),
-          updatedAt: Date.now(),
-        } satisfies StoredUserRecord)
-      )
-    }
-  }
-
-  return jsonResponse({
-    ok: delivered > 0,
-    delivered,
-    failed,
-    results,
+  const result = await sendWebPushNotification({
+    subscription: device.subscription,
+    payload,
+    vapidPublicKey: env.VAPID_PUBLIC_KEY,
+    vapidPrivateKey: env.VAPID_PRIVATE_KEY,
+    vapidSubject: env.VAPID_SUBJECT,
+    ttlSeconds: 45,
+    urgency: 'high',
   })
+  // Acceptance by APNs/FCM/etc. is not proof of display. The client waits
+  // independently for a service worker receipt with this exact test ID.
+  return jsonResponse({
+    ok: result.ok,
+    accepted: result.ok,
+    testId,
+    delivered: result.ok ? 1 : 0,
+    failed: result.ok ? 0 : 1,
+    results: [{ status: result.status, ok: result.ok, expired: result.expired }],
+    ...(!result.ok ? {
+      error: result.expired ? 'This device subscription expired. Reconnect push and test again.' :
+        'The push provider did not accept this device’s test notification.',
+    } : {}),
+  }, result.ok ? 200 : result.expired ? 410 : 502)
 }
 
 interface PokeRequestBody {
@@ -796,26 +744,6 @@ function buildPokePayload(opts: {
   }
 }
 
-async function isDuplicateEventInCache(eventId: string, category: string): Promise<boolean> {
-  try {
-    const cache = caches.default
-    const cacheKey = new Request(
-      `https://agnostr-push.internal/dedupe/${encodeURIComponent(category)}/${encodeURIComponent(eventId)}`
-    )
-    const hit = await cache.match(cacheKey)
-    if (hit) return true
-    await cache.put(
-      cacheKey,
-      new Response('1', {
-        headers: { 'Cache-Control': 'max-age=180' },
-      })
-    )
-    return false
-  } catch {
-    return false
-  }
-}
-
 async function handlePoke(request: Request, env: Env): Promise<Response> {
   const rawBody = await request.text()
   const auth = await verifyNip98Request(request, rawBody)
@@ -843,7 +771,10 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
         .filter((x): x is string => isHex64(x))
         .map((x) => x.toLowerCase())
     )
-  ).slice(0, 10)
+  )
+  if (recipients.length > 20) {
+    return jsonResponse({ ok: false, error: 'A push request can target at most 20 distinct recipients.' }, 400)
+  }
 
   const isAgmailCategory = category === 'agmail' || category === 'agmail-cc'
   // Block self-poke spam (allow self-mail in Agmail only)
@@ -856,13 +787,6 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
   }
 
   const eventId = typeof body.eventId === 'string' ? body.eventId.trim().slice(0, 96) : ''
-  if (eventId) {
-    const dup = await isDuplicateEventInCache(eventId, category)
-    if (dup) {
-      return jsonResponse({ ok: true, deduplicated: true, delivered: 0, skipped: filteredRecipients.length, failed: 0 })
-    }
-  }
-
   const noteId = isHex64(body.noteId) ? body.noteId.toLowerCase() : undefined
   const callId = typeof body.callId === 'string' ? body.callId.trim().slice(0, 64) : undefined
   const mediaType = body.mediaType === 'video' ? 'video' : body.mediaType === 'audio' ? 'audio' : undefined
@@ -876,12 +800,13 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
   const isCall = category === 'dm-call' || category === 'server-call' || category === 'geo-call' || category === 'call-cancel'
   const ttlSeconds = category === 'dm-call' ? 45 : isCall ? 60 : 86_400
   const topic = callId && (category === 'dm-call' || category === 'call-cancel')
-    ? `call-${callId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24)}`
+    ? `call-${(await sha256Hex(`${auth.pubkey}:${callId}`)).slice(0, 24)}`
     : undefined
 
-  let delivered = 0
+  const counts = emptyCounts()
   let skipped = 0
-  let failed = 0
+  const submissions: Array<Promise<void>> = []
+  const id = await sha256Hex(`poke:${auth.pubkey}:${category}:${eventId || (callId ? 'call:'+callId : crypto.randomUUID())}`)
   const handledMasterPubkeys = new Set<string>()
 
   for (const recipientPk of filteredRecipients) {
@@ -914,16 +839,12 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
     }
     handledMasterPubkeys.add(resolvedMasterPk)
 
-    const surviving: StoredDeviceSubscription[] = []
-    let pruned = false
-
+    const targets: Target[] = []
     for (const dev of record.devices) {
       if (!isPokeAllowedByPreferences(category, dev.preferences, isMention)) {
         skipped += 1
-        surviving.push(dev)
         continue
       }
-
       const payload = buildPokePayload({
         category,
         recipientPubkey: resolvedMasterPk,
@@ -938,43 +859,24 @@ async function handlePoke(request: Request, env: Env): Promise<Response> {
         geohash,
         showPreviews: dev.preferences.showPreviews !== false,
       })
-
-      const res = await sendWebPushNotification({
-        subscription: dev.subscription,
-        payload,
-        vapidPublicKey: env.VAPID_PUBLIC_KEY,
-        vapidPrivateKey: env.VAPID_PRIVATE_KEY,
-        vapidSubject: env.VAPID_SUBJECT,
-        ttlSeconds,
-        urgency: 'high',
-        topic,
-      })
-
-      if (res.ok) delivered += 1
-      else failed += 1
-
-      if (res.expired) pruned = true
-      else surviving.push(dev)
+      targets.push({ endpointHash: dev.endpointHash, preferences: JSON.stringify(dev.preferences), payload })
     }
 
-    if (pruned) {
-      if (surviving.length === 0) {
-        await deleteUserRecordAndAliases(env.PUSH_KV, resolvedMasterPk, record)
-      } else {
-        await env.PUSH_KV.put(
-          key,
-          JSON.stringify({
-            pubkey: resolvedMasterPk,
-            devices: surviving,
-            aliasPubkeys: normalizeAliasPubkeys(record.aliasPubkeys, resolvedMasterPk),
-            updatedAt: Date.now(),
-          } satisfies StoredUserRecord)
-        )
+    if (targets.length > 0) {
+      submissions.push(queueJobs(env, { recipient: resolvedMasterPk, jobs: [{ id, targets, ttlSeconds, topic }] })
+        .then((result) => addCounts(counts, result), () => { counts.failed += targets.length }))
+      if (submissions.length === 3) {
+        await Promise.all(submissions)
+        submissions.length = 0
       }
     }
   }
-
-  return jsonResponse({ ok: true, delivered, skipped, failed })
+  await Promise.all(submissions)
+  const retryableFailures = counts.failed - counts.permanentFailures
+  return jsonResponse(
+    { ok: retryableFailures === 0, ...counts, skipped, retryableFailures },
+    retryableFailures > 0 ? 503 : 200
+  )
 }
 
 export default {
@@ -987,7 +889,7 @@ export default {
     const pathname = url.pathname.replace(/\/+$/, '') || '/'
 
     if (request.method === 'GET' && pathname === '/health') {
-      return jsonResponse({ ok: true, service: 'agnostr-push', version: 1 })
+      return jsonResponse({ ok: true, service: 'agnostr-push', version: 2, currentDeviceTest: true, durableDelivery: Boolean(env.PUSH_DELIVERY) })
     }
 
     if (request.method === 'GET' && pathname === '/vapid-public-key') {
@@ -1013,7 +915,9 @@ export default {
     return jsonResponse({ ok: false, error: 'Not found' }, 404)
   },
 
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runNostrPushCron(env))
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runNostrPushCron(env, controller.scheduledTime).then((summary) => {
+      console.info("push relay scan", summary)
+    }))
   },
 } satisfies ExportedHandler<Env>

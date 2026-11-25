@@ -1,5 +1,6 @@
 export interface Env {
   PUSH_KV: KVNamespace
+  PUSH_DELIVERY: DurableObjectNamespace
   VAPID_PUBLIC_KEY: string
   VAPID_PRIVATE_KEY: string
   VAPID_SUBJECT: string
@@ -37,6 +38,8 @@ export interface StoredDeviceSubscription {
   subscription: WebPushSubscriptionJSON
   relays: string[]
   geohashes: string[]
+  publicPinnedRoomFallback?: boolean
+  publicPinnedRoomSince?: number
   serverIds: string[]
   preferences: StoredPushPreferences
   updatedAt: number
@@ -81,7 +84,9 @@ export interface IncomingPushPayload {
   callId?: string
   data?: {
     category: PushCategory
+    deliveryEventId?: string
     tag?: string
+    testId?: string
     callId?: string
     mediaType?: 'audio' | 'video'
     peerPubkey?: string
@@ -108,6 +113,14 @@ export const DEFAULT_PUSH_PREFERENCES: StoredPushPreferences = {
   agoraZaps: true,
   agoraFollows: true,
   showPreviews: true,
+}
+
+// This routing opt-in deliberately expires after the app is no longer
+// refreshing its settings and cannot guarantee current local filtering.
+export const PUBLIC_PINNED_ROOM_LEASE_MS = 12 * 60 * 60_000
+export function publicRoomEnabled(device: StoredDeviceSubscription, now = Date.now()): boolean {
+  return device.publicPinnedRoomFallback === true && device.preferences.geoMessages === 'all'
+    && now-device.updatedAt < PUBLIC_PINNED_ROOM_LEASE_MS && typeof device.publicPinnedRoomSince === 'number'
 }
 
 export const MAX_DEVICES_PER_PUBKEY = 5

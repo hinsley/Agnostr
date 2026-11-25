@@ -9,6 +9,8 @@ import type {
 } from '../types/notifications.ts'
 import { getPwaSwRegistration } from '../hooks/usePwa.ts'
 import { bytesToHex } from './identity.ts'
+import { normalizeBitchatChannelKey } from './bitchatChannel.ts'
+import { findDisplayedPush } from './pushDisplay.ts'
 
 export const KIND_NIP98_HTTP_AUTH = 27235
 const APP_ICON = '/icon-192.png'
@@ -190,6 +192,9 @@ export async function showOsNotification(
   // Prefer ServiceWorkerRegistration.showNotification (required on mobile PWAs & supports action buttons)
   const reg = await getPwaSwRegistration()
   if (reg && typeof reg.showNotification === 'function') {
+    // The worker may already have shown this exact delivery. If either of the
+    // verified IDs is missing, a room/channel notification is not enough proof.
+    if (await findDisplayedPush(reg, input.data)) return true
     try {
       await reg.showNotification(input.title, options)
       return true
@@ -299,8 +304,44 @@ export async function buildNip98AuthHeader(opts: {
   return `Nostr ${btoa(binary)}`
 }
 
+const PUSH_REQUEST_TIMEOUT_MS = 8_000
+
+async function fetchPushRequest(
+  url: string,
+  init: RequestInit,
+  timeoutMs = PUSH_REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal })
+    // Keep the deadline through reading the reply; a response can stall after
+    // returning only HTTP headers.
+    const body = await response.text()
+    return new Response(body || null, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    })
+  } finally {
+    globalThis.clearTimeout(timer)
+  }
+}
+
+export async function readCurrentPushEndpoint(): Promise<string | null> {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return null
+  const reg = await navigator.serviceWorker.getRegistration()
+  const subscription = await reg?.pushManager?.getSubscription()
+  return subscriptionIsCurrent(subscription) ? subscription?.endpoint ?? null : null
+}
+
+function subscriptionIsCurrent(subscription: PushSubscription | null | undefined): boolean {
+  const expiry = subscription?.expirationTime
+  return Boolean(subscription?.endpoint) && (expiry == null || expiry > Date.now())
+}
+
 export async function fetchVapidPublicKey(bridgeUrl: string): Promise<string> {
-  const res = await fetch(`${bridgeUrl}/vapid-public-key`, {
+  const res = await fetchPushRequest(`${bridgeUrl}/vapid-public-key`, {
     method: 'GET',
     headers: { Accept: 'application/json, text/plain' },
   })
@@ -322,6 +363,18 @@ export async function fetchVapidPublicKey(bridgeUrl: string): Promise<string> {
   return text
 }
 
+export function canUsePublicPinnedRoomFallback(opts: {
+  canAutoSign: boolean
+  geoMessages: NotificationSettings['geoMessages']
+  hasBlockedPeers: boolean
+  strictWhitelistMode: boolean
+  pinnedGeohashes: readonly string[]
+}): boolean {
+  return opts.canAutoSign && opts.geoMessages === 'all' && !opts.hasBlockedPeers &&
+    !opts.strictWhitelistMode && opts.pinnedGeohashes.some((room) =>
+      normalizeBitchatChannelKey(room) !== null)
+}
+
 export interface PushBridgeRegisterParams {
   bridgeUrl: string
   vapidPublicKey?: string
@@ -331,20 +384,19 @@ export interface PushBridgeRegisterParams {
   geohashes: string[]
   serverIds: string[]
   settings: NotificationSettings
+  publicPinnedRoomFallback?: boolean
+  replaceSubscription?: boolean
   signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
 }
 
 async function waitForActiveSwRegistration(
   timeoutMs = 8000
 ): Promise<ServiceWorkerRegistration | null> {
-  const existing = await getPwaSwRegistration()
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return null
+  const existing = await navigator.serviceWorker.getRegistration()
   if (existing?.active && existing.pushManager) {
     return existing
   }
-  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
-    return existing?.pushManager ? existing : null
-  }
-
   let timer: ReturnType<typeof setTimeout> | null = null
   try {
     const ready = await Promise.race<ServiceWorkerRegistration | null>([
@@ -362,8 +414,8 @@ async function waitForActiveSwRegistration(
     }
   }
 
-  const fallback = existing ?? (await getPwaSwRegistration())
-  return fallback?.pushManager ? fallback : null
+  const fallback = await navigator.serviceWorker.getRegistration()
+  return fallback?.active && fallback.pushManager ? fallback : null
 }
 
 export async function registerWithPushBridge(
@@ -385,25 +437,29 @@ export async function registerWithPushBridge(
     params.vapidPublicKey?.trim() ||
     (await fetchVapidPublicKey(normalizedBridge))
 
+  const keyBytes = urlBase64ToUint8Array(resolvedKey)
+  if (keyBytes.length !== 65 || keyBytes[0] !== 4) {
+    throw new Error('The push bridge did not provide a valid VAPID public key.')
+  }
   let subscription = await reg.pushManager.getSubscription()
   if (subscription) {
-    const existingKeyBuf = subscription.options?.applicationServerKey
-    if (existingKeyBuf) {
-      const existingKeyB64 = arrayBufferToBase64Url(existingKeyBuf)
-      if (existingKeyB64 !== normalizeBase64Url(resolvedKey)) {
-        try {
-          await subscription.unsubscribe()
-        } catch {
-          // Proceed to create a fresh subscription with the new VAPID key
-        }
-        subscription = null
+    const existingKey = subscription.options?.applicationServerKey
+    const changedKey =
+      existingKey != null &&
+      arrayBufferToBase64Url(existingKey) !== normalizeBase64Url(resolvedKey)
+    if (params.replaceSubscription || !subscriptionIsCurrent(subscription) || changedKey) {
+      await subscription.unsubscribe()
+      const remaining = await reg.pushManager.getSubscription()
+      if (remaining?.endpoint === subscription.endpoint) {
+        throw new Error('Could not replace this browser’s stale push subscription.')
       }
+      subscription = remaining
     }
   }
   if (!subscription) {
     subscription = await reg.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(resolvedKey),
+      applicationServerKey: keyBytes,
     })
   }
 
@@ -416,13 +472,18 @@ export async function registerWithPushBridge(
     )
   ).slice(0, 16)
 
+  const geohashes = Array.from(new Set(params.geohashes.map(normalizeBitchatChannelKey)
+    .filter((key): key is string => key !== null))).slice(0, 12)
   const endpointUrl = `${normalizedBridge}/subscribe`
   const bodyObj = {
     pubkey: normalizedPubkey,
     aliasPubkeys,
     subscription: subscription.toJSON(),
     relays: params.relays.slice(0, 12),
-    geohashes: params.geohashes.slice(0, 12),
+    geohashes,
+    publicPinnedRoomFallback: params.publicPinnedRoomFallback === true &&
+      params.settings.publicPinnedRoomFallback && params.settings.geoMessages === 'all' &&
+      geohashes.length > 0,
     serverIds: params.serverIds.slice(0, 20),
     preferences: {
       dms: params.settings.dms,
@@ -448,7 +509,7 @@ export async function registerWithPushBridge(
     signEvent: params.signEvent,
   })
 
-  const res = await fetch(endpointUrl, {
+  const res = await fetchPushRequest(endpointUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -469,13 +530,21 @@ export async function registerWithPushBridge(
 export async function unregisterFromPushBridge(opts: {
   bridgeUrl?: string
   pubkey: string
+  skipBridgeCleanup?: boolean
   signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
 }): Promise<void> {
   const reg = await getPwaSwRegistration()
   const sub = reg?.pushManager ? await reg.pushManager.getSubscription() : null
   const endpoint = sub?.endpoint ?? null
 
-  if (opts.bridgeUrl && endpoint) {
+  if (sub) {
+    try {
+      await sub.unsubscribe()
+    } catch {
+      // Ignore
+    }
+  }
+  if (!opts.skipBridgeCleanup && opts.bridgeUrl && endpoint) {
     const normalized = normalizePushBridgeUrl(opts.bridgeUrl)
     if (normalized) {
       try {
@@ -490,7 +559,7 @@ export async function unregisterFromPushBridge(opts: {
           bodyJson,
           signEvent: opts.signEvent,
         })
-        await fetch(endpointUrl, {
+        await fetchPushRequest(endpointUrl, {
           method: 'DELETE',
           headers: {
             'Content-Type': 'application/json',
@@ -499,44 +568,76 @@ export async function unregisterFromPushBridge(opts: {
           body: bodyJson,
         })
       } catch {
-        // Proceed with local PushManager unsubscribe even if bridge is unreachable
+        // Local delivery was disabled first. Remote cleanup is best effort.
       }
     }
   }
+}
 
-  if (sub) {
-    try {
-      await sub.unsubscribe()
-    } catch {
-      // Ignore
-    }
+type PushTestResult = {
+  ok: boolean
+  delivered: number
+  failed: number
+  status?: number
+  detail: string
+}
+
+function randomPushRequestId(): string {
+  return bytesToHex(crypto.getRandomValues(new Uint8Array(16)))
+}
+
+function listenForPushTestReceipt(testId: string, timeoutMs: number): {
+  receipt: Promise<'displayed' | 'display-failed' | 'timed-out'>
+  cancel: () => void
+} {
+  const workers = navigator.serviceWorker
+  let resolve: (value: 'displayed' | 'display-failed' | 'timed-out') => void = () => {}
+  const receipt = new Promise<'displayed' | 'display-failed' | 'timed-out'>(
+    (done) => { resolve = done }
+  )
+  const receive = (event: MessageEvent) => {
+    if (event.data?.type !== 'agnostr:push-test-receipt' || event.data.testId !== testId) return
+    if (typeof event.data.displayed !== 'boolean') return
+    finish(event.data.displayed ? 'displayed' : 'display-failed')
   }
+  const timer = globalThis.setTimeout(() => finish('timed-out'), timeoutMs)
+  function finish(value: 'displayed' | 'display-failed' | 'timed-out') {
+    globalThis.clearTimeout(timer)
+    workers.removeEventListener('message', receive)
+    resolve(value)
+  }
+  workers.addEventListener('message', receive)
+  return { receipt, cancel: () => finish('timed-out') }
 }
 
 export async function sendTestWebPush(opts: {
   bridgeUrl: string
   pubkey: string
   signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
-}): Promise<{ ok: boolean; delivered: number; failed: number; status?: number; detail: string }> {
+  receiptTimeoutMs?: number
+}): Promise<PushTestResult> {
+  const failure = (detail: string, status?: number): PushTestResult =>
+    ({ ok: false, delivered: 0, failed: 0, status, detail })
   const normalized = normalizePushBridgeUrl(opts.bridgeUrl)
-  if (!normalized) {
-    return {
-      ok: false,
-      delivered: 0,
-      failed: 0,
-      detail: 'Push bridge URL must use https:// (or http://localhost).',
-    }
-  }
+  if (!normalized) return failure('Push bridge URL must use https:// (or http://localhost).')
 
-  const endpointUrl = `${normalized}/test-push`
-  const bodyJson = JSON.stringify({
-    pubkey: opts.pubkey.toLowerCase(),
-  })
-
-  const controller = new AbortController()
-  const timeoutId = globalThis.setTimeout(() => controller.abort(), 12000)
-
+  let listener: ReturnType<typeof listenForPushTestReceipt> | null = null
   try {
+    const endpoint = await readCurrentPushEndpoint()
+    if (!endpoint) return failure('This device has no current push subscription.', 404)
+    // A legacy bridge ignores the endpoint field and sends its test to every
+    // registered device. Do not POST to one, even if it would report success.
+    const health = await fetchPushRequest(`${normalized}/health`, { cache: 'no-store' }, 5_000)
+    const capabilities = await health.json().catch(() => null) as {
+      ok?: boolean; service?: string; currentDeviceTest?: boolean
+    } | null
+    if (!health.ok || capabilities?.ok !== true || capabilities.service !== 'agnostr-push' ||
+        capabilities.currentDeviceTest !== true) {
+      return failure('This push bridge has not been updated to test only this device.', health.status)
+    }
+    const testId = randomPushRequestId()
+    const endpointUrl = `${normalized}/test-push`
+    const bodyJson = JSON.stringify({ pubkey: opts.pubkey.toLowerCase(), endpoint, testId })
     const authHeader = await buildNip98AuthHeader({
       url: endpointUrl,
       method: 'POST',
@@ -544,140 +645,138 @@ export async function sendTestWebPush(opts: {
       signEvent: opts.signEvent,
     })
 
-    const res = await fetch(endpointUrl, {
+    // Subscribe before sending: the service worker may receive the test before
+    // the HTTP response returns. A provider accepting a push is not a receipt.
+    listener = listenForPushTestReceipt(testId, opts.receiptTimeoutMs ?? 15_000)
+    const res = await fetchPushRequest(endpointUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: authHeader,
-      },
+      headers: { 'Content-Type': 'application/json', Authorization: authHeader },
       body: bodyJson,
-      signal: controller.signal,
-    })
-
-    const rawText = await res.text().catch(() => '')
-    let parsed: {
-      ok?: boolean
-      delivered?: number
-      failed?: number
+    }, 12_000)
+    const parsed = await res.json().catch(() => null) as {
+      accepted?: boolean
+      testId?: string
       error?: string
       detail?: string
-    } | null = null
-    if (rawText) {
-      try {
-        parsed = JSON.parse(rawText) as {
-          ok?: boolean
-          delivered?: number
-          failed?: number
-          error?: string
-          detail?: string
-        }
-      } catch {
-        parsed = null
-      }
-    }
-
-    const delivered =
-      typeof parsed?.delivered === 'number' ? parsed.delivered : 0
-    const failed = typeof parsed?.failed === 'number' ? parsed.failed : 0
-
+    } | null
     if (!res.ok) {
-      const errDetail =
-        parsed?.error ||
-        parsed?.detail ||
-        rawText.slice(0, 120) ||
-        `HTTP ${res.status}`
-      return {
-        ok: false,
-        delivered,
-        failed,
-        status: res.status,
-        detail: `Test push failed (HTTP ${res.status}): ${errDetail}`,
-      }
+      return failure(
+        `Test push failed (HTTP ${res.status}): ${parsed?.error || parsed?.detail || 'bridge rejected the request'}.`,
+        res.status
+      )
+    }
+    if (parsed?.accepted !== true || parsed.testId !== testId) {
+      return failure(
+        parsed?.error || parsed?.detail ||
+          'The bridge did not confirm acceptance for this device. A custom bridge may need an update.',
+        res.status
+      )
     }
 
-    if (delivered > 0) {
-      return {
-        ok: true,
-        delivered,
-        failed,
-        status: res.status,
-        detail: `Background push delivered to ${delivered} device${delivered === 1 ? '' : 's'}${failed > 0 ? ` (${failed} failed)` : ''}.`,
-      }
+    const receipt = await listener.receipt
+    if (receipt === 'displayed') {
+      return { ok: true, delivered: 1, failed: 0, status: res.status,
+        detail: 'This device’s service worker confirmed that the notification was displayed.' }
     }
-
-    return {
-      ok: false,
-      delivered,
-      failed,
-      status: res.status,
-      detail:
-        parsed?.error ||
-        parsed?.detail ||
-        (failed > 0
-          ? `Push bridge could not reach ${failed} registered device${failed === 1 ? '' : 's'}. Reconnect this device and retry.`
-          : 'No active push subscription registered on bridge yet.'),
-    }
+    return failure(
+      receipt === 'display-failed'
+        ? 'The push reached this device, but the browser could not display it.'
+        : 'The push provider accepted the test, but this device did not confirm display. Check notification settings and reload the app if it was just updated.',
+      res.status
+    )
   } catch (err) {
-    const msg =
-      err instanceof Error ? err.message : 'Unable to reach push bridge.'
-    return {
-      ok: false,
-      delivered: 0,
-      failed: 0,
-      detail: `Test push error: ${msg}`,
-    }
+    return failure(`Test push error: ${err instanceof Error ? err.message : 'Unable to reach push bridge.'}`)
   } finally {
-    globalThis.clearTimeout(timeoutId)
+    listener?.cancel()
   }
 }
+
+export type PushPokeResult =
+  | { kind: 'accepted' | 'skipped' }
+  | { kind: 'failed'; detail: string }
 
 export async function sendPushPoke(opts: {
   bridgeUrl: string
   signEvent: (tmpl: EventTemplate) => Promise<VerifiedEvent>
   payload: PushPokePayload
-}): Promise<void> {
+  retryDelaysMs?: readonly number[]
+  shouldContinue?: () => boolean
+}): Promise<PushPokeResult> {
   const normalized = normalizePushBridgeUrl(opts.bridgeUrl)
-  if (!normalized) return
+  if (!normalized || opts.shouldContinue?.() === false) return { kind: 'skipped' }
 
   const recipientPubkeys = Array.from(
     new Set(
-      (opts.payload.recipientPubkeys || [])
+      opts.payload.recipientPubkeys
         .map((pk) => pk.trim().toLowerCase())
         .filter((pk) => /^[0-9a-f]{64}$/.test(pk))
     )
   ).slice(0, 20)
-  if (recipientPubkeys.length === 0) return
+  if (recipientPubkeys.length === 0) return { kind: 'skipped' }
 
   const endpointUrl = `${normalized}/poke`
   const bodyJson = JSON.stringify({
     ...opts.payload,
+    // Some older callers don't have a message ID, e.g. a ring-cancel hint.
+    // Make retries idempotent without using a timestamp to identify private messages.
+    eventId: opts.payload.eventId || randomPushRequestId(),
     recipientPubkeys,
   })
-
-  const controller = new AbortController()
-  const timeoutId = globalThis.setTimeout(() => controller.abort(), 5000)
-
+  let authHeader: string
   try {
-    const authHeader = await buildNip98AuthHeader({
+    authHeader = await buildNip98AuthHeader({
       url: endpointUrl,
       method: 'POST',
       bodyJson,
       signEvent: opts.signEvent,
     })
-
-    await fetch(endpointUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: authHeader,
-      },
-      body: bodyJson,
-      signal: controller.signal,
-      keepalive: true,
-    })
   } catch {
-    // Fire-and-forget: never block or fail sending messages on push poke errors
-  } finally {
-    globalThis.clearTimeout(timeoutId)
+    return { kind: 'failed', detail: 'Push request was not signed.' }
   }
+
+  // Build the signed request once; retries use the same body, auth and event ID,
+  // and finish well within the bridge’s signed request freshness limit.
+  const delays = opts.retryDelaysMs ?? [450, 1800]
+  let detail = 'Unable to reach the push bridge.'
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    if (opts.shouldContinue?.() === false) return { kind: 'skipped' }
+    try {
+      const res = await fetchPushRequest(endpointUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: authHeader },
+        body: bodyJson,
+        keepalive: true,
+      }, 5_000)
+      if (res.ok) {
+        const data = await res.json().catch(() => null) as {
+          ok?: boolean
+          queued?: number
+          delivered?: number
+          duplicates?: number
+          skipped?: number
+          failed?: number
+          permanentFailures?: number
+          deduplicated?: boolean
+        } | null
+        if (data?.ok === true) {
+          if ((data.queued ?? 0) > 0 || (data.delivered ?? 0) > 0 ||
+              (data.duplicates ?? 0) > 0 || data.deduplicated === true) return { kind: 'accepted' }
+          if ((data.permanentFailures ?? 0) > 0) {
+            return { kind: 'failed', detail: 'Push delivery was permanently rejected.' }
+          }
+          if ((data.failed ?? 0) === 0 && (data.skipped ?? 0) > 0) return { kind: 'skipped' }
+        }
+        detail = 'The push bridge did not queue or accept the notification.'
+      } else {
+        detail = `Push bridge returned HTTP ${res.status}.`
+        if (res.status !== 429 && res.status < 500) return { kind: 'failed', detail }
+      }
+    } catch {
+      detail = 'Unable to reach the push bridge.'
+    }
+    if (attempt < delays.length) {
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, delays[attempt]))
+    }
+  }
+  return { kind: 'failed', detail }
 }

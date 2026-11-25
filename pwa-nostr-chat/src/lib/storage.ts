@@ -479,6 +479,9 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   vibrationEnabled: true,
   showPreviews: true,
   pushBridgeUrl: DEFAULT_PUSH_BRIDGE_URL,
+  backgroundPushEnabled: true,
+  publicPinnedRoomFallback: false,
+  extensionPushPokes: false,
   vapidPublicKey: DEFAULT_VAPID_PUBLIC_KEY,
   prefsVersion: NOTIFICATION_PREFS_VERSION,
 }
@@ -600,6 +603,9 @@ export function loadNotificationSettings(): NotificationSettings {
         ? parsed.showPreviews
         : DEFAULT_NOTIFICATION_SETTINGS.showPreviews,
     pushBridgeUrl: resolvedBridgeUrl,
+    backgroundPushEnabled: parsed.backgroundPushEnabled !== false,
+    publicPinnedRoomFallback: parsed.publicPinnedRoomFallback === true,
+    extensionPushPokes: parsed.extensionPushPokes === true,
     vapidPublicKey: resolvedVapidKey,
     prefsVersion: NOTIFICATION_PREFS_VERSION,
   }

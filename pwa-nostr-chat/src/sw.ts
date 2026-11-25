@@ -9,7 +9,8 @@ import {
 } from 'workbox-precaching'
 import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { CacheFirst } from 'workbox-strategies'
-import type { NotificationPayloadData } from './types/notifications.ts'
+import type { NotificationCategory, NotificationPayloadData } from './types/notifications.ts'
+import { findDisplayedPush, normalizePushIdentifier } from './lib/pushDisplay.ts'
 
 interface ManifestEntry {
   url: string
@@ -196,19 +197,118 @@ swSelf.addEventListener('message', (event) => {
   }
 })
 
-async function showSwNotificationSafe(
-  title: string,
-  options: ExtendedNotificationOptions
-): Promise<void> {
+/** Restrict worker forwards to this installation's same-origin scoped app windows.
+ * Finding clients is best effort and must not prevent native delivery. */
+async function getAppWindows(): Promise<WindowClient[]> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
   try {
-    await swSelf.registration.showNotification(title, options)
+    const scope = swSelf.registration.scope
+    const windows = await Promise.race([
+      swSelf.clients.matchAll({ type: 'window', includeUncontrolled: true }),
+      new Promise<WindowClient[]>((resolve) => {
+        timeout = setTimeout(() => resolve([]), 250)
+      }),
+    ])
+    return windows.filter((window) => window.url.startsWith(scope))
   } catch {
-    if (options.actions && options.actions.length > 0) {
-      const withoutActions: ExtendedNotificationOptions = { ...options }
-      delete withoutActions.actions
-      await swSelf.registration.showNotification(title, withoutActions)
+    return []
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+  }
+}
+
+function postToWindows(windows: WindowClient[], message: Record<string, unknown>): void {
+  for (const window of windows) {
+    try {
+      window.postMessage(message)
+    } catch {
+      // A window may have detached after matchAll.
     }
   }
+}
+
+// A subscription rotation requires fresh account-authenticated registration.
+swSelf.addEventListener('pushsubscriptionchange', (event: Event) => {
+  const subscriptionChange = event as ExtendableEvent
+  subscriptionChange.waitUntil(
+    getAppWindows().then((windows) => postToWindows(windows, {
+      type: 'agnostr:push-subscription-changed',
+    }))
+  )
+})
+
+type DisplayFailure = 'notification-permission-denied' | 'notification-display-failed'
+
+async function showSwNotificationSafe(
+  title: string,
+  options: ExtendedNotificationOptions,
+  data: NotificationPayloadData,
+  forceShow: boolean
+): Promise<{ displayed: true } | { displayed: false; error: DisplayFailure }> {
+  // A Web Push event must display a native notification on userVisibleOnly
+  // platforms. An exact notification already displayed by the foreground app
+  // can be replaced in place without alerting a second time. Neither focus,
+  // unread badges nor matching conversation tags prove delivery of this event.
+  const prior = forceShow ? undefined : await findDisplayedPush(swSelf.registration, data)
+  const priorData = prior?.data as Partial<NotificationPayloadData> | undefined
+  const resolvedData: NotificationPayloadData = {
+    ...data,
+    tag: prior?.tag || options.tag,
+    // An exact local display may know the decrypted sender or destination
+    // whereas the relay-only bridge can only announce a generic gift wrap.
+    peerPubkey: normalizePushIdentifier(priorData?.peerPubkey) || data.peerPubkey,
+    serverId: stringField(priorData?.serverId) || data.serverId,
+    channelId: stringField(priorData?.channelId) || data.channelId,
+    geohash: stringField(priorData?.geohash) || data.geohash,
+    noteId: normalizePushIdentifier(priorData?.noteId) || data.noteId,
+    callerNickname: stringField(priorData?.callerNickname) || data.callerNickname,
+  }
+  const display: ExtendedNotificationOptions = prior
+    ? {
+        ...options,
+        body: prior.body || options.body,
+        tag: prior.tag,
+        data: resolvedData,
+        renotify: false,
+        vibrate: undefined,
+        silent: true,
+      }
+    : options
+  const displayTitle = prior?.title || title
+  try {
+    await swSelf.registration.showNotification(displayTitle, display)
+    return { displayed: true }
+  } catch (err) {
+    // Some platforms reject actions, vibration, icons or other presentation hints.
+    // Retry using the most portable options while retaining the click target.
+    try {
+      await swSelf.registration.showNotification(displayTitle, {
+        body: display.body,
+        tag: display.tag,
+        data: display.data,
+        ...(prior ? { silent: true } : {}),
+      })
+      return { displayed: true }
+    } catch (fallbackError) {
+      const permissionDenied = [err, fallbackError].some((failure) =>
+        failure instanceof Error && failure.name === 'NotAllowedError'
+      )
+      return {
+        displayed: false,
+        error: permissionDenied ? 'notification-permission-denied' : 'notification-display-failed',
+      }
+    }
+  }
+}
+
+const PUSH_CATEGORIES: ReadonlySet<string> = new Set<NotificationCategory>([
+  'dm', 'dm-call', 'server-message', 'server-call', 'geo-message', 'geo-call',
+  'location-note', 'agmail', 'agora-reply', 'agora-mention', 'agora-like',
+  'agora-repost', 'agora-zap', 'agora-follow', 'test',
+])
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 // 3. Web Push reception (DM calls, DMs, Group messages/calls, Bitchat, call cancel)
@@ -217,100 +317,111 @@ swSelf.addEventListener('push', (event) => {
     let payload: IncomingPushPayload = {}
     if (event.data) {
       try {
-        payload = (await event.data.json()) as IncomingPushPayload
-      } catch {
-        try {
-          const text = event.data.text()
-          payload = { title: 'Agnostr', body: text, data: { category: 'test' } }
-        } catch {
-          payload = { title: 'Agnostr', body: 'New activity on Agnostr' }
+        const parsed: unknown = event.data.json()
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          payload = parsed as IncomingPushPayload
         }
+      } catch {
+        // An unreadable packet gets a generic notification, never an unvalidated preview.
       }
     }
 
-    const kindAction = payload.action || payload.type || ''
-    const callId = payload.callId || payload.data?.callId
+    const kindAction = stringField(payload.action) || stringField(payload.type)
+    const callId = stringField(payload.callId) || stringField(payload.data?.callId)
     if (kindAction === 'call-cancel' || kindAction === 'call-end') {
-      await closeCallNotifications(callId)
-      try {
-        const cancelClients = await swSelf.clients.matchAll({
-          type: 'window',
-          includeUncontrolled: true,
-        })
-        for (const client of cancelClients) {
-          try {
-            client.postMessage({
-              type: 'agnostr-incoming-call-cancel',
-              callId,
-            })
-          } catch {
-            // Ignore detached window postMessage errors
-          }
-        }
-      } catch {
-        // Ignore
+      if (callId) postToWindows(await getAppWindows(), { type: 'agnostr-incoming-call-cancel', callId })
+      // Replace the call's ring with a quiet, non-answerable notification.
+      // Web Push providers require a visible notification even when the
+      // foreground app already handled a call-ending signal.
+      const tag = callId ? `agnostr-call-${callId}` : 'agnostr-call-ended'
+      const data: NotificationPayloadData = {
+        category: 'dm',
+        tag,
+        peerPubkey: normalizePushIdentifier(payload.data?.peerPubkey),
+        recipientPubkey: normalizePushIdentifier(payload.data?.recipientPubkey),
       }
+      const result = await showSwNotificationSafe('Call ended', {
+        tag, body: 'This call is no longer ringing.', icon: APP_ICON,
+        silent: true, renotify: false, requireInteraction: false, data,
+      }, data, true)
+      if (!result.displayed) console.warn('[Agnostr Web Push] Call notification could not be updated', {
+        error: result.error,
+      })
       return
     }
 
-    const rawRecipient = payload.data?.recipientPubkey
-    const recipientPubkey =
-      typeof rawRecipient === 'string' && /^[0-9a-f]{64}$/i.test(rawRecipient.trim())
-        ? rawRecipient.trim().toLowerCase()
-        : undefined
-    const rawNoteId = payload.data?.noteId
-    const noteId =
-      typeof rawNoteId === 'string' && /^[0-9a-f]{64}$/i.test(rawNoteId.trim())
-        ? rawNoteId.trim().toLowerCase()
-        : undefined
+    const fields = payload.data
+    const recipientPubkey = normalizePushIdentifier(fields?.recipientPubkey)
+    const rawCategory = fields?.category
+    const category = typeof rawCategory === 'string' && PUSH_CATEGORIES.has(rawCategory)
+      ? rawCategory as NotificationCategory
+      : 'dm'
+    const testId = category === 'test' && typeof fields?.testId === 'string' &&
+      /^[0-9a-f]{32}$/.test(fields.testId) ? fields.testId : undefined
     const data: NotificationPayloadData = {
-      category: payload.data?.category ?? 'dm',
-      tag: payload.tag ?? payload.data?.tag,
+      category,
+      tag: stringField(payload.tag) || stringField(fields?.tag),
       callId,
-      mediaType: payload.data?.mediaType,
-      peerPubkey: payload.data?.peerPubkey,
+      mediaType: fields?.mediaType === 'video' ? 'video' : fields?.mediaType === 'audio' ? 'audio' : undefined,
+      peerPubkey: normalizePushIdentifier(fields?.peerPubkey),
       recipientPubkey,
-      serverId: payload.data?.serverId,
-      channelId: payload.data?.channelId,
-      geohash: payload.data?.geohash,
-      noteId,
-      callerNickname: payload.data?.callerNickname,
+      serverId: stringField(fields?.serverId),
+      channelId: stringField(fields?.channelId),
+      geohash: stringField(fields?.geohash),
+      noteId: normalizePushIdentifier(fields?.noteId),
+      deliveryEventId: normalizePushIdentifier(fields?.deliveryEventId),
+      callerNickname: stringField(fields?.callerNickname),
+    }
+    const title = stringField(payload.title)
+    const body = stringField(payload.body)
+    const windowsPromise = getAppWindows()
+
+    const display = async (heading: string, options: ExtendedNotificationOptions) => {
+      const result = await showSwNotificationSafe(heading, options, data, payload.forceShow === true)
+      if (!result.displayed) {
+        // Useful local diagnostics without previews, push endpoints or account data.
+        console.warn('[Agnostr Web Push] Native notification could not be shown', {
+          category, error: result.error,
+        })
+      }
+      if (testId) {
+        postToWindows(await windowsPromise, {
+          type: 'agnostr:push-test-receipt',
+          testId,
+          displayed: result.displayed,
+          ...(!result.displayed ? { error: result.error } : {}),
+        })
+      }
     }
 
-    const windowClients = await swSelf.clients.matchAll({
-      type: 'window',
-      includeUncontrolled: true,
-    })
+    if (category === 'test') {
+      const tag = testId ? `agnostr-test-${testId}` : data.tag || 'agnostr-test'
+      await display(title || 'Agnostr Test Push', {
+        body: body || 'This device received a Web Push test.',
+        tag,
+        icon: APP_ICON,
+        badge: APP_ICON,
+        data: { ...data, tag },
+      })
+      return
+    }
 
-    // Notify controlled client windows so inactive saved profiles update unread badges live
-    if (recipientPubkey && windowClients.length > 0) {
-      for (const client of windowClients) {
-        try {
-          client.postMessage({
-            type: 'agnostr-profile-push',
-            recipientPubkey,
-            category: data.category,
-            title: payload.title,
-            body: payload.body,
-            ts: Date.now(),
-          })
-        } catch {
-          // Ignore detached window postMessage errors
-        }
-      }
+    const windowClients = await windowsPromise
+    if (recipientPubkey) {
+      postToWindows(windowClients, {
+        type: 'agnostr-profile-push',
+        recipientPubkey,
+        category,
+        title,
+        ts: Date.now(),
+      })
     }
     const hasFocusedClient = windowClients.some(
       (c) => c.visibilityState === 'visible' && c.focused
     )
-
-    // Avoid duplicate OS notification when user is actively focused inside the app
-    // (foreground engine already handles room-scoped notifications & live ringing)
-    if (hasFocusedClient && !payload.forceShow && data.category !== 'dm-call') {
-      return
-    }
-
     if (!hasFocusedClient) {
-      await setBadgeSafe(payload.badgeCount)
+      void setBadgeSafe(typeof payload.badgeCount === 'number' && Number.isFinite(payload.badgeCount)
+        ? payload.badgeCount : undefined)
     }
 
     if (data.category === 'dm-call') {
@@ -336,7 +447,7 @@ swSelf.addEventListener('push', (event) => {
       const tag = callId ? `agnostr-call-${callId}` : 'agnostr-call'
       const options: ExtendedNotificationOptions = {
         body:
-          payload.body ||
+          body ||
           (data.mediaType === 'video'
             ? 'Incoming video call · Tap to answer'
             : 'Incoming voice call · Tap to answer'),
@@ -352,7 +463,7 @@ swSelf.addEventListener('push', (event) => {
         ],
         data: { ...data, tag },
       }
-      await showSwNotificationSafe(payload.title || 'Incoming Call', options)
+      await display(title || 'Incoming Call', options)
       return
     }
 
@@ -361,7 +472,7 @@ swSelf.addEventListener('push', (event) => {
         data.tag ||
         (data.serverId ? `agnostr-srvcall-${data.serverId.slice(0, 12)}` : 'agnostr-srvcall')
       const options: ExtendedNotificationOptions = {
-        body: payload.body || 'A group call started in one of your groups',
+        body: body || 'A group call started in one of your groups',
         icon: APP_ICON,
         badge: APP_ICON,
         tag,
@@ -374,7 +485,7 @@ swSelf.addEventListener('push', (event) => {
         ],
         data: { ...data, tag },
       }
-      await showSwNotificationSafe(payload.title || 'Group Call Active', options)
+      await display(title || 'Group Call Active', options)
       return
     }
 
@@ -383,7 +494,7 @@ swSelf.addEventListener('push', (event) => {
         data.tag ||
         (data.geohash ? `agnostr-geocall-${data.geohash}` : 'agnostr-geocall')
       const options: ExtendedNotificationOptions = {
-        body: payload.body || 'A group call started in a Bitchat channel',
+        body: body || 'A group call started in a Bitchat channel',
         icon: APP_ICON,
         badge: APP_ICON,
         tag,
@@ -396,14 +507,14 @@ swSelf.addEventListener('push', (event) => {
         ],
         data: { ...data, tag },
       }
-      await showSwNotificationSafe(payload.title || 'Bitchat Call Active', options)
+      await display(title || 'Bitchat Call Active', options)
       return
     }
 
     if (data.category === 'agmail') {
       const tag = data.tag || 'agnostr-agmail'
       const options: ExtendedNotificationOptions = {
-        body: payload.body || 'You received an encrypted Agmail',
+        body: body || 'You received an encrypted Agmail',
         icon: APP_ICON,
         badge: APP_ICON,
         tag,
@@ -411,7 +522,7 @@ swSelf.addEventListener('push', (event) => {
         vibrate: [140, 80, 140],
         data: { ...data, tag },
       }
-      await showSwNotificationSafe(payload.title || 'New Agmail', options)
+      await display(title || 'New Agmail', options)
       return
     }
 
@@ -424,7 +535,7 @@ swSelf.addEventListener('push', (event) => {
             ? `agnostr-agora-${data.peerPubkey.slice(0, 12)}`
             : 'agnostr-agora')
       const options: ExtendedNotificationOptions = {
-        body: payload.body || 'New activity on Agora',
+        body: body || 'New activity on Agora',
         icon: APP_ICON,
         badge: APP_ICON,
         tag,
@@ -432,7 +543,7 @@ swSelf.addEventListener('push', (event) => {
         vibrate: [140, 80, 140],
         data: { ...data, tag },
       }
-      await showSwNotificationSafe(payload.title || 'Agora', options)
+      await display(title || 'Agora', options)
       return
     }
 
@@ -447,7 +558,7 @@ swSelf.addEventListener('push', (event) => {
             : 'agnostr-msg')
 
     const options: ExtendedNotificationOptions = {
-      body: payload.body || 'New message on Agnostr',
+      body: body || 'New message on Agnostr',
       icon: APP_ICON,
       badge: APP_ICON,
       tag,
@@ -455,7 +566,7 @@ swSelf.addEventListener('push', (event) => {
       vibrate: [140, 80, 140],
       data: { ...data, tag },
     }
-    await showSwNotificationSafe(payload.title || 'Agnostr', options)
+    await display(title || 'Agnostr', options)
   }
 
   event.waitUntil(handlePush())

@@ -36,6 +36,10 @@ jobs:
         working-directory: pwa-nostr-chat
         run: npm run test:agwallet
 
+      - name: PWA push regression tests
+        working-directory: pwa-nostr-chat
+        run: npm run test:push
+
       - name: Build
         working-directory: pwa-nostr-chat
         run: npm run build

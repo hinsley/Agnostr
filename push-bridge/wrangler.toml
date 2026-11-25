@@ -13,3 +13,12 @@ id = "b7b2e726ce964ea1a894f5015f4964c9"
 
 [triggers]
 crons = ["* * * * *"]
+
+
+[[durable_objects.bindings]]
+name = "PUSH_DELIVERY"
+class_name = "PushDelivery"
+
+[[migrations]]
+tag = "delivery-v1"
+new_sqlite_classes = ["PushDelivery"]

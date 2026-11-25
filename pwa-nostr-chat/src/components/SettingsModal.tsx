@@ -2454,6 +2454,7 @@ export function SettingsModal({
                 aria-label="Enable notifications"
                 onChange={() => {
                   notif.updateSettings({ enabled: !ns.enabled })
+                  if (ns.enabled) void notif.disconnectPushBridge({ keepAutomaticRegistration: true })
                   onPlaySound?.('click')
                 }}
               />
@@ -2931,6 +2932,49 @@ export function SettingsModal({
               Agnostr&apos;s built-in push bridge wakes this device while closed. Enter a custom
               server below only if you self-host your own bridge.
             </p>
+
+            {notif.usesExternalPushSigner && (
+              <label className="ag-set-notif-row">
+                <div className="ag-set-notif-row-copy">
+                  <span className="ag-set-notif-row-title">Sign Direct Push Requests</span>
+                  <span className="ag-set-notif-row-desc">
+                    Let your signer authorize background delivery hints when you send. It
+                    may ask you to sign a separate request per message. The bridge receives
+                    the signed delivery metadata. Reconnect this device manually if its
+                    incoming push subscription changes.
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  className="ag-switch"
+                  checked={ns.extensionPushPokes}
+                  onChange={() => notif.updateSettings({ extensionPushPokes: !ns.extensionPushPokes })}
+                />
+              </label>
+            )}
+
+            {!notif.usesExternalPushSigner && (
+              <label className="ag-set-notif-row">
+                <div className="ag-set-notif-row-copy">
+                  <span className="ag-set-notif-row-title">Background Alerts for Pinned Public Bitchat Rooms</span>
+                  <span className="ag-set-notif-row-desc">
+                    Let the bridge monitor up to 12 pinned public Bitchat rooms for new messages.
+                    Requires Bitchat alerts set to All, with no blocked peers or strict allowlist.
+                    Private rooms and filter lists are not shared. Reopen Agnostr at least every
+                    12 hours to keep this optional fallback active.
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  className="ag-switch"
+                  checked={ns.publicPinnedRoomFallback}
+                  disabled={!notif.publicPinnedRoomFallbackAvailable && !ns.publicPinnedRoomFallback}
+                  onChange={() =>
+                    notif.updateSettings({ publicPinnedRoomFallback: !ns.publicPinnedRoomFallback })
+                  }
+                />
+              </label>
+            )}
 
             <form className="ag-set-subform" onSubmit={(e) => void handleConnectPushBridge(e)}>
               <input

@@ -1,15 +1,15 @@
 import { verifyEvent, type Event as NostrEvent } from 'nostr-tools/pure'
 import {
   aliasKeyForPubkey,
-  PUBKEYS_INDEX_KEY,
-  seenKeyForEvent,
+  publicRoomEnabled,
   subKeyForPubkey,
   type Env,
   type IncomingPushPayload,
   type StoredDeviceSubscription,
   type StoredUserRecord,
 } from './types.ts'
-import { sendWebPushNotification } from './webpush.ts'
+import { addCounts, emptyCounts, nextScanPage, queueJobs, type DeliveryJob } from './delivery.ts'
+import { sha256Hex } from './webpush.ts'
 
 const CRON_RELAYS = [
   'wss://relay.damus.io',
@@ -17,10 +17,16 @@ const CRON_RELAYS = [
   'wss://offchain.pub',
 ] as const
 
-const CRON_KINDS = [1059, 1, 6, 7, 9, 20000, 9735, 9321]
+const PUBLIC_KINDS = [4, 1, 6, 7, 9, 20000, 23333, 9735, 9321]
 const RELAY_TIMEOUT_MS = 4_500
-const SEEN_TTL_SECONDS = 600
-const LOOKBACK_SECONDS = 95
+const GIFT_LOOKBACK_SECONDS = 48 * 3600 + 600
+const GIFT_WINDOW_SECONDS = 12 * 3600
+const PUBLIC_LOOKBACK_SECONDS = 600
+const LIMIT_PER_QUERY = 64
+const MAX_GIFT_QUERIES = 11
+const SCAN_WORK_MS = 28_000
+const ROOMS_PER_TICK = 12
+interface RelaySnapshot { events: NostrEvent[]; complete: boolean }
 
 function wssToHttps(wssUrl: string): string {
   return wssUrl.replace(/^wss:\/\//i, 'https://').replace(/^ws:\/\//i, 'http://')
@@ -48,16 +54,22 @@ function getAllTagValues(tags: string[][], name: string): string[] {
 async function queryRelayEvents(
   relayWssUrl: string,
   pubkeys: string[],
-  sinceSec: number
-): Promise<NostrEvent[]> {
-  if (pubkeys.length === 0) return []
+  kinds: number[],
+  sinceSec: number,
+  untilSec: number,
+  deadlineMs = Date.now()+2*RELAY_TIMEOUT_MS,
+  tag: '#p' | '#g' | '#d' = '#p'
+): Promise<RelaySnapshot> {
+  if (pubkeys.length === 0) return { events: [], complete: true }
+  if (Date.now() >= deadlineMs) return { events: [], complete: false }
   const events: NostrEvent[] = []
   const subId = `agpush-${Math.random().toString(36).slice(2, 10)}`
 
   let ws: WebSocket | null = null
+  let complete = false
   try {
     const controller = new AbortController()
-    const connectTimer = setTimeout(() => controller.abort(), RELAY_TIMEOUT_MS)
+    const connectTimer = setTimeout(() => controller.abort(), Math.min(RELAY_TIMEOUT_MS,deadlineMs-Date.now()))
     let resp: Response
     try {
       resp = await fetch(wssToHttps(relayWssUrl), {
@@ -69,7 +81,7 @@ async function queryRelayEvents(
     }
 
     ws = (resp as Response & { webSocket?: WebSocket | null }).webSocket ?? null
-    if (!ws) return []
+    if (!ws) return { events, complete: false }
     ;(ws as WebSocket & { accept?: () => void }).accept?.()
 
     await new Promise<void>((resolve) => {
@@ -91,7 +103,7 @@ async function queryRelayEvents(
         resolve()
       }
 
-      const timer = setTimeout(done, RELAY_TIMEOUT_MS)
+      const timer = setTimeout(done, Math.max(1,Math.min(RELAY_TIMEOUT_MS,deadlineMs-Date.now())))
 
       ws!.addEventListener('message', (msgEv: MessageEvent) => {
         if (typeof msgEv.data !== 'string') return
@@ -104,8 +116,13 @@ async function queryRelayEvents(
         if (!Array.isArray(frame) || frame.length < 2) return
         if (frame[0] === 'EVENT' && frame[1] === subId && frame[2] && typeof frame[2] === 'object') {
           events.push(frame[2] as NostrEvent)
-          if (events.length >= 80) done()
+          if (events.length >= LIMIT_PER_QUERY) done()
         } else if (frame[0] === 'EOSE' && frame[1] === subId) {
+          complete = true
+          done()
+        } else if (frame[0] === 'CLOSED' && frame[1] === subId) {
+          // Recipient-authenticated relays may refuse queries; never answer their
+          // challenge as a user or treat an access denial as an empty history.
           done()
         }
       })
@@ -119,10 +136,11 @@ async function queryRelayEvents(
             'REQ',
             subId,
             {
-              kinds: CRON_KINDS,
-              '#p': pubkeys,
+              kinds,
+              [tag]: pubkeys,
               since: sinceSec,
-              limit: 80,
+              until: untilSec,
+              limit: LIMIT_PER_QUERY,
             },
           ])
         )
@@ -138,7 +156,7 @@ async function queryRelayEvents(
     }
   }
 
-  return events
+  return { events, complete }
 }
 
 function extractHexEventTag(tags: string[][], preferLast = false): string | undefined {
@@ -184,6 +202,16 @@ function buildPayloadForEvent(
         tag: 'agnostr-dm-wrap',
         recipientPubkey,
       },
+    }
+  }
+
+  if (ev.kind === 4) {
+    if (!prefs.dms) return null
+    return {
+      title: 'New encrypted message',
+      body: 'Open Agnostr to read your private message.',
+      tag: 'agnostr-dm-encrypted',
+      data: { category: 'dm', recipientPubkey, peerPubkey: authorPk },
     }
   }
 
@@ -319,11 +347,11 @@ function buildPayloadForEvent(
     }
   }
 
-  if (ev.kind === 20000) {
+  if (ev.kind === 20000 || ev.kind === 23333) {
     const geoMode = prefs.geoMessages as string | boolean | undefined
     const geoOff = geoMode === 'off' || geoMode === false
     if (!prefs.directPings && geoOff) return null
-    const geohash = getTagValue(ev.tags, 'g') || undefined
+    const geohash = eventRoom(ev) || undefined
     const title =
       showPreviews && senderNick
         ? geohash
@@ -346,222 +374,211 @@ function buildPayloadForEvent(
   return null
 }
 
-/**
- * 1-minute Cron Trigger — strictly KV Free-Tier safe:
- * - Reads `pubkeys:index` (1 KV read). If empty → 0 KV writes, exits immediately.
- * - Queries 3 fast Nostr relays in parallel (4.5s hard cap).
- * - If 0 matching events → 0 KV writes, exits immediately.
- * - Only writes `seen:<eventId>` (10-min TTL) when an actual matching event is delivered.
- */
-export async function runNostrPushCron(env: Env): Promise<{
+async function giftSnapshot(relay: string, recipients: string[], now: number, deadline: number, lookback: number): Promise<RelaySnapshot> {
+  // created_at is intentionally backdated. Requery overlapping creation-time
+  // bands, but decide "new" using a durable observed-ID cursor, never the date.
+  const bands: [number, number][] = []
+  for (let from = now-lookback; from <= now+900; from += GIFT_WINDOW_SECONDS) {
+    bands.push([from, Math.min(from+GIFT_WINDOW_SECONDS-1, now+900)])
+  }
+  let queries = 0
+  let complete = true
+  const events = new Map<string,NostrEvent>()
+  const partial = async (from: number, to: number): Promise<void> => {
+    if (queries >= MAX_GIFT_QUERIES || Date.now() >= deadline) { complete = false; return }
+    queries++
+    const page = await queryRelayEvents(relay, recipients, [1059], from, to, deadline)
+    for (const ev of page.events) if (ev?.kind === 1059 && typeof ev.id === 'string') events.set(ev.id,ev)
+    if (page.complete) return
+    if (page.events.length >= LIMIT_PER_QUERY && from < to && queries+2 <= MAX_GIFT_QUERIES) {
+      const middle = Math.floor((from+to)/2)
+      await partial(from, middle)
+      await partial(middle+1, to)
+      return
+    }
+    complete = false
+  }
+  // Start each coarse band even when an earlier band is busy, then refine
+  // saturated ones; otherwise an oldest bucket could starve newer arrivals.
+  const refine: [number, number][] = []
+  for (const [from,to] of bands) {
+    queries++
+    const page = await queryRelayEvents(relay, recipients, [1059], from, to, deadline)
+    for (const ev of page.events) if (ev?.kind === 1059 && typeof ev.id === 'string') events.set(ev.id,ev)
+    if (!page.complete) {
+      if (page.events.length >= LIMIT_PER_QUERY && from < to) refine.push([from,to])
+      else complete=false
+    }
+  }
+  for (const [from,to] of refine) {
+    const middle=Math.floor((from+to)/2)
+    await partial(from,middle)
+    await partial(middle+1,to)
+  }
+  return { events: [...events.values()], complete }
+}
+
+function publicRoomKey(key: string): boolean {
+  // Earth/celestial #g tags or named Bitchat #d slugs, never a virtual/private
+  // channel key. The subscriptions below are on the fixed public relay set.
+  return (/^(?:[a-z][a-z0-9_-]{0,25}:)?[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$/.test(key) &&
+    !key.startsWith('topic:')) || /^topic:[a-z0-9][a-z0-9_-]{0,47}$/.test(key)
+}
+
+function eventRoom(ev: NostrEvent): string | null {
+  if (ev.kind === 20000) return getTagValue(ev.tags, 'g')
+  const slug = ev.kind === 23333 ? getTagValue(ev.tags, 'd') : null
+  return slug ? 'topic:'+slug : null
+}
+
+function validEvent(ev: NostrEvent): boolean {
+  if (!ev || !/^[0-9a-f]{64}$/.test(ev.id) || !Array.isArray(ev.tags)) return false
+  try { return verifyEvent(ev) } catch { return false }
+}
+
+function roomJob(ev: NostrEvent, record: StoredUserRecord, allowed: Set<string>): DeliveryJob | null {
+  if (!validEvent(ev) || ev.pubkey === record.pubkey || record.aliasPubkeys?.includes(ev.pubkey)) return null
+  const room = eventRoom(ev)
+  if (!room || !allowed.has(room)) return null
+  return {
+    id: `relay:${ev.id}`,
+    ttlSeconds: 600,
+    targets: record.devices.flatMap((dev) => {
+      if (!publicRoomEnabled(dev) || ev.created_at*1000+999 < (dev.publicPinnedRoomSince ?? Infinity)
+          || !dev.geohashes.includes(room)) return []
+      const payload: IncomingPushPayload = {
+        title: 'New Bitchat room message',
+        body: 'Open Agnostr to read a new message in your pinned public room.',
+        tag: `agnostr-geo-${room}`,
+        data: { category: 'geo-message', geohash: room, recipientPubkey: record.pubkey,
+          peerPubkey: ev.pubkey, deliveryEventId: ev.id },
+      }
+      return [{ endpointHash: dev.endpointHash, preferences: JSON.stringify(dev.preferences), room, payload }]
+    }),
+  }
+}
+
+function buildJob(ev: NostrEvent, record: StoredUserRecord): DeliveryJob | null {
+  const isSelf = ev.pubkey === record.pubkey || record.aliasPubkeys?.includes(ev.pubkey)
+  if (isSelf && ev.kind !== 1059 && ev.kind !== 9735 && ev.kind !== 9321) return null
+  const targets = record.devices.flatMap((dev) => {
+    const payload = buildPayloadForEvent(ev, dev, record.pubkey)
+    if (!payload) return []
+    if (payload.data) payload.data.deliveryEventId = ev.id
+    return [{ endpointHash: dev.endpointHash, preferences: JSON.stringify(dev.preferences), payload }]
+  })
+  // IDs here are relay event hashes. The blind sender path uses a separate
+  // authenticated namespace; no correlation of ephemeral wraps to senders.
+  return { id: `relay:${ev.id}`, targets, ttlSeconds: 86_400 }
+}
+
+function validForTag(ev: NostrEvent, tag: string): boolean {
+  return Array.isArray(ev?.tags) &&
+    getAllTagValues(ev.tags, 'p').some((pk) => pk.toLowerCase() === tag) && validEvent(ev)
+}
+
+/** Budgeted per-recipient relay scanning. Incomplete/reset scans are explicit;
+ * private relays are never impersonated and may be unavailable to the bridge. */
+export async function runNostrPushCron(env: Env, scheduledAt = Date.now()): Promise<{
   checkedPubkeys: number
   fetchedEvents: number
   delivered: number
+  queued: number
+  partialGiftScans: number
+  failed: number
 }> {
-  const rawIndex = await env.PUSH_KV.get(PUBKEYS_INDEX_KEY, 'json')
-  const pubkeys = Array.isArray(rawIndex)
-    ? Array.from(
-        new Set(
-          rawIndex
-            .filter((x): x is string => typeof x === 'string' && /^[0-9a-f]{64}$/i.test(x))
-            .map((x) => x.toLowerCase())
-        )
-      )
-    : []
-
-  if (pubkeys.length === 0) {
-    return { checkedPubkeys: 0, fetchedEvents: 0, delivered: 0 }
+  const {tags,rotation,periodSeconds} = await nextScanPage(env,scheduledAt)
+  if (!tags.length) return { checkedPubkeys: 0, fetchedEvents: 0, delivered: 0, queued: 0, partialGiftScans: 0, failed: 0 }
+  const now = Math.floor(scheduledAt/1000)
+  // Use observed full sweep length to cover moderate backlogs without
+  // making either public or encrypted Nostr reads unbounded.
+  const publicWindow = Math.min(3600,Math.max(PUBLIC_LOOKBACK_SECONDS,2*periodSeconds))
+  const giftWindow = GIFT_LOOKBACK_SECONDS+Math.min(6*3600,2*periodSeconds)
+  const records = new Map<string,StoredUserRecord>()
+  for (const tag of tags) {
+    const direct = await env.PUSH_KV.get<StoredUserRecord>(subKeyForPubkey(tag),'json')
+    if (direct?.devices?.length) { records.set(tag,direct); continue }
+    const alias = await env.PUSH_KV.get(aliasKeyForPubkey(tag))
+    if (!alias || !/^[0-9a-f]{64}$/i.test(alias)) continue
+    const rec = await env.PUSH_KV.get<StoredUserRecord>(subKeyForPubkey(alias),'json')
+    if (rec?.devices?.length) records.set(tag,rec)
   }
-
-  const pubkeySet = new Set(pubkeys)
-  const sinceSec = Math.floor(Date.now() / 1000) - LOOKBACK_SECONDS
-
-  // Chunk into groups of <= 60 pubkeys if needed
-  const relayBatches: Promise<NostrEvent[]>[] = []
-  for (let i = 0; i < pubkeys.length; i += 60) {
-    const slice = pubkeys.slice(i, i + 60)
-    for (const relayUrl of CRON_RELAYS) {
-      relayBatches.push(queryRelayEvents(relayUrl, slice, sinceSec))
-    }
-  }
-
-  const nestedResults = await Promise.all(relayBatches)
-  const uniqueById = new Map<string, NostrEvent>()
-  for (const list of nestedResults) {
-    for (const ev of list) {
-      if (
-        ev &&
-        typeof ev.id === 'string' &&
-        /^[0-9a-f]{64}$/i.test(ev.id) &&
-        !uniqueById.has(ev.id)
-      ) {
-        uniqueById.set(ev.id, ev)
+  const uniqueRoomRecords = Array.from(new Map([...records.values()].map((rec) => [rec.pubkey,rec])).values())
+  const allRooms = [...new Set(uniqueRoomRecords.flatMap((record) =>
+    record.devices.flatMap((dev) => publicRoomEnabled(dev)
+      ? (dev.geohashes ?? []).filter(publicRoomKey) : [])))].sort()
+  // Recipient batches already rotate each minute. Rotate room slices on
+  // successive visits to a batch, not raw wall minutes (which may share a
+  // divisor with the room count and leave some rooms starved indefinitely).
+  const roomOffset = allRooms.length
+    ? (rotation % Math.ceil(allRooms.length/ROOMS_PER_TICK))*ROOMS_PER_TICK : 0
+  const rooms = allRooms.slice(roomOffset,roomOffset+ROOMS_PER_TICK)
+  const geoRooms = rooms.filter((room) => !room.startsWith('topic:'))
+  const topicRooms = rooms.filter((room) => room.startsWith('topic:')).map((room) => room.slice(6))
+  const deadline = Date.now()+SCAN_WORK_MS
+  const [payloads, roomSnapshots] = await Promise.all([
+    Promise.all(CRON_RELAYS.map(async (relay) => {
+      const publicEvents = await queryRelayEvents(relay, tags, PUBLIC_KINDS, now-publicWindow, now+90, deadline)
+      const gift = await giftSnapshot(relay, tags, now, deadline, giftWindow)
+      return { relay, publicEvents, gift }
+    })),
+    Promise.all(CRON_RELAYS.map(async (relay) => {
+      const geo = await queryRelayEvents(relay, geoRooms, [20000], now-publicWindow, now+90, deadline, '#g')
+      const topics = await queryRelayEvents(relay, topicRooms, [23333], now-publicWindow, now+90, deadline, '#d')
+      return [...geo.events, ...topics.events]
+    })),
+  ])
+  const seen = new Set<string>()
+  const result = emptyCounts()
+  for (const {relay,gift,publicEvents} of payloads) {
+    for (const tag of tags) {
+      const record = records.get(tag)
+      if (!record) continue
+      const publicJobs: DeliveryJob[] = []
+      for (const ev of publicEvents.events) {
+        if (!PUBLIC_KINDS.includes(ev.kind) || !validForTag(ev,tag)) continue
+        seen.add(ev.id)
+        const job = buildJob(ev,record)
+        if (job?.targets.length) publicJobs.push(job)
+      }
+      const events = gift.events.flatMap((ev) => {
+        if (!validForTag(ev,tag)) return []
+        seen.add(ev.id)
+        const job = buildJob(ev,record)
+        return job ? [{ ...job, eventId: ev.id }] : []
+      })
+      try {
+        addCounts(result, await queueJobs(env, {
+          recipient: record.pubkey,
+          jobs: publicJobs,
+          observation: { relay: await sha256Hex(relay+':'+tag), complete: gift.complete, events },
+        }))
+      } catch {
+        result.failed += Math.max(1, publicJobs.length+events.length)
       }
     }
   }
-
-  if (uniqueById.size === 0) {
-    return { checkedPubkeys: pubkeys.length, fetchedEvents: 0, delivered: 0 }
-  }
-
-  let delivered = 0
-  const userCache = new Map<string, StoredUserRecord | null>()
-  const aliasCache = new Map<string, string | null>()
-  const dirtyUsers = new Set<string>()
-  const removedPubkeys = new Set<string>()
-
-  const resolveRecordForRecipient = async (
-    rawPk: string
-  ): Promise<{ masterPk: string; record: StoredUserRecord } | null> => {
-    const pk = rawPk.toLowerCase()
-    if (!userCache.has(pk)) {
-      const direct = (await env.PUSH_KV.get(subKeyForPubkey(pk), 'json')) as StoredUserRecord | null
-      userCache.set(pk, direct)
-    }
-    const directRec = userCache.get(pk)
-    if (directRec && Array.isArray(directRec.devices) && directRec.devices.length > 0) {
-      return { masterPk: pk, record: directRec }
-    }
-
-    if (!aliasCache.has(pk)) {
-      const mapped = await env.PUSH_KV.get(aliasKeyForPubkey(pk))
-      const clean =
-        typeof mapped === 'string' && /^[0-9a-f]{64}$/i.test(mapped)
-          ? mapped.toLowerCase()
-          : null
-      aliasCache.set(pk, clean)
-    }
-    const masterPk = aliasCache.get(pk)
-    if (!masterPk) return null
-
-    if (!userCache.has(masterPk)) {
-      const stored = (await env.PUSH_KV.get(
-        subKeyForPubkey(masterPk),
-        'json'
-      )) as StoredUserRecord | null
-      userCache.set(masterPk, stored)
-    }
-    const aliasedRec = userCache.get(masterPk)
-    if (aliasedRec && Array.isArray(aliasedRec.devices) && aliasedRec.devices.length > 0) {
-      return { masterPk, record: aliasedRec }
-    }
-    return null
-  }
-
-  for (const ev of uniqueById.values()) {
-    const authorPk = ev.pubkey.toLowerCase()
-    const recipients = getAllTagValues(ev.tags, 'p')
-      .map((p) => p.toLowerCase())
-      .filter((p) => pubkeySet.has(p))
-
-    // Avoid self-push noise on regular chat/mentions (keep gift-wrap 1059 since wrap pubkey is ephemeral)
-    const filteredRecipients = Array.from(new Set(recipients)).filter(
-      (r) => ev.kind === 1059 || ev.kind === 9735 || ev.kind === 9321 || r !== authorPk
-    )
-    if (filteredRecipients.length === 0) continue
-
-    let sigOk = false
-    try {
-      sigOk = verifyEvent(ev)
-    } catch {
-      sigOk = false
-    }
-    if (!sigOk) continue
-
-    const seenKey = seenKeyForEvent(ev.id)
-    const alreadySeen = await env.PUSH_KV.get(seenKey)
-    if (alreadySeen) continue
-    await env.PUSH_KV.put(seenKey, '1', { expirationTtl: SEEN_TTL_SECONDS })
-
-    const deliveredMastersForEvent = new Set<string>()
-
-    for (const recipientPk of filteredRecipients) {
-      const resolved = await resolveRecordForRecipient(recipientPk)
-      if (!resolved) continue
-      const { masterPk, record } = resolved
-
-      if (deliveredMastersForEvent.has(masterPk)) continue
-      if (
-        ev.kind !== 1059 &&
-        ev.kind !== 9735 &&
-        ev.kind !== 9321 &&
-        (masterPk === authorPk ||
-          (Array.isArray(record.aliasPubkeys) && record.aliasPubkeys.includes(authorPk)))
-      ) {
-        continue
-      }
-      deliveredMastersForEvent.add(masterPk)
-
-      const survivingDevices: StoredDeviceSubscription[] = []
-      let recordChanged = false
-
-      for (const dev of record.devices) {
-        const payload = buildPayloadForEvent(ev, dev, masterPk)
-        if (!payload) {
-          survivingDevices.push(dev)
-          continue
-        }
-
-        const res = await sendWebPushNotification({
-          subscription: dev.subscription,
-          payload,
-          vapidPublicKey: env.VAPID_PUBLIC_KEY,
-          vapidPrivateKey: env.VAPID_PRIVATE_KEY,
-          vapidSubject: env.VAPID_SUBJECT,
-          ttlSeconds: 86_400,
-          urgency: 'high',
-        })
-        if (res.ok) delivered += 1
-        if (res.expired) {
-          recordChanged = true
-        } else {
-          survivingDevices.push(dev)
-        }
-      }
-
-      if (recordChanged) {
-        record.devices = survivingDevices
-        record.updatedAt = Date.now()
-        dirtyUsers.add(masterPk)
-        if (survivingDevices.length === 0) {
-          removedPubkeys.add(masterPk)
-          if (Array.isArray(record.aliasPubkeys)) {
-            for (const aliasPk of record.aliasPubkeys) {
-              removedPubkeys.add(aliasPk.toLowerCase())
-            }
-          }
-        }
-      }
+  if (rooms.length) {
+    const allowed = new Set(rooms)
+    const roomEvents = roomSnapshots.flat().filter((ev) => {
+      const room = eventRoom(ev)
+      return room && allowed.has(room) && validEvent(ev)
+    })
+    const deduped = [...new Map(roomEvents.map((ev) => [ev.id,ev])).values()]
+    for (const record of uniqueRoomRecords) {
+      const jobs = deduped.flatMap((ev) => {
+        const job = roomJob(ev, record, allowed)
+        if (!job?.targets.length) return []
+        seen.add(ev.id)
+        return [job]
+      })
+      if (!jobs.length) continue
+      try { addCounts(result,await queueJobs(env,{ recipient:record.pubkey,jobs })) }
+      catch { result.failed += jobs.length }
     }
   }
-
-  // Persist any expired-endpoint prunings
-  for (const pk of dirtyUsers) {
-    const rec = userCache.get(pk)
-    if (!rec || rec.devices.length === 0) {
-      await env.PUSH_KV.delete(subKeyForPubkey(pk))
-      if (Array.isArray(rec?.aliasPubkeys)) {
-        for (const aliasPk of rec.aliasPubkeys) {
-          const aliasKey = aliasKeyForPubkey(aliasPk)
-          const owner = await env.PUSH_KV.get(aliasKey)
-          if (owner?.toLowerCase() === pk) {
-            await env.PUSH_KV.delete(aliasKey)
-          }
-        }
-      }
-    } else {
-      await env.PUSH_KV.put(subKeyForPubkey(pk), JSON.stringify(rec))
-    }
-  }
-
-  if (removedPubkeys.size > 0) {
-    const nextIndex = pubkeys.filter((pk) => !removedPubkeys.has(pk))
-    await env.PUSH_KV.put(PUBKEYS_INDEX_KEY, JSON.stringify(nextIndex))
-  }
-
   return {
-    checkedPubkeys: pubkeys.length,
-    fetchedEvents: uniqueById.size,
-    delivered,
+    checkedPubkeys: tags.length, fetchedEvents: seen.size, delivered: result.delivered, queued: result.queued,
+    partialGiftScans: payloads.filter((x) => !x.gift.complete).length, failed: result.failed,
   }
 }

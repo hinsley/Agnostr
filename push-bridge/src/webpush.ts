@@ -216,6 +216,7 @@ export interface WebPushSendResult {
   status: number
   expired: boolean
   error?: string
+  retryAfterMs?: number
 }
 
 export async function sendWebPushNotification(opts: {
@@ -260,6 +261,7 @@ export async function sendWebPushNotification(opts: {
       method: 'POST',
       headers,
       body: toArrayBuffer(encryptedBody),
+      signal: AbortSignal.timeout(8_000),
     })
 
     const expired = res.status === 404 || res.status === 410
@@ -270,12 +272,17 @@ export async function sendWebPushNotification(opts: {
       error = detail ? `HTTP ${res.status}: ${detail.slice(0, 140)}` : `HTTP ${res.status}`
     }
 
+    const retryHeader = res.headers.get('Retry-After')
+    const delay = retryHeader && /^\d+$/.test(retryHeader)
+      ? Number(retryHeader) * 1000
+      : retryHeader ? Date.parse(retryHeader) - Date.now() : NaN
     return {
       endpoint: subscription.endpoint,
       ok,
       status: res.status,
       expired,
       error,
+      retryAfterMs: Number.isFinite(delay) && delay > 0 ? delay : undefined,
     }
   } catch (err) {
     return {

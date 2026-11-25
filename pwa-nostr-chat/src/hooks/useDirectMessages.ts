@@ -1,3 +1,4 @@
+import { rememberLiveDmPush } from '../lib/pushDisplay.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PushPokePayload } from '../types/notifications.ts'
 import type {
@@ -367,6 +368,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                   ...baseMsg,
                   orderMs: isLiveRecent ? Math.max(receivedAtMs, lastOrder + 1) : clampedBacklogMs,
                 }
+                rememberLiveDmPush(newMsg, ev.id, masterMat.pubkey)
                 const nextMsgs = [...existing.messages, newMsg].sort(compareDmMessages)
                 const tail = nextMsgs[nextMsgs.length - 1]
                 const updated: DmThread = {
@@ -389,6 +391,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                 ...baseMsg,
                 orderMs: isLiveRecent ? receivedAtMs : clampedBacklogMs,
               }
+              rememberLiveDmPush(newMsg, ev.id, masterMat.pubkey)
               const created: DmThread = {
                 peerPubkey: senderPk,
                 peerNpub: encodeNpubSafe(senderPk),

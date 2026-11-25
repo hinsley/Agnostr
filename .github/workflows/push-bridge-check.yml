@@ -1,0 +1,32 @@
+name: Check push bridge
+
+on:
+  pull_request:
+    paths: ['push-bridge/**', '.github/workflows/push-bridge-check.yml']
+  push:
+    branches: [main]
+    paths: ['push-bridge/**', '.github/workflows/push-bridge-check.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: push-bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: push-bridge/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Bundle Worker without deploying
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/agnostr-push"

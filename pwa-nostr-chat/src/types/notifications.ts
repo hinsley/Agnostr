@@ -79,12 +79,19 @@ export interface NotificationSettings {
   vibrationEnabled: boolean
   showPreviews: boolean
   pushBridgeUrl: string
+  backgroundPushEnabled: boolean
+  publicPinnedRoomFallback: boolean
+  extensionPushPokes: boolean
   vapidPublicKey: string
   prefsVersion?: number
 }
 
 export interface NotificationPayloadData {
   category: NotificationCategory
+  /** Exact delivery event, distinct from a referenced note ID. */
+  deliveryEventId?: string
+  /** Ephemeral current-device Test Push correlation ID. */
+  testId?: string
   tag?: string
   callId?: string
   mediaType?: 'audio' | 'video'
@@ -108,6 +115,8 @@ export interface NotificationEngine {
   permission: NotificationPermissionState
   isSupported: boolean
   isPushSupported: boolean
+  usesExternalPushSigner: boolean
+  publicPinnedRoomFallbackAvailable: boolean
   isIosRequiresInstall: boolean
 
   // Persisted notification preferences
@@ -137,7 +146,7 @@ export interface NotificationEngine {
     bridgeUrlOverride?: string,
     vapidKeyOverride?: string
   ) => Promise<boolean>
-  disconnectPushBridge: () => Promise<void>
+  disconnectPushBridge: (opts?: { keepAutomaticRegistration?: boolean }) => Promise<void>
   sendTestPush: () => Promise<{ ok: boolean; detail: string }>
   pokeRecipients: (payload: PushPokePayload) => void
 }
