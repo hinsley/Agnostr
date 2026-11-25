@@ -2675,15 +2675,17 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
       )}
 
-      <UserProfileDock
-        engine={engine}
-        collapsed={collapsed}
-        pwa={pwa}
-        onOpenSettings={onOpenSettings}
-        onOpenOwnAgoraProfile={onOpenOwnAgoraProfile}
-        onOpenInstall={onOpenInstall}
-        onPlaySound={onPlaySound}
-      />
+      {isMobileViewport && (
+        <UserProfileDock
+          engine={engine}
+          collapsed={collapsed}
+          pwa={pwa}
+          onOpenSettings={onOpenSettings}
+          onOpenOwnAgoraProfile={onOpenOwnAgoraProfile}
+          onOpenInstall={onOpenInstall}
+          onPlaySound={onPlaySound}
+        />
+      )}
     </aside>
   )
 }

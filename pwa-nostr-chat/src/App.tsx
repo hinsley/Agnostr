@@ -69,6 +69,7 @@ import ToastStack from './components/ToastStack'
 import IncomingCallBanner from './components/IncomingCallBanner'
 import TrustConfirmModal from './components/TrustConfirmModal'
 import { ContextMenuProvider } from './components/ContextMenu'
+import { EmojiAutocompleteOverlay } from './components/EmojiAutocompleteOverlay'
 import type { SettingsTab } from './components/SettingsModal'
 import type { ServerHubTab } from './components/ServerHubModal'
 import type { ServerSettingsTab } from './components/ServerSettingsModal'
@@ -239,6 +240,7 @@ export function App() {
   const [radarExpanded, setRadarExpanded] = useState(false)
   const [installModalOpen, setInstallModalOpen] = useState(false)
   const [callExpanded, setCallExpanded] = useState(false)
+  const [callDockSlotEl, setCallDockSlotEl] = useState<HTMLDivElement | null>(null)
   const [lightboxImage, setLightboxImage] = useState<LightboxImagePayload | null>(null)
   const [qrShareTarget, setQrShareTarget] = useState<QrShareTarget | null>(null)
   const [qrScannerOpen, setQrScannerOpen] = useState(false)
@@ -387,8 +389,14 @@ export function App() {
   const pwa = usePwa(totalUnreadBadge)
 
   const activeCall = engine.calls.activeCall
+  const inChatRoomMain =
+    workspace === 'chat' &&
+    !isBitchatGlobe &&
+    !isPeopleEmptyStage &&
+    !(isMobileViewport && mobileScreen === 'list')
   const viewingActiveCallContext = Boolean(
     activeCall &&
+      inChatRoomMain &&
       ((activeCall.mode === 'dm' &&
         engine.activeView.type === 'dm' &&
         engine.activeView.peerPubkey.toLowerCase() ===
@@ -401,6 +409,11 @@ export function App() {
           (activeCall.geohash ?? '').toLowerCase() === engine.activeGeohash.toLowerCase()))
   )
   const callCompactFloating = Boolean(activeCall && !callExpanded && !viewingActiveCallContext)
+  const callFloatingContext: 'globe' | 'chat' | 'workspace' = isBitchatGlobe
+    ? 'globe'
+    : workspace === 'chat'
+      ? 'chat'
+      : 'workspace'
 
   const activeGeoKey = engine.activeGeohash.toLowerCase()
   const inActiveGeoCallHere = Boolean(
@@ -2663,22 +2676,8 @@ export function App() {
                     </div>
                   )}
 
-                  {/* Active P2P Voice & Video Call Stage (+ Post-Call Transcript Save Prompt) */}
-                  {(activeCall || engine.transcription.endedCallTranscript) && (
-                    <Suspense fallback={null}>
-                      <CallStage
-                        calls={engine.calls}
-                        engine={engine}
-                        expanded={callExpanded}
-                        compactFloating={callCompactFloating}
-                        onToggleExpand={() => setCallExpanded((v) => !v)}
-                        onInspectPeer={setInspectedPeer}
-                        onOpenDm={handleOpenDm}
-                        onReturnToCall={handleReturnToActiveCall}
-                        onPlaySound={playSound}
-                      />
-                    </Suspense>
-                  )}
+                  {/* Docked Call Stage Portal Target (keeps single CallStage mounted across all workspaces with zero audio dropout) */}
+                  <div ref={setCallDockSlotEl} className="ag-call-dock-slot" />
 
                   {/* Live Bitchat Group Call Join Banner (shown when peers are in this room's call) */}
                   {showGeoCallJoinBanner && (
@@ -2813,24 +2812,6 @@ export function App() {
               </>
             )}
           </>
-        )}
-
-        {/* Keep floating active call pill accessible when viewing Agora, Agmail, Agwallet, Bitchat Globe, or People empty stage */}
-        {(workspace !== 'chat' || isBitchatGlobe || isPeopleEmptyStage) &&
-          (activeCall || engine.transcription.endedCallTranscript) && (
-          <Suspense fallback={null}>
-            <CallStage
-              calls={engine.calls}
-              engine={engine}
-              expanded={callExpanded}
-              compactFloating={!callExpanded}
-              onToggleExpand={() => setCallExpanded((v) => !v)}
-              onInspectPeer={setInspectedPeer}
-              onOpenDm={handleOpenDm}
-              onReturnToCall={handleReturnToActiveCall}
-              onPlaySound={playSound}
-            />
-          </Suspense>
         )}
 
         {/* Clean Chat / Room / Server Info Slide-Over Sheet (Lazy loaded on open) */}
@@ -3356,9 +3337,29 @@ export function App() {
         </div>
       )}
 
+      {/* Single Persistent Active P2P Voice & Video Call Stage (docks in <main>, portals fixed pill/PiP/modal to body across all workspaces) */}
+      {(activeCall || engine.transcription.endedCallTranscript) && (
+        <Suspense fallback={null}>
+          <CallStage
+            calls={engine.calls}
+            engine={engine}
+            expanded={callExpanded}
+            compactFloating={callCompactFloating}
+            floatingContext={callFloatingContext}
+            dockContainer={inChatRoomMain ? callDockSlotEl : null}
+            onToggleExpand={() => setCallExpanded((v) => !v)}
+            onInspectPeer={setInspectedPeer}
+            onOpenDm={handleOpenDm}
+            onReturnToCall={handleReturnToActiveCall}
+            onPlaySound={playSound}
+          />
+        </Suspense>
+      )}
+
       {/* Non-Blocking Notifications */}
       <ToastStack toasts={engine.toasts} onDismiss={engine.dismissToast} />
     </div>
+    <EmojiAutocompleteOverlay />
     </ContextMenuProvider>
   )
 }

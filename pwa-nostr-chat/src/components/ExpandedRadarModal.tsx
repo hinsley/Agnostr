@@ -130,6 +130,7 @@ interface LiveDockItem {
   bodyName: string | null
   subLabel: string
   peerCount: number
+  messageCount: number
   lastActivityAt: number
   warmth: LiveWarmthTier
   unreadCount: number
@@ -141,6 +142,22 @@ interface LiveDockItem {
 const LIVE_DOCK_COLLAPSED_KEY = 'agnostr_globe_live_dock_collapsed'
 const LIVE_WARMTH_HOT_MS = 5 * 60 * 1000
 const LIVE_WARMTH_WARM_MS = 60 * 60 * 1000
+
+function hasActualMessageActivity(room: PulseRoom): boolean {
+  return (
+    (room.lastMessageAt ?? 0) > 0 ||
+    room.messageCount > 0 ||
+    Boolean(room.lastPreview?.trim())
+  )
+}
+
+function getRoomMessageTimestamp(room: PulseRoom): number {
+  if ((room.lastMessageAt ?? 0) > 0) return room.lastMessageAt!
+  if (room.messageCount > 0 || Boolean(room.lastPreview?.trim())) {
+    return room.lastActivityAt
+  }
+  return 0
+}
 
 function readLiveDockCollapsed(): boolean {
   try {
@@ -467,21 +484,12 @@ export function ExpandedRadarModal({
   }, [extraTopicKeys, pinnedTopics, topicPulseRooms])
 
   const totalLiveCount = celestialPulseRooms.length + topicPulseRooms.length
-  const prevTotalLiveRef = useRef(totalLiveCount)
 
   useEffect(() => {
     if (visibleLiveCount !== null && visibleLiveCount > 0) {
       setQuietChipDismissed(false)
     }
   }, [visibleLiveCount])
-
-  useEffect(() => {
-    const prev = prevTotalLiveRef.current
-    prevTotalLiveRef.current = totalLiveCount
-    if (prev === 0 && totalLiveCount > 0) {
-      setQuietChipDismissed(false)
-    }
-  }, [totalLiveCount])
 
   const handleToggleLiveDock = useCallback(() => {
     onPlaySound?.('click')
@@ -519,13 +527,15 @@ export function ExpandedRadarModal({
     const pushRoom = (room: PulseRoom) => {
       const keyLower = room.geohash.toLowerCase()
       if (seen.has(keyLower)) return
+      const unread = (unreadCounts[keyLower] ?? 0) + (mentionCounts[keyLower] ?? 0)
+      if (!hasActualMessageActivity(room) && unread <= 0) return
       seen.add(keyLower)
 
       const isTopic = isTopicChannel(room.geohash)
       const slug = isTopic ? (getTopicSlug(room.geohash) ?? room.geohash) : null
       const parsed = isTopic ? null : parseCelestialChannelKey(room.geohash)
       const bodyDef = parsed && parsed.bodyId !== 'earth' ? getBodyDef(parsed.bodyId) : null
-      const unread = (unreadCounts[keyLower] ?? 0) + (mentionCounts[keyLower] ?? 0)
+      const msgTs = getRoomMessageTimestamp(room)
 
       let subLabel = ''
       if (isTopic) {
@@ -547,8 +557,9 @@ export function ExpandedRadarModal({
         bodyName: bodyDef?.name ?? null,
         subLabel,
         peerCount: room.peerCount,
-        lastActivityAt: room.lastActivityAt,
-        warmth: getLiveWarmthTier(room.lastActivityAt, liveNowMs),
+        messageCount: room.messageCount,
+        lastActivityAt: msgTs,
+        warmth: msgTs > 0 ? getLiveWarmthTier(msgTs, liveNowMs) : 'recent',
         unreadCount: unread,
         isPinned: pinnedKeySet.has(keyLower),
         snippetSender: room.lastSender?.trim().replace(/^@+/, '') || '',
@@ -581,6 +592,7 @@ export function ExpandedRadarModal({
         bodyName: bodyDef?.name ?? null,
         subLabel: isTopic ? 'Asteroid' : cleanLabel || bodyDef?.name || '',
         peerCount: 0,
+        messageCount: 0,
         lastActivityAt: 0,
         warmth: 'recent',
         unreadCount: unread,
@@ -593,7 +605,7 @@ export function ExpandedRadarModal({
     items.sort((a, b) => {
       if (b.unreadCount !== a.unreadCount) return b.unreadCount - a.unreadCount
       if (b.lastActivityAt !== a.lastActivityAt) return b.lastActivityAt - a.lastActivityAt
-      return b.peerCount - a.peerCount
+      return b.messageCount - a.messageCount
     })
     return items
   }, [
@@ -606,6 +618,17 @@ export function ExpandedRadarModal({
     liveNowMs,
   ])
 
+  const liveMessageCount = liveDockItems.length
+  const prevLiveMessageCountRef = useRef(liveMessageCount)
+
+  useEffect(() => {
+    const prev = prevLiveMessageCountRef.current
+    prevLiveMessageCountRef.current = liveMessageCount
+    if (prev === 0 && liveMessageCount > 0) {
+      setQuietChipDismissed(false)
+    }
+  }, [liveMessageCount])
+
   const pinnedDockItems = useMemo<LiveDockItem[]>(() => {
     const items: LiveDockItem[] = pinnedChannels.map((pin) => {
       const keyLower = pin.geohash.toLowerCase()
@@ -615,6 +638,7 @@ export function ExpandedRadarModal({
       const parsed = isTopic ? null : parseCelestialChannelKey(pin.geohash)
       const bodyDef = parsed && parsed.bodyId !== 'earth' ? getBodyDef(parsed.bodyId) : null
       const unread = (unreadCounts[keyLower] ?? 0) + (mentionCounts[keyLower] ?? 0)
+      const msgTs = room ? getRoomMessageTimestamp(room) : 0
 
       let subLabel = pin.label?.replace(/^#/, '').trim() ?? ''
       if (isTopic) {
@@ -642,8 +666,9 @@ export function ExpandedRadarModal({
         bodyName: bodyDef?.name ?? null,
         subLabel,
         peerCount: room?.peerCount ?? 0,
-        lastActivityAt: room?.lastActivityAt ?? 0,
-        warmth: room ? getLiveWarmthTier(room.lastActivityAt, liveNowMs) : 'recent',
+        messageCount: room?.messageCount ?? 0,
+        lastActivityAt: msgTs,
+        warmth: msgTs > 0 ? getLiveWarmthTier(msgTs, liveNowMs) : 'recent',
         unreadCount: unread,
         isPinned: true,
         snippetSender: room?.lastSender?.trim().replace(/^@+/, '') || '',
@@ -654,7 +679,7 @@ export function ExpandedRadarModal({
     items.sort((a, b) => {
       if (b.unreadCount !== a.unreadCount) return b.unreadCount - a.unreadCount
       if (b.lastActivityAt !== a.lastActivityAt) return b.lastActivityAt - a.lastActivityAt
-      return b.peerCount - a.peerCount
+      return b.messageCount - a.messageCount
     })
     return items
   }, [pinnedChannels, liveRoomByKey, unreadCounts, mentionCounts, liveNowMs])
@@ -666,7 +691,7 @@ export function ExpandedRadarModal({
       if (
         !best ||
         item.lastActivityAt > best.lastActivityAt ||
-        (item.lastActivityAt === best.lastActivityAt && item.peerCount > best.peerCount)
+        (item.lastActivityAt === best.lastActivityAt && item.messageCount > best.messageCount)
       ) {
         best = item
       }
@@ -1140,7 +1165,7 @@ export function ExpandedRadarModal({
   const dockVisibleItems = dockSourceItems.slice(0, 5)
   const dockOverflowCount =
     effectiveDockTab === 'live'
-      ? Math.max(0, totalLiveCount - 5)
+      ? Math.max(0, liveMessageCount - 5)
       : Math.max(0, pinnedChannels.length - 5)
   const mobileStripItems = (liveDockItems.length > 0 ? liveDockItems : pinnedDockItems).slice(0, 8)
   const hasBottomSnippet = Boolean(
@@ -1325,11 +1350,10 @@ export function ExpandedRadarModal({
       </div>
 
       {/* Smart "Jump to Active" Chip when focused hemisphere is quiet */}
-      {totalLiveCount > 0 &&
+      {hottestLiveItem !== null &&
         visibleLiveCount === 0 &&
         activePopover === null &&
-        !quietChipDismissed &&
-        hottestLiveItem && (
+        !quietChipDismissed && (
           <div className="ag-radar-jump-active-chip" role="status" aria-live="polite">
             <button
               type="button"
@@ -1860,10 +1884,10 @@ export function ExpandedRadarModal({
       </div>
 
       {/* Desktop Collapsible "Live Pulse" Floating Dock */}
-      {totalLiveCount === 0 && pinnedChannels.length === 0 ? (
+      {liveMessageCount === 0 && pinnedChannels.length === 0 ? (
         <div className="ag-radar-live-dock-pill is-idle" role="status">
           <span className="ag-led ag-led-ok ag-led-pulse" aria-hidden="true" />
-          <span className="ag-radar-live-dock-idle-text">Listening for live rooms…</span>
+          <span className="ag-radar-live-dock-idle-text">Listening for live chat activity…</span>
         </div>
       ) : liveDockCollapsed ? (
         <button
@@ -1871,11 +1895,11 @@ export function ExpandedRadarModal({
           className="ag-radar-live-dock-pill"
           onClick={handleToggleLiveDock}
           aria-expanded={false}
-          aria-label={`Expand Live Pulse dock (${totalLiveCount} live channels)`}
+          aria-label={`Expand Live Pulse dock (${liveMessageCount} active chats)`}
           title="Expand Live Pulse dock"
         >
           <span
-            className={`ag-radar-warmth-dot ${totalLiveCount > 0 ? 'is-hot' : 'is-recent'}`}
+            className={`ag-radar-warmth-dot ${liveMessageCount > 0 ? 'is-hot' : 'is-recent'}`}
             aria-hidden="true"
           />
           <span className="ag-radar-live-dock-pill-label">Live Pulse</span>
@@ -1883,7 +1907,7 @@ export function ExpandedRadarModal({
             ·
           </span>
           <span className="ag-radar-live-dock-pill-count mono tabular">
-            {totalLiveCount > 0 ? totalLiveCount : pinnedChannels.length}
+            {liveMessageCount > 0 ? liveMessageCount : pinnedChannels.length}
           </span>
           {totalDockUnread > 0 && (
             <span className="ag-radar-live-dock-unread mono tabular">
@@ -1897,11 +1921,11 @@ export function ExpandedRadarModal({
           <div className="ag-radar-live-dock-head">
             <div className="ag-radar-live-dock-title-wrap">
               <span
-                className={`ag-radar-warmth-dot ${totalLiveCount > 0 ? 'is-hot' : 'is-recent'}`}
+                className={`ag-radar-warmth-dot ${liveMessageCount > 0 ? 'is-hot' : 'is-recent'}`}
                 aria-hidden="true"
               />
               <span className="ag-radar-live-dock-title">Live Pulse</span>
-              <span className="ag-radar-live-dock-count mono tabular">{totalLiveCount}</span>
+              <span className="ag-radar-live-dock-count mono tabular">{liveMessageCount}</span>
             </div>
 
             <div className="ag-radar-live-dock-head-actions">
@@ -1958,7 +1982,7 @@ export function ExpandedRadarModal({
             {dockVisibleItems.length === 0 ? (
               <p className="ag-radar-live-dock-empty">
                 {effectiveDockTab === 'live'
-                  ? 'Listening for active channels…'
+                  ? 'No recent messages yet'
                   : 'No pinned channels yet.'}
               </p>
             ) : (
@@ -2057,7 +2081,7 @@ export function ExpandedRadarModal({
                 }}
               >
                 {effectiveDockTab === 'live'
-                  ? `All ${totalLiveCount} live`
+                  ? `All ${liveMessageCount} live`
                   : `All ${pinnedChannels.length} pinned`}
               </button>
             </div>
@@ -2066,7 +2090,7 @@ export function ExpandedRadarModal({
       )}
 
       {/* Mobile Slim Horizontal Scrollable Live Strip (<= 867px) */}
-      {(totalLiveCount > 0 || pinnedChannels.length > 0) && (
+      {(liveMessageCount > 0 || pinnedChannels.length > 0) && (
         <div
           className={`ag-radar-live-strip${liveDockCollapsed ? ' is-collapsed' : ''}${
             hasBottomSnippet ? ' has-snippet' : ''
@@ -2084,7 +2108,7 @@ export function ExpandedRadarModal({
             }
           >
             <span
-              className={`ag-radar-warmth-dot ${totalLiveCount > 0 ? 'is-hot' : 'is-recent'}`}
+              className={`ag-radar-warmth-dot ${liveMessageCount > 0 ? 'is-hot' : 'is-recent'}`}
               aria-hidden="true"
             />
             <span>Live</span>
@@ -2092,7 +2116,7 @@ export function ExpandedRadarModal({
               ·
             </span>
             <span className="tabular">
-              {totalLiveCount > 0 ? totalLiveCount : pinnedChannels.length}
+              {liveMessageCount > 0 ? liveMessageCount : pinnedChannels.length}
             </span>
           </button>
 
@@ -2154,7 +2178,7 @@ export function ExpandedRadarModal({
                   </button>
                 )
               })}
-              {totalLiveCount > mobileStripItems.length && (
+              {liveMessageCount > mobileStripItems.length && (
                 <button
                   type="button"
                   className="ag-radar-live-strip-pill ag-radar-live-strip-more mono"
@@ -2164,7 +2188,7 @@ export function ExpandedRadarModal({
                     setActivePopover('pulse')
                   }}
                 >
-                  All {totalLiveCount}
+                  All {liveMessageCount}
                 </button>
               )}
             </div>

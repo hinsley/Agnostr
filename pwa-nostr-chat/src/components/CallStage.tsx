@@ -67,11 +67,15 @@ import { pubkeyToColor } from '../utils/identicon.ts'
 import { AvatarImg } from './AvatarImg.tsx'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 
+export type CallFloatingContext = 'globe' | 'chat' | 'workspace'
+
 export interface CallStageProps {
   calls: CallEngine
   engine: AgnostrEngine
   expanded: boolean
   compactFloating?: boolean
+  floatingContext?: CallFloatingContext
+  dockContainer?: HTMLElement | null
   onToggleExpand: () => void
   onPlaySound?: (cue: SoundCue) => void
   onInspectPeer?: (peer: PeerInfo) => void
@@ -1016,6 +1020,8 @@ export function CallStage({
   engine,
   expanded,
   compactFloating = false,
+  floatingContext = 'workspace',
+  dockContainer,
   onToggleExpand,
   onPlaySound,
   onInspectPeer,
@@ -1032,6 +1038,7 @@ export function CallStage({
   const [switchingAudioInput, setSwitchingAudioInput] = useState(false)
   const [pinnedVideoPubkey, setPinnedVideoPubkey] = useState<string | null>(null)
   const [dmMinimizedCallId, setDmMinimizedCallId] = useState<string | null>(null)
+  const [pipCollapsed, setPipCollapsed] = useState(false)
   const [dmPipCorner, setDmPipCorner] = useState<'br' | 'bl' | 'tr' | 'tl'>('br')
   const [dmCameraRear, setDmCameraRear] = useState(false)
   const [transcriptOpen, setTranscriptOpen] = useState(false)
@@ -1093,11 +1100,17 @@ export function CallStage({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [activeCall, endedTranscript, transcription])
 
+  const activeCallId = activeCall?.callId ?? null
+  useEffect(() => {
+    setPipCollapsed(false)
+  }, [activeCallId])
+
   useEffect(() => {
     if (!activeCall) {
       setAudioMenuOpen(false)
       setPinnedVideoPubkey(null)
       setDmMinimizedCallId(null)
+      setPipCollapsed(false)
       setDmCameraRear(false)
       return
     }
@@ -1138,7 +1151,9 @@ export function CallStage({
   }, [transcriptOpen, transcription.liveCaptions.length])
 
   const isDmCall = activeCall?.mode === 'dm'
-  const isDmMinimized = Boolean(isDmCall && activeCall && dmMinimizedCallId === activeCall.callId)
+  const isDmMinimized = Boolean(
+    isDmCall && activeCall && !expanded && (dmMinimizedCallId === activeCall.callId || compactFloating),
+  )
   const isDmFullScreen = Boolean(isDmCall && activeCall && !isDmMinimized)
 
   const isQualityPopoverVisible =
@@ -1503,6 +1518,9 @@ export function CallStage({
     const handleExpandDm = () => {
       onPlaySound?.('click')
       setDmMinimizedCallId(null)
+      if (compactFloating && !expanded) {
+        onToggleExpand()
+      }
     }
 
     const handleFlipCamera = () => {
@@ -1543,38 +1561,188 @@ export function CallStage({
       remotePeer && contentFilter.shouldScreenCallVideo(remotePeer.pubkey, false),
     )
 
-    // Minimized Sleek Floating Compact Active-Call Pill
+    // Minimized / Out-of-Context Floating Direct Call UI (Compact Pill OR 16:10 Video PiP, always portaled!)
     if (isDmMinimized) {
+      const dmPipParticipant =
+        remoteHasVideo && remotePeer
+          ? remotePeer
+          : selfHasVideo && selfParticipant
+            ? selfParticipant
+            : null
+      const dmHasLivePipVideo = Boolean(dmPipParticipant)
+      const dmPipScreenVideo = Boolean(
+        dmPipParticipant &&
+          !dmPipParticipant.isSelf &&
+          contentFilter.shouldScreenCallVideo(dmPipParticipant.pubkey, false),
+      )
+
+      if (dmHasLivePipVideo && dmPipParticipant && !pipCollapsed) {
+        return (
+          <>
+            {audioSinks}
+            {typeof document !== 'undefined' &&
+              createPortal(
+                <div
+                  className={`ag-call-mini-pip is-dm ${remoteSpeaking ? 'is-speaking' : ''} ${
+                    isAnyRecording ? 'is-recording' : ''
+                  }`}
+                  data-floating-context={floatingContext}
+                  role="region"
+                  aria-label={`Active direct video call with ${dmPeerName}`}
+                >
+                  <div
+                    className="ag-call-mini-pip-stage"
+                    role="button"
+                    tabIndex={0}
+                    onClick={handleExpandDm}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        handleExpandDm()
+                      }
+                    }}
+                    title="Return to full-screen call"
+                  >
+                    <DmVideoFeed
+                      stream={dmPipParticipant.stream}
+                      pubkey={dmPipParticipant.pubkey}
+                      mirrored={dmPipParticipant.isSelf && !dmPipParticipant.screenSharing}
+                      contain={dmPipParticipant.screenSharing}
+                      screenVideo={dmPipScreenVideo}
+                      contentFilter={dmPipScreenVideo ? contentFilter : undefined}
+                      className="ag-call-mini-pip-video"
+                    />
+                    <span className="ag-call-mini-pip-badge mono" aria-hidden="true">
+                      <span
+                        className={`ag-call-mini-dot ${
+                          isAnyRecording
+                            ? 'is-rec'
+                            : isRingingOrCalling
+                              ? 'is-warn'
+                              : 'is-live'
+                        }`}
+                      />
+                      <span>{isAnyRecording ? 'REC' : dmPipParticipant.isSelf ? 'YOU' : 'LIVE'}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="ag-call-mini-pip-collapse"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onPlaySound?.('click')
+                        setPipCollapsed(true)
+                      }}
+                      title="Collapse to audio pill"
+                      aria-label="Collapse video preview to audio pill"
+                    >
+                      <Minimize2 size={12} />
+                    </button>
+                  </div>
+
+                  <div className="ag-call-mini-pip-bar">
+                    <button
+                      type="button"
+                      className="ag-call-mini-pip-info"
+                      onClick={handleExpandDm}
+                      title="Return to full-screen call"
+                    >
+                      <span className="ag-call-mini-title truncate">{dmPeerName}</span>
+                      <span className="ag-call-mini-meta mono">{dmStatusText}</span>
+                    </button>
+                    <div className="ag-call-mini-actions">
+                      <button
+                        type="button"
+                        className={`ag-call-mini-btn sm ${activeCall.localMuted ? 'is-muted' : ''}`}
+                        onClick={handleToggleMute}
+                        aria-pressed={activeCall.localMuted}
+                        aria-label={activeCall.localMuted ? 'Unmute microphone' : 'Mute microphone'}
+                        title={activeCall.localMuted ? 'Unmute' : 'Mute'}
+                      >
+                        {activeCall.localMuted ? <MicOff size={13} /> : <Mic size={13} />}
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-call-mini-btn sm"
+                        onClick={handleExpandDm}
+                        aria-label="Expand call"
+                        title="Expand call"
+                      >
+                        <Maximize2 size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        className="ag-call-mini-btn sm hangup"
+                        onClick={handleLeave}
+                        aria-label="End call"
+                        title="End call"
+                      >
+                        <PhoneOff size={13} />
+                      </button>
+                    </div>
+                  </div>
+                </div>,
+                document.body,
+              )}
+          </>
+        )
+      }
+
       return (
         <>
           {audioSinks}
           {typeof document !== 'undefined' &&
             createPortal(
               <div
-                className={`ag-dm-call-pill ${remoteSpeaking ? 'is-speaking' : ''} ${
+                className={`ag-call-mini-pill ag-dm-call-pill ${remoteSpeaking ? 'is-speaking' : ''} ${
                   isAnyRecording ? 'is-recording' : ''
                 }`}
+                data-floating-context={floatingContext}
                 role="region"
                 aria-label={`Active direct call with ${dmPeerName}`}
               >
                 <button
                   type="button"
-                  className="ag-dm-call-pill-main"
+                  className="ag-call-mini-main ag-dm-call-pill-main"
                   onClick={handleExpandDm}
                   title="Return to full-screen call"
                 >
-                  <span className={`ag-dm-call-pill-avatar-wrap ${remoteSpeaking ? 'speaking' : ''}`}>
+                  <span
+                    className={`ag-call-mini-dot ${
+                      isAnyRecording
+                        ? 'is-rec'
+                        : isRingingOrCalling
+                          ? 'is-warn'
+                          : 'is-live'
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <span
+                    className={`ag-call-mini-avatar-wrap ag-dm-call-pill-avatar-wrap ${
+                      remoteSpeaking ? 'speaking' : ''
+                    }`}
+                  >
                     <AvatarImg
                       pubkey={dmPeerPubkey}
                       pictureUrl={dmPeerAvatarUrl}
-                      width={30}
-                      height={30}
-                      className="ag-dm-call-pill-avatar"
+                      width={26}
+                      height={26}
+                      className="ag-call-mini-avatar ag-dm-call-pill-avatar"
                     />
                   </span>
-                  <span className="ag-dm-call-pill-copy">
-                    <span className="ag-dm-call-pill-name truncate">{dmPeerName}</span>
-                    <span className="ag-dm-call-pill-status mono">
+                  <span className="ag-call-mini-copy ag-dm-call-pill-copy">
+                    <span className="ag-call-mini-title-row">
+                      <span className="ag-call-mini-title ag-dm-call-pill-name truncate">
+                        {dmPeerName}
+                      </span>
+                      {remoteSpeaking && (
+                        <Waves
+                          size={11}
+                          className="ag-call-mini-wave"
+                          aria-hidden="true"
+                        />
+                      )}
+                    </span>
+                    <span className="ag-call-mini-meta ag-dm-call-pill-status mono">
                       {isAnyRecording && (
                         <span className="ag-call-rec-pill-dot" aria-hidden="true" />
                       )}
@@ -1583,25 +1751,50 @@ export function CallStage({
                   </span>
                 </button>
 
-                <div className="ag-dm-call-pill-actions">
+                <div className="ag-call-mini-actions ag-dm-call-pill-actions">
+                  {dmHasLivePipVideo && (
+                    <button
+                      type="button"
+                      className="ag-call-mini-btn"
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setPipCollapsed(false)
+                      }}
+                      aria-label="Show video preview"
+                      title="Show video preview"
+                    >
+                      <Video size={13} />
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className={`ag-dm-call-pill-btn ${activeCall.localMuted ? 'muted' : ''}`}
+                    className={`ag-call-mini-btn ag-dm-call-pill-btn ${
+                      activeCall.localMuted ? 'is-muted muted' : ''
+                    }`}
                     onClick={handleToggleMute}
                     aria-pressed={activeCall.localMuted}
                     aria-label={activeCall.localMuted ? 'Unmute microphone' : 'Mute microphone'}
                     title={activeCall.localMuted ? 'Unmute' : 'Mute'}
                   >
-                    {activeCall.localMuted ? <MicOff size={15} /> : <Mic size={15} />}
+                    {activeCall.localMuted ? <MicOff size={14} /> : <Mic size={14} />}
                   </button>
                   <button
                     type="button"
-                    className="ag-dm-call-pill-btn hangup"
+                    className="ag-call-mini-btn ag-dm-call-pill-btn"
+                    onClick={handleExpandDm}
+                    aria-label="Expand call"
+                    title="Expand call"
+                  >
+                    <Maximize2 size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    className="ag-call-mini-btn ag-dm-call-pill-btn hangup"
                     onClick={handleLeave}
                     aria-label="End call"
                     title="End call"
                   >
-                    <PhoneOff size={15} />
+                    <PhoneOff size={14} />
                   </button>
                 </div>
               </div>,
@@ -2116,116 +2309,258 @@ export function CallStage({
     )
   }
 
-  // Compact Floating Bar when user is browsing another channel/server
-  if (compactFloating && !expanded) {
+  // Portaled Floating Compact Active-Call Pill OR Video PiP (Group / Bitchat when browsing Globe, another room, or another workspace)
+  const shouldFloatGroupCall =
+    !expanded && (compactFloating || (dockContainer !== undefined && dockContainer === null))
+
+  if (shouldFloatGroupCall) {
+    const liveVideoCandidates = activeCall.participants.filter(
+      (p) => !isParticipantShielded(p) && hasParticipantLiveVideo(p, false),
+    )
+    const pipVideoParticipant =
+      (pinnedVideoPubkey
+        ? liveVideoCandidates.find((p) => p.pubkey === pinnedVideoPubkey)
+        : null) ??
+      liveVideoCandidates.find((p) => !p.isSelf && p.isSpeaking) ??
+      liveVideoCandidates.find((p) => !p.isSelf && p.screenSharing) ??
+      liveVideoCandidates.find((p) => !p.isSelf) ??
+      liveVideoCandidates[0] ??
+      null
+    const hasPipVideo = Boolean(pipVideoParticipant)
+    const pipScreenVideo = Boolean(
+      pipVideoParticipant &&
+        !pipVideoParticipant.isSelf &&
+        contentFilter.shouldScreenCallVideo(pipVideoParticipant.pubkey, false),
+    )
+    const callTitleLabel = isGeoCall ? (geoTag ?? activeCall.title) : activeCall.title
+    const callRoomIcon = isGeoCall ? (
+      isTopicCall ? (
+        <Hash size={13} />
+      ) : (
+        <Globe size={13} />
+      )
+    ) : (
+      <Users size={13} />
+    )
+    const dotToneClass = isAnyRecording
+      ? 'is-rec'
+      : activeCall.status === 'active'
+        ? 'is-live'
+        : 'is-warn'
+
+    if (hasPipVideo && pipVideoParticipant && !pipCollapsed) {
+      return (
+        <>
+          {audioSinks}
+          {typeof document !== 'undefined' &&
+            createPortal(
+              <div
+                className={`ag-call-mini-pip ${activeSpeaker ? 'is-speaking' : ''} ${
+                  isAnyRecording ? 'is-recording' : ''
+                }`}
+                data-floating-context={floatingContext}
+                role="region"
+                aria-label={`Active video call: ${callTitleLabel}`}
+              >
+                <div
+                  className="ag-call-mini-pip-stage"
+                  role="button"
+                  tabIndex={0}
+                  onClick={handleReturnToCall}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      handleReturnToCall()
+                    }
+                  }}
+                  title={`Return to ${callTitleLabel}`}
+                >
+                  <DmVideoFeed
+                    stream={pipVideoParticipant.stream}
+                    pubkey={pipVideoParticipant.pubkey}
+                    mirrored={pipVideoParticipant.isSelf && !pipVideoParticipant.screenSharing}
+                    contain={pipVideoParticipant.screenSharing}
+                    screenVideo={pipScreenVideo}
+                    contentFilter={pipScreenVideo ? contentFilter : undefined}
+                    className="ag-call-mini-pip-video"
+                  />
+                  <span className="ag-call-mini-pip-badge mono">
+                    <span className={`ag-call-mini-dot ${dotToneClass}`} aria-hidden="true" />
+                    <span className="truncate">
+                      {isAnyRecording
+                        ? 'REC'
+                        : pipVideoParticipant.isSelf
+                          ? 'YOU'
+                          : pipVideoParticipant.displayHandle}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className="ag-call-mini-pip-collapse"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onPlaySound?.('click')
+                      setPipCollapsed(true)
+                    }}
+                    title="Collapse to audio pill"
+                    aria-label="Collapse video preview to audio pill"
+                  >
+                    <Minimize2 size={12} />
+                  </button>
+                </div>
+
+                <div className="ag-call-mini-pip-bar">
+                  <button
+                    type="button"
+                    className="ag-call-mini-pip-info"
+                    onClick={handleReturnToCall}
+                    title={`Return to ${callTitleLabel}`}
+                  >
+                    <span className="ag-call-mini-title truncate">{callTitleLabel}</span>
+                    <span className="ag-call-mini-meta mono">
+                      {statusText} · {count}/{activeCall.maxParticipants}
+                    </span>
+                  </button>
+                  <div className="ag-call-mini-actions">
+                    <button
+                      type="button"
+                      className={`ag-call-mini-btn sm ${activeCall.localMuted ? 'is-muted' : ''}`}
+                      onClick={handleToggleMute}
+                      title={activeCall.localMuted ? 'Unmute mic' : 'Mute mic'}
+                      aria-label={activeCall.localMuted ? 'Unmute mic' : 'Mute mic'}
+                      aria-pressed={activeCall.localMuted}
+                    >
+                      {activeCall.localMuted ? <MicOff size={13} /> : <Mic size={13} />}
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-call-mini-btn sm"
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        onToggleExpand()
+                      }}
+                      title="Expand call stage"
+                      aria-label="Expand call stage"
+                    >
+                      <Maximize2 size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-call-mini-btn sm hangup"
+                      onClick={handleLeave}
+                      title={isGroupCall ? 'Leave call' : 'Hang up'}
+                      aria-label={isGroupCall ? 'Leave call' : 'Hang up call'}
+                    >
+                      <PhoneOff size={13} />
+                    </button>
+                  </div>
+                </div>
+              </div>,
+              document.body,
+            )}
+        </>
+      )
+    }
+
     return (
       <>
         {audioSinks}
-        <div
-          className={`ag-call-floating-bar ${activeSpeaker ? 'has-speaker' : ''} ${
-            isAnyRecording ? 'is-recording' : ''
-          }`}
-          role="region"
-          aria-label={`Active call: ${activeCall.title}`}
-        >
-          <div className="ag-call-float-left">
-            <span
-              className={`ag-led ${
-                activeCall.status === 'active'
-                  ? 'ag-led-ok ag-led-pulse'
-                  : 'ag-led-warn ag-led-pulse'
+        {typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              className={`ag-call-mini-pill ${activeSpeaker ? 'is-speaking' : ''} ${
+                isAnyRecording ? 'is-recording' : ''
               }`}
-            />
-            {isGeoCall ? (
+              data-floating-context={floatingContext}
+              role="region"
+              aria-label={`Active call: ${callTitleLabel}`}
+            >
               <button
                 type="button"
-                className="ag-call-float-return"
+                className="ag-call-mini-main"
                 onClick={handleReturnToCall}
-                title={`Return to ${geoTag ?? activeCall.title}`}
+                title={`Return to ${callTitleLabel}`}
               >
-                <span className="ag-badge ag-badge-accent mono">
-                  {isTopicCall ? <Hash size={9} /> : <Globe size={9} />}
-                  <span>{geoTag ?? activeCall.title}</span>
+                <span className={`ag-call-mini-dot ${dotToneClass}`} aria-hidden="true" />
+                <span className="ag-call-mini-icon" aria-hidden="true">
+                  {callRoomIcon}
                 </span>
-                <span className="ag-badge ag-badge-muted ag-hide-xs">
-                  {isTopicCall ? 'Topic Bitchat · P2P' : 'Public Bitchat · P2P'}
+                <span className="ag-call-mini-copy">
+                  <span className="ag-call-mini-title-row">
+                    <span className={`ag-call-mini-title truncate ${isGeoCall ? 'mono' : ''}`}>
+                      {callTitleLabel}
+                    </span>
+                    {activeSpeaker && (
+                      <Waves
+                        size={11}
+                        className="ag-call-mini-wave"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </span>
+                  <span className="ag-call-mini-meta mono">
+                    {isAnyRecording && (
+                      <span className="ag-call-rec-pill-dot" aria-hidden="true" />
+                    )}
+                    <span>{statusText}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {count}/{activeCall.maxParticipants}
+                    </span>
+                  </span>
                 </span>
               </button>
-            ) : (
-              <>
-                <span
-                  className={`ag-call-float-title truncate ${onReturnToCall ? 'clickable' : ''}`}
-                  onClick={onReturnToCall ? handleReturnToCall : undefined}
-                >
-                  {activeCall.title}
-                </span>
-                {activeCall.encrypted && (
-                  <span className="ag-badge ag-badge-dm ag-hide-xs">
-                    <Lock size={9} />
-                    <span>E2EE P2P</span>
-                  </span>
-                )}
-              </>
-            )}
-            {isOutgoingRinging ? (
-              <span className="ag-call-ringing-pill" role="status">
-                <PhoneCall size={11} className="ag-call-ringing-icon" />
-                <span>Ringing…</span>
-              </span>
-            ) : (
-              <span className="ag-call-float-meta mono">
-                {count}/{activeCall.maxParticipants} · {statusText}
-              </span>
-            )}
-            {recBadge}
-            {transcription.liveCaptionsEnabled && (
-              <span className="ag-badge ag-badge-accent mono ag-hide-xs" title="Live captions active">
-                <Captions size={10} />
-                <span>CC</span>
-              </span>
-            )}
-            {activeSpeaker && (
-              <span className="ag-call-float-speaker truncate ag-hide-xs">
-                <Waves size={10} />
-                <span>{activeSpeaker.displayHandle}</span>
-              </span>
-            )}
-          </div>
 
-          <div className="ag-call-float-actions">
-            <button
-              type="button"
-              className={`ag-call-float-btn ${activeCall.localMuted ? 'danger' : ''}`}
-              onClick={handleToggleMute}
-              title={activeCall.localMuted ? 'Unmute mic' : 'Mute mic'}
-              aria-label={activeCall.localMuted ? 'Unmute mic' : 'Mute mic'}
-              aria-pressed={activeCall.localMuted}
-            >
-              {activeCall.localMuted ? <MicOff size={14} /> : <Mic size={14} />}
-            </button>
-            <button
-              type="button"
-              className="ag-call-float-btn"
-              onClick={() => {
-                onPlaySound?.('click')
-                onToggleExpand()
-              }}
-              title="Expand call stage"
-              aria-label="Expand call stage"
-            >
-              <Maximize2 size={14} />
-            </button>
-            <button
-              type="button"
-              className="ag-call-float-btn hangup"
-              onClick={handleLeave}
-              title={isGroupCall ? 'Leave call' : 'Hang up'}
-              aria-label={isGroupCall ? 'Leave call' : 'Hang up call'}
-            >
-              <PhoneOff size={14} />
-            </button>
-          </div>
-        </div>
+              <div className="ag-call-mini-actions">
+                {hasPipVideo && (
+                  <button
+                    type="button"
+                    className="ag-call-mini-btn"
+                    onClick={() => {
+                      onPlaySound?.('click')
+                      setPipCollapsed(false)
+                    }}
+                    title="Show video preview"
+                    aria-label="Show video preview"
+                  >
+                    <Video size={13} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={`ag-call-mini-btn ${activeCall.localMuted ? 'is-muted' : ''}`}
+                  onClick={handleToggleMute}
+                  title={activeCall.localMuted ? 'Unmute mic' : 'Mute mic'}
+                  aria-label={activeCall.localMuted ? 'Unmute mic' : 'Mute mic'}
+                  aria-pressed={activeCall.localMuted}
+                >
+                  {activeCall.localMuted ? <MicOff size={14} /> : <Mic size={14} />}
+                </button>
+                <button
+                  type="button"
+                  className="ag-call-mini-btn"
+                  onClick={() => {
+                    onPlaySound?.('click')
+                    onToggleExpand()
+                  }}
+                  title="Expand call stage"
+                  aria-label="Expand call stage"
+                >
+                  <Maximize2 size={13} />
+                </button>
+                <button
+                  type="button"
+                  className="ag-call-mini-btn hangup"
+                  onClick={handleLeave}
+                  title={isGroupCall ? 'Leave call' : 'Hang up'}
+                  aria-label={isGroupCall ? 'Leave call' : 'Hang up call'}
+                >
+                  <PhoneOff size={14} />
+                </button>
+              </div>
+            </div>,
+            document.body,
+          )}
       </>
     )
   }
@@ -3218,21 +3553,25 @@ export function CallStage({
     return (
       <>
         {audioSinks}
-        <div
-          className="ag-call-modal-backdrop"
-          onClick={onToggleExpand}
-          role="presentation"
-        >
-          <div
-            className="ag-call-modal-frame"
-            role="dialog"
-            aria-modal="true"
-            aria-label={`Full-screen call: ${activeCall.title}`}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {stageContent}
-          </div>
-        </div>
+        {typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              className="ag-call-modal-backdrop"
+              onClick={onToggleExpand}
+              role="presentation"
+            >
+              <div
+                className="ag-call-modal-frame"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`Full-screen call: ${activeCall.title}`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {stageContent}
+              </div>
+            </div>,
+            document.body,
+          )}
       </>
     )
   }
@@ -3240,7 +3579,7 @@ export function CallStage({
   return (
     <>
       {audioSinks}
-      {stageContent}
+      {dockContainer ? createPortal(stageContent, dockContainer) : stageContent}
     </>
   )
 }
