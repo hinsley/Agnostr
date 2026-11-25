@@ -11,11 +11,14 @@ import {
   type GoState,
 } from '../../lib/games/goEngine'
 import { AvatarImg } from '../AvatarImg'
+import { playGameSound } from '../../utils/gameSounds'
 
 export interface GoBoardViewProps {
   state: GoState
   myColor: GoColor
   myDisplayName: string
+  myPubkey?: string
+  myAvatarUrl?: string
   opponentDisplayName: string
   opponentPubkey: string
   opponentAvatarUrl?: string
@@ -39,6 +42,8 @@ export const GoBoardView: React.FC<GoBoardViewProps> = ({
   state,
   myColor,
   myDisplayName,
+  myPubkey,
+  myAvatarUrl,
   opponentDisplayName,
   opponentPubkey,
   opponentAvatarUrl,
@@ -54,6 +59,23 @@ export const GoBoardView: React.FC<GoBoardViewProps> = ({
   const [illegalHint, setIllegalHint] = useState<string | null>(null)
   const [confirmResignMoveCount, setConfirmResignMoveCount] = useState<number | null>(null)
   const hintTimerRef = useRef<number | null>(null)
+  const prevMoveCountRef = useRef<number>(state.moveCount)
+  const prevTotalCapturesRef = useRef<number>(state.capturesByBlack + state.capturesByWhite)
+
+  useEffect(() => {
+    const totalCaptures = state.capturesByBlack + state.capturesByWhite
+    if (state.moveCount > prevMoveCountRef.current) {
+      if (state.lastMove?.type === 'pass') {
+        playGameSound('check-tap')
+      } else if (totalCaptures > prevTotalCapturesRef.current) {
+        playGameSound('go-capture')
+      } else {
+        playGameSound('go-stone')
+      }
+    }
+    prevMoveCountRef.current = state.moveCount
+    prevTotalCapturesRef.current = totalCaptures
+  }, [state.moveCount, state.capturesByBlack, state.capturesByWhite, state.lastMove?.type])
 
   useEffect(() => {
     return () => {
@@ -121,10 +143,6 @@ export const GoBoardView: React.FC<GoBoardViewProps> = ({
   const rulesShort = state.config.scoring === 'chinese' ? 'Chinese' : 'Japanese'
   const rulesFull =
     state.config.scoring === 'chinese' ? 'Chinese · Area' : 'Japanese · Territory'
-
-  const configSummary = `${size}×${size} · Komi ${formatScoreNum(state.config.komi)}${
-    state.config.handicap >= 2 ? ` · H${state.config.handicap}` : ''
-  } · ${rulesShort}`
 
   const hoverLegal = useMemo(() => {
     if (!canPlay || !hoverPt) return false
@@ -208,8 +226,8 @@ export const GoBoardView: React.FC<GoBoardViewProps> = ({
             pubkey={opponentPubkey}
             pictureUrl={opponentAvatarUrl}
             alt=""
-            width={28}
-            height={28}
+            width={24}
+            height={24}
             className="ag-go-avatar"
           />
           <span
@@ -221,15 +239,10 @@ export const GoBoardView: React.FC<GoBoardViewProps> = ({
           <span className="ag-go-captures mono tabular" title="Captured stones">
             Cap {oppCaptures}
           </span>
-          {waitingForOpponent ? (
-            <span className="ag-go-turn-pill is-waiting">Invited</span>
-          ) : state.phase === 'playing' && state.turn === oppColor ? (
-            <span className="ag-go-turn-pill">Turn</span>
-          ) : null}
         </div>
-        <span className="ag-go-config-pill mono" title={rulesFull}>
-          {configSummary}
-        </span>
+        {!waitingForOpponent && state.phase === 'playing' && state.turn === oppColor && (
+          <span className="ag-go-turn-pill">Turn</span>
+        )}
       </div>
 
       {/* Finished Result Banner */}
@@ -652,6 +665,14 @@ export const GoBoardView: React.FC<GoBoardViewProps> = ({
         className={`ag-go-strip is-self${canPlay ? ' is-active-turn' : ''}`}
       >
         <div className="ag-go-player-id">
+          <AvatarImg
+            pubkey={myPubkey || 'self'}
+            pictureUrl={myAvatarUrl}
+            alt=""
+            width={24}
+            height={24}
+            className="ag-go-avatar"
+          />
           <span
             className={`ag-go-stone-dot is-${myColor}`}
             title={colorName(myColor)}
@@ -661,11 +682,11 @@ export const GoBoardView: React.FC<GoBoardViewProps> = ({
           <span className="ag-go-captures mono tabular" title="Captured stones">
             Cap {myCaptures}
           </span>
-          {canPlay && <span className="ag-go-turn-pill is-mine">Your turn</span>}
         </div>
         <div className="ag-go-strip-meta mono tabular">
+          {canPlay && <span className="ag-game-mini-turn-dot" aria-hidden="true" />}
           <span>Move {state.moveCount}</span>
-          {lastMoveLabel && <span>Last: {lastMoveLabel}</span>}
+          {lastMoveLabel && <span>{lastMoveLabel}</span>}
         </div>
       </div>
 

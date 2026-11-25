@@ -3,14 +3,11 @@ import { createPortal } from 'react-dom'
 import {
   Circle,
   Crown,
-  Gamepad2,
-  Lock,
   Minus,
   Play,
   Plus,
   Shuffle,
   Spade,
-  Users,
   X,
 } from 'lucide-react'
 import {
@@ -186,9 +183,6 @@ export function GameSetupModal({
     onClose()
   }
 
-  const scopeBadgeLabel =
-    scope === 'dm' ? '1-on-1 Direct' : scope === 'geo' ? 'Bitchat Room' : 'Group Table'
-
   return createPortal(
     <div
       className="ag-game-setup-backdrop"
@@ -206,19 +200,11 @@ export function GameSetupModal({
       >
         {/* Header */}
         <header className="ag-game-setup-head">
-          <div className="ag-game-setup-head-main">
-            <span className="ag-game-setup-emblem" aria-hidden="true">
-              {isDmScope ? <Gamepad2 size={18} /> : <Spade size={18} />}
-            </span>
-            <div className="ag-game-setup-head-copy">
-              <h2 id={titleId} className="ag-game-setup-title">
-                {isDmScope ? 'Play a Game' : "Texas Hold'em Poker"}
-              </h2>
-              <div className="ag-game-setup-sub-row">
-                <span className="ag-game-setup-target mono truncate">{targetLabel}</span>
-                <span className="ag-game-setup-scope-pill">{scopeBadgeLabel}</span>
-              </div>
-            </div>
+          <div className="ag-game-setup-head-copy">
+            <h2 id={titleId} className="ag-game-setup-title">
+              {isDmScope ? 'Play' : "Texas Hold'em"}
+            </h2>
+            <span className="ag-game-setup-target mono truncate">{targetLabel}</span>
           </div>
 
           <button
@@ -236,14 +222,7 @@ export function GameSetupModal({
         <div className="ag-game-setup-body">
           {hasActiveGameInScope ? (
             <div className="ag-game-setup-active-notice" role="status">
-              <div className="ag-game-setup-active-icon" aria-hidden="true">
-                <Gamepad2 size={22} />
-              </div>
-              <h3 className="ag-game-setup-active-title">A game is already running here</h3>
-              <p className="ag-game-setup-active-copy">
-                Only 1 active game is allowed per conversation at a time. Jump back into your live
-                game or finish it before starting another.
-              </p>
+              <p className="ag-game-setup-active-copy">A game is already active here.</p>
               <div className="ag-game-setup-active-actions">
                 <button
                   type="button"
@@ -251,7 +230,7 @@ export function GameSetupModal({
                   onClick={handleResume}
                 >
                   <Play size={15} aria-hidden="true" />
-                  <span>Open Active Game</span>
+                  <span>Open Game</span>
                 </button>
                 <button
                   type="button"
@@ -265,7 +244,7 @@ export function GameSetupModal({
           ) : isDmScope ? (
             <>
               {/* DM 2-Tab Segmented Switcher: Go | Chess */}
-              <div className="ag-game-setup-tabs" role="tablist" aria-label="Choose a 1-on-1 game">
+              <div className="ag-game-setup-tabs" role="tablist" aria-label="Choose a game">
                 <button
                   type="button"
                   role="tab"
@@ -311,9 +290,9 @@ export function GameSetupModal({
                     </div>
                   </div>
 
-                  {/* Scoring Rules */}
+                  {/* Scoring */}
                   <div className="ag-game-setup-field">
-                    <span className="ag-game-setup-label">Scoring Rules</span>
+                    <span className="ag-game-setup-label">Scoring</span>
                     <div className="ag-game-setup-seg cols-2">
                       <button
                         type="button"
@@ -324,7 +303,7 @@ export function GameSetupModal({
                         onClick={() => handleSelectScoring('japanese')}
                       >
                         <span className="ag-game-setup-seg-title">Japanese</span>
-                        <span className="ag-game-setup-seg-sub">Territory + captures</span>
+                        <span className="ag-game-setup-seg-sub">Territory</span>
                       </button>
                       <button
                         type="button"
@@ -335,19 +314,16 @@ export function GameSetupModal({
                         onClick={() => handleSelectScoring('chinese')}
                       >
                         <span className="ag-game-setup-seg-title">Chinese</span>
-                        <span className="ag-game-setup-seg-sub">Area: stones + territory</span>
+                        <span className="ag-game-setup-seg-sub">Area</span>
                       </button>
                     </div>
                   </div>
 
                   {/* Komi */}
                   <div className="ag-game-setup-field">
-                    <div className="ag-game-setup-label-row">
-                      <label htmlFor={komiInputId} className="ag-game-setup-label">
-                        Komi
-                      </label>
-                      <span className="ag-game-setup-hint">Compensation for White</span>
-                    </div>
+                    <label htmlFor={komiInputId} className="ag-game-setup-label">
+                      Komi
+                    </label>
                     <div className="ag-game-setup-komi-row">
                       <div className="ag-game-setup-pills">
                         {GO_KOMI_PRESETS.map((preset) => (
@@ -386,9 +362,7 @@ export function GameSetupModal({
                     <div className="ag-game-setup-label-row">
                       <span className="ag-game-setup-label">Handicap</span>
                       <span className="ag-game-setup-hint">
-                        {safeHandicap >= 2
-                          ? `Black starts with ${safeHandicap} stones, White moves first`
-                          : 'Even game'}
+                        {safeHandicap >= 2 ? `H${safeHandicap} · White first` : 'Even'}
                       </span>
                     </div>
                     <div className="ag-game-setup-stepper">
@@ -402,7 +376,7 @@ export function GameSetupModal({
                         <Minus size={14} />
                       </button>
                       <span className="ag-game-setup-step-val mono tabular">
-                        {safeHandicap === 0 ? 'None (0)' : `${safeHandicap} stones`}
+                        {safeHandicap === 0 ? '0' : `${safeHandicap} stones`}
                       </span>
                       <button
                         type="button"
@@ -416,9 +390,9 @@ export function GameSetupModal({
                     </div>
                   </div>
 
-                  {/* Your Color */}
+                  {/* Color */}
                   <div className="ag-game-setup-field">
-                    <span className="ag-game-setup-label">Your Color</span>
+                    <span className="ag-game-setup-label">Color</span>
                     <div className="ag-game-setup-seg cols-3">
                       <button
                         type="button"
@@ -467,9 +441,9 @@ export function GameSetupModal({
                 </div>
               ) : (
                 <div className="ag-game-setup-panel" role="tabpanel" aria-label="Chess setup">
-                  {/* Your Color */}
+                  {/* Color */}
                   <div className="ag-game-setup-field">
-                    <span className="ag-game-setup-label">Your Color</span>
+                    <span className="ag-game-setup-label">Color</span>
                     <div className="ag-game-setup-seg cols-3">
                       <button
                         type="button"
@@ -507,11 +481,6 @@ export function GameSetupModal({
                     </div>
                   </div>
 
-                  <div className="ag-game-setup-note">
-                    <Crown size={14} aria-hidden="true" />
-                    <span>Standard FIDE rules · Real-time 1-on-1 over Nostr</span>
-                  </div>
-
                   <button
                     type="button"
                     className="ag-game-setup-cta"
@@ -524,13 +493,15 @@ export function GameSetupModal({
               )}
             </>
           ) : (
-            /* Bitchat Channel or Group — Texas Hold'em Poker ONLY */
+            /* Bitchat Channel or Group — Texas Hold'em */
             <div className="ag-game-setup-panel">
-              {/* Fixed Buy-In (Fake Chips) */}
+              {/* Buy-In */}
               <div className="ag-game-setup-field">
                 <div className="ag-game-setup-label-row">
-                  <span className="ag-game-setup-label">Fixed Buy-In (Fake Chips)</span>
-                  <span className="ag-game-setup-hint">Fake play chips · Fixed buy-in per player</span>
+                  <span className="ag-game-setup-label">Buy-In</span>
+                  <span className="ag-game-setup-hint mono tabular">
+                    Blinds {selectedBlinds.smallBlind}/{selectedBlinds.bigBlind}
+                  </span>
                 </div>
                 <div className="ag-game-setup-seg cols-2">
                   {POKER_BUY_IN_PRESETS.map((amount) => {
@@ -547,8 +518,8 @@ export function GameSetupModal({
                         <span className="ag-game-setup-seg-title mono tabular">
                           {amount.toLocaleString()}
                         </span>
-                        <span className="ag-game-setup-seg-sub mono">
-                          {blinds.smallBlind}/{blinds.bigBlind} blinds
+                        <span className="ag-game-setup-seg-sub mono tabular">
+                          {blinds.smallBlind}/{blinds.bigBlind}
                         </span>
                       </button>
                     )
@@ -556,15 +527,9 @@ export function GameSetupModal({
                 </div>
               </div>
 
-              {/* Max Players */}
+              {/* Max Seats */}
               <div className="ag-game-setup-field">
-                <div className="ag-game-setup-label-row">
-                  <span className="ag-game-setup-label">Max Players</span>
-                  <span className="ag-game-setup-hint mono tabular">
-                    <Users size={11} style={{ display: 'inline', verticalAlign: '-1px', marginRight: 4 }} />
-                    {maxSeats} seats · {selectedBlinds.smallBlind}/{selectedBlinds.bigBlind} blinds
-                  </span>
-                </div>
+                <span className="ag-game-setup-label">Max Seats</span>
                 <div className="ag-game-setup-seat-grid" role="group" aria-label="Maximum seats">
                   {POKER_SEAT_OPTIONS.map((seats) => (
                     <button
@@ -580,11 +545,6 @@ export function GameSetupModal({
                     </button>
                   ))}
                 </div>
-              </div>
-
-              <div className="ag-game-setup-note">
-                <Lock size={14} aria-hidden="true" />
-                <span>Private hole cards end-to-end encrypted to each player · 1 table per room</span>
               </div>
 
               <button

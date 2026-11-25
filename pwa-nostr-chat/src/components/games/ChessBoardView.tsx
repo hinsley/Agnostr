@@ -10,11 +10,15 @@ import {
   type ChessPromotion,
   type ChessState,
 } from '../../lib/games/chessEngine.ts'
+import { playGameSound } from '../../utils/gameSounds.ts'
+import { AvatarImg } from '../AvatarImg.tsx'
 
 export interface ChessBoardViewProps {
   state: ChessState
   myColor: ChessColor
   myDisplayName: string
+  myPubkey?: string
+  myAvatarUrl?: string
   opponentDisplayName: string
   opponentPubkey: string
   opponentAvatarUrl?: string
@@ -60,9 +64,12 @@ const ChessPieceSvg: React.FC<{
   size?: number
 }> = ({ type, color, className, size }) => {
   const isWhite = color === 'w'
-  const fill = isWhite ? '#FAF7F0' : '#181B24'
-  const stroke = isWhite ? '#1E2330' : '#D5DCE8'
-  const accent = isWhite ? '#384152' : '#C3CCDC'
+  const fill = isWhite ? '#FAF7F0' : '#161922'
+  const stroke = isWhite ? '#1E2330' : 'rgba(255, 255, 255, 0.36)'
+  const strokeW = isWhite ? 1.55 : 1.1
+  const accent = isWhite ? '#384152' : 'rgba(255, 255, 255, 0.3)'
+  const accentW = isWhite ? 1.15 : 0.95
+  const eyeFill = isWhite ? '#1E2330' : 'rgba(255, 255, 255, 0.56)'
 
   return (
     <svg
@@ -77,7 +84,7 @@ const ChessPieceSvg: React.FC<{
         <g
           fill={fill}
           stroke={stroke}
-          strokeWidth="1.7"
+          strokeWidth={strokeW}
           strokeLinecap="round"
           strokeLinejoin="round"
         >
@@ -91,7 +98,7 @@ const ChessPieceSvg: React.FC<{
         <g
           fill={fill}
           stroke={stroke}
-          strokeWidth="1.65"
+          strokeWidth={strokeW}
           strokeLinecap="round"
           strokeLinejoin="round"
         >
@@ -100,8 +107,8 @@ const ChessPieceSvg: React.FC<{
           <path d="M15 32V17.5h15V32H15Z" />
           <path d="M12 17.5l3-2.5h15l3 2.5H12Z" />
           <path d="M12 15V9.5h4.5V12h3.5V9.5h5V12h3.5V9.5H33V15H12Z" />
-          <path d="M15.5 21.5h14" stroke={accent} strokeWidth="1.15" />
-          <path d="M15.5 28.5h14" stroke={accent} strokeWidth="1.15" />
+          <path d="M15.5 21.5h14" stroke={accent} strokeWidth={accentW} />
+          <path d="M15.5 28.5h14" stroke={accent} strokeWidth={accentW} />
         </g>
       )}
 
@@ -109,14 +116,14 @@ const ChessPieceSvg: React.FC<{
         <g
           fill={fill}
           stroke={stroke}
-          strokeWidth="1.65"
+          strokeWidth={strokeW}
           strokeLinecap="round"
           strokeLinejoin="round"
         >
           <path d="M11 39h23v-3.5H11V39Z" />
           <path d="M14 35.5c.6-6.2 4.4-8.8 5.4-12.5-2.6.8-5.1 2-6.8 3.2-1.2.8-2.8.2-3.1-1.2-.3-1.2.3-2.5 1.3-3.4 2.5-2.3 4.8-5.6 6.2-9.1l-1.4-3.3c2.4.3 4.4 1.2 5.9 2.5 1.1-.5 2.4-.8 3.8-.8 5.2 0 9.4 4.3 9.7 10.6.3 5.2-.6 10-2.5 14H14Z" />
-          <circle cx="19.2" cy="15.8" r="1.15" fill={stroke} stroke="none" />
-          <path d="M25.5 15.2c3.2 2.2 4.6 6.6 3.7 12.8" fill="none" stroke={accent} strokeWidth="1.25" />
+          <circle cx="19.2" cy="15.8" r="1.15" fill={eyeFill} stroke="none" />
+          <path d="M25.5 15.2c3.2 2.2 4.6 6.6 3.7 12.8" fill="none" stroke={accent} strokeWidth={accentW} />
         </g>
       )}
 
@@ -124,7 +131,7 @@ const ChessPieceSvg: React.FC<{
         <g
           fill={fill}
           stroke={stroke}
-          strokeWidth="1.65"
+          strokeWidth={strokeW}
           strokeLinecap="round"
           strokeLinejoin="round"
         >
@@ -132,7 +139,7 @@ const ChessPieceSvg: React.FC<{
           <path d="M15 32.5c3.4-1.2 11.6-1.2 15 0 2.5-3.2 3.4-7.2 2.2-11.2-1.1-3.8-4.5-7.4-9.7-10.3-5.2 2.9-8.6 6.5-9.7 10.3-1.2 4-.3 8 2.2 11.2Z" />
           <path d="M15 32.5v3h15v-3H15Z" />
           <path d="M10.5 39c3.5-1.5 8-2.2 12-2.2s8.5.7 12 2.2v-2.2c-3.5-1.4-8-2.1-12-2.1s-8.5.7-12 2.1V39Z" />
-          <path d="M22.5 16.5v6M19.5 19.5h6" fill="none" stroke={accent} strokeWidth="1.45" />
+          <path d="M22.5 16.5v6M19.5 19.5h6" fill="none" stroke={accent} strokeWidth={isWhite ? 1.4 : 1.1} />
         </g>
       )}
 
@@ -140,7 +147,7 @@ const ChessPieceSvg: React.FC<{
         <g
           fill={fill}
           stroke={stroke}
-          strokeWidth="1.6"
+          strokeWidth={strokeW}
           strokeLinecap="round"
           strokeLinejoin="round"
         >
@@ -152,7 +159,7 @@ const ChessPieceSvg: React.FC<{
           <path d="M9.5 15.8l3.8 14.7h18.4l3.8-14.7-6.3 7.5-6.7-12.3-6.7 12.3-6.3-7.5Z" />
           <path d="M13 30.5v4.5c5.5-1.2 13.5-1.2 19 0v-4.5H13Z" />
           <path d="M11 39h23v-3.5c-6.5-1.3-16.5-1.3-23 0V39Z" />
-          <path d="M14.5 33.2c4.8-.9 11.2-.9 16 0" fill="none" stroke={accent} strokeWidth="1.15" />
+          <path d="M14.5 33.2c4.8-.9 11.2-.9 16 0" fill="none" stroke={accent} strokeWidth={accentW} />
         </g>
       )}
 
@@ -160,15 +167,15 @@ const ChessPieceSvg: React.FC<{
         <g
           fill={fill}
           stroke={stroke}
-          strokeWidth="1.65"
+          strokeWidth={strokeW}
           strokeLinecap="round"
           strokeLinejoin="round"
         >
-          <path d="M22.5 12V5.5M19.5 8.3h6" fill="none" strokeWidth="2" />
+          <path d="M22.5 12V5.5M19.5 8.3h6" fill="none" strokeWidth={isWhite ? 1.85 : 1.35} />
           <path d="M22.5 12c-3.5 0-5.2 2.2-5.2 4.6 0 2.1 1.3 3.7 3 4.6-4.2-1.8-9.8-.5-10.8 4-.9 4.1 2.2 7.8 6.5 8.8h13c4.3-1 7.4-4.7 6.5-8.8-1-4.5-6.6-5.8-10.8-4 1.7-.9 3-2.5 3-4.6 0-2.4-1.7-4.6-5.2-4.6Z" />
           <path d="M13 34v5h19v-5c-5.8-1.4-13.2-1.4-19 0Z" />
-          <path d="M14.5 36.2c4.8-1 11.2-1 16 0" fill="none" stroke={accent} strokeWidth="1.15" />
-          <path d="M22.5 21.5v11.5" fill="none" stroke={accent} strokeWidth="1.2" />
+          <path d="M14.5 36.2c4.8-1 11.2-1 16 0" fill="none" stroke={accent} strokeWidth={accentW} />
+          <path d="M22.5 21.5v11.5" fill="none" stroke={accent} strokeWidth={accentW} />
         </g>
       )}
     </svg>
@@ -207,20 +214,37 @@ export const ChessBoardView: React.FC<ChessBoardViewProps> = ({
   state,
   myColor,
   myDisplayName,
+  myPubkey,
+  myAvatarUrl,
   opponentDisplayName,
   opponentPubkey,
-  opponentAvatarUrl: _opponentAvatarUrl,
+  opponentAvatarUrl,
   waitingForOpponent = false,
   onMove,
   onOfferDraw,
   onRespondDraw,
   onResign,
 }) => {
-  void _opponentAvatarUrl
   const [selectedSq, setSelectedSq] = useState<number | null>(null)
   const [pendingPromo, setPendingPromo] = useState<PendingPromotionState | null>(null)
   const [confirmResign, setConfirmResign] = useState(false)
   const historyScrollRef = useRef<HTMLDivElement | null>(null)
+  const prevHistoryLenRef = useRef<number>(state.history.length)
+
+  useEffect(() => {
+    const len = state.history.length
+    if (len > prevHistoryLenRef.current) {
+      const latest = state.history[len - 1]
+      if (latest?.isCheck || latest?.isCheckmate || state.inCheck) {
+        playGameSound('chess-check')
+      } else if (latest?.captured) {
+        playGameSound('chess-capture')
+      } else {
+        playGameSound('chess-move')
+      }
+    }
+    prevHistoryLenRef.current = len
+  }, [state.history, state.inCheck])
 
   const opponentColor: ChessColor = myColor === 'w' ? 'b' : 'w'
   const canInteract = !waitingForOpponent && state.status === 'active' && state.turn === myColor
@@ -367,22 +391,30 @@ export const ChessBoardView: React.FC<ChessBoardViewProps> = ({
       {/* Opponent Strip (Top) */}
       <div
         className={`ag-chess-player-strip is-opponent${
-          state.status === 'active' && state.turn === opponentColor ? ' is-turn' : ''
+          !waitingForOpponent && state.status === 'active' && state.turn === opponentColor
+            ? ' is-turn'
+            : ''
         }`}
         data-opponent-pubkey={opponentPubkey}
       >
         <div className="ag-chess-player-id">
+          <AvatarImg
+            pubkey={opponentPubkey}
+            pictureUrl={opponentAvatarUrl}
+            alt=""
+            width={24}
+            height={24}
+            className="ag-chess-avatar"
+          />
           <span
             className={`ag-chess-color-badge ${opponentColor === 'w' ? 'is-white' : 'is-black'}`}
             title={opponentColor === 'w' ? 'Playing White' : 'Playing Black'}
           >
-            <ChessPieceSvg type="k" color={opponentColor} size={16} />
+            <ChessPieceSvg type="k" color={opponentColor} size={15} />
           </span>
           <span className="ag-chess-player-name truncate">{opponentDisplayName}</span>
-          {state.status === 'active' && state.turn === opponentColor && (
-            <span className="ag-chess-turn-pill">
-              {waitingForOpponent ? 'Waiting…' : 'Their turn'}
-            </span>
+          {!waitingForOpponent && state.status === 'active' && state.turn === opponentColor && (
+            <span className="ag-chess-turn-pill">Turn</span>
           )}
         </div>
 
@@ -525,23 +557,29 @@ export const ChessBoardView: React.FC<ChessBoardViewProps> = ({
 
       {/* Your Strip (Bottom) */}
       <div
-        className={`ag-chess-player-strip is-self${
-          state.status === 'active' && state.turn === myColor ? ' is-turn' : ''
-        }`}
+        className={`ag-chess-player-strip is-self${canInteract ? ' is-turn' : ''}`}
       >
         <div className="ag-chess-player-id">
+          <AvatarImg
+            pubkey={myPubkey || 'self'}
+            pictureUrl={myAvatarUrl}
+            alt=""
+            width={24}
+            height={24}
+            className="ag-chess-avatar"
+          />
           <span
             className={`ag-chess-color-badge ${myColor === 'w' ? 'is-white' : 'is-black'}`}
             title={myColor === 'w' ? 'Playing White' : 'Playing Black'}
           >
-            <ChessPieceSvg type="k" color={myColor} size={16} />
+            <ChessPieceSvg type="k" color={myColor} size={15} />
           </span>
           <span className="ag-chess-player-name truncate">{myDisplayName}</span>
-          {state.status === 'active' && state.turn === myColor && (
-            <span className="ag-chess-turn-pill is-mine">
-              {waitingForOpponent ? 'Waiting…' : state.inCheck ? 'Check · Your turn' : 'Your turn'}
-            </span>
-          )}
+          {canInteract && state.inCheck ? (
+            <span className="ag-chess-turn-pill is-mine">Check</span>
+          ) : canInteract ? (
+            <span className="ag-game-mini-turn-dot" aria-hidden="true" />
+          ) : null}
         </div>
 
         <div className="ag-chess-captures" aria-label="Pieces captured by you">
@@ -561,25 +599,21 @@ export const ChessBoardView: React.FC<ChessBoardViewProps> = ({
       </div>
 
       {/* Compact Scrollable SAN Move History Ribbon */}
-      <div
-        ref={historyScrollRef}
-        className="ag-chess-history mono tabular"
-        aria-label="Move history"
-      >
-        {movePairs.length === 0 ? (
-          <span className="ag-chess-history-empty">
-            {waitingForOpponent ? 'Waiting for opponent to accept…' : 'No moves yet — White to play'}
-          </span>
-        ) : (
-          movePairs.map((pair) => (
+      {movePairs.length > 0 && (
+        <div
+          ref={historyScrollRef}
+          className="ag-chess-history mono tabular"
+          aria-label="Move history"
+        >
+          {movePairs.map((pair) => (
             <span key={pair.moveNumber} className="ag-chess-history-pair">
               <span className="ag-chess-history-num">{pair.moveNumber}.</span>
               <span className="ag-chess-history-ply">{pair.white}</span>
               {pair.black && <span className="ag-chess-history-ply">{pair.black}</span>}
             </span>
-          ))
-        )}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* Incoming Draw Offer Banner */}
       {incomingDrawOffer && (

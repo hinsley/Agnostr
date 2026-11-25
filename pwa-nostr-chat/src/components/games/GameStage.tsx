@@ -4,11 +4,8 @@ import {
   CircleDot,
   Crown,
   Gamepad2,
-  Mic,
-  MicOff,
   Minimize2,
   Phone,
-  PhoneCall,
   Spade,
   X,
 } from 'lucide-react'
@@ -42,15 +39,8 @@ export interface GameStageProps {
   onPlaySound?: (cue: SoundCue) => void
 }
 
-function formatElapsed(startedAtMs: number, nowMs: number): string {
-  const totalSec = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000))
-  const hrs = Math.floor(totalSec / 3600)
-  const mins = Math.floor((totalSec % 3600) / 60)
-  const secs = totalSec % 60
-  if (hrs > 0) {
-    return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
-  }
-  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+function formatScoreNum(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, '')
 }
 
 function parseChessSessionState(session: ActiveChessSession): ChessState {
@@ -96,7 +86,9 @@ function renderGameIcon(kind: GameKind, size = 15) {
 interface SessionDisplayMeta {
   title: string
   scopeLabel: string
+  subtitle: string
   statusLabel: string
+  headerStatus: string | null
   isMyTurn: boolean
   isFinished: boolean
   isWaiting: boolean
@@ -123,16 +115,25 @@ function computeSessionMeta(
     const isFinished = session.status === 'finished' || st.status === 'finished'
     const isMyTurn = !isWaiting && !isFinished && st.turn === session.localColor
     const statusLabel = isWaiting
-      ? 'Waiting for opponent…'
+      ? 'Invited'
       : isFinished
         ? 'Finished'
         : isMyTurn
-          ? 'Your Turn'
-          : "Opponent's Turn"
+          ? 'Your turn'
+          : "Opponent's turn"
+    const headerStatus = isWaiting
+      ? 'Invited'
+      : isFinished
+        ? 'Finished'
+        : isMyTurn
+          ? 'Your turn'
+          : null
     return {
       title: 'Chess',
       scopeLabel,
+      subtitle: scopeLabel,
       statusLabel,
+      headerStatus,
       isMyTurn,
       isFinished,
       isWaiting,
@@ -150,18 +151,33 @@ function computeSessionMeta(
       ((st.phase === 'playing' && st.turn === session.localColor) ||
         (isScoring && !st.scoreAcceptedBy[session.localColor]))
     const statusLabel = isWaiting
-      ? 'Waiting for opponent…'
+      ? 'Invited'
       : isFinished
         ? 'Finished'
         : isScoring
           ? 'Scoring'
           : isMyTurn
-            ? 'Your Turn'
-            : "Opponent's Turn"
+            ? 'Your turn'
+            : "Opponent's turn"
+    const headerStatus = isWaiting
+      ? 'Invited'
+      : isFinished
+        ? 'Finished'
+        : isScoring
+          ? 'Scoring'
+          : isMyTurn
+            ? 'Your turn'
+            : null
+    const rulesLabel = session.goConfig.scoring === 'chinese' ? 'Chinese' : 'Japanese'
+    const goMeta = `Komi ${formatScoreNum(session.goConfig.komi)}${
+      session.goConfig.handicap >= 2 ? ` · H${session.goConfig.handicap}` : ''
+    } · ${rulesLabel}`
     return {
       title: `Go ${session.goConfig.boardSize}×${session.goConfig.boardSize}`,
       scopeLabel,
+      subtitle: `${scopeLabel} · ${goMeta}`,
       statusLabel,
+      headerStatus,
       isMyTurn,
       isFinished,
       isWaiting,
@@ -190,12 +206,26 @@ function computeSessionMeta(
         : pkState.phase === 'showdown'
           ? 'Showdown'
           : isMyTurn
-            ? 'Your Turn'
+            ? 'Your turn'
             : `Hand #${pkState.handNumber}`
+  const headerStatus = isFinished
+    ? 'Finished'
+    : !pkState
+      ? 'Connecting…'
+      : pkState.phase === 'showdown'
+        ? 'Showdown'
+        : isMyTurn
+          ? 'Your turn'
+          : null
+  const subtitle = pkState
+    ? `${scopeLabel} · ${pkState.smallBlind}/${pkState.bigBlind}`
+    : scopeLabel
   return {
-    title: "Texas Hold'em Poker",
+    title: "Texas Hold'em",
     scopeLabel,
+    subtitle,
     statusLabel,
+    headerStatus,
     isMyTurn,
     isFinished,
     isWaiting: false,
@@ -205,10 +235,8 @@ function computeSessionMeta(
 export function GameStage({
   engine,
   games,
-  onFocusCall,
   onPlaySound,
 }: GameStageProps) {
-  const [nowMs, setNowMs] = useState(() => Date.now())
   const [confirmClose, setConfirmClose] = useState(false)
 
   const allSessions = useMemo(
@@ -239,28 +267,50 @@ export function GameStage({
     return ranked[0]?.session ?? null
   }, [showModal, allSessions, engine, games.focusedScopeKey])
 
-  // Keep call elapsed timer ticking in game header only while modal + active call coexist
-  useEffect(() => {
-    if (!showModal || !activeCall) return
-    setNowMs(Date.now())
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [showModal, activeCall])
-
   // Reset close confirmation when switching/minimizing sessions
   const focusedKey = focusedSession?.scopeKey ?? null
   useEffect(() => {
     setConfirmClose(false)
   }, [focusedKey, showModal])
 
-  // Prefetch opponent avatar for DM Chess / Go games
+  // Prefetch kind:0 profile pictures for local user, DM opponent, and all seated Poker players
+  const focusedPokerSeatPubkeysKey = useMemo(() => {
+    if (!focusedSession || focusedSession.kind !== 'poker') return ''
+    const pkState = parsePokerSessionState(focusedSession)
+    if (!pkState) return ''
+    return pkState.seats
+      .map((s) => s.pubkey.trim().toLowerCase())
+      .filter(Boolean)
+      .sort()
+      .join(',')
+  }, [focusedSession])
+
+  const hasFocusedSession = Boolean(focusedSession)
+  const myMasterPubkey = engine.identity.masterPubkey
   const focusedOpponentPubkey =
     focusedSession && focusedSession.scope === 'dm' ? focusedSession.opponentPubkey : null
   const ensureProfilePictures = engine.ensureProfilePictures
+
   useEffect(() => {
-    if (!focusedOpponentPubkey) return
-    ensureProfilePictures([focusedOpponentPubkey])
-  }, [focusedOpponentPubkey, ensureProfilePictures])
+    if (!hasFocusedSession) return
+    const pks: string[] = []
+    if (myMasterPubkey) pks.push(myMasterPubkey)
+    if (focusedOpponentPubkey) pks.push(focusedOpponentPubkey)
+    if (focusedPokerSeatPubkeysKey) {
+      for (const pk of focusedPokerSeatPubkeysKey.split(',')) {
+        if (pk) pks.push(pk)
+      }
+    }
+    if (pks.length > 0) {
+      ensureProfilePictures(pks)
+    }
+  }, [
+    hasFocusedSession,
+    myMasterPubkey,
+    focusedOpponentPubkey,
+    focusedPokerSeatPubkeysKey,
+    ensureProfilePictures,
+  ])
 
   // Android / PWA Back button & Escape minimize the open game smoothly (never destroying the game)
   useBackHandler(showModal, () => {
@@ -284,6 +334,7 @@ export function GameStage({
 
   const myDisplayName =
     engine.identity.nickname.trim() || engine.identity.activeDisplayHandle || 'You'
+  const myAvatarUrl = myMasterPubkey ? engine.getProfilePicture(myMasterPubkey) : undefined
 
   // 1. Sleek Portaled Game Stage Modal (z-index: 62 — strictly below floating Call Pill/PiP at z-index: 68!)
   if (showModal && focusedSession) {
@@ -323,14 +374,6 @@ export function GameStage({
       }
     }
 
-    const callElapsed = activeCall
-      ? activeCall.status === 'connecting' || activeCall.status === 'ringing-out'
-        ? activeCall.status === 'ringing-out'
-          ? 'Ringing…'
-          : 'Connecting…'
-        : formatElapsed(activeCall.connectedAt ?? activeCall.startedAt, nowMs)
-      : null
-
     let boardBody: React.ReactNode = null
     if (focusedSession.kind === 'chess') {
       const chessState = parseChessSessionState(focusedSession)
@@ -339,6 +382,8 @@ export function GameStage({
           state={chessState}
           myColor={focusedSession.localColor}
           myDisplayName={myDisplayName}
+          myPubkey={myMasterPubkey}
+          myAvatarUrl={myAvatarUrl}
           opponentDisplayName={focusedSession.opponentDisplayName}
           opponentPubkey={focusedSession.opponentPubkey}
           opponentAvatarUrl={engine.getProfilePicture(focusedSession.opponentPubkey)}
@@ -368,6 +413,8 @@ export function GameStage({
           state={goState}
           myColor={focusedSession.localColor}
           myDisplayName={myDisplayName}
+          myPubkey={myMasterPubkey}
+          myAvatarUrl={myAvatarUrl}
           opponentDisplayName={focusedSession.opponentDisplayName}
           opponentPubkey={focusedSession.opponentPubkey}
           opponentAvatarUrl={engine.getProfilePicture(focusedSession.opponentPubkey)}
@@ -409,6 +456,12 @@ export function GameStage({
           myPubkey={focusedSession.localPubkey}
           myHoleCards={myHoleCards}
           isHost={focusedSession.isHost}
+          getAvatarUrl={(pk) =>
+            engine.getProfilePicture(pk) ??
+            (pk.trim().toLowerCase() === focusedSession.localPubkey.trim().toLowerCase()
+              ? myAvatarUrl
+              : undefined)
+          }
           onJoinSeat={() => {
             onPlaySound?.('click')
             void games.joinPokerTable(
@@ -459,53 +512,30 @@ export function GameStage({
           <header className="ag-game-stage-head">
             <div className="ag-game-stage-head-left">
               <span className="ag-game-stage-icon" aria-hidden="true">
-                {renderGameIcon(focusedSession.kind, 15)}
+                {renderGameIcon(focusedSession.kind, 14)}
               </span>
               <span className="ag-game-stage-title truncate">{meta.title}</span>
-              <span className="ag-game-scope-pill mono truncate">{meta.scopeLabel}</span>
               <span
-                className={`ag-game-status-pill${meta.isMyTurn ? ' is-my-turn' : ''}${
-                  meta.isFinished ? ' is-finished' : ''
-                }`}
+                className="ag-game-scope-pill ag-game-stage-sub mono truncate"
+                title={meta.subtitle}
               >
-                {meta.statusLabel}
+                {meta.subtitle}
               </span>
             </div>
 
             <div className="ag-game-stage-head-actions">
-              {activeCall ? (
-                <div className="ag-game-call-group">
-                  <button
-                    type="button"
-                    className="ag-game-call-pill mono"
-                    onClick={() => {
-                      onPlaySound?.('click')
-                      if (onFocusCall) onFocusCall()
-                      else engine.calls.toggleMute()
-                    }}
-                    title={onFocusCall ? 'Open call stage' : 'Toggle microphone mute'}
-                  >
-                    <span className="ag-game-call-dot" aria-hidden="true" />
-                    <PhoneCall size={12} aria-hidden="true" />
-                    <span>In Call · {callElapsed}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`ag-game-head-btn icon-only${
-                      activeCall.localMuted ? ' is-danger' : ''
-                    }`}
-                    onClick={() => {
-                      onPlaySound?.('click')
-                      engine.calls.toggleMute()
-                    }}
-                    aria-pressed={activeCall.localMuted}
-                    aria-label={activeCall.localMuted ? 'Unmute call mic' : 'Mute call mic'}
-                    title={activeCall.localMuted ? 'Unmute mic' : 'Mute mic'}
-                  >
-                    {activeCall.localMuted ? <MicOff size={14} /> : <Mic size={14} />}
-                  </button>
-                </div>
-              ) : (
+              {meta.headerStatus && (
+                <span
+                  className={`ag-game-status-pill${meta.isMyTurn ? ' is-my-turn' : ''}${
+                    meta.isFinished ? ' is-finished' : ''
+                  }${meta.isWaiting ? ' is-waiting' : ''}`}
+                >
+                  {meta.isMyTurn && <span className="ag-game-mini-turn-dot" aria-hidden="true" />}
+                  <span>{meta.headerStatus}</span>
+                </span>
+              )}
+
+              {!activeCall && (
                 <button
                   type="button"
                   className="ag-game-head-btn icon-only"
