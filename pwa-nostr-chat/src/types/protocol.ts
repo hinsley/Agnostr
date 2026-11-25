@@ -470,6 +470,7 @@ export interface AgnostrEngine {
   readRoomPeers: () => PeerInfo[]
   presence: ChannelPresenceSummary
   locationNotes: LocationNote[]
+  channelHistoryEpoch: number
   unreadDividerId: string | null
   sending: boolean
   replyingTo: GeoMessage | null

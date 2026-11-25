@@ -51,6 +51,7 @@ import {
   mergeTranscriptionModels,
   resolveActiveTranscriptionModel,
 } from './transcriptionModels.ts'
+import { archiveChannelMessages, clearChannelHistory, removeBlockedFromChannelHistory } from './bitchatHistory.ts'
 import { formatVoiceDuration } from './voiceRecorder.ts'
 
 const PREFIX = 'agnostr:v2:'
@@ -932,17 +933,17 @@ export function loadChannelMessages(geohash: string): GeoMessage[] {
   return clean
 }
 
-export function saveChannelMessages(geohash: string, messages: GeoMessage[]): void {
+export function saveChannelMessages(geohash: string, messages: GeoMessage[], profile: string): void {
   const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
-  const trimmed = messages
+  const confirmed = messages
     .filter((m) => {
       if (m.isSystem || m.isBlockedPlaceholder) return false
       if (isStuckMediaPlaceholder(m) || isEphemeralPendingMessage(m)) return false
       const msgKey = normalizeBitchatChannelKey(m.geohash) ?? normalizeGeohash(m.geohash)
       return msgKey === gh
     })
-    .slice(-MAX_MESSAGES_PER_CHANNEL)
-  safeSet(KEYS.msgChannel(gh), JSON.stringify(trimmed))
+  archiveChannelMessages(profile, gh, confirmed)
+  safeSet(KEYS.msgChannel(gh), JSON.stringify(confirmed.slice(-MAX_MESSAGES_PER_CHANNEL)))
 
   const index = safeJsonParse<string[]>(safeGet(KEYS.msgIndex), []).filter((g) => g !== gh)
   index.unshift(gh)
@@ -953,14 +954,16 @@ export function saveChannelMessages(geohash: string, messages: GeoMessage[]): vo
   safeSet(KEYS.msgIndex, JSON.stringify(index))
 }
 
-export function clearChannelMessagesStorage(geohash: string): void {
+export function clearChannelMessagesStorage(geohash: string, profile: string): void {
   const gh = normalizeBitchatChannelKey(geohash) ?? normalizeGeohash(geohash)
   safeRemove(KEYS.msgChannel(gh))
+  clearChannelHistory(profile, gh)
 }
 
-export function scrubBlockedPubkeyFromChannelStorage(pubkey: string): number {
+export function scrubBlockedPubkeyFromChannelStorage(pubkey: string, profile: string): number {
   const pk = pubkey.trim().toLowerCase()
   if (!pk || typeof localStorage === 'undefined') return 0
+  removeBlockedFromChannelHistory(profile, pk)
   let removed = 0
   try {
     const bitchatPrefix = `${PREFIX}msgs:`

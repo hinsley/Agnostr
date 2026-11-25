@@ -1,3 +1,4 @@
+import '../styles/bitchat-history.css'
 import { dmReplyReference, dmTargetId } from '../lib/dmMessageActions.ts'
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
@@ -39,6 +40,7 @@ import {
   isTopicChannel,
   parseCelestialChannelKey,
 } from '../lib/bitchatChannel'
+import { BITCHAT_HISTORY_STEP, BITCHAT_WINDOW, compareHistory, readChannelHistory, type HistoryDirection } from '../lib/bitchatHistory'
 import { isStuckMediaPlaceholder } from '../lib/storage'
 import { parseInlineChatVoice } from '../lib/inlineChatVoice'
 import { parseInlineChatImage } from '../lib/inlineChatImage'
@@ -133,6 +135,30 @@ const DEFAULT_VIEWPORT_TAIL = 20
 const STICKY_REENGAGE_PX = 100
 const UNSTICK_DELTA_PX = 2
 const JUMP_BTN_THRESHOLD_PX = 160
+
+interface ReadingPage {
+  key: string
+  messages: GeoMessage[]
+  atLiveTail: boolean
+}
+
+interface ReadingAnchor {
+  rows: { id: string; y: number }[]
+  direction: HistoryDirection
+}
+
+const roomWindow = (rows: readonly GeoMessage[]) => rows.slice(-BITCHAT_WINDOW)
+const archivedCursor = (row: GeoMessage) => !row.isSystem && !row.isBlockedPlaceholder &&
+  !row.id.startsWith('pending-') && row.deliveryStatus !== 'sending' && row.deliveryStatus !== 'failed'
+
+// Archival and recent-memory pages share a total order, even for timestamp ties.
+function sortRoomRows(rows: GeoMessage[]) {
+  return rows.sort((a, b) => {
+    const aPending = a.id.startsWith('pending-')
+    const bPending = b.id.startsWith('pending-')
+    return Number(aPending) - Number(bPending) || (aPending ? 0 : compareHistory(a, b))
+  })
+}
 
 interface MessageTranslationSpec {
   mode: 'skip' | 'own-original' | 'translate'
@@ -249,6 +275,13 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     startedEmpty: true,
   })
   const [renderLimit, setRenderLimit] = useState<number>(INITIAL_RENDER_LIMIT)
+  const [readingPage, setReadingPage] = useState<ReadingPage | null>(null)
+  const [loadingPage, setLoadingPage] = useState(false)
+  const [oldestBoundary, setOldestBoundary] = useState<string | null>(null)
+  const readingPageRef = useRef<ReadingPage | null>(null)
+  const pageRequestRef = useRef<object | null>(null)
+  const readingAnchorRef = useRef<ReadingAnchor | null>(null)
+  const lastPublicSearchIdRef = useRef<string | null>(null)
   const [viewportRange, setViewportRange] = useState<[number, number]>([0, -1])
   const [showJumpBtn, setShowJumpBtn] = useState(false)
   const [unseenBelow, setUnseenBelow] = useState(0)
@@ -388,11 +421,12 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     hasUploadedGroupPicture(activeServerPicture) &&
     failedServerPictureUrl !== activeServerPicture
   const isEncryptedContext = Boolean(isDm || (isServer && activeServer?.encrypted))
+  const isBitchat = !isDm && !isServer
   const streamKey = isDm
     ? `dm:${dmThread?.peerPubkey}`
     : isServer && activeServer && activeChannel
       ? `srv:${activeServer.id}:${activeChannel.id}`
-      : `ch:${engine.activeGeohash}`
+      : `ch:${engine.activeGeohash}:${engine.identity.masterPubkey}:${engine.channelHistoryEpoch}`
 
   // Track which message IDs were already present when switching into a stream
   const initialIdsRef = useRef<{ key: string; ids: Set<string> }>({
@@ -460,7 +494,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     }
     if (!isDm || !dmThread) {
       const activeKey = engine.activeGeohash.toLowerCase()
-      return engine.messages.filter(
+      return sortRoomRows(engine.messages.filter(
         (m) =>
           !isStuckMediaPlaceholder(m) &&
           (m.isSystem || m.geohash.toLowerCase() === activeKey) &&
@@ -472,7 +506,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         return image || voice
           ? { ...m, imageAttachment: m.imageAttachment ?? image, voiceMemo: m.voiceMemo ?? voice }
           : m
-      })
+      }))
     }
     return dmThread.messages
       .filter((dm) => !isStuckMediaPlaceholder(dm))
@@ -517,11 +551,122 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     dmTargets,
   ])
 
-  const hiddenEarlierCount = Math.max(0, displayMessages.length - renderLimit)
-  const visibleMessages = useMemo(
-    () => (hiddenEarlierCount > 0 ? displayMessages.slice(hiddenEarlierCount) : displayMessages),
-    [displayMessages, hiddenEarlierCount]
-  )
+  const publicPage = isBitchat && readingPage?.key === streamKey ? readingPage : null
+  const publicContextRef = useRef({ isBitchat, streamKey, displayMessages })
+  useLayoutEffect(() => {
+    publicContextRef.current = { isBitchat, streamKey, displayMessages }
+  }, [isBitchat, streamKey, displayMessages])
+
+  const applyReadingPage = useCallback((page: ReadingPage | null) => {
+    readingPageRef.current = page
+    setReadingPage(page)
+  }, [])
+
+  const freezePublicPage = useCallback(() => {
+    const ctx = publicContextRef.current
+    if (!ctx.isBitchat || readingPageRef.current?.key === ctx.streamKey) return
+    if (ctx.displayMessages.length === 0) return
+    stickToBottomRef.current = false
+    applyReadingPage({ key: ctx.streamKey, messages: roomWindow(ctx.displayMessages), atLiveTail: true })
+  }, [applyReadingPage])
+
+  const hiddenEarlierCount = isBitchat ? 0 : Math.max(0, displayMessages.length - renderLimit)
+  const { isPeerBlocked, isTrusted, strictWhitelistMode } = engine
+  const isHistoryVisible = useCallback((m: GeoMessage) => {
+    if (m.isSystem) return true
+    const blocked = isPeerBlocked(m.pubkey)
+    if (m.isBlockedPlaceholder) return blocked
+    return !blocked && (m.isOwn || !strictWhitelistMode || isTrusted(m.pubkey))
+  }, [isPeerBlocked, isTrusted, strictWhitelistMode])
+  const visibleMessages = useMemo(() => {
+    if (publicPage) {
+      const live = new Map(displayMessages.map((m) => [m.id, m]))
+      return publicPage.messages
+        .filter((m) => !m.id.startsWith('pending-') || live.has(m.id))
+        .map((m) => live.get(m.id) ?? m).filter(isHistoryVisible)
+    }
+    if (isBitchat) return roomWindow(displayMessages)
+    return hiddenEarlierCount > 0 ? displayMessages.slice(hiddenEarlierCount) : displayMessages
+  }, [displayMessages, hiddenEarlierCount, isBitchat, isHistoryVisible, publicPage])
+  const firstArchivable = isBitchat ? visibleMessages.find(archivedCursor) : undefined
+  const canLoadOlder = !!firstArchivable && firstArchivable.id !== oldestBoundary
+
+  const loadPublicPage = useCallback(async (direction: HistoryDirection) => {
+    if (!isBitchat || pageRequestRef.current) return
+    const base = readingPageRef.current?.key === streamKey
+      ? readingPageRef.current.messages.filter(isHistoryVisible) : visibleMessages
+    const cursors = base.filter(archivedCursor)
+    const edge = direction === 'older' ? cursors[0] : cursors.at(-1)
+    if (!edge) return
+    const request = {}
+    pageRequestRef.current = request
+    setLoadingPage(true)
+    try {
+      const disk = await readChannelHistory(engine.identity.masterPubkey.toLowerCase(),
+        engine.activeGeohash, edge, direction, isHistoryVisible)
+      const current = publicContextRef.current
+      if (pageRequestRef.current !== request || current.streamKey !== streamKey) return
+      const candidates = new Map<string, GeoMessage>()
+      for (const m of [...disk.messages, ...current.displayMessages]) {
+        if (!archivedCursor(m) || !isHistoryVisible(m)) continue
+        if ((direction === 'older' && compareHistory(m, edge) < 0) ||
+            (direction === 'newer' && compareHistory(m, edge) > 0)) {
+          candidates.set(m.id, m)
+        }
+      }
+      const sorted = sortRoomRows([...candidates.values()])
+      const step = direction === 'older' ? sorted.slice(-BITCHAT_HISTORY_STEP) : sorted.slice(0, BITCHAT_HISTORY_STEP)
+      if (step.length === 0) {
+        if (direction === 'older' && !disk.more) setOldestBoundary(edge.id)
+        return
+      }
+      const next = direction === 'older'
+        ? [...step, ...base].slice(0, BITCHAT_WINDOW)
+        : [...base, ...step].slice(-BITCHAT_WINDOW)
+      const el = scrollRef.current
+      if (el) {
+        const rect = el.getBoundingClientRect()
+        readingAnchorRef.current = {
+          direction,
+          rows: Array.from(el.querySelectorAll<HTMLElement>('.ag-msg-row[id]')).flatMap((row) => {
+            const b = row.getBoundingClientRect()
+            return b.bottom > rect.top && b.top < rect.bottom ? [{ id: row.id, y: b.top - rect.top }] : []
+          }),
+        }
+      }
+      stickToBottomRef.current = false
+      const newest = current.displayMessages.filter(archivedCursor).at(-1)
+      applyReadingPage({
+        key: streamKey, messages: next,
+        atLiveTail: direction === 'newer' && Boolean(newest && next.at(-1)?.id === newest.id && !disk.more),
+      })
+      setShowJumpBtn(true)
+    } finally {
+      if (pageRequestRef.current === request) {
+        pageRequestRef.current = null
+        setLoadingPage(false)
+      }
+    }
+  }, [applyReadingPage, engine.activeGeohash, engine.identity.masterPubkey, isBitchat, isHistoryVisible, streamKey, visibleMessages])
+
+  useLayoutEffect(() => {
+    const anchor = readingAnchorRef.current
+    const el = scrollRef.current
+    if (!anchor || !el) return
+    readingAnchorRef.current = null
+    const rect = el.getBoundingClientRect()
+    for (const { id, y } of anchor.rows) {
+      const row = document.getElementById(id)
+      if (!row || !el.contains(row)) continue
+      el.scrollTop += row.getBoundingClientRect().top - rect.top - y
+      lastScrollTopRef.current = el.scrollTop
+      lastScrollHeightRef.current = el.scrollHeight
+      return
+    }
+    el.scrollTop = anchor.direction === 'older' ? el.scrollHeight - el.clientHeight : 0
+    lastScrollTopRef.current = el.scrollTop
+    lastScrollHeightRef.current = el.scrollHeight
+  }, [readingPage])
 
   // Coalesce consecutive blocked-message placeholders into a single ultra-compact run indicator
   const renderItems: StreamRenderItem[] = useMemo(() => {
@@ -571,12 +716,15 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     if (isDm && dmThread) {
       addPk(dmThread.peerPubkey)
     }
-    for (const msg of visibleMessages) {
-      if (msg.isSystem || msg.isBlockedPlaceholder) continue
-      addPk(msg.pubkey)
+    // Browsing disk pages must not fan out relay requests for old profiles.
+    if (!publicPage) {
+      for (const msg of visibleMessages) {
+        if (msg.isSystem || msg.isBlockedPlaceholder) continue
+        addPk(msg.pubkey)
+      }
     }
     return pks.join(',')
-  }, [isDm, dmThread, visibleMessages])
+  }, [isDm, dmThread, publicPage, visibleMessages])
 
   useEffect(() => {
     if (!visibleAvatarPubkeysKey) return
@@ -611,7 +759,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     lastClientHeightRef.current = el.clientHeight
   }, [visibleMessages.length])
 
-  // Snapshot existing IDs on channel/DM switch, reset DOM window to latest 80, & snap to bottom synchronously
+  // Reset the bounded DOM window and snap to latest on an actual stream switch.
   useLayoutEffect(() => {
     initialIdsRef.current = {
       key: streamKey,
@@ -624,6 +772,12 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     streamSwitchedAtRef.current = Date.now()
     pendingScrollAnchorRef.current = null
     pendingJumpIdRef.current = null
+    pageRequestRef.current = null
+    readingAnchorRef.current = null
+    applyReadingPage(null)
+    setLoadingPage(false)
+    setOldestBoundary(null)
+    lastPublicSearchIdRef.current = null
     setRenderLimit(INITIAL_RENDER_LIMIT)
     setShowJumpBtn(false)
     setUnseenBelow(0)
@@ -651,12 +805,14 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const tailTrackerRef = useRef<{
     streamKey: string
     lastMsgId: string | null
+    latestConfirmedAt: number
     totalCount: number
     nonPlaceholderCount: number
     seenIds: Set<string>
   }>({
     streamKey: '',
     lastMsgId: null,
+    latestConfirmedAt: 0,
     totalCount: 0,
     nonPlaceholderCount: 0,
     seenIds: new Set(),
@@ -665,12 +821,15 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   useLayoutEffect(() => {
     const lastMsg = displayMessages.length > 0 ? displayMessages[displayMessages.length - 1] : null
     const lastMsgId = lastMsg?.id ?? null
+    const latestConfirmedAt = isBitchat
+      ? displayMessages.reduce((at, m) => archivedCursor(m) ? Math.max(at, m.createdAt) : at, 0) : 0
     const prev = tailTrackerRef.current
 
     if (prev.streamKey !== streamKey) {
       tailTrackerRef.current = {
         streamKey,
         lastMsgId,
+        latestConfirmedAt,
         totalCount: displayMessages.length,
         nonPlaceholderCount,
         seenIds: new Set(displayMessages.map((m) => m.id)),
@@ -685,7 +844,17 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     let appendedReal = 0
     let hasOwnAppended = false
 
-    if (lastMsgId !== null && lastMsgId !== prev.lastMsgId) {
+    if (isBitchat) {
+      for (const m of displayMessages) {
+        if (prev.seenIds.has(m.id) || m.createdAt < prev.latestConfirmedAt) continue
+        if (!archivedCursor(m) && !m.isBlockedPlaceholder) continue
+        appendedTotal += 1
+        if (!m.isBlockedPlaceholder) {
+          appendedReal += 1
+          if (m.isOwn) hasOwnAppended = true
+        }
+      }
+    } else if (lastMsgId !== null && lastMsgId !== prev.lastMsgId) {
       for (let i = displayMessages.length - 1; i >= 0; i -= 1) {
         const m = displayMessages[i]
         if (m.id === prev.lastMsgId || prev.seenIds.has(m.id)) break
@@ -704,13 +873,14 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     tailTrackerRef.current = {
       streamKey,
       lastMsgId,
+      latestConfirmedAt,
       totalCount: displayMessages.length,
       nonPlaceholderCount,
       seenIds: new Set(displayMessages.map((m) => m.id)),
     }
 
     if (appendedTotal > 0) {
-      if (hasOwnAppended) {
+      if (hasOwnAppended && !readingPageRef.current) {
         stickToBottomRef.current = true
         clearSmoothScrollGuard()
         lastUpwardInputAtRef.current = 0
@@ -729,7 +899,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         setShowJumpBtn(true)
       }
     }
-  }, [streamKey, displayMessages, nonPlaceholderCount, clearSmoothScrollGuard, pinScrollToBottomNow])
+  }, [streamKey, displayMessages, isBitchat, nonPlaceholderCount, clearSmoothScrollGuard, pinScrollToBottomNow])
 
   // Track direct upward user scroll input so smooth-scroll or height growth never fights the user
   useEffect(() => {
@@ -737,10 +907,12 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     if (!container) return
 
     let touchStartY = 0
+    let lastTouchY = 0
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY < 0) {
         clearSmoothScrollGuard()
         lastUpwardInputAtRef.current = Date.now()
+        if (container.scrollTop > 0) freezePublicPage()
       } else if (e.deltaY > 0) {
         lastUpwardInputAtRef.current = 0
       }
@@ -748,19 +920,22 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     const onTouchStart = (e: TouchEvent) => {
       clearSmoothScrollGuard()
       touchStartY = e.touches[0]?.clientY ?? 0
+      lastTouchY = touchStartY
       touchDraggingUpRef.current = false
     }
     const onTouchMove = (e: TouchEvent) => {
       const y = e.touches[0]?.clientY ?? touchStartY
-      if (y > touchStartY + 4) {
+      if (y > lastTouchY + 3 || (y >= lastTouchY && y > touchStartY + 4)) {
         // Finger moving down drags content down -> scrolling UP into older messages
         clearSmoothScrollGuard()
         touchDraggingUpRef.current = true
         lastUpwardInputAtRef.current = Date.now()
-      } else if (y < touchStartY - 4) {
+        if (container.scrollTop > 0) freezePublicPage()
+      } else if (y < lastTouchY - 3 || y < touchStartY - 4) {
         touchDraggingUpRef.current = false
         lastUpwardInputAtRef.current = 0
       }
+      lastTouchY = y
     }
     const onTouchEnd = () => {
       touchDraggingUpRef.current = false
@@ -769,6 +944,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       if (e.key === 'PageUp' || e.key === 'ArrowUp' || e.key === 'Home') {
         clearSmoothScrollGuard()
         lastUpwardInputAtRef.current = Date.now()
+        if (container.scrollTop > 0) freezePublicPage()
       } else if (e.key === 'PageDown' || e.key === 'ArrowDown' || e.key === 'End') {
         lastUpwardInputAtRef.current = 0
       }
@@ -789,7 +965,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       container.removeEventListener('touchcancel', onTouchEnd)
       container.removeEventListener('keydown', onKeyDown)
     }
-  }, [clearSmoothScrollGuard])
+  }, [clearSmoothScrollGuard, freezePublicPage])
 
   // Keep pinned to latest message when inner content grows (images, transcripts, translations, reactions),
   // container resizes, or the mobile virtual keyboard / composer changes height
@@ -835,8 +1011,34 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     }
   }, [isUpwardInputActive, pinScrollToBottomNow, syncViewportRange])
 
-  // Scroll to active search hit when navigating search results (auto-expanding window if hit is older)
+  const jumpToPublicMessage = useCallback((id: string) => {
+    const idx = displayMessages.findIndex((m) => m.id === id)
+    if (idx < 0 || !isHistoryVisible(displayMessages[idx])) return
+    const target = document.getElementById(`msg-${id}`)
+    if (target) {
+      freezePublicPage()
+      scrollMessageIntoContainer(target, true)
+      return
+    }
+    pageRequestRef.current = null
+    setLoadingPage(false)
+    stickToBottomRef.current = false
+    const start = Math.min(Math.max(0, displayMessages.length - BITCHAT_WINDOW), Math.max(0, idx - 50))
+    const rows = displayMessages.slice(start, start + BITCHAT_WINDOW)
+    pendingJumpIdRef.current = id
+    applyReadingPage({ key: streamKey, messages: rows, atLiveTail: start + rows.length === displayMessages.length })
+    setShowJumpBtn(true)
+  }, [applyReadingPage, displayMessages, freezePublicPage, isHistoryVisible, scrollMessageIntoContainer, streamKey])
+
+  // Scroll to an explicitly selected search result, not every live delivery.
   useEffect(() => {
+    if (isBitchat) {
+      if (activeSearchMessageId && lastPublicSearchIdRef.current !== activeSearchMessageId) {
+        jumpToPublicMessage(activeSearchMessageId)
+      }
+      lastPublicSearchIdRef.current = activeSearchMessageId
+      return
+    }
     if (!activeSearchMessageId) return
     const idx = displayMessages.findIndex((m) => m.id === activeSearchMessageId)
     if (idx !== -1 && idx < hiddenEarlierCount) {
@@ -848,7 +1050,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     if (el) {
       scrollMessageIntoContainer(el, true)
     }
-  }, [activeSearchMessageId, displayMessages, hiddenEarlierCount, scrollMessageIntoContainer])
+  }, [activeSearchMessageId, displayMessages, hiddenEarlierCount, isBitchat, jumpToPublicMessage, scrollMessageIntoContainer])
 
   // Fulfill deferred reply-quote jumps after expanding the message window
   useEffect(() => {
@@ -860,7 +1062,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     scrollMessageIntoContainer(el, true)
     el.classList.add('is-search-active')
     window.setTimeout(() => el.classList.remove('is-search-active'), 1600)
-  }, [visibleMessages.length, scrollMessageIntoContainer])
+  }, [visibleMessages.length, readingPage, scrollMessageIntoContainer])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -911,13 +1113,15 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     }
 
     const scrolledUp = scrollTop < prevScrollTop - UNSTICK_DELTA_PX
+    const scrolledDown = scrollTop > prevScrollTop + UNSTICK_DELTA_PX
     const scrolledDownOrHeld = scrollTop >= prevScrollTop - UNSTICK_DELTA_PX
     const heightGrew = prevScrollHeight > 0 && scrollHeight > prevScrollHeight + 1
 
     if (stickToBottomRef.current) {
-      if (scrolledUp && distFromBottom > 48) {
+      if (scrolledUp && distFromBottom > (isBitchat ? 0 : 48)) {
         // Genuine upward scroll: unstick immediately so scrolling up never fights the user
         stickToBottomRef.current = false
+        if (isBitchat) freezePublicPage()
       } else if (scrolledDownOrHeld && heightGrew && !isUpwardInputActive()) {
         // Height grew beneath an anchored viewport without upward input: stay cleanly pinned
         pinScrollToBottomNow(el)
@@ -931,12 +1135,22 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       } else if (distFromBottom > STICKY_REENGAGE_PX) {
         // Fallback unstick (e.g. scrollbar thumb drag upward or programmatic jump)
         stickToBottomRef.current = false
+        if (isBitchat) freezePublicPage()
       }
-    } else if (distFromBottom <= STICKY_REENGAGE_PX && scrolledDownOrHeld) {
+    } else if (
+      isBitchat
+        ? readingPageRef.current?.atLiveTail && distFromBottom <= 3 && scrolledDown && !isUpwardInputActive()
+        : distFromBottom <= STICKY_REENGAGE_PX && scrolledDownOrHeld
+    ) {
       // Scrolled back down into the sticky bottom band: re-engage cleanly
       stickToBottomRef.current = true
       lastUpwardInputAtRef.current = 0
       touchDraggingUpRef.current = false
+      if (isBitchat) {
+        pageRequestRef.current = null
+        setLoadingPage(false)
+        applyReadingPage(null)
+      }
     }
 
     lastScrollTopRef.current = scrollTop
@@ -954,14 +1168,14 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       setShowJumpBtn(
         (distFromBottom > JUMP_BTN_THRESHOLD_PX &&
           scrollHeight > clientHeight + JUMP_BTN_THRESHOLD_PX) ||
-          unseenBelow > 0
+          unseenBelow > 0 || Boolean(isBitchat && !readingPageRef.current?.atLiveTail)
       )
     }
 
     // Auto-expand earlier messages smoothly when scrolled near the top
     const now = Date.now()
     if (
-      hiddenEarlierCount > 0 &&
+      (hiddenEarlierCount > 0 || canLoadOlder) &&
       !isStuck &&
       scrollTop <= 48 &&
       scrollHeight > clientHeight + 80 &&
@@ -969,15 +1183,21 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
       now - lastAutoExpandAtRef.current > 250
     ) {
       lastAutoExpandAtRef.current = now
-      loadEarlierMessages()
+      if (isBitchat) void loadPublicPage('older')
+      else loadEarlierMessages()
     }
 
     syncViewportRange()
   }, [
     unseenBelow,
     engine,
+    isBitchat,
+    freezePublicPage,
+    applyReadingPage,
+    canLoadOlder,
     hiddenEarlierCount,
     loadEarlierMessages,
+    loadPublicPage,
     clearSmoothScrollGuard,
     isUpwardInputActive,
     pinScrollToBottomNow,
@@ -990,15 +1210,32 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
     touchDraggingUpRef.current = false
     setShowJumpBtn(false)
     setUnseenBelow(0)
-    scrollContainerToBottom(true)
+    if (isBitchat && readingPageRef.current) {
+      pageRequestRef.current = null
+      setLoadingPage(false)
+      applyReadingPage(null)
+    } else {
+      scrollContainerToBottom(true)
+    }
     syncViewportRange()
     engine.markChannelRead()
-  }, [engine, scrollContainerToBottom, syncViewportRange])
+  }, [applyReadingPage, engine, isBitchat, scrollContainerToBottom, syncViewportRange])
+
+  useLayoutEffect(() => {
+    if (isBitchat && !publicPage && stickToBottomRef.current && scrollRef.current) {
+      pinScrollToBottomNow(scrollRef.current)
+    }
+  }, [isBitchat, publicPage, pinScrollToBottomNow])
 
   const handleJumpToMessage = useCallback(
     (id: string) => {
+      if (isBitchat && !document.getElementById(`msg-${id}`)) {
+        jumpToPublicMessage(id)
+        return
+      }
       const el = document.getElementById(`msg-${id}`)
       if (el) {
+        if (isBitchat && !readingPageRef.current) freezePublicPage()
         scrollMessageIntoContainer(el, true)
         el.classList.add('is-search-active')
         window.setTimeout(() => el.classList.remove('is-search-active'), 1600)
@@ -1011,7 +1248,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         setRenderLimit((curr) => Math.max(curr, needed))
       }
     },
-    [displayMessages, hiddenEarlierCount, scrollMessageIntoContainer]
+    [displayMessages, freezePublicPage, hiddenEarlierCount, isBitchat, jumpToPublicMessage, scrollMessageIntoContainer]
   )
 
   const handleInspectAuthor = useCallback(
@@ -1713,7 +1950,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
 
       <div
         ref={scrollRef}
-        className="ag-stream-scroll"
+        className={`ag-stream-scroll${publicPage ? ' is-reading' : ''}`}
         onScroll={handleScroll}
         onClick={(e) => {
           const target = e.target as HTMLElement | null
@@ -1889,7 +2126,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
             )
           ) : (
             <div>
-              {hiddenEarlierCount > 0 && (
+              {(hiddenEarlierCount > 0 || canLoadOlder) && (
                 <div
                   className="ag-load-earlier-wrap"
                   style={{
@@ -1901,7 +2138,8 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   <button
                     type="button"
                     className="ag-load-earlier-btn"
-                    onClick={loadEarlierMessages}
+                    disabled={loadingPage}
+                    onClick={isBitchat ? () => void loadPublicPage('older') : loadEarlierMessages}
                     style={{
                       appearance: 'none',
                       border: '1px solid var(--border-subtle)',
@@ -1915,7 +2153,9 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       cursor: 'pointer',
                     }}
                   >
-                    Load earlier messages ({hiddenEarlierCount})
+                    {isBitchat
+                      ? loadingPage ? 'Loading…' : 'Load earlier messages'
+                      : `Load earlier messages (${hiddenEarlierCount})`}
                   </button>
                 </div>
               )}
@@ -2217,6 +2457,18 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   </React.Fragment>
                 )
               })}
+              {publicPage && !publicPage.atLiveTail && (
+                <div className="ag-load-earlier-wrap ag-load-newer-wrap">
+                  <button
+                    className="ag-btn"
+                    type="button"
+                    disabled={loadingPage}
+                    onClick={() => void loadPublicPage('newer')}
+                  >
+                    Load newer messages
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

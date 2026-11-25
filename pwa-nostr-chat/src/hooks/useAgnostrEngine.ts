@@ -170,6 +170,7 @@ import {
   scrubAllPersistedStuckPlaceholders,
   scrubBlockedPubkeyFromChannelStorage,
 } from '../lib/storage.ts'
+import { archiveChannelMessages, clearProfileChannelHistory } from '../lib/bitchatHistory.ts'
 import { buildNip42AuthTemplate } from '../lib/nip29.ts'
 import { CALL_SIGNALING_RELAYS } from '../lib/callSignaling.ts'
 import { revokeVoicePreviewUrl } from '../lib/voiceRecorder.ts'
@@ -618,6 +619,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     items: [],
   })
   const [notesRefreshNonce, setNotesRefreshNonce] = useState(0)
+  const [channelHistoryEpoch, setChannelHistoryEpoch] = useState(0)
   const [unreadDividerId, setUnreadDividerId] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const [replyingTo, setReplyingTo] = useState<GeoMessage | null>(null)
@@ -1120,6 +1122,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     ) => {
       const targetKey = normalizeBitchatChannelKey(rawChannelKey) ?? normalizeGeohash(rawChannelKey)
       if (!targetKey) return
+      const profile = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
       const shouldPersist = opts?.persist !== false
       const allowBg = opts?.allowBackgroundPersist === true
 
@@ -1135,7 +1138,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           const cached = loadChannelMessages(targetKey)
           const updated = updater(cached)
           if (updated && updated !== cached) {
-            saveChannelMessages(targetKey, keepForTarget(updated))
+            saveChannelMessages(targetKey, keepForTarget(updated), profile)
           }
         }
         return
@@ -1147,7 +1150,7 @@ export function useAgnostrEngine(): AgnostrEngine {
             const cached = loadChannelMessages(targetKey)
             const updated = updater(cached)
             if (updated && updated !== cached) {
-              saveChannelMessages(targetKey, keepForTarget(updated))
+              saveChannelMessages(targetKey, keepForTarget(updated), profile)
             }
           }
           return prev
@@ -1167,12 +1170,12 @@ export function useAgnostrEngine(): AgnostrEngine {
         }
         const safeItems = keepForTarget(updated)
         if (shouldPersist) {
-          saveChannelMessages(targetKey, safeItems)
+          saveChannelMessages(targetKey, safeItems, profile)
         }
         return { channelKey: targetKey, items: safeItems }
       })
     },
-    []
+    [identityManager]
   )
 
   const refreshPeers = useCallback(
@@ -1528,6 +1531,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     const stored = loadChannelMessages(gh).filter(
       (m) => !blockedSetRef.current.has(m.pubkey.toLowerCase())
     )
+    const profile = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+    archiveChannelMessages(profile, gh, stored)
     const storedIds = new Set<string>(stored.map((m) => m.id))
     const pulseMsgs: GeoMessage[] = []
     const blockedPulsePlaceholders: GeoMessage[] = []
@@ -1555,7 +1560,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         : stored
     ).slice(-200)
     if (pulseMsgs.length > 0) {
-      saveChannelMessages(gh, cached)
+      saveChannelMessages(gh, cached, profile)
     }
     const initialInMemory =
       blockedPulsePlaceholders.length > 0
@@ -1575,7 +1580,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           sortChannelMessagesWithPending([...prev.items, ...extras], 'pending-bitchat-')
         ).slice(-200)
         if (pulseMsgs.some((m) => !existingIds.has(m.id))) {
-          saveChannelMessages(gh, combined)
+          saveChannelMessages(gh, combined, profile)
         }
         return { channelKey: gh, items: combined }
       }
@@ -2246,7 +2251,7 @@ export function useAgnostrEngine(): AgnostrEngine {
             const mergedPinned = backfillReplyReferences(
               sortChannelMessagesWithPending([...existingCached, hydratedPinned], 'pending-bitchat-')
             ).slice(-200)
-            saveChannelMessages(gh, mergedPinned)
+            saveChannelMessages(gh, mergedPinned, identityManager.getMasterKeyMaterial().pubkey.toLowerCase())
           }
 
           const rawNick = getTagValue(ev.tags, 'n')
@@ -2968,7 +2973,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         const newlyBlockedSet = new Set(newlyBlocked)
         const newlyUnblockedSet = new Set(newlyUnblocked)
         for (const pk of newlyBlocked) {
-          scrubBlockedPubkeyFromChannelStorage(pk)
+          scrubBlockedPubkeyFromChannelStorage(pk, identityManager.getMasterKeyMaterial().pubkey.toLowerCase())
         }
         setChannelMessagesState((curr) => {
           let changed = false
@@ -3011,7 +3016,7 @@ export function useAgnostrEngine(): AgnostrEngine {
             nextItems.push(m)
           }
           if (!changed) return curr
-          saveChannelMessages(curr.channelKey, nextItems)
+          saveChannelMessages(curr.channelKey, nextItems, identityManager.getMasterKeyMaterial().pubkey.toLowerCase())
           return { channelKey: curr.channelKey, items: nextItems }
         })
         if (newlyBlocked.length > 0) {
@@ -3029,7 +3034,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       recomputeGeoUnreads()
       refreshPeers(activeGeohashRef.current)
     },
-    [contentFilterEngine, recomputeGeoUnreads, refreshPeers]
+    [contentFilterEngine, identityManager, recomputeGeoUnreads, refreshPeers]
   )
 
   const handleApplySyncedPinned = useCallback((nextPinned: PinnedChannel[]) => {
@@ -3846,7 +3851,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     const ghKey = gh.toLowerCase()
     setChannelMessagesState({ channelKey: gh, items: [] })
     setUnreadDividerId(null)
-    clearChannelMessagesStorage(gh)
+    clearChannelMessagesStorage(gh, identityManager.getMasterKeyMaterial().pubkey.toLowerCase())
+    setChannelHistoryEpoch((n) => n + 1)
     setChannelPreviews((prev) => {
       if (!(ghKey in prev)) return prev
       const next = { ...prev }
@@ -3854,7 +3860,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       return next
     })
     clearRoomMessages(ghKey)
-  }, [activeView, clearThread, serversEngine, clearRoomMessages, pushToast])
+  }, [activeView, clearThread, serversEngine, clearRoomMessages, identityManager, pushToast])
 
   // Moderation
   const isPeerBlocked = useCallback((pubkey: string) => blockedSet.has(pubkey.toLowerCase()), [blockedSet])
@@ -3962,7 +3968,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         blockedSetRef.current = new Set(next)
         saveBlockedPubkeys(next)
         if (!exists) {
-          scrubBlockedPubkeyFromChannelStorage(pk)
+          scrubBlockedPubkeyFromChannelStorage(pk, identityManager.getMasterKeyMaterial().pubkey.toLowerCase())
           setChannelMessagesState((curr) => {
             let changed = false
             const nextItems = curr.items.map((m) => {
@@ -3988,7 +3994,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               }
             })
             if (!changed) return curr
-            saveChannelMessages(curr.channelKey, nextItems)
+            saveChannelMessages(curr.channelKey, nextItems, identityManager.getMasterKeyMaterial().pubkey.toLowerCase())
             return { channelKey: curr.channelKey, items: nextItems }
           })
           setLocationNotesState((curr) => {
@@ -4032,7 +4038,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         return next
       })
     },
-    [resolveBestBlockedLabel, pushToast, recomputeGeoUnreads, refreshPeers, contentFilterEngine]
+    [resolveBestBlockedLabel, pushToast, recomputeGeoUnreads, refreshPeers, contentFilterEngine, identityManager]
   )
 
   const getPeerByPubkey = useCallback(
@@ -5532,6 +5538,8 @@ export function useAgnostrEngine(): AgnostrEngine {
     resetAllServers()
     resetLocation()
     panicWipeStorage()
+    void clearProfileChannelHistory(prevPk)
+    setChannelHistoryEpoch((n) => n + 1)
 
     const { deviceSeedHex, nickname } = identityManager.panicReset()
     saveDeviceSeedHex(deviceSeedHex)
@@ -5839,6 +5847,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     readRoomPeers: () => presenceTracker.getPeers(activeGeohash, ownPubkeys, blockedSet),
     presence,
     locationNotes,
+    channelHistoryEpoch,
     unreadDividerId,
     sending,
     replyingTo,

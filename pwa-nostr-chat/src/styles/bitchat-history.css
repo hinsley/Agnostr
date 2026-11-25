@@ -1,0 +1,10 @@
+/* Keep a visible row in place if content above it finishes loading in read mode. */
+.ag-stream-scroll.is-reading {
+  overflow-anchor: auto;
+}
+
+.ag-load-newer-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
+}

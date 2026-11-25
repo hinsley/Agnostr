@@ -4,6 +4,7 @@ import type {
   ProfileAccountRecord,
   ProfileNotificationSummary,
 } from '../types/protocol.ts'
+import { clearProfileChannelHistory } from './bitchatHistory.ts'
 import { AMAIL_DB_NAME } from './amailStorage.ts'
 import {
   encodeNpubSafe,
@@ -811,6 +812,7 @@ export async function deleteStoredProfile(
   }
 
   await deleteProfileVaultBucket(tgtPk)
+  await clearProfileChannelHistory(tgtPk)
   await deleteIndexedDbByName(amailDbName)
 
   if (tgtPk !== curPk) {
