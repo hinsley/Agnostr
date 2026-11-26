@@ -77,6 +77,7 @@ export interface CallStageProps {
   compactFloating?: boolean
   floatingContext?: CallFloatingContext
   gameFeed?: { label: string; pin: () => void }
+  roomGameFeed?: { gameId: string; label: string; paneRef: (el: HTMLDivElement | null) => void }
   gameVideoDock?: HTMLElement | null
   onCompactCall?: () => void
   floatingDock?: HTMLElement | null
@@ -1029,6 +1030,7 @@ export function CallStage({
   dockContainer,
   floatingDock,
   gameFeed,
+  roomGameFeed,
   gameVideoDock,
   onCompactCall,
   onToggleExpand,
@@ -1046,6 +1048,9 @@ export function CallStage({
   const [audioMenuOpen, setAudioMenuOpen] = useState(false)
   const [switchingAudioInput, setSwitchingAudioInput] = useState(false)
   const [pinnedVideoPubkey, setPinnedVideoPubkey] = useState<string | null>(null)
+  const [pinnedRoomGameKey, setPinnedRoomGameKey] = useState<string | null>(null)
+  const roomGameKey = roomGameFeed && activeCall ? `${activeCall.callId}:${roomGameFeed.gameId}` : null
+  const roomGamePinned = Boolean(roomGameKey && roomGameKey === pinnedRoomGameKey)
   const [dmMinimizedCallId, setDmMinimizedCallId] = useState<string | null>(null)
   const [pipCollapsed, setPipCollapsed] = useState(false)
   const [dmPipCorner, setDmPipCorner] = useState<'br' | 'bl' | 'tr' | 'tl'>('br')
@@ -1108,6 +1113,10 @@ export function CallStage({
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [activeCall, endedTranscript, transcription])
+
+  useEffect(() => {
+    setPinnedRoomGameKey((prev) => prev === roomGameKey ? prev : null)
+  }, [roomGameKey])
 
   const activeCallId = activeCall?.callId ?? null
   useEffect(() => {
@@ -1182,7 +1191,10 @@ export function CallStage({
     onToggleExpand()
   })
   useBackHandler(Boolean(activeCall) && transcriptOpen, () => setTranscriptOpen(false))
-  useBackHandler(Boolean(activeCall) && Boolean(pinnedVideoPubkey), () => setPinnedVideoPubkey(null))
+  useBackHandler(Boolean(activeCall && (roomGamePinned || pinnedVideoPubkey)), () => {
+    setPinnedRoomGameKey(null)
+    setPinnedVideoPubkey(null)
+  })
   useBackHandler(isQualityPopoverVisible, () => setQualityMenuOpen(false))
   useBackHandler(isAudioPopoverVisible, () => setAudioMenuOpen(false))
 
@@ -1216,6 +1228,7 @@ export function CallStage({
         !isAudioPopoverVisible &&
         !isQualityPopoverVisible &&
         !pinnedVideoPubkey &&
+        !roomGamePinned &&
         !transcriptOpen)
     ) {
       return
@@ -1227,6 +1240,8 @@ export function CallStage({
           setAudioMenuOpen(false)
         } else if (isQualityPopoverVisible) {
           setQualityMenuOpen(false)
+        } else if (roomGamePinned) {
+          setPinnedRoomGameKey(null)
         } else if (pinnedVideoPubkey) {
           setPinnedVideoPubkey(null)
         } else if (transcriptOpen) {
@@ -1250,6 +1265,7 @@ export function CallStage({
     isAudioPopoverVisible,
     isQualityPopoverVisible,
     pinnedVideoPubkey,
+    roomGamePinned,
     transcriptOpen,
     onToggleExpand,
     onCompactCall,
@@ -2412,7 +2428,7 @@ export function CallStage({
         ? 'is-live'
         : 'is-warn'
 
-    if (hasPipVideo && pipVideoParticipant && !pipCollapsed && !gameVideoDock) {
+    if (hasPipVideo && pipVideoParticipant && !pipCollapsed) {
       return (
         <>
           {audioSinks}
@@ -2486,7 +2502,6 @@ export function CallStage({
                     </span>
                   </button>
                   <div className="ag-call-mini-actions">
-                    {pinGameToCompactStage}
                     <button
                       type="button"
                       className={`ag-call-mini-btn sm ${activeCall.localMuted ? 'is-muted' : ''}`}
@@ -2577,8 +2592,7 @@ export function CallStage({
               </button>
 
               <div className="ag-call-mini-actions">
-                {pinGameToCompactStage}
-                {hasPipVideo && !gameVideoDock && (
+                {hasPipVideo && (
                   <button
                     type="button"
                     className="ag-call-mini-btn"
@@ -2684,6 +2698,7 @@ export function CallStage({
 
   const togglePinVideo = (pubkey: string) => {
     onPlaySound?.('click')
+    setPinnedRoomGameKey(null)
     setPinnedVideoPubkey((prev) => (prev === pubkey ? null : pubkey))
   }
 
@@ -2952,6 +2967,24 @@ export function CallStage({
     )
   }
 
+  const renderRoomGameTile = () => roomGameFeed && roomGameKey ? (
+    <div className={`ag-call-tile ag-call-room-game-tile${roomGamePinned ? ' is-pinned' : ''}`}>
+      <div ref={roomGameFeed.paneRef} className="ag-call-room-game-pane" />
+      <button type="button" className="ag-call-unpin-btn"
+        aria-pressed={roomGamePinned}
+        aria-label={roomGamePinned ? `Unpin ${roomGameFeed.label}` : `Pin ${roomGameFeed.label} to stage`}
+        title={roomGamePinned ? `Unpin ${roomGameFeed.label}` : `Pin ${roomGameFeed.label} to stage`}
+        onClick={() => {
+          onPlaySound?.('click')
+          setPinnedVideoPubkey(null)
+          setPinnedRoomGameKey(roomGamePinned ? null : roomGameKey)
+        }}
+      >
+        {roomGamePinned ? <PinOff size={14} /> : <Pin size={14} />}
+      </button>
+    </div>
+  ) : null
+
   const stageContent = (
     <section
       className={`ag-call-stage ${expanded ? 'ag-call-stage-expanded' : 'ag-call-stage-docked'}`}
@@ -3011,7 +3044,6 @@ export function CallStage({
         </div>
 
         <div className="ag-call-head-actions">
-          {!expanded && pinGameToCompactStage}
           {showTranscriptTrigger && (
             <button
               type="button"
@@ -3066,7 +3098,9 @@ export function CallStage({
           )}
 
           {/* Video-Priority Stage / Solo Pinned Video / Responsive 1–6 Grid */}
-          {pinnedStageItem ? (
+          {roomGamePinned ? (
+            <div className="ag-call-stage-pinned">{renderRoomGameTile()}</div>
+          ) : pinnedStageItem ? (
             <div className="ag-call-stage-pinned">
               {renderParticipantTile(pinnedStageItem, { compact: false, isPinned: true })}
             </div>
@@ -3074,13 +3108,14 @@ export function CallStage({
             <div className="ag-call-stage-split">
               <div
                 className="ag-call-video-stage"
-                data-video-count={Math.min(6, videoStageItems.length)}
+                data-video-count={Math.min(6, videoStageItems.length + Number(Boolean(roomGameFeed)))}
               >
                 {videoStageItems.map((item) =>
                   renderParticipantTile(item, {
                     compact: !expanded && videoStageItems.length > 2,
                   }),
                 )}
+                {renderRoomGameTile()}
               </div>
               <div className="ag-call-audio-strip" role="list" aria-label="Audio participants">
                 {audioStageItems.map((item) =>
@@ -3089,8 +3124,9 @@ export function CallStage({
               </div>
             </div>
           ) : (
-            <div className="ag-call-grid" data-count={count}>
+            <div className="ag-call-grid" data-count={Math.min(6, count + Number(Boolean(roomGameFeed)))}>
               {stageParticipants.map((item) => renderParticipantTile(item))}
+              {renderRoomGameTile()}
             </div>
           )}
 

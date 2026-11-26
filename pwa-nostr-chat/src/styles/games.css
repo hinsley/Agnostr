@@ -729,6 +729,7 @@
   -webkit-backdrop-filter: blur(10px);
   animation: ag-game-fade-in 150ms var(--ease-out);
 }
+.ag-game-modal-backdrop.is-over-room-call { z-index: calc(var(--z-modal) + 1); }
 .ag-game-modal-frame.ag-game-stage-panel {
   max-height: calc(100dvh - 28px);
   border-radius: 18px;
@@ -3516,39 +3517,51 @@
 .ag-game-stage-panel.is-compact .ag-game-stage-head-actions { gap: 2px; }
 .ag-game-stage-panel.is-compact .ag-game-head-btn.icon-only { width: 27px; height: 27px; }
 
-/* The compact board never stretches with the chat lane. Scroll only its body
-   for game controls that need more space, without moving the chat composer. */
-.ag-chat-game-lanes, .ag-chat-message-lane, .ag-game-chat-slot {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-}
-.ag-chat-game-lanes, .ag-chat-message-lane { flex: 1 1 auto; }
+/* The chat dock spans the whole conversation column, like a docked call. */
 .ag-game-chat-slot {
+  display: flex;
   flex: 0 1 auto;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
   max-height: min(32dvh, 270px);
-  margin: .25rem .5rem;
+  border-bottom: 1px solid var(--border-subtle);
 }
 .ag-game-chat-slot:empty { display: none; }
 .ag-game-in-chat.ag-game-stage-panel {
   flex: 0 1 auto;
   max-width: none;
-  max-height: min(32dvh, 270px);
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
 }
 .ag-game-stage-panel.is-compact .ag-game-stage-body {
   overscroll-behavior-y: contain;
 }
-@media (min-width: 1180px) {
-  .ag-chat-game-lanes { flex-direction: row; }
-  .ag-game-chat-slot {
-    flex: 0 1 min(32%, 400px);
-    align-self: flex-start;
-  }
-  .ag-game-chat-slot:not(:empty) + .ag-chat-message-lane { flex: 1 1 68%; }
+
+.ag-call-tile.ag-call-room-game-tile {
+  align-items: stretch;
+  background: var(--bg-surface);
 }
+.ag-call-room-game-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.ag-game-in-call.ag-game-stage-panel {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+}
+.ag-game-in-call.is-compact .ag-game-stage-head { padding-right: 2.6rem; }
+.ag-call-room-game-tile .ag-call-unpin-btn { top: .32rem; right: .35rem; }
+
 @media (max-width: 867px) {
-  .ag-game-chat-slot { margin: .2rem .35rem; }
   html[data-keyboard-open='true'] :is(.ag-game-chat-slot, .ag-game-stage-panel.is-compact) {
     max-height: min(23dvh, 172px);
   }

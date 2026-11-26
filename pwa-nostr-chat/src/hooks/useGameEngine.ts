@@ -1338,8 +1338,11 @@ export function useGameEngine(params: UseGameEngineParams): UseGameEngineResult 
 
       const existing = activeGamesRef.current[scopeKey]
       if (existing && existing.kind === 'poker' && existing.status !== 'finished' && existing.tableId === tableId) {
-        setFocusedScopeKey(scopeKey)
-        setMinimized(false)
+        // "Sit In" is also a control on the minimized board. Keep its current view.
+        if (!takeSeat || focusedScopeKeyRef.current !== scopeKey) {
+          setFocusedScopeKey(scopeKey)
+          setMinimized(false)
+        }
         const alreadySeated = existing.pokerState.seats.some(
           (s) => s.pubkey.toLowerCase() === existing.localPubkey.toLowerCase(),
         )

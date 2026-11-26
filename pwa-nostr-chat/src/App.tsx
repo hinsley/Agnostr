@@ -444,8 +444,9 @@ export function App() {
     livePokerTableHere && !hasActiveGameInCurrentScope
   )
   const hasAnyActiveGame = Object.keys(engine.games.activeGamesByScope).length > 0
-  const isGameStageOpen = Boolean(
-    engine.games.focusedScopeKey &&
+  const isDmGameStageOpen = Boolean(
+    activeCall?.mode === 'dm' &&
+      engine.games.focusedScopeKey &&
       engine.games.activeGamesByScope[engine.games.focusedScopeKey]
   )
 
@@ -471,9 +472,9 @@ export function App() {
   const callCompactFloating = Boolean(
     activeCall &&
       !callExpanded &&
-      (!viewingActiveCallContext || !inChatRoomMain || isGameStageOpen)
+      (!viewingActiveCallContext || !inChatRoomMain || isDmGameStageOpen)
   )
-  const callFloatingContext: 'globe' | 'chat' | 'workspace' = isGameStageOpen
+  const callFloatingContext: 'globe' | 'chat' | 'workspace' = isDmGameStageOpen
     ? 'workspace'
     : isBitchatGlobe
       ? 'globe'
@@ -3020,37 +3021,34 @@ export function App() {
                     }}
                   />
 
-                  <div className="ag-chat-game-lanes">
-                    <div ref={setGameChatDock} className="ag-game-chat-slot" />
-                    <div className="ag-chat-message-lane">
-                      <MessageStream
-                        engine={engine}
-                        searchQuery={searchOpen ? searchQuery : ''}
-                        activeSearchMessageId={activeSearchMessageId}
-                        onReply={handleReply}
-                        onReact={handleReact}
-                        onReplyServer={handleReplyServer}
-                        onReactServer={handleReactServer}
-                        onInspectPeer={setInspectedPeer}
-                        onStartDm={handleOpenDm}
-                        onMentionPeer={handleMentionPeer}
-                        onTuneChannel={handleTuneChannel}
-                        onClickMention={handleClickInlineMention}
-                        onLocateMe={() => void handleLocateMe()}
-                        onExpandRadar={handleExpandRadar}
-                        onOpenServerSettings={handleOpenServerSettings}
-                        onOpenLightbox={setLightboxImage}
-                        onOpenZap={handleOpenZap}
-                        onClaimCashuToken={handleClaimCashuToken}
-                      />
+                  <div ref={setGameChatDock} className="ag-game-chat-slot" />
 
-                      <Composer
-                        engine={engine}
-                        externalDraftToken={externalDraftToken}
-                        onSent={(isEncrypted) => bitchatAudio.play(isEncrypted ? 'dm' : 'send')}
-                      />
-                    </div>
-                  </div>
+                  <MessageStream
+                    engine={engine}
+                    searchQuery={searchOpen ? searchQuery : ''}
+                    activeSearchMessageId={activeSearchMessageId}
+                    onReply={handleReply}
+                    onReact={handleReact}
+                    onReplyServer={handleReplyServer}
+                    onReactServer={handleReactServer}
+                    onInspectPeer={setInspectedPeer}
+                    onStartDm={handleOpenDm}
+                    onMentionPeer={handleMentionPeer}
+                    onTuneChannel={handleTuneChannel}
+                    onClickMention={handleClickInlineMention}
+                    onLocateMe={() => void handleLocateMe()}
+                    onExpandRadar={handleExpandRadar}
+                    onOpenServerSettings={handleOpenServerSettings}
+                    onOpenLightbox={setLightboxImage}
+                    onOpenZap={handleOpenZap}
+                    onClaimCashuToken={handleClaimCashuToken}
+                  />
+
+                  <Composer
+                    engine={engine}
+                    externalDraftToken={externalDraftToken}
+                    onSent={(isEncrypted) => bitchatAudio.play(isEncrypted ? 'dm' : 'send')}
+                  />
                 </main>
 
                 {/* Dimmed Interactive Scrim behind Mobile Right Slide-Out User List Tray */}

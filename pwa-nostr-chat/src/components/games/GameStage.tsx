@@ -30,6 +30,8 @@ export interface GameStageProps {
   games: GameEngine
   floatingDock?: HTMLElement | null
   chatDock?: HTMLElement | null
+  roomTileDock?: HTMLElement | null
+  modalOverRoomCall?: boolean
   onOpenInChat?: (session: ActiveGameSession) => void
   compactCallDocks?: {
     video: (el: HTMLDivElement | null) => void
@@ -203,6 +205,8 @@ export function GameStage({
   games,
   floatingDock,
   chatDock,
+  roomTileDock,
+  modalOverRoomCall,
   onOpenInChat,
   compactCallDocks,
   onPlaySound,
@@ -215,14 +219,16 @@ export function GameStage({
   )
 
   const focusedSession = games.focusedScopeKey ? games.activeGamesByScope[games.focusedScopeKey] : null
-  const compact = games.minimized || !chatDock
-  const boardTarget = compact ? chatDock ?? floatingDock : typeof document !== 'undefined' ? document.body : null
+  const inRoomTile = roomTileDock !== undefined
+  const compact = inRoomTile || games.minimized || !chatDock
+  const boardTarget = inRoomTile ? roomTileDock
+    : compact ? chatDock ?? floatingDock : typeof document !== 'undefined' ? document.body : null
   const showBoard = Boolean(focusedSession && boardTarget)
   const activeCall = engine.calls.activeCall
 
   // Prioritize a session where it's your turn when minimized across multiple active scopes
   const pillSessions = useMemo(() => {
-    const ranked = allSessions.filter((s) => !showBoard || s.scopeKey !== games.focusedScopeKey).map((s) => ({
+    const ranked = allSessions.filter((s) => !(showBoard || inRoomTile) || s.scopeKey !== games.focusedScopeKey).map((s) => ({
       session: s,
       meta: computeSessionMeta(s, engine),
     }))
@@ -233,7 +239,7 @@ export function GameStage({
       return b.session.updatedAtMs - a.session.updatedAtMs
     })
     return ranked
-  }, [showBoard, allSessions, engine, games.focusedScopeKey])
+  }, [showBoard, inRoomTile, allSessions, engine, games.focusedScopeKey])
 
   // Reset close confirmation when switching/minimizing sessions
   const focusedKey = focusedSession?.scopeKey ?? null
@@ -285,21 +291,22 @@ export function GameStage({
     if (compact) games.setFocusedScopeKey(null)
     else games.setMinimized(true)
   }
-  useBackHandler(showBoard, stepBack)
+  useBackHandler(showBoard && !inRoomTile, stepBack)
 
   useEffect(() => {
-    if (!showBoard) return
+    if (!showBoard || inRoomTile) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
+        if (!compact) e.stopImmediatePropagation()
         onPlaySound?.('click')
         if (compact) games.setFocusedScopeKey(null)
         else games.setMinimized(true)
       }
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [showBoard, compact, games, onPlaySound])
+    window.addEventListener('keydown', onKeyDown, !compact)
+    return () => window.removeEventListener('keydown', onKeyDown, !compact)
+  }, [showBoard, inRoomTile, compact, games, onPlaySound])
 
   if (typeof document === 'undefined') return null
 
@@ -466,7 +473,7 @@ export function GameStage({
     const board = (
       <section key={focusedSession.gameId}
         className={`ag-game-stage-panel is-${focusedSession.kind} ${compact
-          ? `is-compact ${chatDock ? 'ag-game-in-chat' : 'ag-game-floating'}` : 'ag-game-modal-frame'}`}
+          ? `is-compact ${inRoomTile ? 'ag-game-in-call' : chatDock ? 'ag-game-in-chat' : 'ag-game-floating'}` : 'ag-game-modal-frame'}`}
         role={compact ? 'region' : 'dialog'}
         aria-modal={compact ? undefined : true}
         aria-label={`${meta.title} · ${meta.scopeLabel}`}
@@ -586,7 +593,8 @@ export function GameStage({
     )
     if (boardTarget) {
       visibleBoard = createPortal(compact ? board : (
-        <div className="ag-game-modal-backdrop" role="presentation" onClick={handleResize}>
+        <div className={`ag-game-modal-backdrop${modalOverRoomCall ? ' is-over-room-call' : ''}`}
+          role="presentation" onClick={handleResize}>
           {board}
         </div>
       ), boardTarget, 'game-board')

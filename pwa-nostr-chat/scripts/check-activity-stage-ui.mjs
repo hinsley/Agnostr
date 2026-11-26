@@ -28,7 +28,7 @@ try {
     url.searchParams.set('room',room)
     await call('Page.navigate',{url:url.href})
     await new Promise(r=>setTimeout(r,300))
-    const probe = async kind => {
+    const probe = async ({kind,room}) => {
       const q = s => document.querySelector(s)
       const wait = async f => {
         for(let i=0;i<150;i++){const v=f();if(v)return v;await new Promise(r=>setTimeout(r,100))}
@@ -63,21 +63,39 @@ try {
         }
         await wait(()=>q('#sent').textContent!==before)
       }
-      const expectComposer=()=>{
+      const expectComposer=(fullWidth = true)=>{
         const b=board().getBoundingClientRect(), c=q('#fixture-composer').getBoundingClientRect()
         assert(b.width>170 && b.height>115,'Unreadable board: '+JSON.stringify(b.toJSON()))
-        assert(b.height<=Math.min(0.32*innerHeight,270)+2,'Compact game stretches vertically: '+b.height)
-        assert(q('.ag-game-chat-slot').getBoundingClientRect().height<=b.height+2,'Chat slot stretches beyond board')
-        assert(q('.ag-chat-message-lane').getBoundingClientRect().height>innerHeight*.38,'Not enough room left for chat')
+        if (fullWidth) {
+          const chat=q('.ag-main').getBoundingClientRect()
+          assert(Math.abs(b.left-chat.left)<2 && Math.abs(b.right-chat.right)<2,
+            'Minimized board does not span the entire chat column')
+          assert(b.height<=Math.min(0.32*innerHeight,270)+2,'Compact game stretches vertically: '+b.height)
+          assert(q('.ag-game-chat-slot').getBoundingClientRect().height<=b.height+2,'Chat slot stretches beyond board')
+          assert(q('.ag-stream-wrap').getBoundingClientRect().height>100,'Not enough room left for chat')
+        }
         assert(b.bottom<=c.top || b.right<=c.left,'Board hides composer')
         assert(document.elementFromPoint(c.left+5,c.top+5)===q('#fixture-composer'),'Composer is not usable')
         assert(document.documentElement.scrollWidth<=innerWidth+1,'Viewport overflow')
       }
-      await wait(()=>pills().length===2 && q('.ag-activity-dock .ag-call-mini-pip'))
+      const roomCall = room !== 'dm'
+      const dockedStage=()=>q('.ag-call-dock-slot .ag-call-stage-docked')
+      await wait(()=>pills().length===2 && (roomCall ? dockedStage() : q('.ag-activity-dock .ag-call-mini-pip')))
       const dock=q('.ag-activity-dock')
       assert(dock.contains(pills().find(p=>p.title.includes('Other'))),'Missing other game')
       const sink=await wait(()=>q('audio'))
       const src=await wait(()=>sink.srcObject)
+      const groupStage=dockedStage()
+      const groupVideo=roomCall && await wait(()=>groupStage.querySelector('video')?.srcObject && groupStage.querySelector('video'))
+      const groupControls=groupStage?.querySelector('.ag-call-controls')
+      const assertStandardCall=(video=groupVideo)=>{
+        assert(dockedStage()===groupStage && groupStage.querySelector('.ag-call-controls')===groupControls,
+          'Game changed the docked room call or moved its controls')
+        assert(q('audio')===sink && sink.srcObject===src,'Game interrupted the call audio')
+        if (video) assert(groupStage.querySelector('video')===video,'Game remounted normal room video')
+        assert(!q('.ag-call-mini-pip, .ag-call-mini-pill, .ag-game-compact-video-rail'),
+          'Game replaced the normal room call with a compact call')
+      }
       await click(gamePill)
       await wait(dialog)
       await new Promise(r=>setTimeout(r,250)) // Measure after the restored opening transition.
@@ -90,34 +108,70 @@ try {
       assert(q('.ag-game-chat-slot').childElementCount===0,'Expanded game takes up room inside chat')
       const composer=q('#fixture-composer')
       composer.focus(); composer.value='Draft still visible'
-      await click(()=>btn('Minimize game'))
-      await wait(()=>compactBoard() && rail()?.querySelector('video')?.srcObject)
-      await wait(()=>board().querySelector('.ag-game-compact-call-controls .ag-call-mini-pill'))
-      assert(!q('.ag-call-mini-pip') && document.querySelectorAll('video').length===1,'Compact stage duplicated video')
-      expectComposer()
-      if(innerWidth<=867){
-        document.documentElement.dataset.keyboardOpen='true'
-        assert(board().getBoundingClientRect().height<=Math.min(innerHeight*.23,172)+2,
-          'Compact board did not shrink when the keyboard opened')
-        delete document.documentElement.dataset.keyboardOpen
+      if (roomCall) {
+        assertStandardCall()
+        await click(()=>btn('Minimize game'))
+        const gameTile=()=>dockedStage()?.querySelector('.ag-call-tile .ag-game-in-call')
+        await wait(gameTile)
+        assertStandardCall()
+        assert(!q('.ag-game-chat-slot .ag-game-stage-panel'),'Board rendered twice')
+        expectComposer(false)
+        await playable()
+        assert(composer.value==='Draft still visible','Playing cleared chat draft')
+        await hit(()=>btn('Pin Poker to stage'))
+        await wait(()=>q('.ag-call-stage-pinned .ag-game-in-call'))
+        assertStandardCall(null)
+        await playable()
+        await hit(()=>btn('Unpin Poker'))
+        await wait(()=>gameTile() && q('.ag-call-grid video')?.srcObject)
+        assertStandardCall(null)
+        q('.ag-call-grid .ag-call-tile.has-video').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))
+        await wait(()=>q('.ag-call-stage-pinned video')?.srcObject && !gameTile())
+        await click(()=>q('.ag-call-stage-pinned .ag-call-unpin-btn'))
+        await wait(gameTile)
+        await click(()=>btn('Expand call stage'))
+        await wait(()=>q('.ag-call-stage-expanded .ag-game-in-call') && q('.ag-call-stage-expanded video')?.srcObject)
+        await click(()=>btn('Expand game'))
+        await wait(()=>dialog() && q('.ag-call-stage-expanded') && !q('.ag-game-in-call'))
+        document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))
+        await wait(()=>q('.ag-call-stage-expanded .ag-game-in-call'))
+        await click(()=>btn('Minimize call stage'))
+        await wait(()=>gameTile() && q('.ag-call-grid video')?.srcObject)
+        assert(!q('.ag-call-mini-pip, .ag-call-mini-pill'),'Room did not return to its normal dock')
+        await click(()=>btn('Hide game'))
+        await wait(()=>!board() && pills().length===2)
+        assert(q('audio')===sink && !q('.ag-call-mini-pip'),'Hiding the game changed the room call')
+      } else {
+        await click(()=>btn('Minimize game'))
+        await wait(()=>compactBoard() && rail()?.querySelector('video')?.srcObject)
+        await wait(()=>board().querySelector('.ag-game-compact-call-controls .ag-call-mini-pill'))
+        assert(!q('.ag-call-mini-pip') && document.querySelectorAll('video').length===1,'Compact stage duplicated video')
+        expectComposer()
+        if(innerWidth<=867){
+          document.documentElement.dataset.keyboardOpen='true'
+          assert(board().getBoundingClientRect().height<=Math.min(innerHeight*.23,172)+2,
+            'Compact board did not shrink when the keyboard opened')
+          delete document.documentElement.dataset.keyboardOpen
+        }
+        await playable()
+        assert(composer.value==='Draft still visible','Playing cleared chat draft')
+        await click(()=>btn('Expand @bob video'))
+        await wait(()=>!board() && q('.ag-dm-call-view video')?.srcObject)
+        assert(q('audio')===sink && sink.srcObject===src,'Maximizing video interrupted audio')
+        await click(()=>btn('Minimize call'))
+        await wait(()=>compactBoard() && rail()?.querySelector('video')?.srcObject)
+        assert(q('audio')===sink && sink.srcObject===src,'Returning to the compact board interrupted audio')
+        await click(()=>btn('Hide game'))
+        await wait(()=>!board() && pills().length===2 && q('.ag-call-mini-pip'))
+        await click(()=>btn('Pin '+name+' to compact stage'))
+        await wait(()=>compactBoard() && rail()?.querySelector('video')?.srcObject)
+        await click(()=>btn('Hide game'))
       }
-      await playable()
-      assert(composer.value==='Draft still visible','Playing cleared chat draft')
-      await click(()=>btn('Expand @bob video'))
-      await wait(()=>!board() && (q('.ag-call-stage-pinned video')?.srcObject || q('.ag-dm-call-view video')?.srcObject))
-      assert(q('audio')===sink && sink.srcObject===src,'Maximizing video interrupted audio')
-      await click(()=>btn('Minimize call stage') || btn('Minimize call'))
-      await wait(()=>compactBoard() && rail()?.querySelector('video')?.srcObject)
-      assert(q('audio')===sink && sink.srcObject===src,'Returning to the compact board interrupted audio')
-      await click(()=>btn('Hide game'));await wait(()=>!board() && pills().length===2 && q('.ag-call-mini-pip'))
-      await click(()=>btn('Pin '+(kind==='poker'?'Poker':name)+' to compact stage'))
-      await wait(()=>compactBoard() && rail()?.querySelector('video')?.srcObject)
-      await click(()=>btn('Hide game'))
       await click(()=>pills().find(p=>p.title.includes('Other')))
-      await wait(()=>board() && q('.ag-call-mini-pip'))
+      await wait(dialog)
       await click(()=>btn('Minimize game'))
       await wait(compactBoard)
-      assert(!rail(),'Unrelated game inherited the call video rail')
+      assert(!rail() && !q('.ag-game-in-call'),'Unrelated game inherited the call')
       await click(()=>btn('Hide game'))
       q('#stop-test-call').click()
       await wait(()=>!q('audio') && !q('.ag-call-mini-pip') && pills().length===2)
@@ -132,7 +186,7 @@ try {
       await click(()=>btn('Hide game'));await wait(()=>!board() && pills().length===2)
       return kind+' OK'
     }
-    const result=await call('Runtime.evaluate',{expression:'('+probe+')('+JSON.stringify(kind)+')',awaitPromise:true,returnByValue:true})
+    const result=await call('Runtime.evaluate',{expression:'('+probe+')('+JSON.stringify({kind,room})+')',awaitPromise:true,returnByValue:true})
     if(result.result.exceptionDetails)throw Error(result.result.exceptionDetails.exception?.description || JSON.stringify(result.result.exceptionDetails))
     console.log(room, result.result.result.value)
   }
@@ -143,7 +197,21 @@ try {
     window.fixtureMediaRequests = 0
     window.RTCPeerConnection = function () { ++window.fixtureMediaRequests; throw Error('Unexpected call') }
     Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {
-      value: () => { ++window.fixtureMediaRequests; throw Error('Unexpected media permission') },
+      value: async ({audio,video}) => {
+        ++window.fixtureMediaRequests
+        if (!window.fixtureAllowMedia) throw Error('Unexpected media permission')
+        const tracks = []
+        if (audio) {
+          const ctx = new AudioContext()
+          tracks.push(...ctx.createMediaStreamDestination().stream.getAudioTracks())
+        }
+        if (video) {
+          const canvas = document.createElement('canvas')
+          canvas.getContext('2d').fillRect(0, 0, 100, 80)
+          tracks.push(...canvas.captureStream(1).getVideoTracks())
+        }
+        return new MediaStream(tracks)
+      },
     })
     window.WebSocket = class LocalRelay extends EventTarget {
       static CONNECTING = 0
@@ -211,6 +279,8 @@ try {
     const c=composer.getBoundingClientRect(), b=board.getBoundingClientRect()
     assert(c.height>20 && (b.bottom<=c.top || b.right<=c.left),'Board overlaps the real composer')
     assert(b.height<=Math.min(0.32*innerHeight,270)+2,'Real compact table takes up too much height')
+    const chat=q('.ag-main').getBoundingClientRect()
+    assert(Math.abs(b.left-chat.left)<2 && Math.abs(b.right-chat.right)<2,'Real compact table is not full chat width')
     const felt=board.querySelector('.ag-poker-felt').getBoundingClientRect()
     assert(felt.bottom<=b.bottom,'Compact felt bounds: '+JSON.stringify([felt.toJSON(),b.toJSON(),getComputedStyle(board.querySelector('.ag-poker-arena')).height]))
     composer.focus()
@@ -235,6 +305,43 @@ try {
   })()`,awaitPromise:true,returnByValue:true})
   if(seated.result.exceptionDetails)throw Error(seated.result.exceptionDetails.exception?.description || JSON.stringify(seated.result.exceptionDetails))
   console.log('Bitchat: minimize the playable table, type in the real composer, and explicitly sit in without a call')
+  const roomCallProbe = async () => {
+    const q = s => document.querySelector(s)
+    const btn = (label, parent=document) => parent.querySelector('button[aria-label="'+label+'"]')
+    const stage = () => q('.ag-call-dock-slot .ag-call-stage-docked')
+    const gameTile = () => stage()?.querySelector('.ag-call-room-game-pane .ag-game-in-call')
+    const wait = async f => {
+      for(let i=0;i<150;i++){const v=f();if(v)return v;await new Promise(r=>setTimeout(r,100))}
+      throw Error('missing '+f+' '+document.body.innerText.slice(-1800))
+    }
+    const click=async f => (await wait(f)).click()
+    window.fixtureAllowMedia = true
+    await click(()=>btn('Hide game'))
+    await click(()=>btn('Start call in #stage-fixture'))
+    const call=await wait(stage)
+    await click(()=>btn('Turn camera on',call))
+    const video=await wait(()=>call.querySelector('video')?.srcObject && call.querySelector('video'))
+    const controls=call.querySelector('.ag-call-controls')
+    await click(()=>q('.ag-header-game-btn'))
+    await wait(()=>q('.ag-game-modal-frame'))
+    if(stage()!==call || call.querySelector('video')!==video)throw Error('Expanded game changed the Bitchat call stage')
+    await click(()=>btn('Minimize game'))
+    await wait(gameTile)
+    if(stage()!==call || call.querySelector('video')!==video || call.querySelector('.ag-call-controls')!==controls)
+      throw Error('Minimizing remounted the Bitchat call')
+    if(q('.ag-call-mini-pip, .ag-call-mini-pill, .ag-game-compact-video-rail, .ag-game-in-chat'))
+      throw Error('Bitchat call turned into PiP or duplicated the game')
+    await click(()=>btn('Pin Poker to stage'))
+    await wait(()=>q('.ag-call-stage-pinned .ag-game-in-call'))
+    await click(()=>btn('Unpin Poker'))
+    await wait(()=>gameTile() && call.querySelector('video')?.srcObject)
+    if(document.querySelector('.ag-composer-input').value!=='A draft while I watch')
+      throw Error('Using a call game pane lost the chat draft')
+    return true
+  }
+  const room=await call('Runtime.evaluate',{expression:'('+roomCallProbe+')()',awaitPromise:true,returnByValue:true})
+  if(room.result.exceptionDetails)throw Error(room.result.exceptionDetails.exception?.description || JSON.stringify(room.result.exceptionDetails))
+  console.log('Bitchat: real call remains docked with its original video/controls when the game is opened or minimized; game pins as a call tile')
 } finally {
   proc.kill(); await exited
   fs.rmSync(dir,{recursive:true,force:true,maxRetries:3})

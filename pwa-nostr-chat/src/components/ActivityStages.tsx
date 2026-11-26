@@ -14,7 +14,7 @@ function gameKeyForCall(call: ActiveCallSession | null) {
   return target?.trim() ? makeGameScopeKey(call.mode, target) : null
 }
 
-type Props = Omit<CallStageProps, 'calls' | 'onToggleExpand' | 'gameFeed' | 'floatingDock' | 'gameVideoDock'> & {
+type Props = Omit<CallStageProps, 'calls' | 'onToggleExpand' | 'gameFeed' | 'floatingDock' | 'gameVideoDock' | 'roomGameFeed'> & {
   onSetExpanded: (expanded: boolean) => void
   gameChatDock: HTMLElement | null
   allowFloatingGame?: boolean
@@ -29,17 +29,25 @@ export function ActivityStages({
   const [floatingDock, setFloatingDock] = useState<HTMLDivElement | null>(null)
   const [videoDock, setVideoDock] = useState<HTMLDivElement | null>(null)
   const [callControlsDock, setCallControlsDock] = useState<HTMLDivElement | null>(null)
+  const [roomGamePane, setRoomGamePane] = useState<HTMLDivElement | null>(null)
   const scopeKey = gameKeyForCall(calls.activeCall)
   const session = scopeKey ? games.activeGamesByScope[scopeKey] : null
-  const compactWithVideo = Boolean(!expanded && session && session.scopeKey === games.focusedScopeKey &&
+  const directCall = calls.activeCall?.mode === 'dm'
+  const roomStageVisible = Boolean(calls.activeCall && !directCall &&
+    (expanded || (!props.compactFloating && props.dockContainer)))
+  const roomGameFeed = roomStageVisible && session?.kind === 'poker' &&
+    games.minimized && session.scopeKey === games.focusedScopeKey
+    ? { gameId: session.gameId, label: 'Poker', paneRef: setRoomGamePane }
+    : undefined
+  const compactWithVideo = Boolean(directCall && !expanded && session && session.scopeKey === games.focusedScopeKey &&
     (games.minimized || !gameChatDock) && (gameChatDock || allowFloatingGame))
   const openGameInChat = (game: ActiveGameSession) => {
-    onSetExpanded(false)
+    if (directCall) onSetExpanded(false)
     if (!gameChatDock) onRequestGameChat(game)
     games.setFocusedScopeKey(game.scopeKey)
     games.setMinimized(false)
   }
-  const gameFeed = session ? {
+  const gameFeed = directCall && session ? {
     label: session.kind === 'poker' ? 'Poker' : session.kind === 'go' ? 'Go' : 'Chess',
     pin: () => {
       games.setFocusedScopeKey(session.scopeKey)
@@ -55,10 +63,10 @@ export function ActivityStages({
       <Suspense fallback={null}>
         <CallStage {...props} engine={engine} calls={calls}
           floatingDock={compactWithVideo ? callControlsDock ?? floatingDock : floatingDock}
-          gameFeed={gameFeed} gameVideoDock={compactWithVideo ? videoDock : null} expanded={expanded}
+          gameFeed={gameFeed} roomGameFeed={roomGameFeed} gameVideoDock={compactWithVideo ? videoDock : null} expanded={expanded}
           onReturnToCall={props.onReturnToCall ?? (() => onSetExpanded(true))}
           onCompactCall={() => {
-            if (session && session.scopeKey === games.focusedScopeKey) games.setMinimized(true)
+            if (directCall && session && session.scopeKey === games.focusedScopeKey) games.setMinimized(true)
           }}
           onToggleExpand={() => onSetExpanded(!expanded)} />
       </Suspense>
@@ -66,7 +74,10 @@ export function ActivityStages({
     {Object.keys(games.activeGamesByScope).length > 0 && (
       <Suspense fallback={null}>
         <GameStage engine={engine} games={games} onPlaySound={props.onPlaySound}
-          floatingDock={expanded || !allowFloatingGame ? null : floatingDock} chatDock={expanded ? null : gameChatDock}
+          floatingDock={expanded || !allowFloatingGame ? null : floatingDock}
+          chatDock={expanded && directCall ? null : gameChatDock}
+          modalOverRoomCall={expanded && !directCall}
+          roomTileDock={roomGameFeed ? roomGamePane : undefined}
           compactCallDocks={compactWithVideo ? { video: setVideoDock, controls: setCallControlsDock } : undefined}
           onOpenInChat={openGameInChat} />
       </Suspense>
