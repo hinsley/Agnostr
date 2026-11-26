@@ -1,7 +1,16 @@
 import React, { useEffect, useState } from 'react'
 import { getCachedHighlightedCode, highlightCodeToHtml } from '../lib/codeHighlight'
 import { getCachedMathSvg, hasMathSyntax, renderMathToSvg } from '../lib/mathjax'
-import { makeTopicChannelKey, normalizeTopicSlug } from '../lib/bitchatChannel'
+import {
+  formatBitchatChannelHash,
+  formatBitchatChannelLabel,
+  getTopicSlug,
+  makeCelestialChannelKey,
+  makeTopicChannelKey,
+  normalizeTopicSlug,
+  parseBitchatChannelHash,
+  parseCelestialChannelKey,
+} from '../lib/bitchatChannel'
 
 export interface MarkdownCallbacks {
   onTuneGeohash?: (geohash: string) => void
@@ -10,7 +19,6 @@ export interface MarkdownCallbacks {
   knownHandles?: readonly string[]
 }
 
-const GEOHASH_BASE32 = /^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$/
 const MAX_KNOWN_HANDLES = 80
 const MAX_INLINE_DEPTH = 4
 
@@ -56,7 +64,9 @@ const BASE_NON_MENTION_PATTERNS = [
   // 5. Bare URLs, nostr: URIs, #geohash / #topic channel pills
   String.raw`https?:\/\/[^\s<>"')]+`,
   String.raw`nostr:(?:npub|nprofile|note|nevent|naddr)1[02-9ac-hj-np-z]+`,
-  String.raw`(?<=^|[\s([,])#(?:topic:[a-z0-9][a-z0-9_-]{0,47}|[a-z][a-z0-9_-]{1,47}|[0-9bcdefghjkmnpqrstuvwxyz]{1,12})\b`,
+  // Consume the full qualified token, even if invalid. Never turn e.g. #mars:invalid
+  // into a clickable #mars topic or Earth geohash.
+  String.raw`(?<=^|[\s([,"'])#(?:[a-z][a-z0-9_-]*:[a-z0-9_:-]+|[a-z][a-z0-9_-]{1,47}|[0-9bcdefghjkmnpqrstuvwxyz]{1,12})(?![\p{L}\p{N}_-])`,
 ]
 
 function escapeRegexLiteral(text: string): string {
@@ -121,7 +131,7 @@ function getTokenRegex(knownHandles?: readonly string[]): RegExp {
 
 type SanitizedLink =
   | { kind: 'external'; href: string; title: string }
-  | { kind: 'internal'; hash: string; title: string }
+  | { kind: 'internal'; hash: string; title: string; channelKey?: string }
 
 function sanitizeMarkdownUrl(rawUrl: string): SanitizedLink | null {
   let cleaned = rawUrl.trim()
@@ -137,10 +147,14 @@ function sanitizeMarkdownUrl(rawUrl: string): SanitizedLink | null {
 
   const lower = cleaned.toLowerCase()
 
-  // Internal Agnostr deep links (`#dm=...`, `#invite=...`, `#topic=...`)
-  if (lower.startsWith('#dm=') || lower.startsWith('#invite=') || lower.startsWith('#topic=')) {
-    return { kind: 'internal', hash: cleaned, title: cleaned }
+  const internalLink = (hash: string, title: string): SanitizedLink | null => {
+    const channelKey = parseBitchatChannelHash(hash)
+    if (channelKey) return { kind: 'internal', hash: formatBitchatChannelHash(channelKey), title, channelKey }
+    if (/^#(?:dm|invite)=/i.test(hash)) return { kind: 'internal', hash, title }
+    return null
   }
+
+  if (cleaned.startsWith('#')) return internalLink(cleaned, cleaned)
 
   // External links: strictly https:, http:, or mailto:
   if (lower.startsWith('mailto:')) {
@@ -161,14 +175,8 @@ function sanitizeMarkdownUrl(rawUrl: string): SanitizedLink | null {
         parsed.origin === window.location.origin &&
         parsed.pathname === window.location.pathname
       ) {
-        const lowerHash = parsed.hash.toLowerCase()
-        if (
-          lowerHash.startsWith('#dm=') ||
-          lowerHash.startsWith('#invite=') ||
-          lowerHash.startsWith('#topic=')
-        ) {
-          return { kind: 'internal', hash: parsed.hash, title: parsed.href }
-        }
+        const internal = internalLink(parsed.hash, parsed.href)
+        if (internal) return internal
       }
       return { kind: 'external', href: parsed.href, title: parsed.href }
     } catch {
@@ -374,7 +382,8 @@ function renderInline(
               onClick={(e) => {
                 e.preventDefault()
                 e.stopPropagation()
-                navigateInternalHash(sanitized.hash)
+                if (sanitized.channelKey && opts.onTuneGeohash) opts.onTuneGeohash(sanitized.channelKey)
+                else navigateInternalHash(sanitized.hash)
               }}
             >
               {renderedLabel}
@@ -467,7 +476,8 @@ function renderInline(
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()
-              navigateInternalHash(sanitized.hash)
+              if (sanitized.channelKey && opts.onTuneGeohash) opts.onTuneGeohash(sanitized.channelKey)
+              else navigateInternalHash(sanitized.hash)
             }}
           >
             {renderHighlightedText(displayUrl, opts.highlightQuery)}
@@ -512,47 +522,27 @@ function renderInline(
       )
     } else if (token.startsWith('#')) {
       const rawTag = token.slice(1).toLowerCase()
-      const explicitTopic = rawTag.startsWith('topic:')
-      if (!explicitTopic && GEOHASH_BASE32.test(rawTag) && opts.onTuneGeohash) {
+      const celestial = parseCelestialChannelKey(rawTag)
+      const geoKey = celestial ? makeCelestialChannelKey(celestial.bodyId, celestial.geohash) : null
+      // Only an explicit topic may contain a colon; malformed qualified geohashes are plain text.
+      const slug = geoKey ? null : rawTag.includes(':') ? getTopicSlug(rawTag) : normalizeTopicSlug(rawTag)
+      const channelKey = geoKey ?? (slug ? makeTopicChannelKey(slug) : null)
+      if (channelKey && opts.onTuneGeohash && !insideLink) {
+        const label = formatBitchatChannelLabel(channelKey)
         nodes.push(
           <button
             key={k}
             type="button"
             className="ag-geo-chip"
-            title={`Tune to #${rawTag}`}
+            title={geoKey ? `Tune to ${label}` : `Join ${label}`}
             onClick={(e) => {
               e.stopPropagation()
-              opts.onTuneGeohash?.(rawTag)
+              opts.onTuneGeohash?.(channelKey)
             }}
           >
-            #{rawTag}
+            {label}
           </button>
         )
-      } else if (opts.onTuneGeohash) {
-        const slug = normalizeTopicSlug(rawTag)
-        const topicKey = slug ? makeTopicChannelKey(slug) : null
-        if (slug && topicKey) {
-          nodes.push(
-            <button
-              key={k}
-              type="button"
-              className="ag-geo-chip"
-              title={`Join #${slug}`}
-              onClick={(e) => {
-                e.stopPropagation()
-                opts.onTuneGeohash?.(topicKey)
-              }}
-            >
-              #{slug}
-            </button>
-          )
-        } else {
-          nodes.push(
-            <React.Fragment key={k}>
-              {renderHighlightedText(token, opts.highlightQuery)}
-            </React.Fragment>
-          )
-        }
       } else {
         nodes.push(
           <React.Fragment key={k}>
