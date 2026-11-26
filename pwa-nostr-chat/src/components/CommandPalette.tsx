@@ -63,6 +63,10 @@ import type { ServerHubTab } from './ServerHubModal'
 import type { SettingsTab } from './SettingsModal'
 import { tryOpenInternalAgoraLink } from './UntrustedLinkModal'
 
+import { getPeerLastActivity } from '../lib/peerActivity'
+import { PeerPresence } from './PeerPresence'
+import { PrivatePeerNote } from './PrivatePeerNote'
+
 const GEOHASH_REGEX = /^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$/i
 
 const THEMES: Array<{ id: ThemeId; name: string; desc: string }> = [
@@ -79,6 +83,8 @@ interface PaletteEntry {
   subtitle: string
   keywords: string
   badge?: string
+  privateNote?: string
+  peerActivity?: React.ComponentProps<typeof PeerPresence>
   icon: React.ReactNode
   run: () => void
 }
@@ -457,13 +463,19 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       const isBlocked = engine.isPeerBlocked(dm.peerPubkey)
       const visibleUnread = isBlocked ? 0 : dm.unreadCount
       const peerNote = engine.peerNotes[pk] ?? ''
+      const livePeer = engine.getPeerByPubkey(dm.peerPubkey)
       list.push({
         id: `person-dm-${pk}`,
         group: 'People',
         title: dm.peerDisplayHandle,
         subtitle: isBlocked
           ? 'Muted user'
-          : dm.lastPreview || peerNote || (isTrusted ? 'Trusted friend · Encrypted DM' : 'Encrypted DM'),
+          : dm.lastPreview || (isTrusted ? 'Trusted friend · Encrypted DM' : 'Encrypted DM'),
+        privateNote: peerNote,
+        peerActivity: isBlocked ? undefined : {
+          isOnline: livePeer?.isOnline,
+          lastSeenAt: getPeerLastActivity(dm.peerPubkey, livePeer, dm.messages),
+        },
         keywords: `people dm friend message ${dm.peerNickname} ${dm.peerDisplayHandle} ${dm.peerNpub} ${peerNote}`,
         badge: isBlocked
           ? 'MUTED'
@@ -494,7 +506,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         id: `person-friend-${pk}`,
         group: 'People',
         title: handle.full,
-        subtitle: peerNote || 'Trusted',
+        subtitle: 'Trusted',
+        privateNote: peerNote,
+        peerActivity: { isOnline: livePeer?.isOnline, isMuted: engine.isPeerBlocked(entry.pubkey), lastSeenAt: livePeer?.lastSeenAt },
         keywords: `people dm friend trusted ${handle.base} ${handle.full} ${entry.npub} ${peerNote}`,
         badge: 'FRIEND',
         icon: <ShieldCheck size={15} style={{ color: 'var(--accent)' }} />,
@@ -1425,6 +1439,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                       <div className="ag-cmdk-row-text">
                         <span className="ag-cmdk-row-title">{entry.title}</span>
                         <span className="ag-cmdk-row-sub">{entry.subtitle}</span>
+                        {entry.peerActivity && <PeerPresence {...entry.peerActivity} />}
+                        <PrivatePeerNote note={entry.privateNote} />
                       </div>
                     </div>
                     {entry.badge && (

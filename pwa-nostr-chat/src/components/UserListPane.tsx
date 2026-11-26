@@ -22,7 +22,9 @@ import { isAutoAnonNickname } from '../lib/deviceSync.ts'
 import { useContextMenu, type ContextMenuItem } from './ContextMenu.tsx'
 import { AvatarImg } from './AvatarImg.tsx'
 import { formatHandle, pubkeyToColor } from '../utils/identicon.ts'
-import { formatCompactLastActive } from '../utils/relativeTime.ts'
+import { getPeerLastActivity } from '../lib/peerActivity.ts'
+import { PeerPresence } from './PeerPresence.tsx'
+import { PrivatePeerNote } from './PrivatePeerNote.tsx'
 
 export interface UserListPaneProps {
   engine: AgnostrEngine
@@ -236,10 +238,7 @@ export function UserListPane({
         const isBlocked = dmEngine.isPeerBlocked(peerPk)
         const isTrusted = dmEngine.isExplicitlyTrusted(peerPk)
         const isOnline = Boolean(knownPeer?.isOnline)
-        const peerLastSeenAt = Math.max(
-          knownPeer?.lastSeenAt ?? 0,
-          activeDmThread.lastMessageAt ?? 0,
-        )
+        const peerLastSeenAt = getPeerLastActivity(peerPk, knownPeer, activeDmThread.messages)
 
         const peerInfo: PeerInfo = knownPeer
           ? {
@@ -626,18 +625,6 @@ export function UserListPane({
               <div className="ag-users-list" role="list">
                 {group.items.map((item) => {
                   const savedNote = !item.isSelf ? (peerNotes[item.pubkey] ?? '') : ''
-                  const subline = savedNote
-                    ? savedNote
-                    : item.isBlocked
-                      ? 'Muted'
-                      : item.isOnline
-                        ? 'Online'
-                        : formatCompactLastActive(item.lastSeenAt, roomRoster?.sampledAt)
-                  const sublineTitle =
-                    !savedNote && !item.isBlocked && !item.isOnline && item.lastSeenAt > 0
-                      ? `Last active ${new Date(item.lastSeenAt * 1000).toLocaleString()}`
-                      : undefined
-
                   return (
                     <div
                       key={item.pubkey}
@@ -693,14 +680,14 @@ export function UserListPane({
                             <span className="ag-users-role">{item.roleBadge}</span>
                           )}
                         </div>
-                        <span
-                          className={`ag-users-sub truncate ${
-                            savedNote ? 'note' : item.isBlocked ? 'muted-peer' : ''
-                          }`}
-                          title={sublineTitle}
-                        >
-                          {subline}
-                        </span>
+                        <PeerPresence
+                          isOnline={item.isOnline}
+                          isMuted={item.isBlocked}
+                          lastSeenAt={item.lastSeenAt}
+                          sampledAt={roomRoster?.sampledAt}
+                          compact
+                        />
+                        <PrivatePeerNote note={savedNote} />
                       </div>
 
                       {!item.isSelf && (

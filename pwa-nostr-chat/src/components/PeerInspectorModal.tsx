@@ -1,3 +1,4 @@
+import { getPeerLastActivity } from '../lib/peerActivity.ts'
 import { useEffect, useState } from 'react'
 import {
   AtSign,
@@ -103,6 +104,8 @@ export function PeerInspectorModal({
   if (!peer) return null
 
   const livePeer = engine.getPeerByPubkey(peer.pubkey) ?? peer
+  const thread = engine.dmThreads.find(t => t.peerPubkey.toLowerCase() === peerPubkeyLower)
+  const lastActiveAt = getPeerLastActivity(livePeer.pubkey, livePeer, thread?.messages)
   const isBlocked = engine.isPeerBlocked(livePeer.pubkey)
   const isTrustedPeer = !livePeer.isSelf && engine.isExplicitlyTrusted(livePeer.pubkey)
   const peerLud16 = engine.zaps.getPeerLightningAddress(livePeer.pubkey)
@@ -290,12 +293,12 @@ export function PeerInspectorModal({
             <span
               className="ag-kpi-value mono"
               title={
-                livePeer.lastSeenAt > 0
-                  ? new Date(livePeer.lastSeenAt * 1000).toLocaleString()
+                lastActiveAt > 0
+                  ? new Date(lastActiveAt * 1000).toLocaleString()
                   : undefined
               }
             >
-              {formatLastSeen(livePeer.lastSeenAt)}
+              {formatLastSeen(lastActiveAt)}
             </span>
           </div>
           <div className="ag-kpi-cell">

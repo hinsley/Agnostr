@@ -62,6 +62,9 @@ import { buildDmShareUrl, parseShareTarget, type ParsedShareTarget } from '../li
 import { formatHandle, pubkeyToColor } from '../utils/identicon'
 import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import { AvatarImg } from './AvatarImg'
+import { getPeerLastActivity } from '../lib/peerActivity'
+import { PeerPresence } from './PeerPresence'
+import { PrivatePeerNote } from './PrivatePeerNote'
 import { UserProfileDock } from './UserProfileDock'
 
 export type ListTab = 'bitchat' | 'dms' | 'servers'
@@ -2408,6 +2411,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 entry,
                 nickname: handle.base,
                 displayHandle: handle.full,
+                livePeer,
               }
             })
             .filter((friend) => {
@@ -2468,6 +2472,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                       const visibleUnread = blocked ? 0 : thread.unreadCount
                       const hasUnread = visibleUnread > 0
                       const peerNote = engine.peerNotes[thread.peerPubkey.toLowerCase()]
+                      const presentPeer = engine.getPeerByPubkey(thread.peerPubkey)
+                      const lastPeerActivity = getPeerLastActivity(thread.peerPubkey, presentPeer, thread.messages)
                       return (
                         <div
                           key={thread.peerPubkey}
@@ -2519,11 +2525,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                                   </span>
                                 )}
                               </div>
-                              {peerNote && (
-                                <span className="ag-person-note-line truncate" title={peerNote}>
-                                  {peerNote}
-                                </span>
+                              {!blocked && (
+                                <PeerPresence isOnline={presentPeer?.isOnline} lastSeenAt={lastPeerActivity} />
                               )}
+                              <PrivatePeerNote note={peerNote} />
                             </div>
                           </button>
 
@@ -2588,7 +2593,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 {trustedFriends.length > 0 && (
                   <section className="ag-conv-group" aria-label="Trusted friends">
                     <div className="ag-conv-group-label">Trusted Friends</div>
-                    {trustedFriends.map(({ entry, nickname, displayHandle }) => {
+                    {trustedFriends.map(({ entry, nickname, displayHandle, livePeer }) => {
                       const active = isDmActive(entry.pubkey)
                       const peerNote = engine.peerNotes[entry.pubkey.toLowerCase()]
                       return (
@@ -2624,14 +2629,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                               <div className="ag-chat-row-top">
                                 <span className="ag-chat-row-name truncate">{displayHandle}</span>
                               </div>
-                              <div className="ag-chat-row-bottom">
-                                <span
-                                  className={`ag-chat-row-preview truncate ${peerNote ? 'is-note' : ''}`}
-                                  title={peerNote || undefined}
-                                >
-                                  {peerNote || 'Trusted'}
-                                </span>
-                              </div>
+                              <PeerPresence
+                                isOnline={livePeer?.isOnline}
+                                isMuted={engine.isPeerBlocked(entry.pubkey)}
+                                lastSeenAt={livePeer?.lastSeenAt}
+                              />
+                              <PrivatePeerNote note={peerNote} />
                             </div>
                           </button>
 
