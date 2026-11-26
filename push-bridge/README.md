@@ -10,6 +10,14 @@ Zero-knowledge Web Push bridge for [Agnostr](https://agnostr.com), built on Clou
 - **Optional public Bitchat rooms**: only a signed, currently eligible device opted into background notifications for all messages in its known pinned public rooms receives exact `#g`/named-topic `#d` matches. The app does not upload social block or allow lists; it disables this watcher when its local sender filters cannot be enforced. The Worker checks the current registered room and a 12-hour eligibility lease again for queued delivery. Changes can take time to reach Workers KV. Encrypted virtual groups and restricted group-specific relays have no safe untagged fallback without independently authorized routing; direct Agnostr pokes and recipient-tagged public events remain separate.
 - **Bounded state**: durable outcome/observed rows expire; relay work rotates, events are validated, and leases/alarms avoid per-event KV writes. The daily free-tier allowance still depends on user counts, relay traffic, and registration churn.
 
+The minute trigger still polls relays every minute. The discovery coordinator
+lists subscription and alias prefixes at most once per eight minutes (360 list
+requests per 24 hours) and serves bounded minute-size slices from the cached
+batch. An unlisted new registration may wait for discovery; cached identifiers
+never bypass the live device/preferences checks. On a list error the Worker
+continues with the last batch and emits an aggregate `discoveryDegraded` flag.
+Known stale cursors restart on the next budgeted refresh, not immediately.
+
 ## Endpoints
 
 | Method | Path | Auth | Purpose |

@@ -59,6 +59,27 @@ export interface ScanPage {
   tags: string[]
   rotation: number
   periodSeconds: number
+  discoveryDegraded?: true
+}
+
+// A single coordinator issues at most one pair of lists every eight minutes
+// (360 calls/day), while the scheduled relay scan still runs every minute.
+const MINUTE_MS = 60_000
+const DISCOVERY_MINUTES = 8
+const DISCOVERY_INTERVAL_MS = DISCOVERY_MINUTES * MINUTE_MS
+const DISCOVERY_INTERVAL_SECONDS = DISCOVERY_INTERVAL_MS / 1000
+const PER_MINUTE = [6, 2] as const
+
+interface ScanSnapshot {
+  scheduledAt: number
+  // Old Worker versions have only page; new snapshots hold eight minutes
+  // worth of identifiers, but never copy subscription records or endpoints.
+  page: ScanPage
+  batches?: [string[], string[]]
+}
+
+function invalidKvCursor(err: unknown): boolean {
+  return err instanceof Error && /\binvalid (?:kv )?cursor\b|\bcursor (?:is )?expired\b/i.test(err.message)
 }
 
 interface ScanCursor {
@@ -119,34 +140,77 @@ export class PushDelivery {
 
   private async scanPage(scheduledAt: number): Promise<ScanPage> {
     return this.state.blockConcurrencyWhile(async () => {
-      const pre = await this.storage.get<{scheduledAt: number, page: ScanPage}>('scan:last')
-      if (pre?.scheduledAt === scheduledAt) return pre.page
+      const pre = await this.storage.get<ScanSnapshot>('scan:last')
       if (pre && pre.scheduledAt > scheduledAt) return { ...pre.page, tags: [] }
-      const entries = await Promise.all((['sub:', 'alias:'] as const).map(async (prefix,kind) => {
+      const lastAttempt = await this.storage.get<number>('scan:attempt')
+      const relayPage = (snapshot: ScanSnapshot | undefined, degraded: boolean): ScanPage => {
+        const age = snapshot ? Math.max(0, scheduledAt - snapshot.scheduledAt) : 0
+        const minute = Math.floor(age / MINUTE_MS)
+        const tags = snapshot?.batches ? snapshot.batches.flatMap((batch, i) => {
+          if (batch.length === 0) return []
+          const size = PER_MINUTE[i]
+          const offset = (minute % Math.ceil(batch.length / size)) * size
+          return batch.slice(offset,offset+size)
+        }) : snapshot?.page.tags ?? []
+        return {
+          tags: [...new Set(tags)],
+          rotation: (snapshot?.page.rotation ?? 0) + minute,
+          periodSeconds: Math.max(snapshot?.page.periodSeconds ?? 0,
+            Math.floor(age / 1000) + DISCOVERY_INTERVAL_SECONDS),
+          ...(degraded ? { discoveryDegraded: true } : {}),
+        }
+      }
+      const cached = () => relayPage(pre, !pre || pre.scheduledAt !== lastAttempt)
+      if (lastAttempt !== undefined && scheduledAt - lastAttempt < DISCOVERY_INTERVAL_MS) return cached()
+
+      // Reserve the budget before I/O, including on empty namespaces, worker
+      // restart and outages. A retried scheduled invocation cannot re-list.
+      await this.storage.put('scan:attempt', scheduledAt)
+      const settled = await Promise.allSettled((['sub:', 'alias:'] as const).map(async (prefix,kind) => {
         const storeKey = 'scan:cursor:'+prefix
-        let old = await this.storage.get<ScanCursor>(storeKey)
-        const base = { startedAt: scheduledAt, rotation: old?.rotation ?? 0, previousPeriod: old?.previousPeriod ?? 0 }
-        old ??= base
-        const limit = kind===0 ? 6 : 2
-        const keys = await this.env.PUSH_KV.list({ prefix, limit, cursor: old.cursor }).catch((err) => {
-          if (!old?.cursor) throw err
-          return this.env.PUSH_KV.list({prefix,limit})
-        })
+        const old = await this.storage.get<ScanCursor>(storeKey) ??
+          { startedAt: scheduledAt, rotation: 0, previousPeriod: 0 }
+        const limit = PER_MINUTE[kind] * DISCOVERY_MINUTES
+        let keys: KVNamespaceListResult<unknown>
+        try {
+          keys = await this.env.PUSH_KV.list({prefix, limit, cursor: old.cursor})
+        } catch (err) {
+          // A known invalid/expired cursor restarts NEXT time; quota and
+          // transport failures never trigger an immediate second KV request.
+          if (old.cursor && invalidKvCursor(err)) {
+            const { cursor: _cursor, ...reset } = old
+            await this.storage.put(storeKey, reset)
+          }
+          throw err
+        }
         const next: ScanCursor = keys.list_complete ? {
           startedAt: scheduledAt, rotation: old.rotation+1,
-          previousPeriod: Math.max(60,Math.floor((scheduledAt-old.startedAt)/1000)+60),
+          previousPeriod: Math.max(DISCOVERY_INTERVAL_SECONDS,
+            Math.floor((scheduledAt-old.startedAt)/1000)+DISCOVERY_INTERVAL_SECONDS),
         } : {...old,cursor:keys.cursor}
         return {storeKey,next,keys:keys.keys.map((entry) => entry.name.slice(prefix.length))}
       }))
+      if (settled.some(entry => entry.status === 'rejected')) {
+        // No cursor advances on a partially successful page. Previously
+        // discovered tags remain usable; the cron rechecks live device state.
+        return { ...cached(), discoveryDegraded: true }
+      }
+      const entries = settled.flatMap(entry => entry.status === 'fulfilled' ? [entry.value] : [])
       const page = {
-        tags: [...new Set(entries.flatMap((x) => x.keys.filter((key) => /^[a-f0-9]{64}$/.test(key))))],
+        tags: [],
         rotation: entries[0].next.rotation,
-        periodSeconds: Math.max(...entries.map((x) => Math.max(x.next.previousPeriod,Math.floor((scheduledAt-x.next.startedAt)/1000)))),
+        periodSeconds: Math.max(...entries.map((x) => Math.max(DISCOVERY_INTERVAL_SECONDS,
+          x.next.previousPeriod,Math.floor((scheduledAt-x.next.startedAt)/1000)))),
       }
       const writes = Object.fromEntries(entries.map((x) => [x.storeKey,x.next])) as Record<string,unknown>
-      writes['scan:last'] = {scheduledAt,page}
+      const validTags = (keys: string[]) => keys.filter((key) => /^[a-f0-9]{64}$/.test(key))
+      const batches: [string[],string[]] = [validTags(entries[0].keys),validTags(entries[1].keys)]
+      const snapshot: ScanSnapshot = {scheduledAt,page,batches}
+      // Keep the first bounded slice as a rollback-compatible old-format page.
+      snapshot.page.tags = relayPage(snapshot,false).tags
+      writes['scan:last'] = snapshot
       await this.storage.put(writes)
-      return page
+      return relayPage(snapshot,false)
     })
   }
 

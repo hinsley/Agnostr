@@ -4,6 +4,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure
 import worker, { PushDelivery } from '../src/index.ts'
 import { PUBKEYS_INDEX_KEY, subKeyForPubkey, DEFAULT_PUSH_PREFERENCES } from '../src/types.ts'
 import { sha256Hex } from '../src/webpush.ts'
+import { nextScanPage } from '../src/delivery.ts'
 
 const signer = generateSecretKey()
 const recipientSecret = generateSecretKey()
@@ -331,4 +332,69 @@ test('concurrent unrelated signed subscribers are all enumerated without the old
     assert.ok(accounts.every((d)=>scanned.has(d.pk)))
     assert.equal(touchedLegacy,false)
   } finally { globalThis.fetch=oldFetch }
+})
+
+
+test('minute relay calls reuse discovered recipients within a strict daily KV list budget', async () => {
+  const f=await fixture()
+  const base=f.env.PUSH_KV.list
+  let calls=0
+  f.env.PUSH_KV.list=async (options) => { calls++; return base(options) }
+  const day=Date.UTC(2026,10,26)
+  for(let minute=0;minute<24*60; minute++){
+    const t=day+minute*60_000
+    const r=await nextScanPage(f.env,t)
+    assert.deepEqual(r.tags,[recipient])
+    assert.equal(r.discoveryDegraded,undefined)
+    if (minute % 8 === 0) assert.deepEqual(await nextScanPage(f.env,t),r)
+  }
+  assert.equal(calls,360)
+  assert.deepEqual((await nextScanPage(f.env,day)).tags,[])
+  assert.equal(calls,360)
+})
+
+test('quota and stale cursor failures keep last known subscribers and never retry before budget resets', async () => {
+  const f=await fixture()
+  const base=f.env.PUSH_KV.list
+  const tags=Array.from({length:50},(_,i)=>String(i).padStart(64,'0'))
+  for(const pk of tags) await f.env.PUSH_KV.put('sub:'+pk,JSON.stringify({pubkey:pk,devices:[]}))
+  const aliases=Array.from({length:18},(_,i)=>String(900+i).padStart(64,'0'))
+  for(const pk of aliases) await f.env.PUSH_KV.put('alias:'+pk,recipient)
+  const calls=[]
+  let failure=''
+  f.env.PUSH_KV.list=async (options) => {
+    calls.push(options)
+    if(failure && options.prefix==='sub:') throw new Error(failure)
+    return base(options)
+  }
+  const now=Date.UTC(2026,10,26)
+  const firstSweep=[]
+  for(let offset=0;offset<8;offset++) {
+    const {tags}=await nextScanPage(f.env,now+offset*60_000)
+    assert.equal(tags.length,8)
+    firstSweep.push(tags)
+  }
+  assert.equal(calls.length,2)
+  failure='KV LIST failed: 429 daily quota exceeded'
+  for(const offset of [8,9,15]) {
+    const out=await nextScanPage(f.env,now+offset*60_000)
+    assert.deepEqual(out.tags,firstSweep[offset%8])
+    assert.equal(out.discoveryDegraded,true)
+  }
+  assert.equal(calls.length,4)
+  failure='KV LIST failed: 400 Invalid cursor'
+  assert.equal((await nextScanPage(f.env,now+16*60_000)).discoveryDegraded,true)
+  assert.equal(calls.length,6)
+  assert.equal(calls.findLast(x=>x.prefix==='sub:').cursor,'48')
+  failure=''
+  const seen=new Set(firstSweep.flat())
+  for(let offset=24;offset<=32;offset++) {
+    const out=await nextScanPage(f.env,now+offset*60_000)
+    assert.equal(out.discoveryDegraded,undefined)
+    for(const tag of out.tags) seen.add(tag)
+    if(offset===24) assert.equal(calls.findLast(x=>x.prefix==='sub:').cursor,undefined)
+  }
+  assert.ok(tags.every(pk=>seen.has(pk)))
+  assert.ok(aliases.every(pk=>seen.has(pk)))
+  assert.equal(calls.length,10)
 })

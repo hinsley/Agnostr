@@ -486,9 +486,10 @@ export async function runNostrPushCron(env: Env, scheduledAt = Date.now()): Prom
   queued: number
   partialGiftScans: number
   failed: number
+  discoveryDegraded: boolean
 }> {
-  const {tags,rotation,periodSeconds} = await nextScanPage(env,scheduledAt)
-  if (!tags.length) return { checkedPubkeys: 0, fetchedEvents: 0, delivered: 0, queued: 0, partialGiftScans: 0, failed: 0 }
+  const {tags,rotation,periodSeconds,discoveryDegraded = false} = await nextScanPage(env,scheduledAt)
+  if (!tags.length) return { checkedPubkeys: 0, fetchedEvents: 0, delivered: 0, queued: 0, partialGiftScans: 0, failed: 0, discoveryDegraded }
   const now = Math.floor(scheduledAt/1000)
   // Use observed full sweep length to cover moderate backlogs without
   // making either public or encrypted Nostr reads unbounded.
@@ -579,6 +580,6 @@ export async function runNostrPushCron(env: Env, scheduledAt = Date.now()): Prom
   }
   return {
     checkedPubkeys: tags.length, fetchedEvents: seen.size, delivered: result.delivered, queued: result.queued,
-    partialGiftScans: payloads.filter((x) => !x.gift.complete).length, failed: result.failed,
+    partialGiftScans: payloads.filter((x) => !x.gift.complete).length, failed: result.failed, discoveryDegraded,
   }
 }
