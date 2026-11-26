@@ -63,8 +63,10 @@ function Fixture() {
     <button id="toggle-test-chat" onClick={() => setChatMounted(v => !v)}>Toggle fixture chat</button>
     {chatMounted && <main className="ag-main" style={{height: '80dvh'}}>
       <div className="ag-call-dock-slot" ref={setCallDock} />
-      <div ref={setChatDock} className="ag-game-chat-slot" />
-      <div className="ag-stream-wrap"><div className="ag-stream-scroll">A message to read</div></div>
+      <div className="ag-chat-content">
+        <div ref={setChatDock} className="ag-game-chat-slot" />
+        <div className="ag-stream-wrap"><div className="ag-stream-scroll">A message to read</div></div>
+      </div>
       <div className="ag-composer-dock"><textarea id="fixture-composer" aria-label="Message" /></div>
     </main>}
     <ActivityStages engine={engine} expanded={expanded} onSetExpanded={setExpanded}

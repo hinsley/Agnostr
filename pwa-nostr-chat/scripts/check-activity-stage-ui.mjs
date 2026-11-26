@@ -1,4 +1,4 @@
-// Run against a local Vite dev server, optionally with --mobile. CHROME can override the executable.
+// Run against a local Vite dev server, optionally with --mobile and --short-viewport (busy-room case only). CHROME can override the executable.
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -21,6 +21,7 @@ try {
   socket.onmessage=e=>{const d=JSON.parse(e.data);if(d.id){const p=pending.get(d.id);p?.(d);pending.delete(d.id)}else if(d.method==='Fetch.requestPaused'){ const p=d.params; const local=new URL(p.request.url).origin===origin.origin; void call(local?'Fetch.continueRequest':'Fetch.failRequest', {requestId:p.requestId,...(local?{}:{errorReason:'BlockedByClient'})}); }else if(d.method==='Log.entryAdded'||d.method==='Runtime.exceptionThrown') console.log(JSON.stringify(d).slice(0,1200))}
   function call(method,params={}){return new Promise(r=>{pending.set(++seq,r);socket.send(JSON.stringify({id:seq,method,params}))})}
   await call('Runtime.enable');await call('Page.enable');
+  const shortViewport = process.argv.includes('--short-viewport')
   if (process.argv.includes('--mobile')) await call('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
   for(const [kind, room] of [['chess','dm'],['go','dm'],['poker','geo'],['poker','server']]){
     const url = new URL('scripts/fixtures/activity-stage.html', origin)
@@ -70,7 +71,7 @@ try {
           const chat=q('.ag-main').getBoundingClientRect()
           assert(Math.abs(b.left-chat.left)<2 && Math.abs(b.right-chat.right)<2,
             'Minimized board does not span the entire chat column')
-          assert(b.height<=Math.min(0.32*innerHeight,270)+2,'Compact game stretches vertically: '+b.height)
+          assert(b.height<=Math.min(Math.max(224,0.32*innerHeight),270)+2,'Compact game stretches vertically: '+b.height)
           assert(q('.ag-game-chat-slot').getBoundingClientRect().height<=b.height+2,'Chat slot stretches beyond board')
           assert(q('.ag-stream-wrap').getBoundingClientRect().height>100,'Not enough room left for chat')
         }
@@ -198,6 +199,7 @@ try {
   const mockRelay = () => {
     const requests = []
     window.fixtureEvents = []
+    window.fixtureGameEventsSigned = []
     window.fixtureMediaRequests = 0
     window.RTCPeerConnection = function () { ++window.fixtureMediaRequests; throw Error('Unexpected call') }
     Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {
@@ -235,7 +237,10 @@ try {
           this.deliver(['EOSE',id])
         }
         if(type==='EVENT') {
-          if(id.kind===25055) window.fixtureEvents.push(JSON.parse(id.content))
+          if(id.kind===25055) {
+            window.fixtureEvents.push(JSON.parse(id.content))
+            window.fixtureGameEventsSigned.push(id)
+          }
           this.deliver(['OK',id.id,true,''])
         }
       }
@@ -247,7 +252,9 @@ try {
     window.fixtureReplay = events => {
       for (const {ws,id,filters} of requests) {
         for (const event of events) {
-          if(filters.some(f=>f.kinds?.includes(event.kind) && f['#t']?.includes(event.tags[0][1]))) {
+          if(filters.some(f=>f.kinds?.includes(event.kind) && Object.entries(f)
+            .filter(([key])=>key.startsWith('#'))
+            .every(([key,values])=>event.tags.some(([name,value])=>key==='#'+name && values.includes(value))))) {
             ws.deliver(['EVENT',id,event])
           }
         }
@@ -282,7 +289,7 @@ try {
     const composer=await wait(()=>q('.ag-composer-input'))
     const c=composer.getBoundingClientRect(), b=board.getBoundingClientRect()
     assert(c.height>20 && (b.bottom<=c.top || b.right<=c.left),'Board overlaps the real composer')
-    assert(b.height<=Math.min(0.32*innerHeight,270)+2,'Real compact table takes up too much height')
+    assert(b.height<=Math.min(Math.max(224,0.32*innerHeight),270)+2,'Real compact table takes up too much height')
     const chat=q('.ag-main').getBoundingClientRect()
     assert(Math.abs(b.left-chat.left)<2 && Math.abs(b.right-chat.right)<2,'Real compact table is not full chat width')
     const felt=board.querySelector('.ag-poker-felt').getBoundingClientRect()
@@ -359,6 +366,91 @@ try {
   const room=await call('Runtime.evaluate',{expression:'('+roomCallProbe+')()',awaitPromise:true,returnByValue:true})
   if(room.result.exceptionDetails)throw Error(room.result.exceptionDetails.exception?.description || JSON.stringify(room.result.exceptionDetails))
   console.log('Bitchat: the normal call dock stays intact; leaving the call immediately restores the full-width playable board')
+  if(shortViewport && process.argv.includes('--mobile'))
+    await call('Emulation.setDeviceMetricsOverride',{width:390,height:667,deviceScaleFactor:1,mobile:true})
+  await call('Page.navigate',{url:new URL('/?busy-board=1#topic=busy-game-fixture',origin).href})
+  const busyRoomProbe = async () => {
+    const q = s => document.querySelector(s)
+    const wait = async f => {
+      for(let i=0;i<150;i++){const v=f();if(v)return v;await new Promise(r=>setTimeout(r,100))}
+      throw Error('missing '+f+' '+document.body.innerText.slice(-1800))
+    }
+    const assert=(valid,msg)=>{if(!valid)throw Error(msg)}
+    const findButton=(label,root=document)=>[...root.querySelectorAll('button')]
+      .find(el=>el.getAttribute('aria-label')===label || el.textContent.trim()===label)
+    const target='topic:busy-game-fixture'
+    const {roomEvents,busyRoomHistory,liveHandForVisitor}=await import('/scripts/fixtures/activity-smoke-events.js')
+    const events=[...roomEvents(target),...busyRoomHistory(target)]
+    await wait(()=>q('.ag-header-game-btn'))
+    await wait(()=>{
+      window.fixtureReplay(events)
+      const stream=q('.ag-stream-scroll')
+      return stream?.scrollHeight > stream?.clientHeight + 1200 && findButton('View table')
+    })
+    findButton('View table').click()
+    const modal=await wait(()=>q('.ag-game-modal-frame'))
+    await wait(()=>modal.textContent.includes('Synthetic host'))
+    findButton('Minimize game',modal).click()
+    const board=await wait(()=>q('.ag-game-in-chat.is-compact'))
+    const body=q('.ag-game-in-chat .ag-game-stage-body')
+    const composer=q('.ag-composer-input')
+    const stream=q('.ag-stream-scroll')
+    const layout=phase=>{
+      const h=body.getBoundingClientRect().height
+      const c=composer.getBoundingClientRect(), b=board.getBoundingClientRect()
+      const chat=q('.ag-main').getBoundingClientRect()
+      assert(h>=185,phase+' board body collapsed to '+h+'px with '+stream.scrollHeight+'px of messages')
+      assert(b.bottom<c.top && Math.abs(b.width-chat.width)<2,'Board overlaps chat composer or is not full width')
+      assert(stream.clientHeight>78 && stream.scrollHeight>stream.clientHeight+1200,'Busy chat no longer has its own scroll area')
+      assert(!q('.ag-call-stage, .ag-call-mini-pip, .ag-call-mini-pill') && window.fixtureMediaRequests===0,
+        'Standalone play unexpectedly started a call')
+      return h
+    }
+    const lobby=layout('Lobby')
+    const physicalTarget=el=>{
+      el.scrollIntoView({block:'nearest'})
+      const b=el.getBoundingClientRect()
+      assert(el.contains(document.elementFromPoint(b.left+b.width/2,b.top+b.height/2)),
+        el.textContent.trim()+' is not physically reachable through the compact scroll area')
+      return {x:b.left+b.width/2,y:b.top+b.height/2}
+    }
+    const seat=await wait(()=>[...board.querySelectorAll('button')].find(b=>b.textContent.includes('Sit In')))
+    physicalTarget(seat)
+    seat.click()
+    const join=await wait(()=>window.fixtureGameEventsSigned.find(e=>JSON.parse(e.content).type==='poker-join'))
+    const live=liveHandForVisitor(target,join.pubkey)
+    const check=await wait(()=>{
+      window.fixtureReplay([live])
+      return findButton('Check',board)
+    })
+    const liveHeight=layout('Live hand')
+    assert(Math.abs(lobby-liveHeight)<2,'Changing game state changed the dock height')
+    const chatBefore=stream.scrollTop
+    const targetPoint=physicalTarget(check)
+    assert(chatBefore===stream.scrollTop,'Scrolling to poker controls moved chat history')
+    return {...targetPoint,lobby,live:liveHeight,messages:stream.scrollHeight}
+  }
+  const busy=await call('Runtime.evaluate',{expression:'('+busyRoomProbe+')()',awaitPromise:true,returnByValue:true})
+  if(busy.result.exceptionDetails)throw Error(busy.result.exceptionDetails.exception?.description || JSON.stringify(busy.result.exceptionDetails))
+  const {x,y,...dimensions}=busy.result.result.value
+  if(process.argv.includes('--mobile')){
+    await call('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1})
+    await call('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y,id:1}]})
+    await call('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})
+  }else{
+    await call('Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',clickCount:1})
+    await call('Input.dispatchMouseEvent',{type:'mouseReleased',x,y,button:'left',clickCount:1})
+  }
+  const action=await call('Runtime.evaluate',{expression:`(async()=>{
+    for(let i=0;i<100;i++){
+      const sent=window.fixtureEvents.find(e=>e.type==='poker-action' && JSON.parse(e.action).type==='check')
+      if(sent)return sent.handNumber===1 && window.fixtureMediaRequests===0
+      await new Promise(r=>setTimeout(r,50))
+    }
+    return false
+  })()`,awaitPromise:true,returnByValue:true})
+  if(action.result.result.value!==true)throw Error('Physical click/tap on compact Check did not send the live-hand action')
+  console.log('Busy Bitchat: lobby and live board survived overflowing chat, then physical Check succeeded',dimensions)
 } finally {
   proc.kill(); await exited
   fs.rmSync(dir,{recursive:true,force:true,maxRetries:3})

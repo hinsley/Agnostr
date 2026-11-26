@@ -3021,28 +3021,30 @@ export function App() {
                     }}
                   />
 
-                  <div ref={setGameChatDock} className="ag-game-chat-slot" />
+                  <div className="ag-chat-content">
+                    <div ref={setGameChatDock} className="ag-game-chat-slot" />
 
-                  <MessageStream
-                    engine={engine}
-                    searchQuery={searchOpen ? searchQuery : ''}
-                    activeSearchMessageId={activeSearchMessageId}
-                    onReply={handleReply}
-                    onReact={handleReact}
-                    onReplyServer={handleReplyServer}
-                    onReactServer={handleReactServer}
-                    onInspectPeer={setInspectedPeer}
-                    onStartDm={handleOpenDm}
-                    onMentionPeer={handleMentionPeer}
-                    onTuneChannel={handleTuneChannel}
-                    onClickMention={handleClickInlineMention}
-                    onLocateMe={() => void handleLocateMe()}
-                    onExpandRadar={handleExpandRadar}
-                    onOpenServerSettings={handleOpenServerSettings}
-                    onOpenLightbox={setLightboxImage}
-                    onOpenZap={handleOpenZap}
-                    onClaimCashuToken={handleClaimCashuToken}
-                  />
+                    <MessageStream
+                      engine={engine}
+                      searchQuery={searchOpen ? searchQuery : ''}
+                      activeSearchMessageId={activeSearchMessageId}
+                      onReply={handleReply}
+                      onReact={handleReact}
+                      onReplyServer={handleReplyServer}
+                      onReactServer={handleReactServer}
+                      onInspectPeer={setInspectedPeer}
+                      onStartDm={handleOpenDm}
+                      onMentionPeer={handleMentionPeer}
+                      onTuneChannel={handleTuneChannel}
+                      onClickMention={handleClickInlineMention}
+                      onLocateMe={() => void handleLocateMe()}
+                      onExpandRadar={handleExpandRadar}
+                      onOpenServerSettings={handleOpenServerSettings}
+                      onOpenLightbox={setLightboxImage}
+                      onOpenZap={handleOpenZap}
+                      onClaimCashuToken={handleClaimCashuToken}
+                    />
+                  </div>
 
                   <Composer
                     engine={engine}

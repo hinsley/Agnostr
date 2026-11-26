@@ -3511,19 +3511,29 @@
 .ag-game-stage-panel.is-compact .ag-game-stage-head-actions { gap: 2px; }
 .ag-game-stage-panel.is-compact .ag-game-head-btn.icon-only { width: 27px; height: 27px; }
 
-/* The chat dock spans the whole conversation column, like a docked call. */
-.ag-game-chat-slot {
+/* Allocate chat and game space independently of message or game content height. */
+.ag-chat-content {
+  flex: 1 1 0;
   display: flex;
-  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.ag-chat-content > .ag-stream-wrap { flex: 1 1 0; }
+
+.ag-game-chat-slot {
+  --ag-game-dock-height: clamp(224px, 32dvh, 270px);
+  display: flex;
+  flex: 0 0 max(0px, min(var(--ag-game-dock-height), calc(100% - 5rem)));
   flex-direction: column;
   width: 100%;
   min-height: 0;
-  max-height: min(32dvh, 270px);
   border-bottom: 1px solid var(--border-subtle);
 }
 .ag-game-chat-slot:empty { display: none; }
 .ag-game-in-chat.ag-game-stage-panel {
-  flex: 0 1 auto;
+  flex: 1 1 0;
   max-width: none;
   min-height: 0;
   border: 0;
@@ -3556,7 +3566,10 @@
 .ag-call-room-game-tile .ag-call-unpin-btn { top: .32rem; right: .35rem; }
 
 @media (max-width: 867px) {
-  html[data-keyboard-open='true'] :is(.ag-game-chat-slot, .ag-game-stage-panel.is-compact) {
+  html[data-keyboard-open='true'] .ag-game-chat-slot {
+    --ag-game-dock-height: min(23dvh, calc(0.32 * var(--ag-vvh, 100dvh)), 172px);
+  }
+  html[data-keyboard-open='true'] .ag-game-in-call.is-compact {
     max-height: min(23dvh, 172px);
   }
 }
