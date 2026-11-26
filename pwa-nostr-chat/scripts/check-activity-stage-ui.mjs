@@ -1,4 +1,4 @@
-// Run against a local Vite dev server, optionally with --mobile and --short-viewport (busy-room case only). CHROME can override the executable.
+// Run against a local Vite dev server, optionally with --mobile, --short-viewport, or --small-window (the latter two affect only the busy-room case). CHROME can override the executable.
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -368,6 +368,8 @@ try {
   console.log('Bitchat: the normal call dock stays intact; leaving the call immediately restores the full-width playable board')
   if(shortViewport && process.argv.includes('--mobile'))
     await call('Emulation.setDeviceMetricsOverride',{width:390,height:667,deviceScaleFactor:1,mobile:true})
+  if(process.argv.includes('--small-window'))
+    await call('Emulation.setDeviceMetricsOverride',{width:804,height:638,deviceScaleFactor:1,mobile:false})
   await call('Page.navigate',{url:new URL('/?busy-board=1#topic=busy-game-fixture',origin).href})
   const busyRoomProbe = async () => {
     const q = s => document.querySelector(s)
@@ -379,7 +381,7 @@ try {
     const findButton=(label,root=document)=>[...root.querySelectorAll('button')]
       .find(el=>el.getAttribute('aria-label')===label || el.textContent.trim()===label)
     const target='topic:busy-game-fixture'
-    const {roomEvents,busyRoomHistory,liveHandForVisitor}=await import('/scripts/fixtures/activity-smoke-events.js')
+    const {roomEvents,busyRoomHistory,seatedLobbyForVisitor,liveHandForVisitor}=await import('/scripts/fixtures/activity-smoke-events.js')
     const events=[...roomEvents(target),...busyRoomHistory(target)]
     await wait(()=>q('.ag-header-game-btn'))
     await wait(()=>{
@@ -418,6 +420,19 @@ try {
     physicalTarget(seat)
     seat.click()
     const join=await wait(()=>window.fixtureGameEventsSigned.find(e=>JSON.parse(e.content).type==='poker-join'))
+    const seatedLobby=seatedLobbyForVisitor(target,join.pubkey)
+    const leaveInLobby=await wait(()=>{
+      window.fixtureReplay([seatedLobby])
+      return findButton('Leave table',body)
+    })
+    const assertFullLeave=(button,phase)=>{
+      const r=button.getBoundingClientRect(), clip=body.getBoundingClientRect()
+      assert(r.top>=clip.top && r.bottom<=clip.bottom,
+        phase+' Leave table is clipped by '+Math.max(0,r.bottom-clip.bottom)+'px below the board')
+      assert([r.top+2,r.bottom-2].every(y=>button.contains(document.elementFromPoint(r.left+r.width/2,y))),
+        phase+' Leave table is not physically clickable near both edges')
+    }
+    assertFullLeave(leaveInLobby,'Seated lobby')
     const live=liveHandForVisitor(target,join.pubkey)
     const check=await wait(()=>{
       window.fixtureReplay([live])
@@ -425,22 +440,28 @@ try {
     })
     const liveHeight=layout('Live hand')
     assert(Math.abs(lobby-liveHeight)<2,'Changing game state changed the dock height')
+    const liveLeave=findButton('Leave table',body)
+    assertFullLeave(liveLeave,'Live hand')
     const chatBefore=stream.scrollTop
     const targetPoint=physicalTarget(check)
+    assertFullLeave(liveLeave,'Live hand after scrolling to Check')
     assert(chatBefore===stream.scrollTop,'Scrolling to poker controls moved chat history')
     return {...targetPoint,lobby,live:liveHeight,messages:stream.scrollHeight}
   }
   const busy=await call('Runtime.evaluate',{expression:'('+busyRoomProbe+')()',awaitPromise:true,returnByValue:true})
   if(busy.result.exceptionDetails)throw Error(busy.result.exceptionDetails.exception?.description || JSON.stringify(busy.result.exceptionDetails))
   const {x,y,...dimensions}=busy.result.result.value
-  if(process.argv.includes('--mobile')){
-    await call('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1})
-    await call('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y,id:1}]})
-    await call('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})
-  }else{
-    await call('Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',clickCount:1})
-    await call('Input.dispatchMouseEvent',{type:'mouseReleased',x,y,button:'left',clickCount:1})
+  const pointerPress=async (x,y) => {
+    if(process.argv.includes('--mobile')){
+      await call('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1})
+      await call('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y,id:1}]})
+      await call('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})
+    }else{
+      await call('Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',clickCount:1})
+      await call('Input.dispatchMouseEvent',{type:'mouseReleased',x,y,button:'left',clickCount:1})
+    }
   }
+  await pointerPress(x,y)
   const action=await call('Runtime.evaluate',{expression:`(async()=>{
     for(let i=0;i<100;i++){
       const sent=window.fixtureEvents.find(e=>e.type==='poker-action' && JSON.parse(e.action).type==='check')
@@ -450,6 +471,21 @@ try {
     return false
   })()`,awaitPromise:true,returnByValue:true})
   if(action.result.result.value!==true)throw Error('Physical click/tap on compact Check did not send the live-hand action')
+  const leave=await call('Runtime.evaluate',{expression:`(()=>{
+    const button=document.querySelector('.ag-game-in-chat .ag-poker-leave-footer button[title="Leave table"]')
+    const r=button.getBoundingClientRect()
+    return {x:r.left+r.width/2,y:r.bottom-3}
+  })()`,returnByValue:true})
+  await pointerPress(leave.result.result.value.x,leave.result.result.value.y)
+  const left=await call('Runtime.evaluate',{expression:`(async()=>{
+    for(let i=0;i<100;i++){
+      if(window.fixtureEvents.some(e=>e.type==='poker-leave') && !document.querySelector('.ag-game-stage-panel'))return true
+      await new Promise(r=>setTimeout(r,50))
+    }
+    return false
+  })()`,awaitPromise:true,returnByValue:true})
+  if(left.result.result.value!==true)throw Error('Physical click/tap near the bottom of Leave table did not leave the table')
+  console.log('Busy Bitchat: Leave table was fully visible before and during play; tapping its lower edge left the table')
   console.log('Busy Bitchat: lobby and live board survived overflowing chat, then physical Check succeeded',dimensions)
 } finally {
   proc.kill(); await exited

@@ -732,8 +732,17 @@ export function PokerTableView({
     }
   }
 
-  return (
-    <div className="ag-poker-view" data-phase={state.phase}>
+  const dockLeaveButton = compact && Boolean(mySeat)
+  const leaveButton = mySeat ? (
+    <button type="button" className="ag-poker-btn is-subtle"
+      onClick={onLeaveSeat} title="Leave table">
+      <LogOut size={13} aria-hidden="true" />
+      <span>Leave table</span>
+    </button>
+  ) : null
+
+  const playableTable = (
+    <>
       {/* True Elliptical Casino Poker Table Stage */}
       <div
         ref={arenaRef}
@@ -1294,17 +1303,7 @@ export function PokerTableView({
           </div>
 
           <div className="ag-poker-util-right">
-            {mySeat && (
-              <button
-                type="button"
-                className="ag-poker-btn is-subtle"
-                onClick={onLeaveSeat}
-                title="Leave table"
-              >
-                <LogOut size={13} aria-hidden="true" />
-                <span>Leave table</span>
-              </button>
-            )}
+            {!dockLeaveButton && leaveButton}
 
             {mySeat && state.seats.length >= 3 && (
               <div className="ag-poker-confirm-group" role="group" aria-label="Vote to remove a player">
@@ -1332,6 +1331,12 @@ export function PokerTableView({
           </div>
         </div>
       </div>
+    </>
+  )
+  return (
+    <div className={`ag-poker-view${dockLeaveButton ? ' has-docked-leave' : ''}`} data-phase={state.phase}>
+      {compact ? <div className="ag-poker-table-scroll">{playableTable}</div> : playableTable}
+      {dockLeaveButton && <div className="ag-poker-leave-footer">{leaveButton}</div>}
     </div>
   )
 }

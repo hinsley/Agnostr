@@ -33,20 +33,32 @@ export function busyRoomHistory(targetId) {
   })
 }
 
-// The host accepts the visitor's seat and calls the small blind, so the visitor can Check.
-export function liveHandForVisitor(targetId, visitorPubkey) {
+function seatedVisitor(visitorPubkey) {
   const key = Uint8Array.from({ length: 32 }, (_, i) => i === 31 ? 7 : 0)
   const hostPubkey = getPublicKey(key)
   const tableId = 'fixture-room-table'
   const table = createPokerTable({ tableId, hostPubkey, hostDisplayName: 'Synthetic host', fixedBuyIn: 100 })
   const seated = seatPokerPlayer(table, visitorPubkey, 'Fixture guest')
   if (!seated) throw Error('Fixture visitor could not sit')
+  return { key, hostPubkey, tableId, seated }
+}
+
+export function seatedLobbyForVisitor(targetId, visitorPubkey) {
+  const { key, tableId, seated } = seatedVisitor(visitorPubkey)
+  return finalizeEvent(buildGeoGameSignalTemplate({
+    v: 1, type: 'poker-state', tableId, seq: 2, publicState: JSON.stringify(seated), ts: Date.now(),
+  }, targetId), key)
+}
+
+// The host starts the hand and calls the small blind, so the visitor can Check.
+export function liveHandForVisitor(targetId, visitorPubkey) {
+  const { key, hostPubkey, tableId, seated } = seatedVisitor(visitorPubkey)
   const hand = startPokerHand(seated)
   if (!hand) throw Error('Fixture hand did not start')
   const afterHost = applyPokerAction(hand.publicState, hand.privateState, hostPubkey, { type: 'call' })
   if (afterHost?.publicState.actingPubkey !== visitorPubkey) throw Error('Fixture visitor did not get the turn')
   return finalizeEvent(buildGeoGameSignalTemplate({
-    v: 1, type: 'poker-state', tableId, seq: 2,
+    v: 1, type: 'poker-state', tableId, seq: 3,
     publicState: JSON.stringify(afterHost.publicState), ts: Date.now(),
   }, targetId), key)
 }

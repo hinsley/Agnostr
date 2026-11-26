@@ -3470,6 +3470,34 @@
   max-width: min(100%, clamp(138px, 23dvh, 218px));
 }
 
+/* Keep Leave table fully visible while the felt and hand actions scroll above it. */
+.ag-game-stage-body:has(> .ag-poker-view.has-docked-leave) {
+  display: flex;
+  overflow: hidden;
+}
+.ag-poker-view.has-docked-leave {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.ag-poker-table-scroll { display: contents; }
+.ag-poker-view.has-docked-leave > .ag-poker-table-scroll {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: inherit;
+  min-height: 0;
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+}
+.ag-poker-view.has-docked-leave > .ag-poker-table-scroll > * { flex-shrink: 0; }
+.ag-poker-leave-footer {
+  display: flex;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  padding-top: 2px;
+  border-top: 1px solid var(--border-subtle);
+}
+
 /* Fit the whole felt into the compact stage instead of cropping a tall table. */
 .ag-game-stage-panel.is-compact .ag-poker-view { gap: .3rem; }
 .ag-game-stage-panel.is-compact .ag-poker-arena {
