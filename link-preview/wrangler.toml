@@ -1,0 +1,22 @@
+name = "agnostr-link-preview"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["global_fetch_strictly_public"]
+workers_dev = true
+preview_urls = false
+
+[observability]
+enabled = false
+
+[vars]
+ALLOWED_ORIGINS = "https://agnostr.com,https://www.agnostr.com,https://hinsley.github.io"
+
+[[ratelimits]]
+name = "REQUEST_LIMITER"
+namespace_id = "76129"
+simple = { limit = 24, period = 60 }
+
+[[ratelimits]]
+name = "LOCATION_LIMITER"
+namespace_id = "76130"
+simple = { limit = 240, period = 60 }

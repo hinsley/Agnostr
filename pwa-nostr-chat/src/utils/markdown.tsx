@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react'
+import { InlineLinkCards, type LinkPreviewMode } from '../components/InlineLinkCards'
+import { collectPreviewLink } from '../../../link-preview/src/url'
 import { getCachedHighlightedCode, highlightCodeToHtml } from '../lib/codeHighlight'
 import { getCachedMathSvg, hasMathSyntax, renderMathToSvg } from '../lib/mathjax'
 import {
@@ -17,6 +19,7 @@ export interface MarkdownCallbacks {
   onClickMention?: (mention: string) => void
   highlightQuery?: string
   knownHandles?: readonly string[]
+  collectExternalLink?: (href: string) => void
 }
 
 const MAX_KNOWN_HANDLES = 80
@@ -390,6 +393,7 @@ function renderInline(
             </a>
           )
         } else {
+          opts.collectExternalLink?.(sanitized.href)
           nodes.push(
             <a
               key={k}
@@ -415,7 +419,7 @@ function renderInline(
     } else if (token.startsWith('||') && token.endsWith('||') && token.length > 4) {
       nodes.push(
         <SpoilerNode key={k}>
-          {renderInline(token.slice(2, -2), opts, `${k}sp-`, depth + 1, insideLink)}
+          {renderInline(token.slice(2, -2), { ...opts, collectExternalLink: undefined }, `${k}sp-`, depth + 1, insideLink)}
         </SpoilerNode>
       )
     } else if (token.startsWith('***') && token.endsWith('***') && token.length > 6) {
@@ -484,6 +488,7 @@ function renderInline(
           </a>
         )
       } else {
+        if (sanitized) opts.collectExternalLink?.(sanitized.href)
         nodes.push(
           <a
             key={k}
@@ -1068,6 +1073,7 @@ function renderBlocks(
 
 export interface RichMessageContentProps extends MarkdownCallbacks {
   content: string
+  linkPreviewMode?: LinkPreviewMode
 }
 
 /**
@@ -1075,15 +1081,18 @@ export interface RichMessageContentProps extends MarkdownCallbacks {
  * Never renders inline <img> elements or unsafe link schemes.
  */
 export const RichMessageContent: React.FC<RichMessageContentProps> = React.memo(
-  ({ content, onTuneGeohash, onClickMention, highlightQuery, knownHandles }) => {
+  ({ content, onTuneGeohash, onClickMention, highlightQuery, knownHandles, linkPreviewMode }) => {
+    const previewLinks = new Map<string, string>()
     const callbacks: MarkdownCallbacks = {
       onTuneGeohash,
       onClickMention,
       highlightQuery,
       knownHandles,
+      collectExternalLink: linkPreviewMode ? (href) => collectPreviewLink(previewLinks, href) : undefined,
     }
 
-    return <div className="ag-msg-rich">{renderBlocks(content, callbacks)}</div>
+    const blocks = renderBlocks(content, callbacks)
+    return <div className="ag-msg-rich">{blocks}<InlineLinkCards links={previewLinks} mode={linkPreviewMode} /></div>
   }
 )
 

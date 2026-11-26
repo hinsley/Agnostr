@@ -1,0 +1,39 @@
+.ag-link-card-slot { min-height: 1px; min-width: 0; }
+.ag-link-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  width: min(100%, 390px);
+  box-sizing: border-box;
+  margin-top: 5px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, currentColor 23%, transparent);
+  border-radius: 8px;
+  color: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+.ag-link-card:hover, .ag-link-card:focus-visible {
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  text-decoration: none;
+}
+.ag-link-card > svg, .ag-link-card-load > svg { flex: none; }
+.ag-link-card-copy { min-width: 0; display: grid; gap: 2px; }
+.ag-link-card-title, .ag-link-card-description, .ag-link-card-domain {
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.ag-link-card-domain { font-size: .75em; opacity: .75; -webkit-line-clamp: 1; }
+.ag-link-card-description { font-size: .85em; opacity: .85; }
+.ag-link-card-load {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 4px; padding: 4px 6px; font-size: .8em; color: inherit;
+  background: transparent; border-radius: 5px;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  cursor: pointer;
+}
+.ag-link-card-state { font-size: .8em; opacity: .74; }

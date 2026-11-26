@@ -3346,6 +3346,7 @@ export function AmailView({
                       >
                         <RichMessageContent
                           content={item.body}
+                          linkPreviewMode={fromIsSelf || item.direction === 'out' || engine.isExplicitlyTrusted(item.fromPubkey) ? 'manual' : undefined}
                           onTuneGeohash={(gh) => {
                             engine.tuneGeohash(gh)
                             onClose()

@@ -1,0 +1,29 @@
+name: Check link previews
+on:
+  pull_request:
+    paths: ['link-preview/**', '.github/workflows/link-preview-check.yml']
+  push:
+    branches: [main]
+    paths: ['link-preview/**', '.github/workflows/link-preview-check.yml']
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            link-preview/package-lock.json
+            push-bridge/package-lock.json
+      - run: npm ci --prefix link-preview
+      - run: npm ci --prefix push-bridge
+      - run: npm test --prefix link-preview
+      - run: push-bridge/node_modules/.bin/tsc -p link-preview/tsconfig.json
+      - name: Bundle Worker without deploying
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: push-bridge/node_modules/.bin/wrangler deploy --config link-preview/wrangler.toml --dry-run --outdir "$RUNNER_TEMP/agnostr-link-preview"

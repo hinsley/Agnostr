@@ -255,6 +255,8 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     const { openContextMenu } = useContextMenu()
 
     const warnUntrustedLinks = !message.isOwn && !isSenderTrusted && !allowUntrustedLinks
+    const linkPreviewMode = (message.isOwn || isSenderExplicitlyTrusted) && displayContentOverride === undefined
+      ? (isEncryptedContext ? 'manual' : 'automatic') : undefined
 
     const myActiveEmojis = useMemo(
       () => message.reactions.filter((r) => r.reactedByMe).map((r) => r.emoji),
@@ -1121,6 +1123,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                     <div className="ag-msg-translated-main">
                       <RichMessageContent
                         content={visibleContent}
+                        linkPreviewMode={linkPreviewMode}
                         onTuneGeohash={onTuneGeohash}
                         onClickMention={onClickMention}
                         highlightQuery={highlightQuery}
@@ -1134,6 +1137,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 ) : (
                   <RichMessageContent
                     content={visibleContent}
+                    linkPreviewMode={linkPreviewMode}
                     onTuneGeohash={onTuneGeohash}
                     onClickMention={onClickMention}
                     highlightQuery={highlightQuery}

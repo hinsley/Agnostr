@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { InlineLinkCards } from './InlineLinkCards'
+import { collectPreviewLink } from '../../../link-preview/src/url'
 import type { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -2099,6 +2101,14 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                   })}
                 </div>
               )}
+
+              {(isSelf || engine.isExplicitlyTrusted(note.pubkey)) && (() => {
+                const links = new Map<string, string>()
+                for (const token of (showingOriginal || !hasMeaningfulTranslation) ? displayTokens : []) {
+                  if (token.type === 'link') collectPreviewLink(links, token.url)
+                }
+                return <InlineLinkCards links={links} mode="automatic" />
+              })()}
 
               {(hasMeaningfulTranslation || translationLoading || translationErrored) && (
                 <div className="ag-agora-tr-note-foot" onClick={(e) => e.stopPropagation()}>

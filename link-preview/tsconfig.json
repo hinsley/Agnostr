@@ -1,0 +1,6 @@
+{
+  "extends": "../push-bridge/tsconfig.json",
+  "compilerOptions": { "types": [] },
+  "files": ["../push-bridge/node_modules/@cloudflare/workers-types/index.d.ts"],
+  "include": ["src/**/*.ts"]
+}

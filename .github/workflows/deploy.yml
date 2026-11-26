@@ -69,6 +69,8 @@ jobs:
         run: npm run test:solar-maps && npm run test:solar-tiles && npm run test:lunar-orientation
 
       - name: Build
+        env:
+          VITE_LINK_PREVIEW_URL: ${{ vars.VITE_LINK_PREVIEW_URL }}
         working-directory: pwa-nostr-chat
         run: npm run build
 
