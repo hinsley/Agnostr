@@ -42,6 +42,7 @@ try {
       const gamePill=()=>pills().find(p=>p.title.includes(name)&&!p.title.includes('@Other'))
       const board = () => q('.ag-game-stage-panel')
       const compactBoard = () => q('.ag-game-stage-panel.is-compact')
+      const dialog = () => q('.ag-game-modal-backdrop > .ag-game-modal-frame[role=dialog][aria-modal=true]')
       const rail = () => q('.ag-game-compact-video-rail')
       const hit = async f => {
         const el=await wait(f)
@@ -64,7 +65,10 @@ try {
       }
       const expectComposer=()=>{
         const b=board().getBoundingClientRect(), c=q('#fixture-composer').getBoundingClientRect()
-        assert(b.width>170 && b.height>120,'Unreadable board: '+JSON.stringify(b.toJSON()))
+        assert(b.width>170 && b.height>115,'Unreadable board: '+JSON.stringify(b.toJSON()))
+        assert(b.height<=Math.min(0.32*innerHeight,270)+2,'Compact game stretches vertically: '+b.height)
+        assert(q('.ag-game-chat-slot').getBoundingClientRect().height<=b.height+2,'Chat slot stretches beyond board')
+        assert(q('.ag-chat-message-lane').getBoundingClientRect().height>innerHeight*.38,'Not enough room left for chat')
         assert(b.bottom<=c.top || b.right<=c.left,'Board hides composer')
         assert(document.elementFromPoint(c.left+5,c.top+5)===q('#fixture-composer'),'Composer is not usable')
         assert(document.documentElement.scrollWidth<=innerWidth+1,'Viewport overflow')
@@ -75,17 +79,28 @@ try {
       const sink=await wait(()=>q('audio'))
       const src=await wait(()=>sink.srcObject)
       await click(gamePill)
-      await wait(()=>q('.ag-game-chat-slot .ag-game-in-chat') && !compactBoard())
-      expectComposer()
-      const originalBoard=board()
+      await wait(dialog)
+      await new Promise(r=>setTimeout(r,250)) // Measure after the restored opening transition.
+      const modal = dialog().getBoundingClientRect()
+      const expectedWidth=kind==='poker'?920:kind==='go'?600:560
+      assert(Math.abs((modal.left+modal.right)/2-innerWidth/2)<2 &&
+        Math.abs((modal.top+modal.bottom)/2-innerHeight/2)<2 &&
+        Math.abs(modal.width-Math.min(expectedWidth,innerWidth-(innerWidth<=867?16:28)))<2,
+        'Maximized game does not match the original centered modal')
+      assert(q('.ag-game-chat-slot').childElementCount===0,'Expanded game takes up room inside chat')
       const composer=q('#fixture-composer')
       composer.focus(); composer.value='Draft still visible'
       await click(()=>btn('Minimize game'))
       await wait(()=>compactBoard() && rail()?.querySelector('video')?.srcObject)
-      assert(board()===originalBoard,'Minimizing remounted the board')
       await wait(()=>board().querySelector('.ag-game-compact-call-controls .ag-call-mini-pill'))
       assert(!q('.ag-call-mini-pip') && document.querySelectorAll('video').length===1,'Compact stage duplicated video')
       expectComposer()
+      if(innerWidth<=867){
+        document.documentElement.dataset.keyboardOpen='true'
+        assert(board().getBoundingClientRect().height<=Math.min(innerHeight*.23,172)+2,
+          'Compact board did not shrink when the keyboard opened')
+        delete document.documentElement.dataset.keyboardOpen
+      }
       await playable()
       assert(composer.value==='Draft still visible','Playing cleared chat draft')
       await click(()=>btn('Expand @bob video'))
@@ -112,7 +127,8 @@ try {
       await playable()
       assert(!rail() && !q('audio'),'Minimizing a standalone game attached media')
       q('#toggle-test-chat').click();await wait(()=>q('.ag-activity-dock .ag-game-floating.is-compact'))
-      await click(()=>btn('Expand game'));await wait(()=>q('.ag-game-chat-slot .ag-game-in-chat:not(.is-compact)'))
+      await click(()=>btn('Expand game'));await wait(dialog)
+      await click(()=>q('.ag-game-modal-backdrop'));await wait(compactBoard)
       await click(()=>btn('Hide game'));await wait(()=>!board() && pills().length===2)
       return kind+' OK'
     }
@@ -185,15 +201,18 @@ try {
       return q('button[aria-label="View poker table"]')
     })
     await click(()=>[...document.querySelectorAll('.ag-game-banner button')].find(b=>b.textContent.trim()==='View table'))
-    const board=await wait(()=>q('.ag-game-chat-slot .ag-game-in-chat'))
-    await wait(()=>board.textContent.includes('Synthetic host'))
-    assert(board.textContent.includes('Watching'),'Viewing took a seat')
-    await click(()=>q('.ag-game-in-chat button[aria-label="Minimize game"]'))
-    await wait(()=>board.matches('.is-compact'))
+    const modal=await wait(()=>q('.ag-game-modal-backdrop > .ag-game-modal-frame'))
+    await wait(()=>modal.textContent.includes('Synthetic host'))
+    assert(modal.textContent.includes('Watching'),'Viewing took a seat')
+    await click(()=>q('.ag-game-modal-frame button[aria-label="Minimize game"]'))
+    const board=await wait(()=>q('.ag-game-in-chat.is-compact'))
     assert(window.fixtureEvents.length===0 && window.fixtureMediaRequests===0,'Viewing or minimizing sent a signal or joined a call')
     const composer=await wait(()=>q('.ag-composer-input'))
     const c=composer.getBoundingClientRect(), b=board.getBoundingClientRect()
     assert(c.height>20 && (b.bottom<=c.top || b.right<=c.left),'Board overlaps the real composer')
+    assert(b.height<=Math.min(0.32*innerHeight,270)+2,'Real compact table takes up too much height')
+    const felt=board.querySelector('.ag-poker-felt').getBoundingClientRect()
+    assert(felt.bottom<=b.bottom,'Compact felt bounds: '+JSON.stringify([felt.toJSON(),b.toJSON(),getComputedStyle(board.querySelector('.ag-poker-arena')).height]))
     composer.focus()
     assert(document.activeElement===composer,'Real chat composer is not focusable')
     return true
@@ -206,6 +225,8 @@ try {
     if(!composer.value.includes('A draft while I watch'))throw Error('Could not type into chat while viewing')
     const seat=[...document.querySelectorAll('.ag-game-in-chat.is-compact button')].find(b=>b.textContent.includes('Sit In'))
     if(!seat)throw Error('Missing explicit seat button')
+    const r=seat.getBoundingClientRect()
+    if(!seat.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)))throw Error('Seat button is clipped')
     seat.click()
     for(let i=0;i<100;i++){if(window.fixtureEvents.some(e=>e.type==='poker-join'))break;await new Promise(r=>setTimeout(r,50))}
     if(!window.fixtureEvents.some(e=>e.type==='poker-join')||window.fixtureMediaRequests!==0)throw Error('Taking a seat did not signal only poker')

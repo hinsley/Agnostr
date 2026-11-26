@@ -17,6 +17,7 @@ import { pokerVoteThreshold } from '../../lib/games/pokerGovernance.ts'
 import { AvatarImg } from '../AvatarImg.tsx'
 
 export interface PokerTableViewProps {
+  compact?: boolean
   state: PokerPublicState
   myPubkey: string
   myHoleCards: [PokerCard, PokerCard] | null
@@ -406,6 +407,7 @@ export function PokerTableView({
   myHoleCards,
   isHost,
   getAvatarUrl,
+  compact = false,
   onJoinSeat,
   onLeaveSeat,
   onStartHand,
@@ -416,9 +418,10 @@ export function PokerTableView({
   const normalizedMyPubkey = myPubkey.trim().toLowerCase()
   const [voteTarget, setVoteTarget] = useState('')
   const [wagerAmount, setWagerAmount] = useState<number>(state.bigBlind * 2)
-  const [isCompactViewport, setIsCompactViewport] = useState<boolean>(() =>
+  const [narrowViewport, setNarrowViewport] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth <= 640 : false,
   )
+  const isCompactViewport = compact || narrowViewport
   const arenaRef = useRef<HTMLDivElement | null>(null)
   const [arenaSize, setArenaSize] = useState<{ w: number; h: number }>(() =>
     typeof window !== 'undefined' && window.innerWidth <= 640
@@ -429,7 +432,7 @@ export function PokerTableView({
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
     const mq = window.matchMedia('(max-width: 640px)')
-    const onChange = (e: MediaQueryListEvent) => setIsCompactViewport(e.matches)
+    const onChange = (e: MediaQueryListEvent) => setNarrowViewport(e.matches)
     mq.addEventListener('change', onChange)
     return () => mq.removeEventListener('change', onChange)
   }, [])

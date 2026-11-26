@@ -715,6 +715,37 @@
 .ag-game-stage-panel.is-go { max-width: 600px; }
 .ag-game-stage-panel.is-poker { max-width: 920px; }
 
+/* The expanded game is the original centered dialog, not a second chat lane. */
+.ag-game-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 62;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  background: var(--bg-overlay);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  animation: ag-game-fade-in 150ms var(--ease-out);
+}
+.ag-game-modal-frame.ag-game-stage-panel {
+  max-height: calc(100dvh - 28px);
+  border-radius: 18px;
+  box-shadow: 0 28px 72px -18px rgba(0, 0, 0, 0.62);
+  animation: ag-game-scale-in 180ms var(--ease-spring);
+}
+[data-theme='daylight'] .ag-game-modal-frame.ag-game-stage-panel {
+  box-shadow: 0 24px 60px -16px rgba(15, 23, 42, 0.22);
+}
+@media (max-width: 867px) {
+  .ag-game-modal-backdrop { padding: 8px; }
+  .ag-game-modal-frame.ag-game-stage-panel {
+    max-height: calc(100dvh - 16px);
+    border-radius: 16px;
+  }
+}
+
 /* Flush Transparent Stage Header (Single Row on Desktop & Mobile!) */
 .ag-game-stage-head {
   display: flex;
@@ -3435,47 +3466,90 @@
 .ag-game-floating.ag-game-stage-panel {
   order: -1;
   width: min(344px, calc(100vw - 32px));
-  max-height: min(52dvh, 430px);
+  max-height: min(34dvh, 284px);
   box-shadow: var(--shadow-lg);
 }
 .ag-game-stage-panel.is-compact .ag-game-stage-head { padding: .3rem .55rem; gap: .25rem; }
 .ag-game-stage-panel.is-compact .ag-game-stage-body { padding: .35rem .5rem; }
 .ag-game-stage-panel.is-compact :is(.ag-chess-board-wrap, .ag-go-board-wrap) {
-  max-width: min(100%, clamp(145px, 31dvh, 290px));
+  max-width: min(100%, clamp(138px, 23dvh, 218px));
 }
 
-/* Inline board and composer have separate scroll areas; neither is a modal. */
+/* Fit the whole felt into the compact stage instead of cropping a tall table. */
+.ag-game-stage-panel.is-compact .ag-poker-view { gap: .3rem; }
+.ag-game-stage-panel.is-compact .ag-poker-arena {
+  height: clamp(158px, 23dvh, 195px);
+  border-radius: 12px;
+}
+.ag-game-stage-panel.is-compact .ag-poker-rail {
+  inset: 11px 16px 15px;
+  border-radius: 90px;
+  padding: 6px;
+}
+.ag-game-stage-panel.is-compact .ag-poker-felt { border-radius: 84px; }
+.ag-game-stage-panel.is-compact .ag-poker-bet-line { inset: 7px; }
+.ag-game-stage-panel.is-compact :is(.ag-poker-center-stage, .ag-poker-lobby-center) { gap: 3px; }
+.ag-game-stage-panel.is-compact :is(.ag-poker-lobby-deck-wrap, .ag-poker-board-row > .ag-poker-deck) {
+  display: none;
+}
+.ag-game-stage-panel.is-compact .ag-poker-lobby-count { font-size: .82rem; }
+.ag-game-stage-panel.is-compact .ag-poker-lobby-stakes { font-size: .63rem; }
+.ag-game-stage-panel.is-compact .ag-poker-board { gap: 3px; }
+.ag-game-stage-panel.is-compact .ag-poker-board :is(.ag-poker-card-slot.is-md, .ag-poker-card-3d.is-md) {
+  width: 27px;
+  height: 38px;
+}
+.ag-game-stage-panel.is-compact .ag-poker-felt-cards .ag-poker-card-3d {
+  width: 23px;
+  height: 32px;
+}
+.ag-game-stage-panel.is-compact .ag-poker-seat-pod {
+  min-width: 0;
+  max-width: 77px;
+}
+.ag-game-stage-panel.is-compact .ag-poker-seat-pod-inner {
+  gap: 4px;
+  padding: 3px 5px 3px 3px;
+}
+.ag-game-stage-panel.is-compact .ag-poker-seat-avatar { width: 20px; height: 20px; }
+.ag-game-stage-panel.is-compact :is(.ag-poker-seat-name, .ag-poker-seat-stack) { font-size: .59rem; }
+.ag-game-stage-panel.is-compact .ag-game-stage-head-actions { gap: 2px; }
+.ag-game-stage-panel.is-compact .ag-game-head-btn.icon-only { width: 27px; height: 27px; }
+
+/* The compact board never stretches with the chat lane. Scroll only its body
+   for game controls that need more space, without moving the chat composer. */
 .ag-chat-game-lanes, .ag-chat-message-lane, .ag-game-chat-slot {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
 }
+.ag-chat-game-lanes, .ag-chat-message-lane { flex: 1 1 auto; }
 .ag-game-chat-slot {
-  flex: 0 1 50%;
+  flex: 0 1 auto;
+  max-height: min(32dvh, 270px);
   margin: .25rem .5rem;
 }
 .ag-game-chat-slot:empty { display: none; }
-.ag-game-chat-slot:has(> .is-compact) { flex-basis: 46%; }
 .ag-game-in-chat.ag-game-stage-panel {
-  flex: 1;
+  flex: 0 1 auto;
   max-width: none;
-  max-height: none;
-  min-height: 0;
-  border-radius: var(--radius-md);
+  max-height: min(32dvh, 270px);
 }
-.ag-game-in-chat .ag-game-stage-body {
+.ag-game-stage-panel.is-compact .ag-game-stage-body {
   overscroll-behavior-y: contain;
 }
 @media (min-width: 1180px) {
   .ag-chat-game-lanes { flex-direction: row; }
-  .ag-game-chat-slot { flex: 0 1 52%; }
-  .ag-game-chat-slot:has(> .is-compact) { flex-basis: 36%; }
-  .ag-game-chat-slot:not(:empty) + .ag-chat-message-lane { flex: 1 1 44%; }
+  .ag-game-chat-slot {
+    flex: 0 1 min(32%, 400px);
+    align-self: flex-start;
+  }
+  .ag-game-chat-slot:not(:empty) + .ag-chat-message-lane { flex: 1 1 68%; }
 }
 @media (max-width: 867px) {
   .ag-game-chat-slot { margin: .2rem .35rem; }
-  html[data-keyboard-open='true'] .ag-game-chat-slot,
-  html[data-keyboard-open='true'] .ag-game-chat-slot:has(> .is-compact) { flex-basis: 29%; }
+  html[data-keyboard-open='true'] :is(.ag-game-chat-slot, .ag-game-stage-panel.is-compact) {
+    max-height: min(23dvh, 172px);
+  }
 }

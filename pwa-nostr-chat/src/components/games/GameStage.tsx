@@ -215,9 +215,9 @@ export function GameStage({
   )
 
   const focusedSession = games.focusedScopeKey ? games.activeGamesByScope[games.focusedScopeKey] : null
-  const boardTarget = chatDock ?? floatingDock
+  const compact = games.minimized || !chatDock
+  const boardTarget = compact ? chatDock ?? floatingDock : typeof document !== 'undefined' ? document.body : null
   const showBoard = Boolean(focusedSession && boardTarget)
-  const compact = Boolean(games.minimized || !chatDock)
   const activeCall = engine.calls.activeCall
 
   // Prioritize a session where it's your turn when minimized across multiple active scopes
@@ -307,7 +307,7 @@ export function GameStage({
     engine.identity.nickname.trim() || engine.identity.activeDisplayHandle || 'You'
   const myAvatarUrl = myMasterPubkey ? engine.getProfilePicture(myMasterPubkey) : undefined
 
-  // The same board renders on the call stage or beside the chat.
+  // Use the original centered game dialog when expanded; only compact play shares chat space.
   let visibleBoard: React.ReactNode = null
   if (showBoard && focusedSession) {
     const meta = computeSessionMeta(focusedSession, engine)
@@ -424,6 +424,7 @@ export function GameStage({
 
       boardBody = pokerState ? (
         <PokerTableView
+          compact={compact}
           state={pokerState}
           myPubkey={focusedSession.localPubkey}
           myHoleCards={myHoleCards}
@@ -464,8 +465,10 @@ export function GameStage({
 
     const board = (
       <section key={focusedSession.gameId}
-        className={`ag-game-stage-panel is-${focusedSession.kind} ${chatDock ? 'ag-game-in-chat' : 'ag-game-floating'}${compact ? ' is-compact' : ''}`}
-        role="region"
+        className={`ag-game-stage-panel is-${focusedSession.kind} ${compact
+          ? `is-compact ${chatDock ? 'ag-game-in-chat' : 'ag-game-floating'}` : 'ag-game-modal-frame'}`}
+        role={compact ? 'region' : 'dialog'}
+        aria-modal={compact ? undefined : true}
         aria-label={`${meta.title} · ${meta.scopeLabel}`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -518,13 +521,15 @@ export function GameStage({
               {compact ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
             </button>
 
-            <button type="button" className="ag-game-head-btn icon-only"
-              onClick={() => {
-                onPlaySound?.('click')
-                games.setFocusedScopeKey(null)
-              }} title="Hide game" aria-label="Hide game">
-              <ChevronDown size={14} />
-            </button>
+            {compact && (
+              <button type="button" className="ag-game-head-btn icon-only"
+                onClick={() => {
+                  onPlaySound?.('click')
+                  games.setFocusedScopeKey(null)
+                }} title="Hide game" aria-label="Hide game">
+                <ChevronDown size={14} />
+              </button>
+            )}
 
             {confirmClose && !meta.isFinished ? (
               <div className="ag-game-close-confirm">
@@ -579,7 +584,13 @@ export function GameStage({
         <div className="ag-game-stage-body">{boardBody}</div>
       </section>
     )
-    if (boardTarget) visibleBoard = createPortal(board, boardTarget, 'game-board')
+    if (boardTarget) {
+      visibleBoard = createPortal(compact ? board : (
+        <div className="ag-game-modal-backdrop" role="presentation" onClick={handleResize}>
+          {board}
+        </div>
+      ), boardTarget, 'game-board')
+    }
   }
 
   if (floatingDock && pillSessions.length) {
