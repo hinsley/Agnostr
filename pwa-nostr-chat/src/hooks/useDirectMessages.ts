@@ -1,3 +1,4 @@
+import { chatRetries, isUnconfirmed, publishChatWire } from '../lib/chatDelivery.ts'
 import {
   applyDmReaction,
   dmTargetId,
@@ -46,9 +47,6 @@ import {
 import { formatVoiceDuration } from '../lib/voiceRecorder.ts'
 
 const DM_LOOKBACK_SEC = 3 * 24 * 60 * 60 // 3 days to account for NIP-59 ±2d randomized timestamps
-const DM_BACKLOG_FALLBACK_MS = 2500
-const DM_EOSE_GRACE_MS = 500
-const LIVE_RECENCY_WINDOW_MS = 10 * 60 * 1000 // 10 minutes tolerance for live clock skew
 
 export function pickBestPeerNickname(
   pubkey: string,
@@ -70,9 +68,13 @@ export function getDmOrderKey(msg: Pick<DmMessage, 'orderMs' | 'createdAt'>): nu
 }
 
 export function compareDmMessages(a: DmMessage, b: DmMessage): number {
+  const pending = Number(isUnconfirmed(a)) - Number(isUnconfirmed(b))
+  if (pending !== 0) return pending
   const diff = getDmOrderKey(a) - getDmOrderKey(b)
   if (diff !== 0) return diff
-  return a.id.localeCompare(b.id)
+  const left = a.wireId ?? a.id
+  const right = b.wireId ?? b.id
+  return left < right ? -1 : left > right ? 1 : 0
 }
 
 function getMaxOrderMs(messages: readonly DmMessage[]): number {
@@ -111,7 +113,7 @@ export interface UseDirectMessagesOptions {
   identityVersion: number
   onIncomingDm?: (senderHandle: string, preview: string, peerPubkey: string) => void
   onNotifyPushPoke?: (payload: PushPokePayload) => void
-  onError?: (title: string, detail?: string) => void
+  onError?: (title: string, detail?: string, retryMessageId?: string) => void
 }
 
 export function useDirectMessages(opts: UseDirectMessagesOptions) {
@@ -136,7 +138,6 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   const dmSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
   const dmRelaysRef = useRef<readonly string[]>(dmRelays)
   const processedWrapIdsRef = useRef<Set<string>>(new Set())
-  const dmBacklogSettledRef = useRef<boolean>(false)
   const dmSubSeqRef = useRef<number>(0)
   const activeDmPeerRef = useRef<string | null>(activeDmPeer)
   const blockedRef = useRef<Set<string>>(blockedPubkeys)
@@ -277,35 +278,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     if (pTags.length === 0) return
 
     let cancelled = false
-    dmBacklogSettledRef.current = false
-    const eoseRelays = new Set<string>()
-    let eoseGraceTimer: number | null = null
-    const settleBacklog = () => {
-      if (cancelled) return
-      dmBacklogSettledRef.current = true
-      if (eoseGraceTimer !== null) {
-        window.clearTimeout(eoseGraceTimer)
-        eoseGraceTimer = null
-      }
-      window.clearTimeout(fallbackTimer)
-    }
-    const fallbackTimer = window.setTimeout(settleBacklog, DM_BACKLOG_FALLBACK_MS)
-
     const since = Math.floor(Date.now() / 1000) - DM_LOOKBACK_SEC
     const unsub = pool.subscribe(
       `agnostr-dm-${++dmSubSeqRef.current}`,
       dmRelays,
       [{ kinds: [KIND_GIFT_WRAP], '#p': pTags, since, limit: 150 }],
       {
-        onEose: (relayUrl) => {
-          if (cancelled) return
-          eoseRelays.add(relayUrl)
-          if (eoseRelays.size >= dmRelays.length) {
-            settleBacklog()
-          } else if (eoseGraceTimer === null) {
-            eoseGraceTimer = window.setTimeout(settleBacklog, DM_EOSE_GRACE_MS)
-          }
-        },
         onEvent: (ev) => {
           if (cancelled) return
           if (ev.kind !== KIND_GIFT_WRAP) return
@@ -323,7 +301,6 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           const recipient = recipientByPubkey.get(targetTag)
           if (!recipient) return
 
-          const arrivedAfterEose = dmBacklogSettledRef.current
           const receivedAtMs = Date.now()
           const wipeGen = identityManager.getWipeGeneration()
           void decryptGiftWrapEvent(ev, recipient).then((decrypted) => {
@@ -347,6 +324,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             }
 
             if (decrypted.ackType && decrypted.embeddedMessageId) {
+              chatRetries.confirm(decrypted.embeddedMessageId)
               setThreads((prev) =>
                 prev.map((t) => {
                   if (t.peerPubkey !== senderPk) return t
@@ -356,7 +334,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                       m.id === decrypted.embeddedMessageId
                         ? mergeDmMessageMetadata(m, { ...m, deliveryStatus: decrypted.ackType === 'read' ? 'read' : 'delivered' })
                         : m
-                    ),
+                    ).sort(compareDmMessages),
                   }
                 })
               )
@@ -397,9 +375,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             const isViewing = activeDmPeerRef.current?.toLowerCase() === senderPk
 
             const rawMsgMs = decrypted.timestampMs ?? decrypted.createdAt * 1000
-            const clampedBacklogMs = Math.min(rawMsgMs, receivedAtMs)
-            const isLiveRecent =
-              arrivedAfterEose && Math.abs(receivedAtMs - rawMsgMs) <= LIVE_RECENCY_WINDOW_MS
+            const orderMs = Math.min(rawMsgMs, receivedAtMs)
 
             const baseMsg: DmMessage = {
               id: decrypted.id,
@@ -425,10 +401,9 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                 const nextNick = pickBestPeerNickname(senderPk, presenceNick, existing.peerNickname)
                 const nextHandle = formatDisplayHandle(nextNick, senderPk)
                 resolvedHandle = nextHandle
-                const lastOrder = getMaxOrderMs(existing.messages)
                 const newMsg: DmMessage = {
                   ...baseMsg,
-                  orderMs: isLiveRecent ? Math.max(receivedAtMs, lastOrder + 1) : clampedBacklogMs,
+                  orderMs,
                 }
                 rememberLiveDmPush(newMsg, ev.id, masterMat.pubkey)
                 const nextMsgs = [...existing.messages, newMsg].sort(compareDmMessages)
@@ -451,7 +426,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               added = true
               const newMsg: DmMessage = {
                 ...baseMsg,
-                orderMs: isLiveRecent ? receivedAtMs : clampedBacklogMs,
+                orderMs,
               }
               rememberLiveDmPush(newMsg, ev.id, masterMat.pubkey)
               const created: DmThread = {
@@ -478,8 +453,6 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
     return () => {
       cancelled = true
-      window.clearTimeout(fallbackTimer)
-      if (eoseGraceTimer !== null) window.clearTimeout(eoseGraceTimer)
       unsub()
     }
   }, [pool, dmRelays, activeGeohash, identityManager, presenceTracker, identityVersion, acceptIncomingReaction])
@@ -632,75 +605,72 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         return [created, ...prev]
       })
 
-      return await dmSendQueueRef.current.enqueue(
-        `dm:${pk}`,
-        async () => {
+      const queueAttempt = (attempt: () => Promise<boolean>) =>
+        dmSendQueueRef.current.enqueue(`dm:${pk}`, attempt, () => false)
+      const attempt = async (): Promise<boolean> => {
+        if (identityManager.getWipeGeneration() !== wipeGen) return false
+        try {
+          setThreads((prev) => prev.map((t) => t.peerPubkey === pk ? { ...t, messages: t.messages.map((m) =>
+            m.id === localMsgId ? { ...m, deliveryStatus: 'sending' } : m) } : t))
+          if (!await pool.waitForChatRelay(targetRelays)) throw new Error('No connected DM relay accepted the message.')
           if (identityManager.getWipeGeneration() !== wipeGen) return false
-          try {
-            const { event, protocol, wireId } = await createEncryptedDmEvent({
-              content,
-              recipientPubkey: pk,
-              signer,
-              protocol: chosenProtocol,
-              messageId: localMsgId,
-              action: target ? { type: 'reply', targetId: target } : undefined,
+          const { event, protocol, wireId, orderMs } = await createEncryptedDmEvent({
+            content,
+            recipientPubkey: pk,
+            signer,
+            protocol: chosenProtocol,
+            messageId: localMsgId,
+            action: target ? { type: 'reply', targetId: target } : undefined,
+          })
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          processedWrapIdsRef.current.add(event.id)
+          return await publishChatWire({
+            rowId: localMsgId,
+            publish: (ack) => pool.publish([...new Set([...targetRelays, ...dmRelaysRef.current])], event, undefined, ack),
+            isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+            queueRetry: (retry) => dmSendQueueRef.current.enqueue(`dm:${pk}`, retry, () => false),
+            update: (deliveryStatus) => setThreads((prev) => prev.map((t) => {
+              if (t.peerPubkey !== pk) return t
+              const messages = t.messages.map((m) => m.id === localMsgId
+                ? { ...m, wireId, protocol, orderMs, createdAt: Math.floor(orderMs / 1000),
+
+                    deliveryStatus: m.deliveryStatus === 'read' || m.deliveryStatus === 'delivered'
+                      ? m.deliveryStatus : deliveryStatus }
+                : m).sort(compareDmMessages)
+              const tail = messages.at(-1)
+              return { ...t, protocol, messages, lastMessageAt: tail?.createdAt ?? 0,
+                lastPreview: tail ? formatDmPreview(tail) : '' }
+            }).sort((a, b) => b.lastMessageAt - a.lastMessageAt)),
+            onSuccess: () => onNotifyPushPokeRef.current?.({
+              recipientPubkeys: [pk],
+              category: 'dm',
+              eventId: localMsgId,
+            }),
+            onFailure: (reason) => onErrorRef.current?.('DM failed to publish', reason, localMsgId),
+          })
+        } catch (err) {
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          chatRetries.hold(localMsgId, () => queueAttempt(attempt))
+          setThreads((prev) =>
+            prev.map((t) => {
+              if (t.peerPubkey !== pk) return t
+              return {
+                ...t,
+                messages: t.messages.map((m) =>
+                  m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
+                ),
+              }
             })
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-            processedWrapIdsRef.current.add(event.id)
-            const res = await pool.publish(targetRelays, event)
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-            const ok = res.acceptedRelays.length > 0
-
-            setThreads((prev) =>
-              prev.map((t) => {
-                if (t.peerPubkey !== pk) return t
-                return {
-                  ...t,
-                  protocol,
-                  messages: t.messages.map((m) =>
-                    m.id === localMsgId
-                      ? { ...m, wireId, protocol, deliveryStatus: ok ? 'sent' : 'failed' }
-                      : m
-                  ),
-                }
-              })
-            )
-
-            if (ok) {
-              onNotifyPushPokeRef.current?.({
-                recipientPubkeys: [pk],
-                category: 'dm',
-                eventId: localMsgId,
-              })
-            } else {
-              onErrorRef.current?.(
-                'DM failed to publish',
-                'No DM-capable relay accepted the gift wrap.'
-              )
-            }
-            return ok
-          } catch (err) {
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-            setThreads((prev) =>
-              prev.map((t) => {
-                if (t.peerPubkey !== pk) return t
-                return {
-                  ...t,
-                  messages: t.messages.map((m) =>
-                    m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
-                  ),
-                }
-              })
-            )
-            onErrorRef.current?.(
-              'DM encryption error',
-              err instanceof Error ? err.message : 'Unable to send encrypted DM'
-            )
-            return false
-          }
-        },
-        () => false
-      )
+          )
+          onErrorRef.current?.(
+            'DM failed to send',
+            err instanceof Error ? err.message : 'Unable to send encrypted DM',
+            localMsgId
+          )
+          return false
+        }
+      }
+      return await queueAttempt(attempt)
     },
     [pool, identityManager, activeGeohash, presenceTracker]
   )
@@ -806,7 +776,9 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             })
 
             const wireContent = encodeDmVoicePayload(voiceMemo, cleanCaption)
-            const { event, protocol, wireId } = await createEncryptedDmEvent({
+            await pool.waitForChatRelay(targetRelays)
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            const { event, protocol, wireId, orderMs } = await createEncryptedDmEvent({
               content: wireContent,
               recipientPubkey: pk,
               signer,
@@ -816,45 +788,30 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             })
             if (identityManager.getWipeGeneration() !== wipeGen) return false
             processedWrapIdsRef.current.add(event.id)
-            const res = await pool.publish(targetRelays, event)
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-            const ok = res.acceptedRelays.length > 0
-
-            setThreads((prev) =>
-              prev.map((t) => {
+            return await publishChatWire({
+              rowId: localMsgId,
+              publish: (ack) => pool.publish([...new Set([...targetRelays, ...dmRelaysRef.current])], event, undefined, ack),
+              isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+              queueRetry: (retry) => dmSendQueueRef.current.enqueue(`dm:${pk}`, retry, () => false),
+              update: (deliveryStatus) => setThreads((prev) => prev.map((t) => {
                 if (t.peerPubkey !== pk) return t
-                return {
-                  ...t,
-                  protocol,
-                  messages: t.messages.map((m) =>
-                    m.id === localMsgId
-                      ? {
-                          ...m,
-                          wireId,
-                          protocol,
-                          voiceMemo,
-                          content: cleanCaption,
-                          deliveryStatus: ok ? 'sent' : 'failed',
-                        }
-                      : m
-                  ),
-                }
-              })
-            )
-
-            if (ok) {
-              onNotifyPushPokeRef.current?.({
+                const messages = t.messages.map((m) => m.id === localMsgId
+                  ? { ...m, wireId, protocol, orderMs, createdAt: Math.floor(orderMs / 1000),
+                      voiceMemo, content: cleanCaption,
+                      deliveryStatus: m.deliveryStatus === 'read' || m.deliveryStatus === 'delivered'
+                        ? m.deliveryStatus : deliveryStatus }
+                  : m).sort(compareDmMessages)
+                const tail = messages.at(-1)
+                return { ...t, protocol, messages, lastMessageAt: tail?.createdAt ?? 0,
+                  lastPreview: tail ? formatDmPreview(tail) : '' }
+              }).sort((a, b) => b.lastMessageAt - a.lastMessageAt)),
+              onSuccess: () => onNotifyPushPokeRef.current?.({
                 recipientPubkeys: [pk],
                 category: 'dm',
                 eventId: localMsgId,
-              })
-            } else {
-              onErrorRef.current?.(
-                'Encrypted voice DM failed',
-                'No DM-capable relay accepted the gift wrap.'
-              )
-            }
-            return ok
+              }),
+              onFailure: (reason) => onErrorRef.current?.('Encrypted voice DM failed', reason, localMsgId),
+            })
           } catch (err) {
             if (identityManager.getWipeGeneration() !== wipeGen) return false
             if (inserted) {
@@ -982,7 +939,9 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             })
 
             const wireContent = encodeDmImagePayload(imageAttachment, cleanCaption)
-            const { event, protocol, wireId } = await createEncryptedDmEvent({
+            await pool.waitForChatRelay(targetRelays)
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            const { event, protocol, wireId, orderMs } = await createEncryptedDmEvent({
               content: wireContent,
               recipientPubkey: pk,
               signer,
@@ -992,45 +951,30 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             })
             if (identityManager.getWipeGeneration() !== wipeGen) return false
             processedWrapIdsRef.current.add(event.id)
-            const res = await pool.publish(targetRelays, event)
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-            const ok = res.acceptedRelays.length > 0
-
-            setThreads((prev) =>
-              prev.map((t) => {
+            return await publishChatWire({
+              rowId: localMsgId,
+              publish: (ack) => pool.publish([...new Set([...targetRelays, ...dmRelaysRef.current])], event, undefined, ack),
+              isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+              queueRetry: (retry) => dmSendQueueRef.current.enqueue(`dm:${pk}`, retry, () => false),
+              update: (deliveryStatus) => setThreads((prev) => prev.map((t) => {
                 if (t.peerPubkey !== pk) return t
-                return {
-                  ...t,
-                  protocol,
-                  messages: t.messages.map((m) =>
-                    m.id === localMsgId
-                      ? {
-                          ...m,
-                          wireId,
-                          protocol,
-                          imageAttachment,
-                          content: cleanCaption,
-                          deliveryStatus: ok ? 'sent' : 'failed',
-                        }
-                      : m
-                  ),
-                }
-              })
-            )
-
-            if (ok) {
-              onNotifyPushPokeRef.current?.({
+                const messages = t.messages.map((m) => m.id === localMsgId
+                  ? { ...m, wireId, protocol, orderMs, createdAt: Math.floor(orderMs / 1000),
+                      imageAttachment, content: cleanCaption,
+                      deliveryStatus: m.deliveryStatus === 'read' || m.deliveryStatus === 'delivered'
+                        ? m.deliveryStatus : deliveryStatus }
+                  : m).sort(compareDmMessages)
+                const tail = messages.at(-1)
+                return { ...t, protocol, messages, lastMessageAt: tail?.createdAt ?? 0,
+                  lastPreview: tail ? formatDmPreview(tail) : '' }
+              }).sort((a, b) => b.lastMessageAt - a.lastMessageAt)),
+              onSuccess: () => onNotifyPushPokeRef.current?.({
                 recipientPubkeys: [pk],
                 category: 'dm',
                 eventId: localMsgId,
-              })
-            } else {
-              onErrorRef.current?.(
-                'Encrypted image DM failed',
-                'No DM-capable relay accepted the gift wrap.'
-              )
-            }
-            return ok
+              }),
+              onFailure: (reason) => onErrorRef.current?.('Encrypted image DM failed', reason, localMsgId),
+            })
           } catch (err) {
             if (identityManager.getWipeGeneration() !== wipeGen) return false
             if (inserted) {

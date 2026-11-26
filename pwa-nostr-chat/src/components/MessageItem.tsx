@@ -142,6 +142,7 @@ export interface MessageItemProps {
   onReact?: (message: GeoMessage, emoji: string) => void
   resolveReactorName?: (pubkey: string) => string
   onDelete?: (message: GeoMessage) => void
+  onRetrySend?: () => void
   onInspectAuthor?: (pubkey: string, nickname: string) => void
   onTuneGeohash?: (geohash: string) => void
   onClickMention?: (mention: string) => void
@@ -209,6 +210,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onReact,
     resolveReactorName,
     onDelete,
+    onRetrySend,
     onInspectAuthor,
     onTuneGeohash,
     onClickMention,
@@ -582,7 +584,18 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     }
 
     const deliveryIcon =
-      message.isOwn && message.deliveryStatus ? (
+      message.isOwn && message.deliveryStatus === 'failed' && onRetrySend ? (
+        <button
+          type="button"
+          className="ag-msg-delivery failed ag-msg-retry"
+          title="Failed to send. Retry sending this message."
+          aria-label="Retry sending message"
+          onClick={(event) => { event.stopPropagation(); onRetrySend() }}
+        >
+          <AlertCircle size={12} />
+          Retry
+        </button>
+      ) : message.isOwn && message.deliveryStatus ? (
         <span
           className={`ag-msg-delivery ${message.deliveryStatus}`}
           title={

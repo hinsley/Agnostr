@@ -422,6 +422,7 @@ export interface ToastItem {
   level: ToastLevel
   title: string
   detail?: string
+  retryMessageId?: string
   createdAt: number
 }
 

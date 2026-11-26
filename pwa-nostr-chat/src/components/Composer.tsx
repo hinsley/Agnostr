@@ -589,10 +589,23 @@ export const Composer: React.FC<ComposerProps> = ({
     const isSlashCmd = trimmed.startsWith('/')
     const shouldTranslate = outgoingTranslateActive && !isSlashCmd
 
+    let outboxOwnsMessage = false
     const dispatchText = (
       outgoingBody: string,
       translatedMeta?: { originalText: string; translatedToLang: string; sourceLang: string }
     ): Promise<boolean> => {
+      const onPublishedId = (id: string) => {
+        outboxOwnsMessage = true
+        if (translatedMeta) {
+          engine.translator.recordOutgoingOriginal(
+            id,
+            translatedMeta.originalText,
+            outgoingBody,
+            translatedMeta.translatedToLang,
+            translatedMeta.sourceLang
+          )
+        }
+      }
       if (submitIsServer) {
         if (outgoingBody.toLowerCase() === '/clear') {
           engine.servers.clearChannelCache()
@@ -601,38 +614,12 @@ export const Composer: React.FC<ComposerProps> = ({
         if (/^\/me\s+/i.test(outgoingBody)) {
           const action = outgoingBody.replace(/^\/me\s+/i, '').trim()
           return action
-            ? engine.servers.sendMessage(`* ${engine.identity.nickname} ${action} *`)
+            ? engine.servers.sendMessage(`* ${engine.identity.nickname} ${action} *`, { onPublishedId })
             : Promise.resolve(false)
         }
-        return engine.servers.sendMessage(
-          outgoingBody,
-          translatedMeta
-            ? {
-                onPublishedId: (id) => {
-                  engine.translator.recordOutgoingOriginal(
-                    id,
-                    translatedMeta.originalText,
-                    outgoingBody,
-                    translatedMeta.translatedToLang,
-                    translatedMeta.sourceLang
-                  )
-                },
-              }
-            : undefined
-        )
+        return engine.servers.sendMessage(outgoingBody, { onPublishedId })
       }
       if (submitIsDm && submitDmThread && !outgoingBody.startsWith('/')) {
-        const onPublishedId = translatedMeta
-          ? (id: string) => {
-              engine.translator.recordOutgoingOriginal(
-                id,
-                translatedMeta.originalText,
-                outgoingBody,
-                translatedMeta.translatedToLang,
-                translatedMeta.sourceLang
-              )
-            }
-          : undefined
         return engine.sendDirectMessage(
           submitDmThread.peerPubkey,
           outgoingBody,
@@ -641,7 +628,7 @@ export const Composer: React.FC<ComposerProps> = ({
           dmContext?.replyToId
         )
       }
-      return engine.sendInput(outgoingBody, translatedMeta)
+      return engine.sendInput(outgoingBody, { onPublishedId })
     }
 
     // Slash commands execute immediately without waiting behind queued message publishes
@@ -649,7 +636,7 @@ export const Composer: React.FC<ComposerProps> = ({
       void dispatchText(trimmed).then((ok) => {
         if (ok) {
           onSent?.(submitIsViolet)
-        } else {
+        } else if (!outboxOwnsMessage) {
           restoreDraftIfSafe()
         }
       })
@@ -662,7 +649,7 @@ export const Composer: React.FC<ComposerProps> = ({
       void dispatchText(trimmed).then((ok) => {
         if (ok) {
           onSent?.(submitIsViolet)
-        } else {
+        } else if (!outboxOwnsMessage) {
           restoreDraftIfSafe()
         }
       })
@@ -734,7 +721,7 @@ export const Composer: React.FC<ComposerProps> = ({
         if (ok === null) return
         if (ok) {
           onSent?.(submitIsViolet)
-        } else {
+        } else if (!outboxOwnsMessage) {
           restoreDraftIfSafe()
         }
       })

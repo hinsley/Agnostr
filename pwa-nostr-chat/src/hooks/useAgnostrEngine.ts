@@ -1,3 +1,4 @@
+import { acceptChatEcho, chatRetries, publishChatWire } from '../lib/chatDelivery.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Event as NostrEvent, Filter } from 'nostr-tools'
 import type { PushPokePayload } from '../types/notifications.ts'
@@ -1390,7 +1391,10 @@ export function useAgnostrEngine(): AgnostrEngine {
       refreshPeers(gh)
 
       updateChannelMessages(gh, (prev) => {
-        if (prev.some((m) => m.id === parsed.id)) return null
+        if (prev.some((m) => m.id === parsed.id)) {
+          const echoed = acceptChatEcho(prev, parsed)
+          return echoed ? sortChannelMessagesWithPending(echoed, 'pending-bitchat-') : null
+        }
         let hydrated = parsed
         if (hydrated.replyTo && (!hydrated.replyTo.preview || !hydrated.replyTo.nickname)) {
           const parent = prev.find((m) => m.id === hydrated.replyTo!.id)
@@ -1821,7 +1825,10 @@ export function useAgnostrEngine(): AgnostrEngine {
             refreshPeers(gh)
 
             updateChannelMessages(gh, (prev) => {
-              if (prev.some((m) => m.id === parsed.id)) return null
+              if (prev.some((m) => m.id === parsed.id)) {
+          const echoed = acceptChatEcho(prev, parsed)
+          return echoed ? sortChannelMessagesWithPending(echoed, 'pending-bitchat-') : null
+        }
 
               // Resolve incoming replyTo against latest prev state
               let hydrated: GeoMessage =
@@ -2454,8 +2461,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       pushToast('info', `Encrypted DM from ${senderHandle}`, preview)
     },
     onNotifyPushPoke: handlePushPoke,
-    onError: (title, detail) => {
-      pushToast('error', title, detail)
+    onError: (title, detail, retryMessageId) => {
+      pushToast('error', title, detail, retryMessageId)
     },
   })
 
@@ -3502,95 +3509,102 @@ export function useAgnostrEngine(): AgnostrEngine {
         { allowBackgroundPersist: true }
       )
       revealLocalBitchatSend(gh, tempId)
-      const optimisticPreview = formatBitchatPreviewText({ content })
-      if (optimisticPreview) {
-        upsertChannelPreview(
-          gh,
-          {
-            id: tempId,
-            preview: optimisticPreview,
-            sender: nick,
-            senderPubkey: activePk,
-            createdAt: nowSec,
-          },
-          { force: true }
-        )
-        recordRoomMessage({
-          id: tempId,
-          geohash: gh,
-          pubkey: activePk,
-          sender: nick,
-          preview: optimisticPreview,
-          createdAtSec: nowSec,
-          isAuthoritative: activeGeohashRef.current === gh,
-        })
+      const queueAttempt = async (attempt: () => Promise<boolean>) => {
+        adjustInFlightSend(1)
+        try {
+          return await bitchatSendQueueRef.current.enqueue(`bitchat:${gh}`, attempt, () => false)
+        } finally {
+          adjustInFlightSend(-1)
+        }
       }
+      const attempt = async (): Promise<boolean> => {
+        if (identityManager.getWipeGeneration() !== wipeGen) return false
+        let activeMsgId = tempId
+        try {
+          updateChannelMessages(gh, (prev) => prev.map((m) =>
+            m.id === tempId ? { ...m, deliveryStatus: 'sending' } : m
+          ), { allowBackgroundPersist: true })
+          const latestRelays = activeGeohashRef.current === gh ? relaySelectionRef.current.channelRelays : []
+          if (!await pool.waitForChatRelay([...targetRelays, ...latestRelays])) {
+            throw new Error('No connected relay accepted the message.')
+          }
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          const template = isTopic
+            ? buildNamedBitchatChatTemplate({
+                content,
+                topic: gh,
+                nickname: nick,
+                replyTo: replyTarget,
+                broadcastClientTag,
+                lightningAddress: lightningAddr,
+              })
+            : buildGeohashChatTemplate({
+                content,
+                geohash: gh,
+                nickname: nick,
+                isTeleported,
+                replyTo: replyTarget,
+                broadcastClientTag,
+                lightningAddress: lightningAddr,
+              })
 
-      adjustInFlightSend(1)
-      try {
-        return await bitchatSendQueueRef.current.enqueue(
-          `bitchat:${gh}`,
-          async () => {
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-            let activeMsgId = tempId
-            try {
-              const template = isTopic
-                ? buildNamedBitchatChatTemplate({
-                    content,
-                    topic: gh,
-                    nickname: nick,
-                    replyTo: replyTarget,
-                    broadcastClientTag,
-                    lightningAddress: lightningAddr,
-                  })
-                : buildGeohashChatTemplate({
-                    content,
-                    geohash: gh,
-                    nickname: nick,
-                    isTeleported,
-                    replyTo: replyTarget,
-                    broadcastClientTag,
-                    lightningAddress: lightningAddr,
-                  })
+          // Mine 8-bit NIP-13 PoW non-blocking when enabled and pubkey is known
+          if (powEnabled && powTargetBits > 0 && activeKey.pubkey) {
+            const nonceTag = await mineNip13NonceTag(
+              template,
+              activeKey.pubkey,
+              powTargetBits,
+              450
+            )
+            if (nonceTag) {
+              template.tags = [...template.tags, nonceTag]
+            }
+          }
 
-              // Mine 8-bit NIP-13 PoW non-blocking when enabled and pubkey is known
-              if (powEnabled && powTargetBits > 0 && activeKey.pubkey) {
-                const nonceTag = await mineNip13NonceTag(
-                  template,
-                  activeKey.pubkey,
-                  powTargetBits,
-                  450
-                )
-                if (nonceTag) {
-                  template.tags = [...template.tags, nonceTag]
-                }
-              }
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          const signed = await identityManager.signEvent(template, gh)
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
 
-              if (identityManager.getWipeGeneration() !== wipeGen) return false
-              const signed = await identityManager.signEvent(template, gh)
-              if (identityManager.getWipeGeneration() !== wipeGen) return false
+          activeMsgId = signed.id
+          chatRetries.confirm(tempId)
+          onPublishedId?.(signed.id)
 
-              activeMsgId = signed.id
-              onPublishedId?.(signed.id)
+          const findParent = (id: string) =>
+            messagesChannelRef.current === gh
+              ? messagesRef.current.find((m) => m.id === id)
+              : undefined
+          const parsed = isTopic
+            ? parseNamedBitchatChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+            : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
 
-              const findParent = (id: string) =>
-                messagesChannelRef.current === gh
-                  ? messagesRef.current.find((m) => m.id === id)
-                  : undefined
-              const parsed = isTopic
-                ? parseNamedBitchatChatEvent(signed, gh, ownPubkeysRef.current, findParent)
-                : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+          if (parsed) {
+            parsed.deliveryStatus = 'sending'
+            parsed.isOwn = true
+            // Atomically promote tempId -> signed.id into confirmed messages BEFORE publishing,
+            // keeping unconfirmed rows pinned at the tail.
+            updateChannelMessages(
+              gh,
+              (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-bitchat-'),
+              { allowBackgroundPersist: true }
+            )
+          }
 
+          return await publishChatWire({
+            rowId: signed.id,
+            publish: (ack) => pool.publish([...new Set([...targetRelays, ...(activeGeohashRef.current === gh ? relaySelectionRef.current.channelRelays : [])])], signed, undefined, ack),
+            isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+            queueRetry: queueAttempt,
+            update: (deliveryStatus, relayCount) => updateChannelMessages(
+              gh,
+              (prev) => sortChannelMessagesWithPending(prev.map((m) =>
+                m.id !== signed.id || (m.deliveryStatus === 'sent' && deliveryStatus !== 'sent')
+                    ? m : { ...m, deliveryStatus, relayCount: Math.max(m.relayCount ?? 0, relayCount) }
+              ), 'pending-bitchat-'),
+              { allowBackgroundPersist: true }
+            ),
+            onFailure: (reason) => pushToast('error', 'Failed to broadcast message', reason, signed.id),
+            onSuccess: () => {
               if (parsed) {
-                parsed.deliveryStatus = 'sending'
-                parsed.isOwn = true
-                // Atomically promote tempId -> signed.id into confirmed messages BEFORE publishing,
-                // keeping any remaining queued pending-bitchat-* placeholders pinned at the tail.
-                updateChannelMessages(
-                  gh,
-                  (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-bitchat-'),
-                  { allowBackgroundPersist: true }
-                )
                 const signedPreview = formatBitchatPreviewText({
                   content: parsed.content,
                   hasImage: Boolean(parsed.imageAttachment),
@@ -3623,103 +3637,71 @@ export function useAgnostrEngine(): AgnostrEngine {
                   })
                 }
               }
-
-              const res = await pool.publish(targetRelays, signed)
-              if (identityManager.getWipeGeneration() !== wipeGen) return false
-              const ok = res.acceptedRelays.length > 0
-
-              updateChannelMessages(
-                gh,
-                (prev) => {
-                  let changed = false
-                  const next = prev.map((m) => {
-                    if (m.id !== signed.id) return m
-                    changed = true
-                    return {
-                      ...m,
-                      deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
-                      relayCount: res.acceptedRelays.length,
-                    }
-                  })
-                  return changed ? next : null
-                },
-                { allowBackgroundPersist: true }
-              )
-
-              if (ok) {
-                const pokeSet = new Set<string>()
-                if (replyTarget && !replyTarget.isSystem && replyTarget.pubkey) {
-                  const rpk = replyTarget.pubkey.toLowerCase()
-                  if (/^[0-9a-f]{64}$/.test(rpk) && !ownPubkeysRef.current.has(rpk)) {
-                    pokeSet.add(rpk)
-                  }
+              const pokeSet = new Set<string>()
+              if (replyTarget && !replyTarget.isSystem && replyTarget.pubkey) {
+                const rpk = replyTarget.pubkey.toLowerCase()
+                if (/^[0-9a-f]{64}$/.test(rpk) && !ownPubkeysRef.current.has(rpk)) {
+                  pokeSet.add(rpk)
                 }
-                const contentMentions = extractMentions(content)
-                if (contentMentions.length > 0) {
-                  const roomPeers = presenceTracker.getPeers(
-                    gh,
-                    ownPubkeysRef.current,
-                    blockedSetRef.current
-                  )
-                  for (const peer of roomPeers) {
-                    const ppk = peer.pubkey.toLowerCase()
-                    if (peer.isSelf || ownPubkeysRef.current.has(ppk)) continue
-                    if (doesContentMentionUser(content, contentMentions, peer.nickname, ppk)) {
-                      pokeSet.add(ppk)
-                    }
-                  }
-                }
-                if (pokeSet.size > 0) {
-                  handlePushPoke({
-                    recipientPubkeys: Array.from(pokeSet),
-                    category: 'geo-message',
-                    isMention: true,
-                    eventId: signed.id,
-                    geohash: gh,
-                    senderName: nick,
-                    preview: content.slice(0, 110),
-                  })
-                }
-              } else {
-                pushToast(
-                  'error',
-                  'Failed to broadcast message',
-                  'No connected relay accepted the event.'
-                )
               }
-              return ok
-            } catch (err) {
-              if (identityManager.getWipeGeneration() === wipeGen) {
-                updateChannelMessages(
+              const contentMentions = extractMentions(content)
+              if (contentMentions.length > 0) {
+                const roomPeers = presenceTracker.getPeers(
                   gh,
-                  (prev) => {
-                    let changed = false
-                    const next = prev.map((m) => {
-                      if (m.id !== activeMsgId && m.id !== tempId) return m
-                      changed = true
-                      return {
-                        ...m,
-                        deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
-                      }
-                    })
-                    return changed ? next : null
-                  },
-                  { allowBackgroundPersist: true }
+                  ownPubkeysRef.current,
+                  blockedSetRef.current
                 )
-                pushToast(
-                  'error',
-                  'Signing failed',
-                  err instanceof Error ? err.message : 'Unable to sign event.'
-                )
+                for (const peer of roomPeers) {
+                  const ppk = peer.pubkey.toLowerCase()
+                  if (peer.isSelf || ownPubkeysRef.current.has(ppk)) continue
+                  if (doesContentMentionUser(content, contentMentions, peer.nickname, ppk)) {
+                    pokeSet.add(ppk)
+                  }
+                }
               }
-              return false
-            }
-          },
-          () => false
-        )
-      } finally {
-        adjustInFlightSend(-1)
+              if (pokeSet.size > 0) {
+                handlePushPoke({
+                  recipientPubkeys: Array.from(pokeSet),
+                  category: 'geo-message',
+                  isMention: true,
+                  eventId: signed.id,
+                  geohash: gh,
+                  senderName: nick,
+                  preview: content.slice(0, 110),
+                })
+              }
+            },
+          })
+        } catch (err) {
+          if (identityManager.getWipeGeneration() === wipeGen) {
+            if (activeMsgId === tempId) chatRetries.hold(tempId, () => queueAttempt(attempt))
+            updateChannelMessages(
+              gh,
+              (prev) => {
+                let changed = false
+                const next = prev.map((m) => {
+                  if ((m.id !== activeMsgId && m.id !== tempId) || m.deliveryStatus === 'sent') return m
+                  changed = true
+                  return {
+                    ...m,
+                    deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
+                  }
+                })
+                return changed ? next : null
+              },
+              { allowBackgroundPersist: true }
+            )
+            pushToast(
+              'error',
+              'Message failed to send',
+              err instanceof Error ? err.message : 'Unable to sign event.',
+              tempId
+            )
+          }
+          return false
+        }
       }
+      return await queueAttempt(attempt)
     },
     [
       pool,
@@ -4716,36 +4698,18 @@ export function useAgnostrEngine(): AgnostrEngine {
               }
 
               setVoiceSendPhase('publishing')
-              const res = await pool.publish(targetRelays, signed)
-              if (identityManager.getWipeGeneration() !== wipeGen) return false
-              const ok = res.acceptedRelays.length > 0
-
-              updateChannelMessages(
-                gh,
-                (prev) => {
-                  let changed = false
-                  const next = prev.map((m) => {
-                    if (m.id !== signed.id) return m
-                    changed = true
-                    return {
-                      ...m,
-                      deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
-                      relayCount: res.acceptedRelays.length,
-                    }
-                  })
-                  return changed ? next : null
-                },
-                { allowBackgroundPersist: true }
-              )
-
-              if (!ok) {
-                pushToast(
-                  'error',
-                  'Voice memo publish failed',
-                  'Uploaded to Blossom, but no Nostr relay accepted the event.'
-                )
-              }
-              return ok
+              return await publishChatWire({
+                rowId: signed.id,
+                publish: (ack) => pool.publish(targetRelays, signed, undefined, ack),
+                isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+                queueRetry: (replay) => bitchatSendQueueRef.current.enqueue(`bitchat:${gh}`, replay, () => false),
+                update: (deliveryStatus, relayCount) => updateChannelMessages(gh, (prev) =>
+                  sortChannelMessagesWithPending(prev.map((m) =>
+                    m.id !== signed.id || (m.deliveryStatus === 'sent' && deliveryStatus !== 'sent')
+                    ? m : { ...m, deliveryStatus, relayCount: Math.max(m.relayCount ?? 0, relayCount) }
+                  ), 'pending-bitchat-'), { allowBackgroundPersist: true }),
+                onFailure: (reason) => pushToast('error', 'Voice memo publish failed', reason, signed.id),
+              })
             } catch (err) {
               if (identityManager.getWipeGeneration() === wipeGen) {
                 if (signedMsgId) {
@@ -5239,36 +5203,18 @@ export function useAgnostrEngine(): AgnostrEngine {
               }
 
               setVoiceSendPhase('publishing')
-              const res = await pool.publish(targetRelays, signed)
-              if (identityManager.getWipeGeneration() !== wipeGen) return false
-              const ok = res.acceptedRelays.length > 0
-
-              updateChannelMessages(
-                gh,
-                (prev) => {
-                  let changed = false
-                  const next = prev.map((m) => {
-                    if (m.id !== signed.id) return m
-                    changed = true
-                    return {
-                      ...m,
-                      deliveryStatus: (ok ? 'sent' : 'failed') as GeoMessage['deliveryStatus'],
-                      relayCount: res.acceptedRelays.length,
-                    }
-                  })
-                  return changed ? next : null
-                },
-                { allowBackgroundPersist: true }
-              )
-
-              if (!ok) {
-                pushToast(
-                  'error',
-                  'Image publish failed',
-                  'Uploaded to Blossom, but no Nostr relay accepted the event.'
-                )
-              }
-              return ok
+              return await publishChatWire({
+                rowId: signed.id,
+                publish: (ack) => pool.publish(targetRelays, signed, undefined, ack),
+                isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+                queueRetry: (replay) => bitchatSendQueueRef.current.enqueue(`bitchat:${gh}`, replay, () => false),
+                update: (deliveryStatus, relayCount) => updateChannelMessages(gh, (prev) =>
+                  sortChannelMessagesWithPending(prev.map((m) =>
+                    m.id !== signed.id || (m.deliveryStatus === 'sent' && deliveryStatus !== 'sent')
+                    ? m : { ...m, deliveryStatus, relayCount: Math.max(m.relayCount ?? 0, relayCount) }
+                  ), 'pending-bitchat-'), { allowBackgroundPersist: true }),
+                onFailure: (reason) => pushToast('error', 'Image publish failed', reason, signed.id),
+              })
             } catch (err) {
               if (identityManager.getWipeGeneration() === wipeGen) {
                 if (signedMsgId) {
@@ -5522,6 +5468,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     resetAllNotifications()
     resetAllTranscription()
     bitchatSendQueueRef.current.clearAll()
+    chatRetries.clear()
     inFlightSendCountRef.current = 0
     inFlightMediaCountRef.current = 0
     setSending(false)
@@ -5671,7 +5618,7 @@ export function useAgnostrEngine(): AgnostrEngine {
           tuneTopicChannel,
           openDmThread,
           sendDirectMessage,
-          sendPublicContent: (text) => sendPublicContent(text, null),
+          sendPublicContent: (text) => sendPublicContent(text, null, options?.onPublishedId),
           postLocationNote,
           refreshLocationNotes,
           toggleBlockPeer,

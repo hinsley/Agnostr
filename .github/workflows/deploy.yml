@@ -62,7 +62,7 @@ jobs:
 
       - name: Device sync and private DM regression tests
         working-directory: pwa-nostr-chat
-        run: node --experimental-strip-types --test scripts/check-device-sync.mjs scripts/check-private-dm-actions.mjs
+        run: node --experimental-strip-types --test scripts/check-device-sync.mjs scripts/check-private-dm-actions.mjs scripts/check-chat-delivery.mjs
 
       - name: Solar map regression tests
         working-directory: pwa-nostr-chat

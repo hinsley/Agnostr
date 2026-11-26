@@ -290,7 +290,7 @@ function randomizedBitchatTimestamp(): number {
  * Encodes a Bitchat `bitchat1:` binary packet carrying a GeoDM PrivateMessagePacket TLV.
  * Returns null if content/messageID exceeds 255 UTF-8 bytes (1-byte TLV length limit).
  */
-export function encodeBitchatEmbeddedPM(content: string, messageId: string): string | null {
+export function encodeBitchatEmbeddedPM(content: string, messageId: string, timestampMs = Date.now()): string | null {
   const idBytes = utf8Encoder.encode(messageId)
   const contentBytes = utf8Encoder.encode(content)
   if (idBytes.length > 255 || contentBytes.length > 255) return null
@@ -313,7 +313,7 @@ export function encodeBitchatEmbeddedPM(content: string, messageId: string): str
   packet[0] = 0x01 // version 1
   packet[1] = 0x11 // MessageType.noiseEncrypted
   packet[2] = 0x07 // TTL
-  const tsMs = BigInt(Date.now())
+  const tsMs = BigInt(timestampMs)
   view.setBigUint64(3, tsMs, false)
   packet[11] = 0x00 // flags: no recipient, no sig, uncompressed
   view.setUint16(12, payload.length, false)
@@ -417,7 +417,9 @@ export async function createEncryptedDmEvent(opts: {
   protocol: DmProtocol
   messageId?: string
   action?: { type: 'reply' | 'reaction'; targetId: string }
-}): Promise<{ event: NostrEvent; protocol: DmProtocol; wireId: string }> {
+}): Promise<{ event: NostrEvent; protocol: DmProtocol; wireId: string; orderMs: number }> {
+  const orderMs = Date.now()
+  const createdAt = Math.floor(orderMs / 1000)
   const recipientPk = opts.recipientPubkey.toLowerCase()
 
   const action = opts.action
@@ -425,6 +427,7 @@ export async function createEncryptedDmEvent(opts: {
   const kind = action?.type === 'reaction' ? 7 : KIND_DM_RUMOR
   const tags = [['p', recipientPk], ...(action ? [['e', action.targetId]] : [])]
   if (kind === 7) tags.push(['k', String(KIND_DM_RUMOR)])
+  else tags.push(['agnostr-ms', String(orderMs)])
   // A nonce distinguishes identical messages from the same sender within one second.
   if (opts.messageId) tags.push(['nonce-id', opts.messageId])
 
@@ -435,7 +438,7 @@ export async function createEncryptedDmEvent(opts: {
     }
     const rumor = {
       pubkey: opts.signer.pubkey,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: createdAt,
       kind,
       tags,
       content: opts.content,
@@ -462,7 +465,7 @@ export async function createEncryptedDmEvent(opts: {
       },
       wrapSk
     )
-    return { event: wrapEvent, protocol: 'nip17', wireId }
+    return { event: wrapEvent, protocol: 'nip17', wireId, orderMs }
   }
 
   const sk = opts.signer.secretKey
@@ -470,14 +473,14 @@ export async function createEncryptedDmEvent(opts: {
 
   if (opts.protocol === 'bitchat') {
     const msgId = opts.messageId ?? bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
-    const embedded = kind === KIND_DM_RUMOR ? encodeBitchatEmbeddedPM(opts.content, msgId) : null
+    const embedded = kind === KIND_DM_RUMOR ? encodeBitchatEmbeddedPM(opts.content, msgId, orderMs) : null
     // If content > 255 bytes (exceeds 1-byte Bitchat TLV), send plain text inside v2 rumor or fall back to nip17
     const innerContent = embedded ?? opts.content
 
     const rumor = {
       id: '',
       pubkey: senderPk,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: createdAt,
       kind,
       tags,
       content: innerContent,
@@ -504,13 +507,13 @@ export async function createEncryptedDmEvent(opts: {
       },
       wrapSk
     )
-    return { event: giftWrap, protocol: 'bitchat', wireId: embedded ? msgId : giftWrap.id }
+    return { event: giftWrap, protocol: 'bitchat', wireId: embedded ? msgId : giftWrap.id, orderMs }
   }
 
   // Standard NIP-17 / NIP-59 gift wrap
-  const rumor = nip59.createRumor({ kind, created_at: Math.floor(Date.now() / 1000), tags, content: opts.content }, sk)
+  const rumor = nip59.createRumor({ kind, created_at: createdAt, tags, content: opts.content }, sk)
   const wrapEvent = nip59.createWrap(nip59.createSeal(rumor, sk, recipientPk), recipientPk)
-  return { event: wrapEvent, protocol: 'nip17', wireId: rumor.id }
+  return { event: wrapEvent, protocol: 'nip17', wireId: rumor.id, orderMs }
 }
 
 /**
@@ -603,6 +606,7 @@ export async function decryptGiftWrapEvent(
       content: rumor.content,
       replyToId: refId,
       createdAt: clampDmCreatedAtSec(rawRumorSec),
+      timestampMs: privateOrderingTime(rumor.tags, rawRumorSec),
       protocol: 'bitchat',
     }
   }
@@ -626,10 +630,20 @@ export async function decryptGiftWrapEvent(
     if (refId === null || (rumor.kind === 7 && (!refId || !validReaction(rumor.content)))) return null
     return { id: rumor.id || giftWrap.id, senderPubkey: seal.pubkey, protocol: 'nip17',
       content: rumor.content, createdAt: clampDmCreatedAtSec(rumor.created_at ?? giftWrap.created_at),
+      timestampMs: privateOrderingTime(rumor.tags, rumor.created_at),
       ...(rumor.kind === 7 ? { reactionToId: refId } : { replyToId: refId }) }
   } catch {
     return null
   }
+}
+
+// Only use the optional millisecond refinement within the authenticated rumor's second.
+function privateOrderingTime(tags: unknown, sec: number): number | undefined {
+  if (!Array.isArray(tags)) return undefined
+  const raw = tags.find((tag) => Array.isArray(tag) && tag[0] === 'agnostr-ms')?.[1]
+  if (typeof raw !== 'string' || !/^\d{13}$/.test(raw)) return undefined
+  const ms = Number(raw)
+  return Math.floor(ms / 1000) === sec && ms <= Date.now() ? ms : undefined
 }
 
 function validReaction(content: string): boolean {

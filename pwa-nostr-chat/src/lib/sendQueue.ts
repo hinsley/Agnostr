@@ -1,3 +1,5 @@
+import { compareConfirmedChat, isUnconfirmed } from './chatDelivery.ts'
+
 /**
  * Per-conversation strict FIFO async send queue.
  *
@@ -96,53 +98,21 @@ export class KeyedFifoQueue {
 
 export const chatSendQueue = new KeyedFifoQueue()
 
-function isQueuedPending<T extends { id: string; deliveryStatus?: string }>(
-  message: T,
-  pendingPrefix: string
-): boolean {
-  return message.id.startsWith(pendingPrefix) && message.deliveryStatus !== 'failed'
-}
-
-/**
- * Sorts confirmed messages stably by `createdAt` while pinning queued optimistic
- * placeholders (`id.startsWith(pendingPrefix)` and not `'failed'`) strictly at the
- * tail in their original FIFO enqueue order (bumping their timestamps >= the latest
- * confirmed message so interleaved peer traffic can never sort pending sends ahead
- * of earlier confirmed sends).
- */
+/** Keep local drafts out of the shared wire ordering until delivery is known. */
 export function sortChannelMessagesWithPending<
   T extends { id: string; createdAt: number; deliveryStatus?: string },
 >(messages: readonly T[], pendingPrefix: string): T[] {
   const confirmed: T[] = []
   const pending: T[] = []
-
-  for (const m of messages) {
-    if (isQueuedPending(m, pendingPrefix)) {
-      pending.push(m)
-    } else {
-      confirmed.push(m)
-    }
+  for (const message of messages) {
+    (message.id.startsWith(pendingPrefix) || isUnconfirmed(message) ? pending : confirmed).push(message)
   }
-
-  confirmed.sort((a, b) => a.createdAt - b.createdAt)
-  if (pending.length === 0) return confirmed
-
-  let floorSec = confirmed.length > 0 ? confirmed[confirmed.length - 1].createdAt : 0
-  const adjustedPending: T[] = new Array(pending.length)
-  for (let i = 0; i < pending.length; i++) {
-    const p = pending[i]
-    const nextSec = Math.max(p.createdAt, floorSec)
-    floorSec = nextSec
-    adjustedPending[i] = nextSec === p.createdAt ? p : { ...p, createdAt: nextSec }
-  }
-
-  return [...confirmed, ...adjustedPending]
+  return [...confirmed.sort(compareConfirmedChat), ...pending]
 }
 
 /**
- * Replaces an optimistic placeholder (`tempId`) with its signed event (`signedMsg`)
- * while preserving strict monotonic ordering across confirmed messages and bumping
- * any remaining queued placeholders to stay pinned at the tail.
+ * Replaces a local draft with its signed row without copying any local timestamp.
+ * Do not create a second row if an echo made it into the timeline first.
  */
 export function swapPendingWithSigned<
   T extends { id: string; createdAt: number; deliveryStatus?: string },
@@ -152,31 +122,11 @@ export function swapPendingWithSigned<
   signedMsg: T,
   pendingPrefix: string
 ): T[] {
-  const confirmed: T[] = []
-  const remainingPending: T[] = []
-  let hasSigned = false
-  let tempCreatedAt = 0
-
-  for (const m of prev) {
-    if (m.id === tempId) {
-      tempCreatedAt = m.createdAt
-      continue
-    }
-    if (m.id === signedMsg.id) {
-      hasSigned = true
-    }
-    if (isQueuedPending(m, pendingPrefix)) {
-      remainingPending.push(m)
-    } else {
-      confirmed.push(m)
-    }
+  const alreadyPresent = prev.some((m) => m.id === signedMsg.id && m.id !== tempId)
+  const next = prev.filter((m) => m.id !== tempId)
+  if (!alreadyPresent) {
+    const index = prev.findIndex((m) => m.id === tempId)
+    next.splice(index < 0 ? next.length : index, 0, signedMsg)
   }
-
-  if (!hasSigned) {
-    const nextSec = Math.max(signedMsg.createdAt, tempCreatedAt)
-    confirmed.push(nextSec === signedMsg.createdAt ? signedMsg : { ...signedMsg, createdAt: nextSec })
-  }
-
-  return sortChannelMessagesWithPending([...confirmed, ...remainingPending], pendingPrefix)
+  return sortChannelMessagesWithPending(next, pendingPrefix)
 }
-

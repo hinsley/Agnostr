@@ -18,13 +18,14 @@ export function useToasts() {
   }, [])
 
   const pushToast = useCallback(
-    (level: ToastLevel, title: string, detail?: string) => {
+    (level: ToastLevel, title: string, detail?: string, retryMessageId?: string) => {
       const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
       const item: ToastItem = {
         id,
         level,
         title,
         detail,
+        retryMessageId,
         createdAt: Date.now(),
       }
       setToasts((prev) => [...prev.slice(-(MAX_TOASTS - 1)), item])

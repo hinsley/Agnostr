@@ -769,7 +769,9 @@ export function isEphemeralPendingMessage(msg: {
   ) {
     return true
   }
-  return msg.deliveryStatus === 'sending'
+  // Unconfirmed outbox attempts are local to this tab and must not become
+  // history or device-sync records on another client.
+  return msg.deliveryStatus === 'sending' || msg.deliveryStatus === 'failed'
 }
 
 function formatDmPreviewForStorage(msg: DmMessage): string {

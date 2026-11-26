@@ -304,10 +304,23 @@ export class RelayPool {
     this.scheduleTelemetryEmit()
   }
 
+  /** Wait before constructing a chat event, rather than aging its timestamp during reconnect. */
+  async waitForChatRelay(relayUrls: readonly string[]): Promise<boolean> {
+    try {
+      await Promise.any(Array.from(new Set(relayUrls), async (url) => {
+        if (!await this.waitForOpen(this.ensureConnection(url), 1800)) throw new Error('Relay is offline')
+      }))
+      return true
+    } catch {
+      return false
+    }
+  }
+
   async publish(
     relayUrls: readonly string[],
     event: NostrEvent,
-    timeoutMs = 4500
+    timeoutMs = 4500,
+    onAccepted?: (count: number) => void
   ): Promise<PublishResult> {
     const acceptedRelays: string[] = []
     const rejectedRelays: Array<{ url: string; reason: string }> = []
@@ -349,6 +362,7 @@ export class RelayPool {
 
       if (okRes.ok) {
         acceptedRelays.push(url)
+        onAccepted?.(acceptedRelays.length)
       } else {
         rejectedRelays.push({ url, reason: okRes.reason || 'rejected' })
       }

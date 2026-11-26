@@ -1,3 +1,4 @@
+import { chatRetries } from '../lib/chatDelivery'
 import React from 'react'
 import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from 'lucide-react'
 import type { ToastItem } from '../types/protocol'
@@ -34,6 +35,18 @@ export const ToastStack: React.FC<ToastStackProps> = ({ toasts, onDismiss }) => 
             <div className="ag-toast-title">{toast.title}</div>
             {toast.detail && <div className="ag-toast-detail">{toast.detail}</div>}
           </div>
+          {toast.retryMessageId && chatRetries.has(toast.retryMessageId) && (
+            <button
+              type="button"
+              className="ag-msg-delivery failed ag-msg-retry"
+              onClick={() => {
+                onDismiss(toast.id)
+                if (toast.retryMessageId) void chatRetries.retry(toast.retryMessageId)
+              }}
+            >
+              Retry
+            </button>
+          )}
           <button
             type="button"
             className="ag-icon-btn"

@@ -1,3 +1,4 @@
+import { acceptChatEcho, chatRetries, isUnconfirmed, publishChatWire } from '../lib/chatDelivery.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   ActiveView,
@@ -201,7 +202,7 @@ export interface UseServersOptions {
   onIngestEventTags?: (pubkey: string, tags: string[][]) => void
   onNotifyPushPoke?: (payload: PushPokePayload) => void
   sendDirectMessage: (peerPubkey: string, content: string) => Promise<boolean>
-  pushToast: (level: ToastLevel, title: string, detail?: string) => void
+  pushToast: (level: ToastLevel, title: string, detail?: string, retryMessageId?: string) => void
 }
 
 export interface UseServersResult {
@@ -997,7 +998,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
             onIngestEventTagsRef.current?.(pk, ev.tags)
 
             updateServerChannelMessages(serverSnapshot.id, chanId, (prev) => {
-              if (prev.some((m) => m.id === parsed.id)) return null
+              if (prev.some((m) => m.id === parsed.id)) {
+                const echoed = acceptChatEcho(prev, parsed)
+                return echoed ? sortChannelMessagesWithPending(echoed, 'pending-srv-') : null
+              }
 
               let hydrated: ServerMessage = parsed
               if (hydrated.replyTo && (!hydrated.replyTo.preview || !hydrated.replyTo.nickname)) {
@@ -2020,7 +2024,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   // Messaging (text + voice + image + reactions + delete)
   // Internal non-enqueuing publish step executed strictly inside `serverSendQueueRef`
   const publishServerMessageDirect = useCallback(
-    async (params: {
+    async function publishDirect(params: {
       server: ServerSummary
       channel: ServerChannel
       tempId?: string
@@ -2035,7 +2039,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       powEnabled: boolean
       powTargetBits: number
       lightningAddr: string | null
-    }): Promise<boolean> => {
+    }): Promise<boolean> {
       const {
         server,
         channel,
@@ -2067,15 +2071,30 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           : []
       if (targetRelays.length === 0) return false
 
+      const queueRetry = async (attempt: () => Promise<boolean>) => {
+        adjustInFlightSend(1)
+        try {
+          return await serverSendQueueRef.current.enqueue(`srv:${server.id}:${chanId}`, attempt, () => false)
+        } finally {
+          adjustInFlightSend(-1)
+        }
+      }
       let activeMsgId: string | null = tempId ?? null
       try {
+        if (tempId) {
+          updateServerChannelMessages(server.id, chanId, (prev) => prev.map((m) =>
+            m.id === tempId ? { ...m, deliveryStatus: 'sending' } : m
+          ), { allowBackgroundPersist: true })
+        }
+        if (!await pool.waitForChatRelay(targetRelays) && tempId) throw new Error('No connected group relay accepted the message.')
+        if (identityManager.getWipeGeneration() !== wipeGen) return false
         const previousIds =
           rawMessagesKeyRef.current === targetKey
             ? rawMessagesRef.current
-                .filter((m) => !m.isSystem && !m.id.startsWith('pending-srv-'))
+                .filter((m) => !m.isSystem && !isUnconfirmed(m))
                 .map((m) => m.id)
             : loadServerChannelMessages(server.id, chanId)
-                .filter((m) => !m.isSystem && !m.id.startsWith('pending-srv-'))
+                .filter((m) => !m.isSystem && !isUnconfirmed(m))
                 .map((m) => m.id)
 
         const tmpl = isVirtual
@@ -2110,6 +2129,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         if (identityManager.getWipeGeneration() !== wipeGen) return false
 
         activeMsgId = signed.id
+        if (tempId) chatRetries.confirm(tempId)
         onPublishedId?.(signed.id)
 
         // Atomically promote tempId -> signed.id into confirmed messages BEFORE publishing,
@@ -2160,30 +2180,22 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           { allowBackgroundPersist: true }
         )
 
-        const res = await pool.publish(targetRelays, signed)
-        if (identityManager.getWipeGeneration() !== wipeGen) return false
-        const ok = res.acceptedRelays.length > 0
-
-        updateServerChannelMessages(
-          server.id,
-          chanId,
-          (prev) => {
-            let changed = false
-            const next = prev.map((m) => {
-              if (m.id !== signed.id) return m
-              changed = true
-              return {
-                ...m,
-                deliveryStatus: (ok ? 'sent' : 'failed') as ServerMessage['deliveryStatus'],
-                relayCount: res.acceptedRelays.length,
-              }
-            })
-            return changed ? next : null
-          },
-          { allowBackgroundPersist: true }
-        )
-
-        if (ok) {
+        return await publishChatWire({
+          rowId: signed.id,
+          publish: (ack) => pool.publish(targetRelays, signed, undefined, ack),
+          isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+          queueRetry,
+          update: (deliveryStatus, relayCount) => updateServerChannelMessages(
+            server.id,
+            chanId,
+            (prev) => sortChannelMessagesWithPending(prev.map((m) =>
+              m.id !== signed.id || (m.deliveryStatus === 'sent' && deliveryStatus !== 'sent')
+                    ? m : { ...m, deliveryStatus, relayCount: Math.max(m.relayCount ?? 0, relayCount) }
+            ), 'pending-srv-'),
+            { allowBackgroundPersist: true }
+          ),
+          onFailure: (reason) => pushToast('error', 'Message failed to send', reason, signed.id),
+          onSuccess: () => {
           const pingPokeSet = new Set<string>()
           const broadcastPokeSet = new Set<string>()
           const isValidRecipient = (raw?: string | null): string | null => {
@@ -2274,14 +2286,13 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               })
             }
           }
-        } else {
-          const reason =
-            res.rejectedRelays[0]?.reason || 'No connected group relay accepted the message.'
-          pushToast('error', 'Message failed to send', reason)
-        }
-        return ok
+          },
+        })
       } catch (err) {
         if (identityManager.getWipeGeneration() === wipeGen) {
+          if (tempId && activeMsgId === tempId) {
+            chatRetries.hold(tempId, () => queueRetry(() => publishDirect(params)))
+          }
           if (activeMsgId || tempId) {
             updateServerChannelMessages(
               server.id,
@@ -2290,8 +2301,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 let changed = false
                 const next = prev.map((m) => {
                   if (
-                    (activeMsgId && m.id === activeMsgId) ||
-                    (tempId && m.id === tempId)
+                    m.deliveryStatus !== 'sent' && ((activeMsgId && m.id === activeMsgId) ||
+                    (tempId && m.id === tempId))
                   ) {
                     changed = true
                     return {
@@ -2309,13 +2320,14 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           pushToast(
             'error',
             'Failed to send message',
-            err instanceof Error ? err.message : 'Signing error'
+            err instanceof Error ? err.message : 'Signing error',
+            tempId
           )
         }
         return false
       }
     },
-    [pool, identityManager, updateServerChannelMessages, pushToast]
+    [pool, identityManager, updateServerChannelMessages, adjustInFlightSend, pushToast]
   )
 
   const sendMessage = useCallback(

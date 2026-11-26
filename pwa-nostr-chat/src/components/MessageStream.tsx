@@ -1,3 +1,4 @@
+import { chatRetries, isUnconfirmed } from '../lib/chatDelivery'
 import '../styles/bitchat-history.css'
 import { dmReplyReference, dmTargetId } from '../lib/dmMessageActions.ts'
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -154,8 +155,8 @@ const archivedCursor = (row: GeoMessage) => !row.isSystem && !row.isBlockedPlace
 // Archival and recent-memory pages share a total order, even for timestamp ties.
 function sortRoomRows(rows: GeoMessage[]) {
   return rows.sort((a, b) => {
-    const aPending = a.id.startsWith('pending-')
-    const bPending = b.id.startsWith('pending-')
+    const aPending = isUnconfirmed(a)
+    const bPending = isUnconfirmed(b)
     return Number(aPending) - Number(bPending) || (aPending ? 0 : compareHistory(a, b))
   })
 }
@@ -2261,6 +2262,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                   msg.id === engine.unreadDividerId
 
                 const grouped =
+                  !isUnconfirmed(msg) &&
                   !showDateDivider &&
                   !showUnreadDivider &&
                   !msg.isSystem &&
@@ -2433,8 +2435,11 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       onStartDm={onStartDm}
                       onStartCall={handleStartCallSender}
                       onMentionAuthor={onMentionPeer}
-                      onReply={!isDm || dmTargets.localIds.has(msg.id) ? handleReplyUnified : undefined}
-                      onReact={!isDm || dmTargets.localIds.has(msg.id) ? handleReactUnified : undefined}
+                      onReply={!isUnconfirmed(msg) && (!isDm || dmTargets.localIds.has(msg.id)) ? handleReplyUnified : undefined}
+                      onReact={!isUnconfirmed(msg) && (!isDm || dmTargets.localIds.has(msg.id)) ? handleReactUnified : undefined}
+                      onRetrySend={msg.isOwn && msg.deliveryStatus === 'failed' && chatRetries.has(msg.id)
+                        ? () => void chatRetries.retry(msg.id).catch(() => engine.pushToast('error', 'Retry failed'))
+                        : undefined}
                       resolveReactorName={resolveReactorName}
                       onDelete={
                         isServer &&

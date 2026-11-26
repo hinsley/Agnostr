@@ -2748,6 +2748,23 @@ img.ag-avatar-glubchat,
   color: var(--status-danger);
 }
 
+.ag-msg-retry {
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 7px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ag-msg-retry:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
 /* Compact Inline Reply Reference Strip */
 .ag-reply-quote {
   display: inline-flex;
