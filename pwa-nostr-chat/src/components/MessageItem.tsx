@@ -236,6 +236,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
   }) => {
     const pinnedReactions = usePinnedReactions()
     const [pickerOpen, setPickerOpen] = useState(false)
+    const [quickPickerPlacement, setQuickPickerPlacement] = useState({ left: 0, width: 234 })
     const [expandedPickerAnchor, setExpandedPickerAnchor] = useState<DOMRect | null>(null)
     const [copied, setCopied] = useState(false)
     const quickPickerWrapRef = useRef<HTMLDivElement | null>(null)
@@ -1410,7 +1411,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
             document.body
           )}
 
-        {/* Sleek Top-Right Floating Quick-Action Bar (Desktop Hover / Mobile Tap-to-Reveal) */}
+        {/* Desktop hover actions sit beside the message; touch keeps its tap-to-reveal bar. */}
         <div
           className={`ag-msg-actions ${pickerOpen || expandedPickerAnchor ? 'picker-open' : ''}`}
           role="toolbar"
@@ -1427,7 +1428,16 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                     setExpandedPickerAnchor(e.currentTarget.getBoundingClientRect())
                     return
                   }
-                  setPickerOpen((v) => !v)
+                  if (!pickerOpen) {
+                    const trigger = e.currentTarget.getBoundingClientRect()
+                    const stream = e.currentTarget.closest('.ag-stream-scroll')?.getBoundingClientRect()
+                    const left = Math.max(0, stream?.left ?? 0) + 6
+                    const right = Math.min(window.innerWidth, stream?.right ?? window.innerWidth) - 6
+                    const width = Math.max(36, Math.min(234, right - left))
+                    const offset = Math.max(left, Math.min(trigger.left, right - width)) - trigger.left
+                    setQuickPickerPlacement({ left: offset, width })
+                  }
+                  setPickerOpen(!pickerOpen)
                 }}
                 title="React"
                 aria-label="Add reaction"
@@ -1436,7 +1446,8 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 <Smile size={15} />
               </button>
               {pickerOpen && (
-                <div className="ag-emoji-popover" role="menu" aria-label="Quick reactions">
+                <div className="ag-emoji-popover" role="menu" aria-label="Quick reactions"
+                  style={{ left: quickPickerPlacement.left, maxWidth: quickPickerPlacement.width }}>
                   {pinnedReactions.map((emoji) => {
                     const reacted = myActiveEmojis.includes(emoji)
                     return (

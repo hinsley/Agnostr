@@ -2823,6 +2823,26 @@ img.ag-avatar-glubchat,
     transform var(--dur-fast) ease;
 }
 
+/* Keep desktop actions next to the rendered message, not the edge of the
+   full-width hover row. Reserve their width even while hidden so hovering
+   never rewraps text. The rail contributes no height to dense message runs. */
+@media (min-width: 868px) {
+  .ag-msg-row:not(.is-system) > .ag-msg-content {
+    flex: 0 1 max-content;
+  }
+
+  .ag-msg-row > .ag-msg-actions {
+    --ag-message-actions-height: 34px;
+    position: relative;
+    inset: auto;
+    flex: 0 0 auto;
+    block-size: var(--ag-message-actions-height);
+    margin-inline-start: -4px;
+    margin-block: -5px calc(5px - var(--ag-message-actions-height));
+    align-self: flex-start;
+  }
+}
+
 .ag-msg-row:hover .ag-msg-actions,
 .ag-msg-row:focus-within .ag-msg-actions,
 .ag-msg-row.actions-open .ag-msg-actions,
@@ -2858,7 +2878,7 @@ img.ag-avatar-glubchat,
 .ag-emoji-popover {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  left: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
