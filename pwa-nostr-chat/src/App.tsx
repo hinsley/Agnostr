@@ -3617,7 +3617,7 @@ export function App() {
         <ActivityStages engine={engine} expanded={callExpanded} onSetExpanded={setCallExpanded}
           compactFloating={callCompactFloating} floatingContext={callFloatingContext}
           gameChatDock={inChatRoomMain ? gameChatDock : null}
-          allowFloatingGame={!isMobileViewport || mobileScreen !== 'list'} onRequestGameChat={handleOpenGameChat}
+          allowBackgroundGameLinks={!isMobileViewport || mobileScreen !== 'list'} onRequestGameChat={handleOpenGameChat}
           dockContainer={inChatRoomMain ? callDockSlotEl : null} onInspectPeer={setInspectedPeer}
           onOpenDm={handleOpenDm} onReturnToCall={handleReturnToActiveCall} onPlaySound={playSound} />
       )}

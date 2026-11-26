@@ -6,7 +6,6 @@ import {
   Gamepad2,
   Minimize2,
   Maximize2,
-  ChevronDown,
   Phone,
   Spade,
   X,
@@ -32,7 +31,7 @@ export interface GameStageProps {
   chatDock?: HTMLElement | null
   roomTileDock?: HTMLElement | null
   modalOverRoomCall?: boolean
-  onOpenInChat?: (session: ActiveGameSession) => void
+  onOpenInChat?: (session: ActiveGameSession, maximize?: boolean) => void
   compactCallDocks?: {
     video: (el: HTMLDivElement | null) => void
     controls: (el: HTMLDivElement | null) => void
@@ -220,9 +219,11 @@ export function GameStage({
 
   const focusedSession = games.focusedScopeKey ? games.activeGamesByScope[games.focusedScopeKey] : null
   const inRoomTile = roomTileDock !== undefined
-  const compact = inRoomTile || games.minimized || !chatDock
+  const compact = inRoomTile || games.minimized
+  // A compact board belongs to the chat layout or a matching call tile, never a floating window.
   const boardTarget = inRoomTile ? roomTileDock
-    : compact ? chatDock ?? floatingDock : typeof document !== 'undefined' ? document.body : null
+    : !chatDock || compact ? chatDock
+      : typeof document !== 'undefined' ? document.body : null
   const showBoard = Boolean(focusedSession && boardTarget)
   const activeCall = engine.calls.activeCall
 
@@ -286,27 +287,22 @@ export function GameStage({
     ensureProfilePictures,
   ])
 
-  // Back first shrinks the board; a second Back hides it without ending the game.
-  const stepBack = () => {
-    if (compact) games.setFocusedScopeKey(null)
-    else games.setMinimized(true)
-  }
-  useBackHandler(showBoard && !inRoomTile, stepBack)
+  // Back/Escape dismiss the expanded dialog to the dock, never dismiss the dock itself.
+  useBackHandler(showBoard && !compact, () => games.setMinimized(true))
 
   useEffect(() => {
-    if (!showBoard || inRoomTile) return
+    if (!showBoard || compact) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
-        if (!compact) e.stopImmediatePropagation()
+        e.stopImmediatePropagation()
         onPlaySound?.('click')
-        if (compact) games.setFocusedScopeKey(null)
-        else games.setMinimized(true)
+        games.setMinimized(true)
       }
     }
-    window.addEventListener('keydown', onKeyDown, !compact)
-    return () => window.removeEventListener('keydown', onKeyDown, !compact)
-  }, [showBoard, inRoomTile, compact, games, onPlaySound])
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [showBoard, compact, games, onPlaySound])
 
   if (typeof document === 'undefined') return null
 
@@ -323,7 +319,7 @@ export function GameStage({
 
     const handleResize = () => {
       onPlaySound?.('click')
-      if (compact && !chatDock) onOpenInChat?.(focusedSession)
+      if (compact && !chatDock) onOpenInChat?.(focusedSession, true)
       else games.setMinimized(!compact)
     }
 
@@ -473,7 +469,7 @@ export function GameStage({
     const board = (
       <section key={focusedSession.gameId}
         className={`ag-game-stage-panel is-${focusedSession.kind} ${compact
-          ? `is-compact ${inRoomTile ? 'ag-game-in-call' : chatDock ? 'ag-game-in-chat' : 'ag-game-floating'}` : 'ag-game-modal-frame'}`}
+          ? `is-compact ${inRoomTile ? 'ag-game-in-call' : 'ag-game-in-chat'}` : 'ag-game-modal-frame'}`}
         role={compact ? 'region' : 'dialog'}
         aria-modal={compact ? undefined : true}
         aria-label={`${meta.title} · ${meta.scopeLabel}`}
@@ -527,16 +523,6 @@ export function GameStage({
             >
               {compact ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
             </button>
-
-            {compact && (
-              <button type="button" className="ag-game-head-btn icon-only"
-                onClick={() => {
-                  onPlaySound?.('click')
-                  games.setFocusedScopeKey(null)
-                }} title="Hide game" aria-label="Hide game">
-                <ChevronDown size={14} />
-              </button>
-            )}
 
             {confirmClose && !meta.isFinished ? (
               <div className="ag-game-close-confirm">

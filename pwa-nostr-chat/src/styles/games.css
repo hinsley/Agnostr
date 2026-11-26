@@ -3464,12 +3464,6 @@
   background: rgba(0, 0, 0, .7);
   font-size: .65rem;
 }
-.ag-game-floating.ag-game-stage-panel {
-  order: -1;
-  width: min(344px, calc(100vw - 32px));
-  max-height: min(34dvh, 284px);
-  box-shadow: var(--shadow-lg);
-}
 .ag-game-stage-panel.is-compact .ag-game-stage-head { padding: .3rem .55rem; gap: .25rem; }
 .ag-game-stage-panel.is-compact .ag-game-stage-body { padding: .35rem .5rem; }
 .ag-game-stage-panel.is-compact :is(.ag-chess-board-wrap, .ag-go-board-wrap) {
