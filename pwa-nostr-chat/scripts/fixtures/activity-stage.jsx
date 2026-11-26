@@ -47,9 +47,9 @@ function Fixture() {
   const [lastMove, setLastMove] = useState('')
   const games = { activeGamesByScope: { [scopeKey]: board, [other.scopeKey]: other },
     minimized, focusedScopeKey, setMinimized, setFocusedScopeKey,
-    makeChessMove: (...args) => setLastMove(JSON.stringify(args)),
-    makeGoMove: (...args) => setLastMove(JSON.stringify(args)),
-    joinPokerTable: (...args) => setLastMove(JSON.stringify(args)) }
+    makeChessMove: (...args) => setLastMove(prev => prev + JSON.stringify(args)),
+    makeGoMove: (...args) => setLastMove(prev => prev + JSON.stringify(args)),
+    joinPokerTable: (...args) => setLastMove(prev => prev + JSON.stringify(args)) }
   const engine = { calls: { activeCall, audioOutputDevices: [], audioInputDevices: [],
       recordingQuality: 'balanced', leaveCall: () => setActiveCall(null) }, games,
     identity: { masterPubkey: pk, nickname: 'Alice' }, servers: { joinedServers: [] },

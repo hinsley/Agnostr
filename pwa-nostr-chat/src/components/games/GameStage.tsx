@@ -5,8 +5,9 @@ import {
   Crown,
   Gamepad2,
   Minimize2,
+  Maximize2,
+  ChevronDown,
   Phone,
-  PinOff,
   Spade,
   X,
 } from 'lucide-react'
@@ -27,12 +28,13 @@ import { PokerTableView } from './PokerTableView.tsx'
 export interface GameStageProps {
   engine: AgnostrEngine
   games: GameEngine
-  embeddedSession?: ActiveGameSession
   floatingDock?: HTMLElement | null
   chatDock?: HTMLElement | null
   onOpenInChat?: (session: ActiveGameSession) => void
-  onPlayInChat?: () => void
-  onUnpin?: () => void
+  compactCallDocks?: {
+    video: (el: HTMLDivElement | null) => void
+    controls: (el: HTMLDivElement | null) => void
+  }
   onPlaySound?: (cue: SoundCue) => void
 }
 
@@ -199,12 +201,10 @@ function computeSessionMeta(
 export function GameStage({
   engine,
   games,
-  embeddedSession,
   floatingDock,
   chatDock,
   onOpenInChat,
-  onPlayInChat,
-  onUnpin,
+  compactCallDocks,
   onPlaySound,
 }: GameStageProps) {
   const [confirmClose, setConfirmClose] = useState(false)
@@ -214,17 +214,14 @@ export function GameStage({
     [games.activeGamesByScope],
   )
 
-  const embedded = Boolean(embeddedSession)
-  const focusedSession: ActiveGameSession | null = embeddedSession ?? (games.focusedScopeKey
-    ? (games.activeGamesByScope[games.focusedScopeKey] ?? null)
-    : null)
-
-  const showBoard = Boolean(focusedSession && (embedded || (chatDock && !games.minimized)))
+  const focusedSession = games.focusedScopeKey ? games.activeGamesByScope[games.focusedScopeKey] : null
+  const boardTarget = chatDock ?? floatingDock
+  const showBoard = Boolean(focusedSession && boardTarget)
+  const compact = Boolean(games.minimized || !chatDock)
   const activeCall = engine.calls.activeCall
 
   // Prioritize a session where it's your turn when minimized across multiple active scopes
   const pillSessions = useMemo(() => {
-    if (embedded) return []
     const ranked = allSessions.filter((s) => !showBoard || s.scopeKey !== games.focusedScopeKey).map((s) => ({
       session: s,
       meta: computeSessionMeta(s, engine),
@@ -236,13 +233,13 @@ export function GameStage({
       return b.session.updatedAtMs - a.session.updatedAtMs
     })
     return ranked
-  }, [embedded, showBoard, allSessions, engine, games.focusedScopeKey])
+  }, [showBoard, allSessions, engine, games.focusedScopeKey])
 
   // Reset close confirmation when switching/minimizing sessions
   const focusedKey = focusedSession?.scopeKey ?? null
   useEffect(() => {
     setConfirmClose(false)
-  }, [focusedKey, showBoard])
+  }, [focusedKey, showBoard, compact])
 
   // Prefetch kind:0 profile pictures for local user, DM opponent, and all seated Poker players
   const focusedPokerSeatPubkeysKey = useMemo(() => {
@@ -283,23 +280,26 @@ export function GameStage({
     ensureProfilePictures,
   ])
 
-  // Android / PWA Back and Escape hide the inline board without ending the game
-  useBackHandler(showBoard && !embedded, () => {
-    games.setMinimized(true)
-  })
+  // Back first shrinks the board; a second Back hides it without ending the game.
+  const stepBack = () => {
+    if (compact) games.setFocusedScopeKey(null)
+    else games.setMinimized(true)
+  }
+  useBackHandler(showBoard, stepBack)
 
   useEffect(() => {
-    if (!showBoard || embedded) return
+    if (!showBoard) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
         onPlaySound?.('click')
-        games.setMinimized(true)
+        if (compact) games.setFocusedScopeKey(null)
+        else games.setMinimized(true)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [showBoard, embedded, games, onPlaySound])
+  }, [showBoard, compact, games, onPlaySound])
 
   if (typeof document === 'undefined') return null
 
@@ -314,9 +314,10 @@ export function GameStage({
     const watchingPoker = focusedSession.kind === 'poker' &&
       !parsePokerSessionState(focusedSession)?.seats.some((seat) => seat.pubkey === focusedSession.localPubkey)
 
-    const handleMinimize = () => {
+    const handleResize = () => {
       onPlaySound?.('click')
-      games.setMinimized(true)
+      if (compact && !chatDock) onOpenInChat?.(focusedSession)
+      else games.setMinimized(!compact)
     }
 
     const handleCloseImmediate = () => {
@@ -462,8 +463,8 @@ export function GameStage({
     }
 
     const board = (
-      <section
-        className={`ag-game-stage-panel is-${focusedSession.kind}${embedded ? ' ag-game-embedded' : ' ag-game-in-chat'}`}
+      <section key={focusedSession.gameId}
+        className={`ag-game-stage-panel is-${focusedSession.kind} ${chatDock ? 'ag-game-in-chat' : 'ag-game-floating'}${compact ? ' is-compact' : ''}`}
         role="region"
         aria-label={`${meta.title} · ${meta.scopeLabel}`}
         onClick={(e) => e.stopPropagation()}
@@ -495,9 +496,6 @@ export function GameStage({
               </span>
             )}
 
-            {onPlayInChat && (
-              <button type="button" className="ag-game-head-btn" onClick={onPlayInChat}>Play in chat</button>
-            )}
             {!activeCall && (
               <button
                 type="button"
@@ -513,11 +511,19 @@ export function GameStage({
             <button
               type="button"
               className="ag-game-head-btn icon-only"
-              onClick={embedded ? onUnpin : handleMinimize}
-              title={embedded ? "Unpin game and show call feeds" : "Minimize game"}
-              aria-label={embedded ? "Unpin game" : "Minimize game"}
+              onClick={handleResize}
+              title={compact ? 'Expand game' : 'Minimize game'}
+              aria-label={compact ? 'Expand game' : 'Minimize game'}
             >
-              {embedded ? <PinOff size={14} /> : <Minimize2 size={14} />}
+              {compact ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+            </button>
+
+            <button type="button" className="ag-game-head-btn icon-only"
+              onClick={() => {
+                onPlaySound?.('click')
+                games.setFocusedScopeKey(null)
+              }} title="Hide game" aria-label="Hide game">
+              <ChevronDown size={14} />
             </button>
 
             {confirmClose && !meta.isFinished ? (
@@ -564,16 +570,21 @@ export function GameStage({
           </div>
         </header>
 
+        {compactCallDocks && (
+          <div className="ag-game-compact-media">
+            <div className="ag-game-video-dock" ref={compactCallDocks.video} />
+            <div className="ag-game-compact-call-controls" ref={compactCallDocks.controls} />
+          </div>
+        )}
         <div className="ag-game-stage-body">{boardBody}</div>
       </section>
     )
-    if (embedded) return board
-    if (chatDock) visibleBoard = createPortal(board, chatDock)
+    if (boardTarget) visibleBoard = createPortal(board, boardTarget, 'game-board')
   }
 
   if (floatingDock && pillSessions.length) {
     return <>{visibleBoard}{createPortal(
-      <div className="ag-game-dock-list" aria-label="Minimized games" role="region">
+      <div className="ag-game-dock-list" aria-label="Background games" role="region">
         {pillSessions.map(({ session: pillSession, meta }) => (
           <div
             key={pillSession.scopeKey}
@@ -581,7 +592,7 @@ export function GameStage({
               meta.isFinished ? ' is-finished' : ''
             }`}
             role="region"
-            aria-label={`Minimized game: ${meta.title} (${meta.scopeLabel})`}
+            aria-label={`Background game: ${meta.title} (${meta.scopeLabel})`}
           >
             <button
               type="button"

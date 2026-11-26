@@ -446,7 +446,6 @@ export function App() {
   const hasAnyActiveGame = Object.keys(engine.games.activeGamesByScope).length > 0
   const isGameStageOpen = Boolean(
     engine.games.focusedScopeKey &&
-      !engine.games.minimized &&
       engine.games.activeGamesByScope[engine.games.focusedScopeKey]
   )
 
@@ -3619,7 +3618,8 @@ export function App() {
       {(activeCall || engine.transcription.endedCallTranscript || hasAnyActiveGame) && (
         <ActivityStages engine={engine} expanded={callExpanded} onSetExpanded={setCallExpanded}
           compactFloating={callCompactFloating} floatingContext={callFloatingContext}
-          gameChatDock={inChatRoomMain ? gameChatDock : null} onRequestGameChat={handleOpenGameChat}
+          gameChatDock={inChatRoomMain ? gameChatDock : null}
+          allowFloatingGame={!isMobileViewport || mobileScreen !== 'list'} onRequestGameChat={handleOpenGameChat}
           dockContainer={inChatRoomMain ? callDockSlotEl : null} onInspectPeer={setInspectedPeer}
           onOpenDm={handleOpenDm} onReturnToCall={handleReturnToActiveCall} onPlaySound={playSound} />
       )}
