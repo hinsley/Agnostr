@@ -1,5 +1,7 @@
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -10,6 +12,7 @@ import { createPortal } from 'react-dom'
 import { nip19 } from 'nostr-tools'
 import {
   AlertCircle,
+  ArrowDown,
   Bluetooth,
   Captions,
   Check,
@@ -1056,16 +1059,58 @@ export function CallStage({
   const [dmPipCorner, setDmPipCorner] = useState<'br' | 'bl' | 'tr' | 'tl'>('br')
   const [dmCameraRear, setDmCameraRear] = useState(false)
   const [transcriptOpen, setTranscriptOpen] = useState(false)
+  const [transcriptListNode, setTranscriptListNode] = useState<HTMLDivElement | null>(null)
+  const [transcriptScrolledUp, setTranscriptScrolledUp] = useState(false)
+  const [transcriptNewCount, setTranscriptNewCount] = useState(0)
   const [copiedTranscript, setCopiedTranscript] = useState(false)
   const [promptCopied, setPromptCopied] = useState(false)
   const [promptSaved, setPromptSaved] = useState(false)
   const qualityWrapRef = useRef<HTMLDivElement | null>(null)
   const audioWrapRef = useRef<HTMLDivElement | null>(null)
   const transcriptListRef = useRef<HTMLDivElement | null>(null)
+  const transcriptPinnedRef = useRef(true)
+  const transcriptMountedReadyRef = useRef(false)
+  const transcriptProgrammaticScrollRef = useRef(false)
+  const transcriptSmoothTargetTimerRef = useRef<number | null>(null)
+  const transcriptLastCaptionIdRef = useRef<string>('')
+  const transcriptLastCountRef = useRef<number>(0)
+  const transcriptLastCallIdRef = useRef<string | null>(null)
   const promptDismissTimerRef = useRef<number | null>(null)
   const promptCopyTimerRef = useRef<number | null>(null)
   const endedTranscript = transcription.endedCallTranscript
   const endedTranscriptId = endedTranscript?.id ?? null
+
+  const clearTranscriptSmoothGuard = useCallback(() => {
+    transcriptProgrammaticScrollRef.current = false
+    if (transcriptSmoothTargetTimerRef.current !== null) {
+      window.clearTimeout(transcriptSmoothTargetTimerRef.current)
+      transcriptSmoothTargetTimerRef.current = null
+    }
+  }, [])
+
+  const handleTranscriptListRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      transcriptListRef.current = node
+      setTranscriptListNode(node)
+      if (!node) {
+        transcriptMountedReadyRef.current = false
+        clearTranscriptSmoothGuard()
+      }
+    },
+    [clearTranscriptSmoothGuard],
+  )
+
+  const pinTranscriptToBottomNow = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return
+    transcriptProgrammaticScrollRef.current = true
+    el.scrollTop = el.scrollHeight
+    window.requestAnimationFrame(() => {
+      if (transcriptListRef.current === el && transcriptPinnedRef.current) {
+        el.scrollTop = el.scrollHeight
+      }
+      transcriptProgrammaticScrollRef.current = false
+    })
+  }, [])
 
   // Prefetch verified kind: 0 profile pictures for all active call participants (+ DM callee during ringout)
   const callParticipantPubkeysKey = useMemo(() => {
@@ -1161,18 +1206,198 @@ export function CallStage({
     }
   }, [pinnedVideoPubkey, activeCall, engine, contentFilter])
 
-  useEffect(() => {
-    if (!transcriptOpen) return
-    const el = transcriptListRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [transcriptOpen, transcription.liveCaptions.length])
-
   const isDmCall = activeCall?.mode === 'dm'
   const isDmMinimized = Boolean(
     isDmCall && activeCall && !expanded && (dmMinimizedCallId === activeCall.callId || compactFloating),
   )
   const isDmFullScreen = Boolean(isDmCall && activeCall && !isDmMinimized)
+
+  const liveCaptions = transcription.liveCaptions
+  const liveCaptionsCount = liveCaptions.length
+  const lastCaptionId = liveCaptionsCount > 0 ? liveCaptions[liveCaptionsCount - 1].id : ''
+
+  // Cleanup smooth-scroll timer on unmount
+  useEffect(() => {
+    return () => {
+      clearTranscriptSmoothGuard()
+    }
+  }, [clearTranscriptSmoothGuard])
+
+  // Sticky bottom autoscroll for the call transcript pane:
+  // - Remounts (e.g. leaving & returning to a group/channel or restoring minimized DM call)
+  //   always open scrolled cleanly to the bottom before paint.
+  // - Incoming captions (even past the 500-entry rolling cap) auto-scroll only while pinned;
+  //   scrolling up keeps the reader in place and counts new lines cleanly.
+  useLayoutEffect(() => {
+    if (activeCallId !== transcriptLastCallIdRef.current || liveCaptionsCount === 0) {
+      transcriptLastCallIdRef.current = activeCallId
+      transcriptLastCaptionIdRef.current = lastCaptionId
+      transcriptLastCountRef.current = liveCaptionsCount
+      transcriptPinnedRef.current = true
+      setTranscriptScrolledUp(false)
+      setTranscriptNewCount(0)
+    }
+
+    if (!transcriptOpen || !transcriptListNode) return
+
+    if (!transcriptMountedReadyRef.current) {
+      transcriptPinnedRef.current = true
+      setTranscriptScrolledUp(false)
+      setTranscriptNewCount(0)
+      transcriptLastCaptionIdRef.current = lastCaptionId
+      transcriptLastCountRef.current = liveCaptionsCount
+      pinTranscriptToBottomNow(transcriptListNode)
+      transcriptMountedReadyRef.current = true
+      return
+    }
+
+    if (lastCaptionId && lastCaptionId !== transcriptLastCaptionIdRef.current) {
+      let added = 1
+      const prevId = transcriptLastCaptionIdRef.current
+      if (prevId) {
+        let prevIdx = -1
+        for (let i = liveCaptionsCount - 1; i >= 0; i -= 1) {
+          if (liveCaptions[i].id === prevId) {
+            prevIdx = i
+            break
+          }
+        }
+        added =
+          prevIdx >= 0
+            ? Math.max(1, liveCaptionsCount - 1 - prevIdx)
+            : Math.max(1, liveCaptionsCount - transcriptLastCountRef.current)
+      } else {
+        added = Math.max(1, liveCaptionsCount - transcriptLastCountRef.current)
+      }
+
+      transcriptLastCaptionIdRef.current = lastCaptionId
+      transcriptLastCountRef.current = liveCaptionsCount
+
+      if (transcriptPinnedRef.current) {
+        pinTranscriptToBottomNow(transcriptListNode)
+      } else {
+        setTranscriptNewCount((prev) => prev + added)
+        setTranscriptScrolledUp(true)
+      }
+      return
+    }
+
+    if (transcriptPinnedRef.current) {
+      pinTranscriptToBottomNow(transcriptListNode)
+    }
+  }, [
+    transcriptOpen,
+    transcriptListNode,
+    compactFloating,
+    isDmMinimized,
+    expanded,
+    activeCallId,
+    liveCaptions,
+    liveCaptionsCount,
+    lastCaptionId,
+    pinTranscriptToBottomNow,
+  ])
+
+  // Keep sticky bottom locked when the transcript pane resizes (docked <-> expanded, mobile keyboard)
+  useEffect(() => {
+    if (!transcriptOpen || !transcriptListNode || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      if (transcriptMountedReadyRef.current && transcriptPinnedRef.current) {
+        pinTranscriptToBottomNow(transcriptListNode)
+      }
+    })
+    ro.observe(transcriptListNode)
+    return () => ro.disconnect()
+  }, [transcriptOpen, transcriptListNode, pinTranscriptToBottomNow])
+
+  // Break stickiness immediately on upward wheel / touch / keyboard scroll intent so live captions never fight reading
+  useEffect(() => {
+    if (!transcriptOpen || !transcriptListNode) return
+    const container = transcriptListNode
+    let touchStartY = 0
+    let lastTouchY = 0
+
+    const unpinIfScrollableUp = () => {
+      clearTranscriptSmoothGuard()
+      if (container.scrollTop > 0) {
+        transcriptPinnedRef.current = false
+        setTranscriptScrolledUp(true)
+      }
+    }
+
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) {
+        unpinIfScrollableUp()
+      }
+    }
+    const onTouchStart = (e: TouchEvent) => {
+      clearTranscriptSmoothGuard()
+      touchStartY = e.touches[0]?.clientY ?? 0
+      lastTouchY = touchStartY
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY ?? touchStartY
+      if (y > lastTouchY + 3 || (y >= lastTouchY && y > touchStartY + 4)) {
+        unpinIfScrollableUp()
+      }
+      lastTouchY = y
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'PageUp' || e.key === 'ArrowUp' || e.key === 'Home') {
+        unpinIfScrollableUp()
+      }
+    }
+
+    container.addEventListener('wheel', onWheel, { passive: true })
+    container.addEventListener('touchstart', onTouchStart, { passive: true })
+    container.addEventListener('touchmove', onTouchMove, { passive: true })
+    container.addEventListener('keydown', onKeyDown)
+    return () => {
+      container.removeEventListener('wheel', onWheel)
+      container.removeEventListener('touchstart', onTouchStart)
+      container.removeEventListener('touchmove', onTouchMove)
+      container.removeEventListener('keydown', onKeyDown)
+    }
+  }, [transcriptOpen, transcriptListNode, clearTranscriptSmoothGuard])
+
+  const handleTranscriptScroll = useCallback(() => {
+    const el = transcriptListRef.current
+    if (!el || !transcriptMountedReadyRef.current) return
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (transcriptProgrammaticScrollRef.current) {
+      if (distFromBottom <= 48) {
+        clearTranscriptSmoothGuard()
+      }
+      return
+    }
+    if (distFromBottom <= 48) {
+      transcriptPinnedRef.current = true
+      setTranscriptScrolledUp(false)
+      setTranscriptNewCount(0)
+    } else {
+      transcriptPinnedRef.current = false
+      setTranscriptScrolledUp(true)
+    }
+  }, [clearTranscriptSmoothGuard])
+
+  const handleJumpTranscriptToLatest = useCallback(() => {
+    const el = transcriptListRef.current
+    transcriptPinnedRef.current = true
+    setTranscriptScrolledUp(false)
+    setTranscriptNewCount(0)
+    onPlaySound?.('click')
+    if (!el) return
+    clearTranscriptSmoothGuard()
+    transcriptProgrammaticScrollRef.current = true
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    transcriptSmoothTargetTimerRef.current = window.setTimeout(() => {
+      transcriptSmoothTargetTimerRef.current = null
+      transcriptProgrammaticScrollRef.current = false
+      if (transcriptListRef.current === el && transcriptPinnedRef.current) {
+        el.scrollTop = el.scrollHeight
+      }
+    }, 450)
+  }, [clearTranscriptSmoothGuard, onPlaySound])
 
   const isQualityPopoverVisible =
     qualityMenuOpen && Boolean(activeCall) && !activeCall?.localRecording
@@ -1323,16 +1548,17 @@ export function CallStage({
         className="ag-transcript-save-prompt"
         role="status"
         aria-live="polite"
-        aria-label="Save call transcript"
+        aria-label="Call transcript saved"
       >
         <div className="ag-transcript-prompt-top">
           <span className="ag-transcript-prompt-icon" aria-hidden="true">
             <Captions size={15} />
           </span>
           <div className="ag-transcript-prompt-copy">
-            <span className="ag-transcript-prompt-title">Save call transcript?</span>
+            <span className="ag-transcript-prompt-title">Call transcript saved</span>
             <span className="ag-transcript-prompt-sub truncate">
-              {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {endedTranscript.callTitle}
+              {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {endedTranscript.callTitle} · Kept
+              30 days
             </span>
           </div>
           <button
@@ -1353,7 +1579,7 @@ export function CallStage({
             onClick={handlePromptSave}
           >
             {promptSaved ? <Check size={13} /> : <Download size={13} />}
-            <span>{promptSaved ? 'Saved' : 'Save .md'}</span>
+            <span>{promptSaved ? 'Downloaded' : 'Download .md'}</span>
           </button>
           <button
             type="button"
@@ -3240,7 +3466,11 @@ export function CallStage({
               </div>
             </div>
 
-            <div className="ag-call-transcript-list" ref={transcriptListRef}>
+            <div
+              className="ag-call-transcript-list"
+              ref={handleTranscriptListRef}
+              onScroll={handleTranscriptScroll}
+            >
               {transcription.liveCaptions.length === 0 ? (
                 <div className="ag-call-transcript-empty">
                   {transcription.modelStatus === 'downloading'
@@ -3272,6 +3502,24 @@ export function CallStage({
                 ))
               )}
             </div>
+
+            {transcriptScrolledUp && liveCaptionsCount > 0 && (
+              <button
+                type="button"
+                className={`ag-call-transcript-jump${transcriptNewCount > 0 ? ' has-new' : ''}`}
+                onClick={handleJumpTranscriptToLatest}
+                aria-label={
+                  transcriptNewCount > 0
+                    ? `Jump to ${transcriptNewCount} new transcript ${
+                        transcriptNewCount === 1 ? 'line' : 'lines'
+                      }`
+                    : 'Jump to latest transcript'
+                }
+              >
+                <ArrowDown size={12} aria-hidden="true" />
+                <span>{transcriptNewCount > 0 ? `${transcriptNewCount} new` : 'Latest'}</span>
+              </button>
+            )}
           </aside>
         )}
       </div>

@@ -787,6 +787,104 @@ export function clampTimestamp(createdAt: number): number {
   return Math.min(createdAt, nowSec)
 }
 
+/**
+ * Extracts Nymchat `['nymquote', quoteAuthor, quoteText]` (+ optional `['quote_pk', hex]`)
+ * reply metadata and strips the redundant leading `@<quoteAuthor> ` prefix from `content`
+ * when non-empty reply text remains.
+ */
+export function extractNymquoteReply(
+  tags: readonly string[][],
+  content: string
+): { replyTo: ReplyReference; displayContent: string } | null {
+  const quoteTag = tags.find(
+    (t) =>
+      Array.isArray(t) &&
+      t[0] === 'nymquote' &&
+      typeof t[1] === 'string' &&
+      t[1].trim().length > 0 &&
+      typeof t[2] === 'string' &&
+      t[2].trim().length > 0
+  )
+  if (!quoteTag) return null
+
+  const cleanAuthor = quoteTag[1].trim().replace(/^@+/, '').slice(0, 48)
+  if (!cleanAuthor) return null
+
+  // Strip nested leading `>` quote lines (falling back to stripped raw lines if all started with `>`)
+  const rawLines = quoteTag[2].split(/\r?\n/)
+  const nonNestedLines = rawLines
+    .filter((line) => !line.trimStart().startsWith('>'))
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const cleanPreview = (
+    nonNestedLines.length > 0
+      ? nonNestedLines.join(' ')
+      : rawLines
+          .map((line) => line.trimStart().replace(/^>+\s*/, '').trim())
+          .filter(Boolean)
+          .join(' ')
+  )
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 140)
+  if (!cleanPreview) return null
+
+  const rawQuotePk =
+    tags.find((t) => Array.isArray(t) && t[0] === 'quote_pk' && typeof t[1] === 'string')?.[1]
+      ?.trim()
+      .toLowerCase() ?? ''
+  let quotePk: string | undefined = /^[0-9a-f]{64}$/.test(rawQuotePk) ? rawQuotePk : undefined
+  if (!quotePk) {
+    const pTag = tags.find(
+      (t) =>
+        Array.isArray(t) &&
+        t[0] === 'p' &&
+        typeof t[1] === 'string' &&
+        /^[0-9a-f]{64}$/i.test(t[1].trim())
+    )
+    if (pTag) quotePk = pTag[1].trim().toLowerCase()
+  }
+
+  const trimmedContent = content.trim()
+  let displayContent = trimmedContent
+  const leadingMentionRe = new RegExp(`^@${escapeRegExp(cleanAuthor)}(?:[:,])?\\s+`, 'i')
+  const stripped = trimmedContent.replace(leadingMentionRe, '').trim()
+  if (stripped.length > 0) {
+    displayContent = stripped
+  }
+
+  return {
+    replyTo: {
+      id: '',
+      ...(quotePk ? { pubkey: quotePk } : {}),
+      nickname: cleanAuthor,
+      preview: cleanPreview,
+    },
+    displayContent,
+  }
+}
+
+/**
+ * Selects the reply target `e` tag following NIP-10 priority:
+ * 1) `reply` marker, 2) `root` marker, 3) last unmarked valid `e` tag (`length >= 16`).
+ */
+function findReplyETag(tags: readonly string[][]): string[] | undefined {
+  const valid = tags.filter(
+    (t) => Array.isArray(t) && t[0] === 'e' && typeof t[1] === 'string' && t[1].trim().length >= 16
+  )
+  if (valid.length === 0) return undefined
+  const replyMarked = valid.find(
+    (t) => typeof t[3] === 'string' && t[3].trim().toLowerCase() === 'reply'
+  )
+  if (replyMarked) return replyMarked
+  const rootMarked = valid.find(
+    (t) => typeof t[3] === 'string' && t[3].trim().toLowerCase() === 'root'
+  )
+  if (rootMarked) return rootMarked
+  const unmarked = valid.filter((t) => !t[3] || !t[3].trim())
+  return unmarked.length > 0 ? unmarked[unmarked.length - 1] : valid[valid.length - 1]
+}
+
 export function parseGeohashChatEvent(
   event: NostrEvent,
   expectedGeohash: string,
@@ -820,20 +918,28 @@ export function parseGeohashChatEvent(
     nickname.toLowerCase().endsWith('.mesh') ||
     nickname.toLowerCase() === 'mesh-bridge'
 
+  const nymquote = extractNymquoteReply(event.tags, content)
+  const displayContent = nymquote ? nymquote.displayContent : content
+
   let replyTo: ReplyReference | undefined
-  const eTag = event.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16)
+  const eTag = findReplyETag(event.tags)
   if (eTag) {
-    const parent = findMessageById?.(eTag[1])
+    const targetId = eTag[1].trim()
+    const parent = findMessageById?.(targetId)
     replyTo = {
-      id: eTag[1],
-      pubkey: parent?.pubkey ?? getTagValue(event.tags, 'p') ?? undefined,
-      nickname: parent?.nickname,
-      preview: parent ? parent.content.slice(0, 120) : undefined,
+      id: targetId,
+      pubkey: parent?.pubkey ?? nymquote?.replyTo.pubkey ?? getTagValue(event.tags, 'p') ?? undefined,
+      nickname: parent?.nickname ?? nymquote?.replyTo.nickname,
+      preview: parent ? parent.content.slice(0, 120) : nymquote?.replyTo.preview,
     }
+  } else if (nymquote) {
+    replyTo = nymquote.replyTo
   }
 
-  const voiceMemo = parseVoiceMemoFromImeta(event.tags) ?? parseInlineChatVoice(content, event.tags)?.memo
-  const imageAttachment = parseImageFromImeta(event.tags) ?? parseInlineChatImage(content, event.tags)?.image
+  const voiceMemo =
+    parseVoiceMemoFromImeta(event.tags) ?? parseInlineChatVoice(displayContent, event.tags)?.memo
+  const imageAttachment =
+    parseImageFromImeta(event.tags) ?? parseInlineChatImage(displayContent, event.tags)?.image
 
   return {
     id: event.id,
@@ -841,11 +947,11 @@ export function parseGeohashChatEvent(
     pubkey,
     nickname,
     displayHandle,
-    content,
+    content: displayContent,
     createdAt: clampTimestamp(event.created_at),
     tags: event.tags,
     isOwn: ownPubkeys.has(pubkey),
-    isEmote: isEmoteContent(content),
+    isEmote: isEmoteContent(displayContent),
     isTeleported,
     isMeshBridge,
     bridgeClient: clientTag,
@@ -893,20 +999,28 @@ export function parseNamedBitchatChatEvent(
     nickname.toLowerCase().endsWith('.mesh') ||
     nickname.toLowerCase() === 'mesh-bridge'
 
+  const nymquote = extractNymquoteReply(event.tags, content)
+  const displayContent = nymquote ? nymquote.displayContent : content
+
   let replyTo: ReplyReference | undefined
-  const eTag = event.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16)
+  const eTag = findReplyETag(event.tags)
   if (eTag) {
-    const parent = findMessageById?.(eTag[1])
+    const targetId = eTag[1].trim()
+    const parent = findMessageById?.(targetId)
     replyTo = {
-      id: eTag[1],
-      pubkey: parent?.pubkey ?? getTagValue(event.tags, 'p') ?? undefined,
-      nickname: parent?.nickname,
-      preview: parent ? parent.content.slice(0, 120) : undefined,
+      id: targetId,
+      pubkey: parent?.pubkey ?? nymquote?.replyTo.pubkey ?? getTagValue(event.tags, 'p') ?? undefined,
+      nickname: parent?.nickname ?? nymquote?.replyTo.nickname,
+      preview: parent ? parent.content.slice(0, 120) : nymquote?.replyTo.preview,
     }
+  } else if (nymquote) {
+    replyTo = nymquote.replyTo
   }
 
-  const voiceMemo = parseVoiceMemoFromImeta(event.tags) ?? parseInlineChatVoice(content, event.tags)?.memo
-  const imageAttachment = parseImageFromImeta(event.tags) ?? parseInlineChatImage(content, event.tags)?.image
+  const voiceMemo =
+    parseVoiceMemoFromImeta(event.tags) ?? parseInlineChatVoice(displayContent, event.tags)?.memo
+  const imageAttachment =
+    parseImageFromImeta(event.tags) ?? parseInlineChatImage(displayContent, event.tags)?.image
 
   return {
     id: event.id,
@@ -914,11 +1028,11 @@ export function parseNamedBitchatChatEvent(
     pubkey,
     nickname,
     displayHandle,
-    content,
+    content: displayContent,
     createdAt: clampTimestamp(event.created_at),
     tags: event.tags,
     isOwn: ownPubkeys.has(pubkey),
-    isEmote: isEmoteContent(content),
+    isEmote: isEmoteContent(displayContent),
     isTeleported: false,
     isMeshBridge,
     bridgeClient: clientTag,

@@ -41,6 +41,8 @@ export interface MemoTranscriptState {
   updatedAt: number
 }
 
+export const CALL_TRANSCRIPT_RETENTION_DAYS = 30
+
 export interface LiveCaptionEntry {
   id: string
   pubkey: string
@@ -49,6 +51,36 @@ export interface LiveCaptionEntry {
   isSelf: boolean
   text: string
   timestamp: number // unix ms
+}
+
+export interface SavedCallTranscript {
+  id: string
+  callId: string
+  callTitle: string
+  startedAt: number // unix ms
+  endedAt: number // unix ms
+  savedAt: number // unix ms (retention baseline)
+  expiresAt: number // savedAt + 30 days
+  modelLabel: string
+  hfModelId: string
+  entries: LiveCaptionEntry[]
+  contentHash: string // SHA-256 hex (computed ONLY on finalize)
+}
+
+export interface CallTranscriptSyncPayload {
+  v: 1
+  updatedAt: number
+  collectionHash: string
+  transcripts: SavedCallTranscript[]
+  deleted: Record<string, number> // id -> deletedAtMs (30-day TTL tombstones)
+}
+
+export interface CallTranscriptSyncDigest {
+  count: number
+  updatedAt: number
+  hash: string // precomputed collectionHash (O(1) read)
+  itemHashes: Record<string, string> // id -> contentHash (for delta sync)
+  deleted: Record<string, number> // id -> deletedAtMs
 }
 
 export interface EndedCallTranscript {
@@ -61,6 +93,8 @@ export interface EndedCallTranscript {
   filename: string
   markdown: string
   plainText: string
+  contentHash?: string
+  savedAt?: number
 }
 
 export interface PersistedTranscriptionConfig {
@@ -117,4 +151,15 @@ export interface TranscriptionEngine {
   endedCallTranscript: EndedCallTranscript | null
   dismissEndedCallTranscript: () => void
   downloadEndedCallTranscript: () => void
+
+  // Automatically persisted call transcripts (30-day retention, hash-verified multi-device sync)
+  savedCallTranscripts: SavedCallTranscript[]
+  deleteSavedCallTranscript: (id: string) => void
+  clearSavedCallTranscripts: () => void
+  downloadSavedCallTranscript: (id: string) => void
+  formatSavedCallTranscriptMarkdown: (transcript: SavedCallTranscript) => {
+    filename: string
+    markdown: string
+    plainText: string
+  }
 }

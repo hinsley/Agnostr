@@ -626,12 +626,20 @@ export async function decryptGiftWrapEvent(
     if (!rumor || (rumor.kind !== KIND_DM_RUMOR && rumor.kind !== 7) ||
         rumor.pubkey !== seal.pubkey || typeof rumor.content !== 'string') return null
     if (rumor.id && rumor.id !== getEventHash(rumor)) return null
-    const refId = privateTarget(rumor.tags, recipient.pubkey, seal.pubkey)
+    const refId = privateTarget(rumor.tags, recipient.pubkey, seal.pubkey, rumor.kind === KIND_DM_RUMOR)
     if (refId === null || (rumor.kind === 7 && (!refId || !validReaction(rumor.content)))) return null
-    return { id: rumor.id || giftWrap.id, senderPubkey: seal.pubkey, protocol: 'nip17',
-      content: rumor.content, createdAt: clampDmCreatedAtSec(rumor.created_at ?? giftWrap.created_at),
+    const embeddedMessageId =
+      rumor.kind === KIND_DM_RUMOR ? privateEmbeddedMessageId(rumor.tags) : undefined
+    return {
+      id: rumor.id || giftWrap.id,
+      senderPubkey: seal.pubkey,
+      protocol: 'nip17',
+      content: rumor.content,
+      createdAt: clampDmCreatedAtSec(rumor.created_at ?? giftWrap.created_at),
       timestampMs: privateOrderingTime(rumor.tags, rumor.created_at),
-      ...(rumor.kind === 7 ? { reactionToId: refId } : { replyToId: refId }) }
+      ...(embeddedMessageId ? { embeddedMessageId } : {}),
+      ...(rumor.kind === 7 ? { reactionToId: refId } : { replyToId: refId }),
+    }
   } catch {
     return null
   }
@@ -646,18 +654,36 @@ function privateOrderingTime(tags: unknown, sec: number): number | undefined {
   return Math.floor(ms / 1000) === sec && ms <= Date.now() ? ms : undefined
 }
 
+function privateEmbeddedMessageId(tags: unknown): string | undefined {
+  if (!Array.isArray(tags)) return undefined
+  const raw = tags.find((tag) => Array.isArray(tag) && tag[0] === 'x')?.[1]
+  return isDmTargetId(raw) ? raw : undefined
+}
+
 function validReaction(content: string): boolean {
   return !!content.trim() && content.length <= 32 && !/\s/u.test(content)
 }
 
 // Never resolve a group-chat reference against a 1:1 conversation.
-function privateTarget(tags: unknown, recipient: string, sender: string): string | undefined | null {
+function privateTarget(
+  tags: unknown,
+  recipient: string,
+  sender: string,
+  allowNymthread = false
+): string | undefined | null {
   if (!Array.isArray(tags)) return undefined
-  let id: string | undefined
+  const recipientLower = recipient.toLowerCase()
+  const senderLower = sender.toLowerCase()
+  let eId: string | undefined
+  let nymthreadId: string | undefined
   for (const tag of tags) {
     if (!Array.isArray(tag)) continue
-    if (tag[0] === 'p' && tag[1] !== recipient && tag[1] !== sender) return null
-    if (tag[0] === 'e' && isDmTargetId(tag[1])) id = tag[1]
+    if (tag[0] === 'p') {
+      const pVal = typeof tag[1] === 'string' ? tag[1].toLowerCase() : tag[1]
+      if (pVal !== recipientLower && pVal !== senderLower) return null
+    }
+    if (tag[0] === 'e' && isDmTargetId(tag[1])) eId = tag[1]
+    if (allowNymthread && tag[0] === 'nymthread' && isDmTargetId(tag[1])) nymthreadId = tag[1]
   }
-  return id
+  return eId ?? nymthreadId
 }

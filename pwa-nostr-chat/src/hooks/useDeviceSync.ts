@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { Event as NostrEvent } from 'nostr-tools'
 import type {
   AmailSyncProvider,
+  CallTranscriptSyncProvider,
   DeviceSyncCrdtState,
   DeviceSyncEngine,
   DeviceSyncHelloPacket,
@@ -12,6 +13,7 @@ import type {
   DeviceSyncStatePacket,
   DeviceSyncWirePacket,
   LinkedDeviceInfo,
+  SyncedCallTranscriptsState,
   SyncedDeviceRecord,
   SyncedDmPeerNameRecord,
   SyncedRecentMessagesTail,
@@ -27,6 +29,7 @@ import type {
 import type { ServerMessage, ServerSummary } from '../types/servers.ts'
 import {
   buildAmailChunkPackets,
+  buildCallTranscriptChunkPackets,
   buildMessageChunkPackets,
   buildMessageRequestPackets,
   buildSignedDeviceSyncCheckpointEvent,
@@ -253,6 +256,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   deviceSync: DeviceSyncEngine
   registerAmailSyncProvider: (provider: AmailSyncProvider | null) => void
   notifyAmailChanged: () => void
+  registerCallTranscriptSyncProvider: (provider: CallTranscriptSyncProvider | null) => void
+  notifyCallTranscriptsChanged: () => void
 } {
   const {
     relayPool,
@@ -351,6 +356,8 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
   const amailProviderRef = useRef<AmailSyncProvider | null>(null)
   const amailTransfersRef = useRef<Map<string, PendingAmailTransfer>>(new Map())
   const amailLastUpdatedAtRef = useRef<number>(0)
+  const callTranscriptProviderRef = useRef<CallTranscriptSyncProvider | null>(null)
+  const transcriptTransfersRef = useRef<Map<string, PendingAmailTransfer>>(new Map())
   const subSeqRef = useRef<number>(0)
 
   const activeDmPeerNames = useMemo<Record<string, SyncedDmPeerNameRecord>>(() => {
@@ -741,6 +748,26 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     }
   }, [])
 
+  const getCallTranscriptExportInfo = useCallback((): SyncedCallTranscriptsState | null => {
+    const provider = callTranscriptProviderRef.current
+    if (!provider) return null
+    try {
+      const digest = provider.exportSyncDigest()
+      if (digest.count === 0 && Object.keys(digest.deleted).length === 0) return null
+      const payload = provider.exportSyncPayload()
+      if (payload.transcripts.length === 0 && Object.keys(payload.deleted).length === 0) {
+        return null
+      }
+      return {
+        updatedAt: payload.updatedAt,
+        hash: payload.collectionHash,
+        payload,
+      }
+    } catch {
+      return null
+    }
+  }, [])
+
   const computeLocalMsgDigests = useCallback(async (): Promise<DeviceSyncMsgDigests> => {
     const { dmMap, serverMap, bitchatMap } = collectLocalMessageBuckets()
     const dm: Record<string, DeviceSyncScopeDigest> = {}
@@ -756,11 +783,27 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       bitchat[gh] = computeScopeDigest(msgs)
     }
     const amailInfo = await getAmailExportInfo()
+    let callTranscriptsDigest: DeviceSyncMsgDigests['callTranscripts'] = null
+    if (callTranscriptProviderRef.current) {
+      try {
+        const digest = callTranscriptProviderRef.current.exportSyncDigest()
+        if (digest.count > 0 || Object.keys(digest.deleted).length > 0) {
+          callTranscriptsDigest = {
+            count: digest.count,
+            updatedAt: digest.updatedAt,
+            hash: digest.hash,
+          }
+        }
+      } catch {
+        callTranscriptsDigest = null
+      }
+    }
     return {
       dm,
       server,
       bitchat,
       amail: amailInfo ? { updatedAt: amailInfo.updatedAt, hash: amailInfo.hash } : null,
+      callTranscripts: callTranscriptsDigest,
     }
   }, [collectLocalMessageBuckets, getAmailExportInfo])
 
@@ -844,10 +887,17 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       try {
         const amailInfo = await getAmailExportInfo()
         if (!isCurrent()) return false
+        const callTranscriptsInfo = getCallTranscriptExportInfo()
         const recentTail = buildRecentMessagesTail()
         upsertSelfDeviceRecord(Date.now())
         persistLocalJournal()
-        const bounded = fitCheckpointStateWithinBudget(crdtRef.current, amailInfo, recentTail, MAX_NIP44_CHUNK_BYTES)
+        const bounded = fitCheckpointStateWithinBudget(
+          crdtRef.current,
+          amailInfo,
+          recentTail,
+          MAX_NIP44_CHUNK_BYTES,
+          callTranscriptsInfo
+        )
         if (utf8ByteLength(JSON.stringify(bounded)) > MAX_NIP44_CHUNK_BYTES) {
           issue = 'too-large'
           return false
@@ -885,6 +935,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       identityManager,
       relayPool,
       getAmailExportInfo,
+      getCallTranscriptExportInfo,
       buildRecentMessagesTail,
       upsertSelfDeviceRecord,
       persistLocalJournal,
@@ -948,6 +999,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       const owner = identityManager.getMasterKeyMaterial().pubkey
       const amailInfo = await getAmailExportInfo()
       if (identityManager.getMasterKeyMaterial().pubkey !== owner) return false
+      const callTranscriptsInfo = getCallTranscriptExportInfo()
       upsertSelfDeviceRecord(now)
       persistLocalJournal()
       const packet: DeviceSyncStatePacket = {
@@ -962,13 +1014,19 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       }
       const envelopeBytes = utf8ByteLength(JSON.stringify(packet)) -
         utf8ByteLength(JSON.stringify(packet.state))
-      packet.state = fitCheckpointStateWithinBudget(crdtRef.current, amailInfo, undefined,
-        MAX_NIP44_CHUNK_BYTES - envelopeBytes)
+      packet.state = fitCheckpointStateWithinBudget(
+        crdtRef.current,
+        amailInfo,
+        undefined,
+        MAX_NIP44_CHUNK_BYTES - envelopeBytes,
+        callTranscriptsInfo
+      )
       return await publishEphemeralPacket(packet, allowExtensionPrompt)
     },
     [
       identityManager,
       getAmailExportInfo,
+      getCallTranscriptExportInfo,
       upsertSelfDeviceRecord,
       persistLocalJournal,
       publishEphemeralPacket,
@@ -1112,6 +1170,22 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         }
       }
 
+      if (remoteState.callTranscripts?.payload && callTranscriptProviderRef.current) {
+        try {
+          const localDigest = callTranscriptProviderRef.current.exportSyncDigest()
+          if (remoteState.callTranscripts.hash !== localDigest.hash) {
+            const mergedCount = callTranscriptProviderRef.current.mergeSyncPayload(
+              remoteState.callTranscripts.payload
+            )
+            if (mergedCount > 0) {
+              itemsApplied += mergedCount
+            }
+          }
+        } catch {
+          // Ignore malformed optional call transcripts payload
+        }
+      }
+
       if (identityManager.getMasterKeyMaterial().pubkey !== owner) return { changed: false, itemsApplied: 0 }
       syncLinkedDevicesFromCrdt(changed ? merged : crdtRef.current)
 
@@ -1184,7 +1258,29 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           remoteDigests.amail.hash !== localDigests.amail?.hash
       )
 
-      if (scopes.length > 0 || wantAmail) {
+      let wantCallTranscripts: DeviceSyncMsgReqPacket['wantCallTranscripts'] = undefined
+      if (
+        callTranscriptProviderRef.current &&
+        remoteDigests.callTranscripts &&
+        remoteDigests.callTranscripts.hash &&
+        remoteDigests.callTranscripts.hash !== localDigests.callTranscripts?.hash
+      ) {
+        try {
+          const localTranscriptDigest = callTranscriptProviderRef.current.exportSyncDigest()
+          if (remoteDigests.callTranscripts.hash !== localTranscriptDigest.hash) {
+            wantCallTranscripts = {
+              knownHashes: localTranscriptDigest.itemHashes,
+              ...(Object.keys(localTranscriptDigest.deleted).length > 0
+                ? { deleted: localTranscriptDigest.deleted }
+                : {}),
+            }
+          }
+        } catch {
+          wantCallTranscripts = undefined
+        }
+      }
+
+      if (scopes.length > 0 || wantAmail || wantCallTranscripts) {
         lastReqSentToPeerRef.current.set(peerDeviceId, now)
         const req: DeviceSyncMsgReqPacket = {
           v: 1,
@@ -1194,6 +1290,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           ts: now,
           scopes,
           ...(wantAmail ? { wantAmail: true } : {}),
+          ...(wantCallTranscripts ? { wantCallTranscripts } : {}),
         }
         for (const packet of buildMessageRequestPackets(req)) {
           if (identityManager.getMasterKeyMaterial().pubkey !== owner) return
@@ -1330,6 +1427,34 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
           }
         }
 
+        if (packet.wantCallTranscripts && callTranscriptProviderRef.current) {
+          try {
+            const deltaPayload = callTranscriptProviderRef.current.exportSyncPayload(
+              packet.wantCallTranscripts.knownHashes,
+              packet.wantCallTranscripts.deleted
+            )
+            if (
+              deltaPayload.transcripts.length > 0 ||
+              Object.keys(deltaPayload.deleted).length > 0
+            ) {
+              const chunks = buildCallTranscriptChunkPackets({
+                deviceId: deviceIdRef.current,
+                targetDeviceId: packet.deviceId,
+                transferId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+                updatedAt: deltaPayload.updatedAt,
+                hash: computeJsonDigest(deltaPayload),
+                payload: deltaPayload,
+              })
+              for (const chunk of chunks) {
+                if (!isCurrent()) return
+                await publishEphemeralPacket(chunk, false)
+              }
+            }
+          } catch {
+            // Ignore malformed delta transcript request
+          }
+        }
+
         return
       }
 
@@ -1424,6 +1549,70 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         return
       }
 
+      if (packet.type === 'sync-transcript-chunk') {
+        if (
+          !callTranscriptProviderRef.current ||
+          packet.totalChunks <= 0 ||
+          packet.totalChunks > 64
+        ) {
+          return
+        }
+        touchSiblingDevice(packet.deviceId, undefined, undefined, {
+          markSynced: true,
+          syncedAt: packet.ts,
+        })
+        const tKey = `${packet.deviceId}:${packet.transferId}`
+        const now = Date.now()
+        // Prune stale incomplete transfers (> 90s old)
+        for (const [k, v] of transcriptTransfersRef.current.entries()) {
+          if (now - v.startedAt > 90_000) {
+            transcriptTransfersRef.current.delete(k)
+          }
+        }
+        let transfer = transcriptTransfersRef.current.get(tKey)
+        if (!transfer) {
+          if (transcriptTransfersRef.current.size >= 8) {
+            transcriptTransfersRef.current.delete(transcriptTransfersRef.current.keys().next().value!)
+          }
+          transfer = {
+            totalChunks: packet.totalChunks,
+            updatedAt: packet.updatedAt,
+            hash: packet.hash,
+            chunks: new Map(),
+            startedAt: now,
+          }
+          transcriptTransfersRef.current.set(tKey, transfer)
+        }
+        if (
+          transfer.hash !== packet.hash ||
+          transfer.totalChunks !== packet.totalChunks ||
+          transfer.updatedAt !== packet.updatedAt
+        ) {
+          return
+        }
+        transfer.chunks.set(packet.chunkIndex, packet.data)
+        if (transfer.chunks.size >= transfer.totalChunks) {
+          transcriptTransfersRef.current.delete(tKey)
+          let combined = ''
+          for (let i = 0; i < transfer.totalChunks; i += 1) {
+            const part = transfer.chunks.get(i)
+            if (typeof part !== 'string') return
+            combined += part
+          }
+          try {
+            const parsed: unknown = JSON.parse(combined)
+            if (computeJsonDigest(parsed) !== transfer.hash) return
+            const count = callTranscriptProviderRef.current.mergeSyncPayload(parsed)
+            if (isCurrent() && count > 0) {
+              recordSyncedActivity(count)
+            }
+          } catch {
+            // Ignore malformed reassembled call transcripts payload
+          }
+        }
+        return
+      }
+
     },
     [
       identityManager,
@@ -1453,6 +1642,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     checkpointDirtyRef.current = hasPendingCheckpoint(pk)
     seenEventIdsRef.current.clear()
     amailTransfersRef.current.clear()
+    transcriptTransfersRef.current.clear()
 
     lastStateSentToPeerRef.current.clear()
     lastReqSentToPeerRef.current.clear()
@@ -1963,6 +2153,24 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     }
   }, [scheduleCheckpointPublish, broadcastHello])
 
+  const registerCallTranscriptSyncProvider = useCallback(
+    (provider: CallTranscriptSyncProvider | null) => {
+      callTranscriptProviderRef.current = provider
+    },
+    []
+  )
+
+  const notifyCallTranscriptsChanged = useCallback(() => {
+    if (!enabledRef.current || isApplyingRemoteRef.current) return
+    scheduleCheckpointPublish()
+    const hasOnlineSibling = linkedDevicesRef.current.some(
+      (d) => d.lastSeenAt > 0 && Date.now() - d.lastSeenAt <= DEVICE_SYNC_ONLINE_TTL_MS
+    )
+    if (hasOnlineSibling) {
+      void broadcastHello(false)
+    }
+  }, [scheduleCheckpointPublish, broadcastHello])
+
   const resetAll = useCallback(() => {
     if (checkpointTimerRef.current !== null) {
       window.clearTimeout(checkpointTimerRef.current)
@@ -1993,6 +2201,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     savePendingCheckpoint(ownerPubkeyRef.current ?? '', false)
     seenEventIdsRef.current.clear()
     amailTransfersRef.current.clear()
+    transcriptTransfersRef.current.clear()
     lastStateSentToPeerRef.current.clear()
     lastReqSentToPeerRef.current.clear()
     lastPeerDigestsRef.current.clear()
@@ -2048,5 +2257,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     deviceSync,
     registerAmailSyncProvider,
     notifyAmailChanged,
+    registerCallTranscriptSyncProvider,
+    notifyCallTranscriptsChanged,
   }
 }

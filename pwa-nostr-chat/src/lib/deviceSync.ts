@@ -10,6 +10,7 @@ import {
 } from 'nostr-tools'
 import type {
   DeviceSyncAmailChunkPacket,
+  DeviceSyncCallTranscriptChunkPacket,
   DeviceSyncCrdtState,
   DeviceSyncHelloPacket,
   DeviceSyncMergeDiff,
@@ -22,6 +23,7 @@ import type {
   DeviceSyncStatePacket,
   DeviceSyncWirePacket,
   SyncedBlockedRecord,
+  SyncedCallTranscriptsState,
   SyncedDeviceRecord,
   SyncedDmPeerNameRecord,
   SyncedPeerNoteRecord,
@@ -38,7 +40,9 @@ import type {
   TrustedPeerEntry,
 } from '../types/protocol.ts'
 import type { ServerMessage, ServerSummary } from '../types/servers.ts'
+import type { CallTranscriptSyncPayload } from '../types/transcription.ts'
 import { verifyEventCached } from './bitchatProtocol.ts'
+import { computeCallTranscriptCollectionHash } from './callTranscriptStore.ts'
 import { bytesToHex, encodeNpubSafe, type SigningKeyMaterial } from './identity.ts'
 
 /** Ephemeral Nostr kind for live silent sibling-device sync */
@@ -1339,12 +1343,45 @@ export function computeDmScopeDigest(messages: readonly DmMessage[]): DeviceSync
 /** Request groups fit on the wire even when dozens of threads have full histories. */
 export function buildMessageRequestPackets(packet: DeviceSyncMsgReqPacket): DeviceSyncMsgReqPacket[] {
   const result: DeviceSyncMsgReqPacket[] = []
-  let next = { ...packet, scopes: [] as DeviceSyncScopeRequest[] }
+  let safeWantCallTranscripts = packet.wantCallTranscripts
+  if (safeWantCallTranscripts) {
+    const solo: DeviceSyncMsgReqPacket = {
+      ...packet,
+      scopes: [],
+      wantAmail: undefined,
+      wantCallTranscripts: safeWantCallTranscripts,
+    }
+    if (utf8ByteLength(JSON.stringify(solo)) > MAX_NIP44_CHUNK_BYTES) {
+      const withoutDeleted = { knownHashes: safeWantCallTranscripts.knownHashes }
+      if (
+        utf8ByteLength(JSON.stringify({ ...solo, wantCallTranscripts: withoutDeleted })) <=
+        MAX_NIP44_CHUNK_BYTES
+      ) {
+        safeWantCallTranscripts = withoutDeleted
+      } else {
+        safeWantCallTranscripts = { knownHashes: {} }
+      }
+    }
+  }
+
+  let next: DeviceSyncMsgReqPacket = {
+    ...packet,
+    scopes: [] as DeviceSyncScopeRequest[],
+    ...(safeWantCallTranscripts ? { wantCallTranscripts: safeWantCallTranscripts } : {}),
+  }
   for (const scope of packet.scopes) {
     const candidate = { ...next, scopes: [...next.scopes, scope] }
-    if (next.scopes.length >= MAX_REQUEST_PACKET_SCOPES || utf8ByteLength(JSON.stringify(candidate)) > MAX_NIP44_CHUNK_BYTES) {
-      if (next.scopes.length || next.wantAmail) result.push(next)
-      next = { ...packet, scopes: [], wantAmail: undefined }
+    if (
+      next.scopes.length >= MAX_REQUEST_PACKET_SCOPES ||
+      utf8ByteLength(JSON.stringify(candidate)) > MAX_NIP44_CHUNK_BYTES
+    ) {
+      if (next.scopes.length || next.wantAmail || next.wantCallTranscripts) result.push(next)
+      next = {
+        ...packet,
+        scopes: [],
+        wantAmail: undefined,
+        wantCallTranscripts: undefined,
+      }
     }
     const fallback = { ...scope, knownIds: [] }
     if (utf8ByteLength(JSON.stringify({ ...next, scopes: [...next.scopes, scope] })) <= MAX_NIP44_CHUNK_BYTES) {
@@ -1353,7 +1390,7 @@ export function buildMessageRequestPackets(packet: DeviceSyncMsgReqPacket): Devi
       next.scopes.push(fallback)
     }
   }
-  if (next.scopes.length || next.wantAmail) result.push(next)
+  if (next.scopes.length || next.wantAmail || next.wantCallTranscripts) result.push(next)
   return result
 }
 
@@ -1365,17 +1402,82 @@ export function computeJsonDigest(value: unknown): string {
   }
 }
 
+function attachCallTranscriptsWithinBudget(
+  target: DeviceSyncCrdtState,
+  callTranscriptsInfo: SyncedCallTranscriptsState | null | undefined,
+  maxBytes: number
+): DeviceSyncCrdtState {
+  if (!callTranscriptsInfo || !callTranscriptsInfo.payload) return target
+  const { transcripts, deleted, updatedAt } = callTranscriptsInfo.payload
+  const deletedCount = Object.keys(deleted).length
+  if (transcripts.length === 0 && deletedCount === 0) return target
+
+  // 1. Try full finalized call transcripts bundle first
+  const fullCandidate: DeviceSyncCrdtState = {
+    ...target,
+    callTranscripts: callTranscriptsInfo,
+  }
+  if (utf8ByteLength(JSON.stringify(fullCandidate)) <= maxBytes) {
+    return fullCandidate
+  }
+
+  // 2. Binary-search largest newest-first transcript prefix (+ active tombstones) that fits
+  const buildTrimmedState = (keepCount: number): DeviceSyncCrdtState => {
+    const kept = transcripts.slice(0, keepCount)
+    const nextHash = computeCallTranscriptCollectionHash(kept, deleted)
+    const trimmedPayload: CallTranscriptSyncPayload = {
+      v: 1,
+      updatedAt,
+      collectionHash: nextHash,
+      transcripts: kept,
+      deleted,
+    }
+    return {
+      ...target,
+      callTranscripts: {
+        updatedAt: callTranscriptsInfo.updatedAt,
+        hash: nextHash,
+        payload: trimmedPayload,
+      },
+    }
+  }
+
+  let lo = 0
+  let hi = transcripts.length - 1
+  let best: DeviceSyncCrdtState | null = null
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2)
+    if (mid === 0 && deletedCount === 0) {
+      lo = 1
+      continue
+    }
+    const candidate = buildTrimmedState(mid)
+    if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
+      best = candidate
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+
+  // Never exceed maxBytes: omit callTranscripts if even the minimal bundle doesn't fit
+  return best ?? target
+}
+
 /**
  * Fits a CRDT checkpoint (plus optional Amail snapshot,
- * and bounded recent messages tail) within the budget if possible. An
- * oversized core is returned unmodified so callers can surface an error
- * instead of silently discarding tombstones or other required profile state.
+ * bounded recent messages tail, and finalized 30-day call transcripts) within the budget
+ * if possible. Core CRDT, Amail, and recentMessages remain protected; call transcripts
+ * progressively trim oldest items or are omitted before ever causing a budget overflow.
+ * An oversized core is returned unmodified so callers can surface an error instead of
+ * silently discarding tombstones or other required profile state.
  */
 export function fitCheckpointStateWithinBudget(
   crdt: DeviceSyncCrdtState,
   amailSnapshot: { updatedAt: number; hash: string; payload: unknown } | null,
   recentMessages?: SyncedRecentMessagesTail,
-  maxBytes = MAX_NIP44_CHUNK_BYTES
+  maxBytes = MAX_NIP44_CHUNK_BYTES,
+  callTranscriptsInfo?: SyncedCallTranscriptsState | null
 ): DeviceSyncCrdtState {
   const base: DeviceSyncCrdtState = {
     v: 1,
@@ -1392,79 +1494,87 @@ export function fitCheckpointStateWithinBudget(
     devices: sanitizeSyncedDevicesMap(crdt.devices),
   }
 
-  // 1. Full (`base + amail + recentMessages`)
-  let candidate: DeviceSyncCrdtState = {
-    ...base,
-    ...(amailSnapshot ? { amail: amailSnapshot } : {}),
-    ...(recentMessages ? { recentMessages } : {}),
-  }
-  if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
-    return candidate
-  }
-
-  // 2. `base + amail + trimmedTail`
-  if (recentMessages) {
-    const trimmedTail: SyncedRecentMessagesTail = {}
-    if (recentMessages.dm) {
-      trimmedTail.dm = {}
-      for (const [pk, entry] of Object.entries(recentMessages.dm).slice(0, 8)) {
-        trimmedTail.dm[pk] = {
-          peerNickname: entry.peerNickname,
-          protocol: entry.protocol,
-          messages: entry.messages.slice(-8),
-        }
-      }
-    }
-    if (recentMessages.server) {
-      trimmedTail.server = {}
-      for (const [k, msgs] of Object.entries(recentMessages.server).slice(0, 8)) {
-        trimmedTail.server[k] = msgs.slice(-8)
-      }
-    }
-    if (recentMessages.bitchat) {
-      trimmedTail.bitchat = {}
-      for (const [k, msgs] of Object.entries(recentMessages.bitchat).slice(0, 6)) {
-        trimmedTail.bitchat[k] = msgs.slice(-8)
-      }
-    }
-    candidate = {
+  const fitCore = (): DeviceSyncCrdtState => {
+    // 1. Full (`base + amail + recentMessages`)
+    let candidate: DeviceSyncCrdtState = {
       ...base,
       ...(amailSnapshot ? { amail: amailSnapshot } : {}),
-      recentMessages: trimmedTail,
+      ...(recentMessages ? { recentMessages } : {}),
     }
     if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
       return candidate
     }
-  }
 
-  // Drop the recent tail before dropping the Amail snapshot.
-  if (amailSnapshot) {
-    candidate = { ...base, amail: amailSnapshot }
-    if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
-      return candidate
-    }
-  }
-
-  if (recentMessages) {
-    const tinyTail: SyncedRecentMessagesTail = {}
-    if (recentMessages.dm) {
-      tinyTail.dm = {}
-      for (const [pk, entry] of Object.entries(recentMessages.dm).slice(0, 5)) {
-        tinyTail.dm[pk] = {
-          peerNickname: entry.peerNickname,
-          protocol: entry.protocol,
-          messages: entry.messages.slice(-5),
+    // 2. `base + amail + trimmedTail`
+    if (recentMessages) {
+      const trimmedTail: SyncedRecentMessagesTail = {}
+      if (recentMessages.dm) {
+        trimmedTail.dm = {}
+        for (const [pk, entry] of Object.entries(recentMessages.dm).slice(0, 8)) {
+          trimmedTail.dm[pk] = {
+            peerNickname: entry.peerNickname,
+            protocol: entry.protocol,
+            messages: entry.messages.slice(-8),
+          }
         }
       }
+      if (recentMessages.server) {
+        trimmedTail.server = {}
+        for (const [k, msgs] of Object.entries(recentMessages.server).slice(0, 8)) {
+          trimmedTail.server[k] = msgs.slice(-8)
+        }
+      }
+      if (recentMessages.bitchat) {
+        trimmedTail.bitchat = {}
+        for (const [k, msgs] of Object.entries(recentMessages.bitchat).slice(0, 6)) {
+          trimmedTail.bitchat[k] = msgs.slice(-8)
+        }
+      }
+      candidate = {
+        ...base,
+        ...(amailSnapshot ? { amail: amailSnapshot } : {}),
+        recentMessages: trimmedTail,
+      }
+      if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
+        return candidate
+      }
     }
-    candidate = { ...base, recentMessages: tinyTail }
-    if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
-      return candidate
+
+    // Drop the recent tail before dropping the Amail snapshot.
+    if (amailSnapshot) {
+      candidate = { ...base, amail: amailSnapshot }
+      if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
+        return candidate
+      }
     }
+
+    if (recentMessages) {
+      const tinyTail: SyncedRecentMessagesTail = {}
+      if (recentMessages.dm) {
+        tinyTail.dm = {}
+        for (const [pk, entry] of Object.entries(recentMessages.dm).slice(0, 5)) {
+          tinyTail.dm[pk] = {
+            peerNickname: entry.peerNickname,
+            protocol: entry.protocol,
+            messages: entry.messages.slice(-5),
+          }
+        }
+      }
+      candidate = { ...base, recentMessages: tinyTail }
+      if (utf8ByteLength(JSON.stringify(candidate)) <= maxBytes) {
+        return candidate
+      }
+    }
+
+    // Pure core CRDT state
+    return base
   }
 
-  // Pure core CRDT state
-  return base
+  const fittedCore = fitCore()
+  if (utf8ByteLength(JSON.stringify(fittedCore)) > maxBytes) {
+    return fittedCore
+  }
+  return attachCallTranscriptsWithinBudget(fittedCore, callTranscriptsInfo, maxBytes)
 }
 
 /**
@@ -1560,6 +1670,62 @@ export function buildAmailChunkPackets(params: {
     if (slices.length >= 64) return []
     let len = Math.max(1, Math.min(maxChunkChars, serialized.length - offset))
     while (utf8ByteLength(JSON.stringify(packet(serialized.slice(offset, offset + len), 63, 64))) > MAX_NIP44_CHUNK_BYTES) {
+      if (len === 1) return []
+      len = Math.floor(len / 2)
+    }
+    slices.push(serialized.slice(offset, offset + len))
+    offset += len
+  }
+  return slices.map((data, idx) => packet(data, idx, slices.length))
+}
+
+/**
+ * Splits a serialized delta call transcripts sync payload into `< 48 KB` NIP-44-safe chunk packets.
+ */
+export function buildCallTranscriptChunkPackets(params: {
+  deviceId: string
+  targetDeviceId: string
+  transferId: string
+  updatedAt: number
+  hash: string
+  payload: CallTranscriptSyncPayload
+  maxChunkChars?: number
+}): DeviceSyncCallTranscriptChunkPacket[] {
+  const maxChunkChars = params.maxChunkChars ?? 28_000
+  let serialized: string
+  try {
+    serialized = JSON.stringify(params.payload)
+  } catch {
+    return []
+  }
+  if (!serialized) return []
+
+  const ts = Date.now()
+  const packet = (
+    data: string,
+    chunkIndex: number,
+    totalChunks: number
+  ): DeviceSyncCallTranscriptChunkPacket => ({
+    v: 1,
+    type: 'sync-transcript-chunk',
+    deviceId: params.deviceId,
+    targetDeviceId: params.targetDeviceId,
+    ts,
+    transferId: params.transferId,
+    updatedAt: params.updatedAt,
+    hash: params.hash,
+    chunkIndex,
+    totalChunks,
+    data,
+  })
+  const slices: string[] = []
+  for (let offset = 0; offset < serialized.length; ) {
+    if (slices.length >= 64) return []
+    let len = Math.max(1, Math.min(maxChunkChars, serialized.length - offset))
+    while (
+      utf8ByteLength(JSON.stringify(packet(serialized.slice(offset, offset + len), 63, 64))) >
+      MAX_NIP44_CHUNK_BYTES
+    ) {
       if (len === 1) return []
       len = Math.floor(len / 2)
     }
@@ -1671,7 +1837,9 @@ function projectWireState(state: DeviceSyncCrdtState): DeviceSyncCrdtState {
     v: 1, servers: state.servers, serverOrder: state.serverOrder, trusted: state.trusted,
     blocked: state.blocked, pinned: state.pinned, dmClearedAt: state.dmClearedAt, lud16: state.lud16,
     nickname: state.nickname, peerNotes: state.peerNotes, dmPeerNames: state.dmPeerNames,
-    devices: state.devices, amail: state.amail, recentMessages: state.recentMessages,
+    devices: state.devices, amail: state.amail,
+    ...(state.callTranscripts ? { callTranscripts: state.callTranscripts } : {}),
+    recentMessages: state.recentMessages,
   }
 }
 
@@ -1848,6 +2016,24 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     }
   }
 
+  let callTranscripts: DeviceSyncCrdtState['callTranscripts'] = undefined
+  if (
+    isRecord(raw.callTranscripts) &&
+    typeof raw.callTranscripts.hash === 'string' &&
+    isRecord(raw.callTranscripts.payload) &&
+    raw.callTranscripts.payload.v === 1
+  ) {
+    callTranscripts = {
+      updatedAt:
+        typeof raw.callTranscripts.updatedAt === 'number' &&
+        Number.isFinite(raw.callTranscripts.updatedAt)
+          ? raw.callTranscripts.updatedAt
+          : 0,
+      hash: raw.callTranscripts.hash.slice(0, 64),
+      payload: raw.callTranscripts.payload as unknown as CallTranscriptSyncPayload,
+    }
+  }
+
   let recentMessages: SyncedRecentMessagesTail | undefined
   if (isRecord(raw.recentMessages)) {
     recentMessages = raw.recentMessages as SyncedRecentMessagesTail
@@ -1870,6 +2056,7 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     dmPeerNames,
     devices,
     ...(amail ? { amail } : {}),
+    ...(callTranscripts ? { callTranscripts } : {}),
     ...(recentMessages ? { recentMessages } : {}),
   }
 }
@@ -1928,6 +2115,22 @@ export async function parseDeviceSyncEphemeralEvent(
                   hash: digests.amail.hash,
                 }
               : null,
+          callTranscripts:
+            isRecord(digests.callTranscripts) && typeof digests.callTranscripts.hash === 'string'
+              ? {
+                  count:
+                    typeof digests.callTranscripts.count === 'number' &&
+                    Number.isFinite(digests.callTranscripts.count)
+                      ? Math.max(0, Math.floor(digests.callTranscripts.count))
+                      : 0,
+                  updatedAt:
+                    typeof digests.callTranscripts.updatedAt === 'number' &&
+                    Number.isFinite(digests.callTranscripts.updatedAt)
+                      ? Math.max(0, Math.floor(digests.callTranscripts.updatedAt))
+                      : 0,
+                  hash: digests.callTranscripts.hash.slice(0, 64),
+                }
+              : null,
         },
       } satisfies DeviceSyncHelloPacket
     }
@@ -1966,6 +2169,42 @@ export async function parseDeviceSyncEphemeralEvent(
           sinceSec: typeof s.sinceSec === 'number' ? s.sinceSec : undefined,
         })
       }
+      let wantCallTranscripts: DeviceSyncMsgReqPacket['wantCallTranscripts'] = undefined
+      if (isRecord(parsed.wantCallTranscripts) && isRecord(parsed.wantCallTranscripts.knownHashes)) {
+        const knownHashes: Record<string, string> = {}
+        let kCount = 0
+        for (const [k, v] of Object.entries(parsed.wantCallTranscripts.knownHashes)) {
+          if (kCount >= 120) break
+          const cleanId = k.trim()
+          if (!cleanId || cleanId.length > 128 || typeof v !== 'string') continue
+          const cleanHash = v.trim().toLowerCase()
+          if (/^[0-9a-f]{64}$/.test(cleanHash)) {
+            knownHashes[cleanId] = cleanHash
+            kCount += 1
+          }
+        }
+        let deleted: Record<string, number> | undefined
+        if (isRecord(parsed.wantCallTranscripts.deleted)) {
+          const cleanDel: Record<string, number> = {}
+          let dCount = 0
+          for (const [k, v] of Object.entries(parsed.wantCallTranscripts.deleted)) {
+            if (dCount >= 300) break
+            const cleanId = k.trim()
+            if (!cleanId || cleanId.length > 128) continue
+            if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+              cleanDel[cleanId] = Math.floor(v)
+              dCount += 1
+            }
+          }
+          if (Object.keys(cleanDel).length > 0) {
+            deleted = cleanDel
+          }
+        }
+        wantCallTranscripts = {
+          knownHashes,
+          ...(deleted ? { deleted } : {}),
+        }
+      }
       return {
         v: 1,
         type: 'sync-msg-req',
@@ -1974,6 +2213,7 @@ export async function parseDeviceSyncEphemeralEvent(
         ts: typeof parsed.ts === 'number' ? parsed.ts : Date.now(),
         scopes,
         wantAmail: Boolean(parsed.wantAmail),
+        ...(wantCallTranscripts ? { wantCallTranscripts } : {}),
       } satisfies DeviceSyncMsgReqPacket
     }
 
@@ -2038,6 +2278,34 @@ export async function parseDeviceSyncEphemeralEvent(
         totalChunks: Number(parsed.totalChunks),
         data: parsed.data,
       } satisfies DeviceSyncAmailChunkPacket
+    }
+
+    case 'sync-transcript-chunk': {
+      if (
+        typeof parsed.targetDeviceId !== 'string' ||
+        typeof parsed.transferId !== 'string' ||
+        typeof parsed.hash !== 'string' ||
+        typeof parsed.data !== 'string' ||
+        typeof parsed.chunkIndex !== 'number' ||
+        !Number.isInteger(parsed.totalChunks) || !Number.isInteger(parsed.chunkIndex) ||
+        Number(parsed.totalChunks) < 1 || Number(parsed.totalChunks) > 64 ||
+        Number(parsed.chunkIndex) < 0 || Number(parsed.chunkIndex) >= Number(parsed.totalChunks)
+      ) {
+        return null
+      }
+      return {
+        v: 1,
+        type: 'sync-transcript-chunk',
+        deviceId: parsed.deviceId,
+        targetDeviceId: parsed.targetDeviceId,
+        ts: typeof parsed.ts === 'number' ? parsed.ts : Date.now(),
+        transferId: parsed.transferId,
+        updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+        hash: parsed.hash,
+        chunkIndex: Number(parsed.chunkIndex),
+        totalChunks: Number(parsed.totalChunks),
+        data: parsed.data,
+      } satisfies DeviceSyncCallTranscriptChunkPacket
     }
 
     default:

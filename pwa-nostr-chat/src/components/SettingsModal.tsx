@@ -74,6 +74,7 @@ import {
   getRecordingQualitySpec,
 } from '../lib/callRecorder.ts'
 import { DEFAULT_TRANSCRIPTION_MODEL_ID } from '../lib/transcriptionModels.ts'
+import type { SavedCallTranscript } from '../types/transcription.ts'
 import { DEFAULT_PUSH_BRIDGE_URL, DEFAULT_VAPID_PUBLIC_KEY } from '../lib/storage.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
 import { bitchatAudio, type SoundCue } from '../utils/sound.ts'
@@ -248,10 +249,10 @@ const NAV_ITEMS: readonly SettingsNavItem[] = [
     id: 'calls',
     category: 'Communication',
     label: 'Calls & Voice',
-    subtitle: 'Recording, captions & relay',
-    description: 'Adjust recording quality, local voice transcription, live captions, and TURN relays.',
+    subtitle: 'Recording, transcripts & relay',
+    description: 'Adjust recording quality, local voice transcription, live captions, saved call transcripts, and TURN relays.',
     keywords:
-      'calls voice video recording quality resolution fps captions transcription auto transcribe whisper parakeet speech model cache onnx huggingface turn stun custom call relay firewall',
+      'calls voice video recording quality resolution fps captions transcription auto transcribe whisper parakeet speech model cache onnx huggingface turn stun custom call relay firewall saved call transcripts call transcript history 30 days retention synced markdown download',
   },
   {
     id: 'translator',
@@ -365,6 +366,49 @@ async function copyClipboard(text: string): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+function formatSavedTranscriptDate(ms: number): string {
+  try {
+    return new Date(ms).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    })
+  } catch {
+    return ''
+  }
+}
+
+function formatSavedTranscriptDuration(startedAt: number, endedAt: number): string {
+  const totalSec = Math.max(0, Math.round((endedAt - startedAt) / 1000))
+  const hrs = Math.floor(totalSec / 3600)
+  const mins = Math.floor((totalSec % 3600) / 60)
+  const secs = totalSec % 60
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+  }
+  return `${mins}:${String(secs).padStart(2, '0')}`
+}
+
+function formatSavedTranscriptRetention(expiresAt: number, nowMs: number): string {
+  const remainingMs = Math.max(0, expiresAt - nowMs)
+  const days = Math.floor(remainingMs / 86_400_000)
+  if (days < 1) return '< 1d left'
+  return `${days}d left`
+}
+
+function formatSavedCaptionClock(ms: number): string {
+  try {
+    return new Date(ms).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  } catch {
+    return ''
   }
 }
 
@@ -493,6 +537,26 @@ export function SettingsModal({
   const [translatorModelOpen, setTranslatorModelOpen] = useState<boolean | null>(null)
   const [cfModelOpen, setCfModelOpen] = useState<boolean | null>(null)
   const [addTrustedOpen, setAddTrustedOpen] = useState(false)
+
+  // Saved Call Transcripts inline reader & copy feedback
+  const [expandedTranscriptId, setExpandedTranscriptId] = useState<string | null>(null)
+  const [copiedTranscriptId, setCopiedTranscriptId] = useState<string | null>(null)
+  const [transcriptNowMs, setTranscriptNowMs] = useState<number>(() => Date.now())
+  const copiedTranscriptTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (open && activeTab === 'calls') {
+      setTranscriptNowMs(Date.now())
+    }
+  }, [open, activeTab])
+
+  useEffect(() => {
+    return () => {
+      if (copiedTranscriptTimerRef.current !== null) {
+        window.clearTimeout(copiedTranscriptTimerRef.current)
+      }
+    }
+  }, [])
 
   // Profile drafts
   const [nickDraft, setNickDraft] = useState(identity.nickname)
@@ -1152,6 +1216,25 @@ export function SettingsModal({
     } finally {
       setClearingModelCache(false)
     }
+  }
+
+  const handleCopySavedTranscript = async (transcript: SavedCallTranscript) => {
+    const { plainText } = engine.transcription.formatSavedCallTranscriptMarkdown(transcript)
+    const ok = await copyClipboard(plainText)
+    if (!ok) {
+      engine.pushToast('error', 'Failed to copy transcript')
+      return
+    }
+    onPlaySound?.('click')
+    setCopiedTranscriptId(transcript.id)
+    engine.pushToast('success', 'Copied call transcript')
+    if (copiedTranscriptTimerRef.current !== null) {
+      window.clearTimeout(copiedTranscriptTimerRef.current)
+    }
+    copiedTranscriptTimerRef.current = window.setTimeout(() => {
+      copiedTranscriptTimerRef.current = null
+      setCopiedTranscriptId(null)
+    }, 1800)
   }
 
   const handleAddRelay = (e: FormEvent) => {
@@ -4590,7 +4673,156 @@ export function SettingsModal({
           )}
         </SettingsDisclosure>
 
-        {/* 3. Collapsible Custom Call Relay (TURN) */}
+        {/* 3. Saved Call Transcripts (30-Day Local Retention + Cross-Device Sync) */}
+        <SettingsSection
+          title="Saved Call Transcripts"
+          description="Auto-saved locally when calls end or captions turn off · Deleted after 30 days · Synced across devices"
+          badge={
+            <span className="ag-badge ag-badge-muted mono tabular">
+              {transcription.savedCallTranscripts.length}
+            </span>
+          }
+          action={
+            transcription.savedCallTranscripts.length > 0 ? (
+              <button
+                type="button"
+                className="ag-btn ag-btn-ghost ag-btn-sm"
+                onClick={() => {
+                  transcription.clearSavedCallTranscripts()
+                  setExpandedTranscriptId(null)
+                  onPlaySound?.('click')
+                }}
+              >
+                <span>Clear All</span>
+              </button>
+            ) : undefined
+          }
+        >
+          <div className="ag-set-card-list">
+            {transcription.savedCallTranscripts.length === 0 ? (
+              <p className="ag-saved-tx-empty">No saved call transcripts yet.</p>
+            ) : (
+              [...transcription.savedCallTranscripts]
+                .sort((a, b) => b.savedAt - a.savedAt)
+                .map((tx) => {
+                  const isExpanded = expandedTranscriptId === tx.id
+                  const isCopied = copiedTranscriptId === tx.id
+                  const lineCount = tx.entries.length
+                  const title = tx.callTitle.trim() || 'Call'
+                  return (
+                    <div
+                      key={tx.id}
+                      className={`ag-saved-tx-item${isExpanded ? ' is-expanded' : ''}`}
+                    >
+                      <div className="ag-saved-tx-row">
+                        <button
+                          type="button"
+                          className="ag-saved-tx-main"
+                          aria-expanded={isExpanded}
+                          onClick={() => {
+                            setExpandedTranscriptId(isExpanded ? null : tx.id)
+                            onPlaySound?.('click')
+                          }}
+                        >
+                          <ChevronRight
+                            size={14}
+                            className={`ag-saved-tx-chevron${isExpanded ? ' is-open' : ''}`}
+                            aria-hidden="true"
+                          />
+                          <span className="ag-saved-tx-copy">
+                            <span className="ag-saved-tx-title-row">
+                              <span className="ag-saved-tx-title truncate">{title}</span>
+                              <span className="ag-badge ag-badge-muted mono tabular ag-saved-tx-ttl">
+                                {formatSavedTranscriptRetention(tx.expiresAt, transcriptNowMs)}
+                              </span>
+                            </span>
+                            <span className="ag-saved-tx-meta mono tabular">
+                              {formatSavedTranscriptDate(tx.endedAt || tx.savedAt)} ·{' '}
+                              {formatSavedTranscriptDuration(tx.startedAt, tx.endedAt)} ·{' '}
+                              {lineCount} {lineCount === 1 ? 'line' : 'lines'}
+                            </span>
+                          </span>
+                        </button>
+
+                        <div className="ag-saved-tx-actions">
+                          <button
+                            type="button"
+                            className="ag-icon-btn-xs"
+                            onClick={() => void handleCopySavedTranscript(tx)}
+                            title={isCopied ? 'Copied' : 'Copy transcript'}
+                            aria-label={`Copy transcript for ${title}`}
+                          >
+                            {isCopied ? <Check size={12} /> : <Copy size={12} />}
+                          </button>
+                          <button
+                            type="button"
+                            className="ag-icon-btn-xs"
+                            onClick={() => {
+                              transcription.downloadSavedCallTranscript(tx.id)
+                              onPlaySound?.('click')
+                            }}
+                            title="Download Markdown (.md)"
+                            aria-label={`Download transcript for ${title}`}
+                          >
+                            <Download size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            className="ag-icon-btn-xs ag-icon-btn-danger"
+                            onClick={() => {
+                              transcription.deleteSavedCallTranscript(tx.id)
+                              if (isExpanded) setExpandedTranscriptId(null)
+                              onPlaySound?.('click')
+                            }}
+                            title="Delete transcript"
+                            aria-label={`Delete transcript for ${title}`}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {isExpanded && (
+                        <div
+                          className="ag-saved-tx-drawer"
+                          role="region"
+                          aria-label={`Transcript lines for ${title}`}
+                        >
+                          {tx.entries.length === 0 ? (
+                            <p className="ag-saved-tx-empty-lines">No spoken lines recorded.</p>
+                          ) : (
+                            <div className="ag-saved-tx-lines">
+                              {tx.entries.map((entry) => (
+                                <div key={entry.id} className="ag-saved-tx-line">
+                                  <div className="ag-saved-tx-line-head">
+                                    <span
+                                      className={`ag-saved-tx-speaker${
+                                        entry.isSelf ? ' is-self' : ''
+                                      }`}
+                                    >
+                                      {entry.isSelf
+                                        ? 'You'
+                                        : entry.displayHandle || entry.nickname || 'Speaker'}
+                                    </span>
+                                    <span className="ag-saved-tx-time mono tabular">
+                                      {formatSavedCaptionClock(entry.timestamp)}
+                                    </span>
+                                  </div>
+                                  <p className="ag-saved-tx-text">{entry.text}</p>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })
+            )}
+          </div>
+        </SettingsSection>
+
+        {/* 4. Collapsible Custom Call Relay (TURN) */}
         <SettingsDisclosure
           icon={<Server size={15} />}
           title="Custom Call Relay (TURN)"

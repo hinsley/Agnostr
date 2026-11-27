@@ -3279,10 +3279,17 @@ export function useAgnostrEngine(): AgnostrEngine {
     [applySyncedDmPeerNames]
   )
 
+  const notifyCallTranscriptsChangedRef = useRef<() => void>(() => {})
+  const handleCallTranscriptsLocalChange = useCallback(() => {
+    notifyCallTranscriptsChangedRef.current()
+  }, [])
+
   const {
     deviceSync: deviceSyncEngine,
     registerAmailSyncProvider,
     notifyAmailChanged,
+    registerCallTranscriptSyncProvider,
+    notifyCallTranscriptsChanged,
   } = useDeviceSync({
     relayPool: pool,
     identityManager,
@@ -3320,6 +3327,10 @@ export function useAgnostrEngine(): AgnostrEngine {
   useLayoutEffect(() => {
     notifyAmailChangedRef.current = notifyAmailChanged
   }, [notifyAmailChanged])
+
+  useLayoutEffect(() => {
+    notifyCallTranscriptsChangedRef.current = notifyCallTranscriptsChanged
+  }, [notifyCallTranscriptsChanged])
 
   const exportAmailSyncState = amailEngine.exportSyncState
   const mergeAmailSyncState = amailEngine.mergeSyncState
@@ -5104,11 +5115,31 @@ export function useAgnostrEngine(): AgnostrEngine {
   const {
     transcription: transcriptionEngine,
     resetAllTranscription,
+    exportCallTranscriptsSyncDigest,
+    exportCallTranscriptsSyncPayload,
+    mergeCallTranscriptsSyncPayload,
   } = useTranscription({
     activeCall: callsEngine.activeCall,
     fetchVoiceMemoBlob,
     pushToast,
+    onCallTranscriptsChanged: handleCallTranscriptsLocalChange,
   })
+
+  useLayoutEffect(() => {
+    registerCallTranscriptSyncProvider({
+      exportSyncDigest: exportCallTranscriptsSyncDigest,
+      exportSyncPayload: exportCallTranscriptsSyncPayload,
+      mergeSyncPayload: mergeCallTranscriptsSyncPayload,
+    })
+    return () => {
+      registerCallTranscriptSyncProvider(null)
+    }
+  }, [
+    registerCallTranscriptSyncProvider,
+    exportCallTranscriptsSyncDigest,
+    exportCallTranscriptsSyncPayload,
+    mergeCallTranscriptsSyncPayload,
+  ])
 
   useLayoutEffect(() => {
     seedMemoTranscriptRef.current = transcriptionEngine.seedMemoTranscript

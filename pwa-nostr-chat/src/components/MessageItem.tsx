@@ -102,6 +102,13 @@ function formatFullTimestamp(unixSec: number): string {
   }
 }
 
+function formatReplyAuthorLabel(nickname?: string, pubkey?: string): string {
+  const clean = nickname?.trim().replace(/^@+/, '')
+  if (clean) return clean
+  if (pubkey) return `#${pubkey.slice(-4)}`
+  return 'Reply'
+}
+
 export interface MessageItemProps {
   message: GeoMessage
   grouped: boolean
@@ -1208,26 +1215,36 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
           )}
 
           {/* Compact Inline Reply Reference Strip */}
-          {message.replyTo && (
-            <button
-              type="button"
-              className={`ag-reply-quote ${isEncryptedContext ? 'encrypted' : ''}`}
-              onClick={() => message.replyTo && onJumpToMessage?.(message.replyTo.id)}
-              title="Jump to replied message"
-            >
-              <CornerUpLeft size={12} className="ag-reply-quote-icon" />
-              <span className="ag-reply-quote-author">
-                {message.replyTo.nickname
-                  ? message.replyTo.nickname
-                  : message.replyTo.pubkey
-                    ? `#${message.replyTo.pubkey.slice(-4)}`
-                    : 'Reply'}
-              </span>
-              <span className="ag-reply-quote-text">
-                {message.replyTo.preview || 'Referenced message'}
-              </span>
-            </button>
-          )}
+          {message.replyTo &&
+            (message.replyTo.id.trim() ? (
+              <button
+                type="button"
+                className={`ag-reply-quote ${isEncryptedContext ? 'encrypted' : ''}`}
+                onClick={() => message.replyTo && onJumpToMessage?.(message.replyTo.id)}
+                title="Jump to replied message"
+              >
+                <CornerUpLeft size={12} className="ag-reply-quote-icon" />
+                <span className="ag-reply-quote-author">
+                  {formatReplyAuthorLabel(message.replyTo.nickname, message.replyTo.pubkey)}
+                </span>
+                <span className="ag-reply-quote-text">
+                  {message.replyTo.preview || 'Referenced message'}
+                </span>
+              </button>
+            ) : (
+              <div
+                className={`ag-reply-quote is-static ${isEncryptedContext ? 'encrypted' : ''}`}
+                style={{ cursor: 'default' }}
+              >
+                <CornerUpLeft size={12} className="ag-reply-quote-icon" />
+                <span className="ag-reply-quote-author">
+                  {formatReplyAuthorLabel(message.replyTo.nickname, message.replyTo.pubkey)}
+                </span>
+                <span className="ag-reply-quote-text">
+                  {message.replyTo.preview || 'Referenced message'}
+                </span>
+              </div>
+            ))}
 
           {/* Full-Width Message Text Body (with optional Single-Column Translator Side Inlay) */}
           {(visibleContent.length > 0 ||

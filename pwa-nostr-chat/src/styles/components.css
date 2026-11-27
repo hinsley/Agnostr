@@ -1594,7 +1594,7 @@ img.ag-avatar-glubchat,
   height: 7px;
   border-radius: var(--radius-full);
   background-color: var(--status-danger);
-  animation: ag-rec-pulse 1.2s ease-in-out infinite;
+  animation: ag-vrec-led-pulse 1.2s ease-in-out infinite;
   flex-shrink: 0;
 }
 
@@ -2786,8 +2786,16 @@ img.ag-avatar-glubchat,
   border-left-color: var(--dm-accent);
 }
 
-.ag-reply-quote:hover {
+.ag-reply-quote:hover:not(.is-static) {
   background-color: var(--bg-elevated);
+}
+
+.ag-reply-quote.is-static,
+.ag-reply-quote.is-static:hover,
+.ag-reply-quote.is-static:active {
+  cursor: default;
+  background-color: var(--bg-surface);
+  transform: none;
 }
 
 .ag-reply-quote-icon {
@@ -4465,7 +4473,7 @@ img.ag-avatar-glubchat,
 /* --------------------------------------------------------------------------
    10. Voice Recorder Bar & Inline Waveform Voice Player
    -------------------------------------------------------------------------- */
-@keyframes ag-rec-pulse {
+@keyframes ag-vrec-led-pulse {
   0%, 100% {
     opacity: 1;
     box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55);
@@ -4542,7 +4550,7 @@ img.ag-avatar-glubchat,
   border-radius: var(--radius-full);
   background-color: var(--status-danger);
   flex-shrink: 0;
-  animation: ag-rec-pulse 1.15s ease-in-out infinite;
+  animation: ag-vrec-led-pulse 1.15s ease-in-out infinite;
 }
 
 .ag-vrec-lock {

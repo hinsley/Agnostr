@@ -5,6 +5,10 @@ import type {
   PinnedChannel,
 } from './protocol.ts'
 import type { ServerMessage, ServerSummary } from './servers.ts'
+import type {
+  CallTranscriptSyncDigest,
+  CallTranscriptSyncPayload,
+} from './transcription.ts'
 
 /** Live metadata for another Agnostr device sharing the same master Nostr keypair */
 export interface LinkedDeviceInfo {
@@ -48,6 +52,16 @@ export interface DeviceSyncEngine {
 export interface AmailSyncProvider {
   exportSyncState: () => Promise<unknown> | unknown
   mergeSyncState: (remote: unknown) => Promise<boolean | number | void> | boolean | number | void
+}
+
+/** Hook-in provider allowing finalized 30-day call transcripts to ride hash-based multi-device sync */
+export interface CallTranscriptSyncProvider {
+  exportSyncDigest: () => CallTranscriptSyncDigest
+  exportSyncPayload: (
+    knownHashes?: Record<string, string>,
+    remoteDeleted?: Record<string, number>
+  ) => CallTranscriptSyncPayload
+  mergeSyncPayload: (remote: unknown) => number
 }
 
 
@@ -132,6 +146,13 @@ export interface SyncedAmailState {
   payload: unknown
 }
 
+/** Optional finalized 30-day call transcripts snapshot bundled when checkpoint budget permits */
+export interface SyncedCallTranscriptsState {
+  updatedAt: number
+  hash: string
+  payload: CallTranscriptSyncPayload
+}
+
 /** Compact bounded recent-message catch-up tail for offline kind:30078 checkpoints */
 export interface SyncedRecentMessagesTail {
   dm?: Record<
@@ -161,6 +182,7 @@ export interface DeviceSyncCrdtState {
   dmPeerNames?: Record<string, SyncedDmPeerNameRecord>
   devices?: Record<string, SyncedDeviceRecord>
   amail?: SyncedAmailState | null
+  callTranscripts?: SyncedCallTranscriptsState | null
   recentMessages?: SyncedRecentMessagesTail
 }
 
@@ -178,6 +200,7 @@ export interface DeviceSyncMsgDigests {
   server: Record<string, DeviceSyncScopeDigest>
   bitchat: Record<string, DeviceSyncScopeDigest>
   amail?: { updatedAt: number; hash: string } | null
+  callTranscripts?: { count: number; updatedAt: number; hash: string } | null
 }
 
 export interface DeviceSyncScopeRequest {
@@ -219,6 +242,10 @@ export interface DeviceSyncMsgReqPacket {
   ts: number
   scopes: DeviceSyncScopeRequest[]
   wantAmail?: boolean
+  wantCallTranscripts?: {
+    knownHashes: Record<string, string>
+    deleted?: Record<string, number>
+  }
 }
 
 export interface DeviceSyncMsgChunkPacket {
@@ -252,12 +279,27 @@ export interface DeviceSyncAmailChunkPacket {
   data: string
 }
 
+export interface DeviceSyncCallTranscriptChunkPacket {
+  v: 1
+  type: 'sync-transcript-chunk'
+  deviceId: string
+  targetDeviceId: string
+  ts: number
+  transferId: string
+  updatedAt: number
+  hash: string
+  chunkIndex: number
+  totalChunks: number
+  data: string
+}
+
 export type DeviceSyncWirePacket =
   | DeviceSyncHelloPacket
   | DeviceSyncStatePacket
   | DeviceSyncMsgReqPacket
   | DeviceSyncMsgChunkPacket
   | DeviceSyncAmailChunkPacket
+  | DeviceSyncCallTranscriptChunkPacket
 
 /** Diff flags returned by CRDT merges between same-key devices */
 export interface DeviceSyncMergeDiff {

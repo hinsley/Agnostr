@@ -34,7 +34,7 @@ import type { ServerSettingsTab } from './ServerSettingsModal'
 import type { LightboxImagePayload } from './ImageLightboxModal'
 import { AvatarImg } from './AvatarImg'
 import { MessageItem } from './MessageItem'
-import { doesContentMentionUser } from '../lib/bitchatProtocol'
+import { doesContentMentionUser, extractNymquoteReply } from '../lib/bitchatProtocol'
 import {
   formatBitchatChannelLabel,
   getChannelBodyName,
@@ -63,6 +63,155 @@ function extractCleanMessageText(msg: GeoMessage): string {
     text = text.split(target).join('')
   }
   return text.replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function normalizeQuoteText(raw: string): string {
+  return raw.replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+function matchesQuotedAuthor(candidate: GeoMessage, quotedAuthor: string): boolean {
+  const cleanQuoted = quotedAuthor.trim().replace(/^@+/, '').toLowerCase()
+  if (!cleanQuoted) return false
+  const candNick = (candidate.nickname || '').trim().replace(/^@+/, '').toLowerCase()
+  const candHandle = (candidate.displayHandle || '').trim().replace(/^@+/, '').toLowerCase()
+  const suffix = candidate.pubkey ? candidate.pubkey.slice(-4).toLowerCase() : ''
+  if (cleanQuoted === candNick || cleanQuoted === candHandle) return true
+  if (suffix && (cleanQuoted === `${candNick}#${suffix}` || cleanQuoted === `#${suffix}`)) {
+    return true
+  }
+  const hashIdx = cleanQuoted.lastIndexOf('#')
+  if (hashIdx > 0 && suffix) {
+    const qBase = cleanQuoted.slice(0, hashIdx)
+    const qSuffix = cleanQuoted.slice(hashIdx + 1)
+    if (qSuffix === suffix && (!qBase || qBase === candNick)) return true
+  }
+  return false
+}
+
+function hydrateAndResolveReplies(rows: GeoMessage[]): GeoMessage[] {
+  if (rows.length === 0) return rows
+
+  // Pass 1: Hydrate cached messages carrying ['nymquote', ...] that predate this fix
+  let hydrated: GeoMessage[] = rows
+  let didHydrate = false
+  for (let i = 0; i < rows.length; i += 1) {
+    const m = rows[i]
+    if (
+      m.isSystem ||
+      m.isBlockedPlaceholder ||
+      m.replyTo ||
+      !Array.isArray(m.tags) ||
+      m.tags.length === 0
+    ) {
+      continue
+    }
+    const q = extractNymquoteReply(m.tags, m.content)
+    if (!q) continue
+    if (!didHydrate) {
+      hydrated = rows.slice()
+      didHydrate = true
+    }
+    hydrated[i] = {
+      ...m,
+      content: q.displayContent,
+      replyTo: q.replyTo,
+    }
+  }
+
+  // Pass 2: Out-of-order parent backfill (by id) + reverse-scan parent match for nymquote (id === '')
+  const byId = new Map<string, GeoMessage>()
+  for (const m of hydrated) {
+    if (m.id && !m.isSystem && !m.isBlockedPlaceholder) {
+      byId.set(m.id, m)
+    }
+  }
+
+  let resolved: GeoMessage[] = hydrated
+  let didResolve = false
+
+  for (let i = 0; i < hydrated.length; i += 1) {
+    const m = hydrated[i]
+    const ref = m.replyTo
+    if (!ref || m.isSystem || m.isBlockedPlaceholder) continue
+
+    if (ref.id) {
+      if (!ref.preview || !ref.nickname || !ref.pubkey) {
+        const parent = byId.get(ref.id)
+        if (parent) {
+          const parentPreview =
+            extractCleanMessageText(parent).slice(0, 120) || parent.content.slice(0, 120)
+          const nextRef = {
+            id: ref.id,
+            pubkey: ref.pubkey ?? parent.pubkey,
+            nickname: ref.nickname || parent.nickname || parent.displayHandle,
+            preview: ref.preview || parentPreview || undefined,
+          }
+          if (
+            nextRef.pubkey !== ref.pubkey ||
+            nextRef.nickname !== ref.nickname ||
+            nextRef.preview !== ref.preview
+          ) {
+            if (!didResolve) {
+              resolved = hydrated.slice()
+              didResolve = true
+            }
+            resolved[i] = { ...m, replyTo: nextRef }
+          }
+        }
+      }
+      continue
+    }
+
+    const normPreview = ref.preview ? normalizeQuoteText(ref.preview) : ''
+    if (!normPreview) continue
+    const previewPrefix = normPreview.slice(0, 64)
+    const targetPk = ref.pubkey?.trim().toLowerCase() || ''
+    const targetNick = ref.nickname?.trim() || ''
+
+    let matched: GeoMessage | null = null
+    let matchCount = 0
+    const scanStart = Math.max(0, i - 160)
+    for (let j = i - 1; j >= scanStart; j -= 1) {
+      const cand = hydrated[j]
+      if (!cand.id || cand.isSystem || cand.isBlockedPlaceholder) continue
+      const authorMatches = targetPk
+        ? cand.pubkey.toLowerCase() === targetPk
+        : targetNick
+          ? matchesQuotedAuthor(cand, targetNick)
+          : false
+      if (!authorMatches) continue
+
+      const candText = normalizeQuoteText(extractCleanMessageText(cand) || cand.content)
+      if (!candText) continue
+      const candPrefix = candText.slice(0, 64)
+      if (
+        candText === normPreview ||
+        candText.startsWith(previewPrefix) ||
+        normPreview.startsWith(candPrefix)
+      ) {
+        matched = cand
+        matchCount += 1
+        if (matchCount > 1) break
+      }
+    }
+
+    if (matchCount === 1 && matched) {
+      if (!didResolve) {
+        resolved = hydrated.slice()
+        didResolve = true
+      }
+      resolved[i] = {
+        ...m,
+        replyTo: {
+          ...ref,
+          id: matched.id,
+          pubkey: ref.pubkey ?? matched.pubkey,
+        },
+      }
+    }
+  }
+
+  return resolved
 }
 
 function buildFallbackPeer(
@@ -458,7 +607,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   // Normalize DM & Server messages into GeoMessage shape for unified bubble rendering
   const displayMessages: GeoMessage[] = useMemo(() => {
     if (isServer && activeServer && activeChannel) {
-      return engine.servers.messages
+      const serverRows: GeoMessage[] = engine.servers.messages
         .filter(
           (sm) =>
             !isStuckMediaPlaceholder(sm) &&
@@ -492,10 +641,11 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
           deliveryStatus: sm.deliveryStatus,
           relayCount: sm.relayCount,
         }))
+      return hydrateAndResolveReplies(serverRows)
     }
     if (!isDm || !dmThread) {
       const activeKey = engine.activeGeohash.toLowerCase()
-      return sortRoomRows(engine.messages.filter(
+      const roomRows = sortRoomRows(engine.messages.filter(
         (m) =>
           !isStuckMediaPlaceholder(m) &&
           (m.isSystem || m.geohash.toLowerCase() === activeKey) &&
@@ -508,6 +658,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
           ? { ...m, imageAttachment: m.imageAttachment ?? image, voiceMemo: m.voiceMemo ?? voice }
           : m
       }))
+      return hydrateAndResolveReplies(roomRows)
     }
     return dmThread.messages
       .filter((dm) => !isStuckMediaPlaceholder(dm))
@@ -582,9 +733,11 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
   const visibleMessages = useMemo(() => {
     if (publicPage) {
       const live = new Map(displayMessages.map((m) => [m.id, m]))
-      return publicPage.messages
+      const merged = publicPage.messages
         .filter((m) => !m.id.startsWith('pending-') || live.has(m.id))
-        .map((m) => live.get(m.id) ?? m).filter(isHistoryVisible)
+        .map((m) => live.get(m.id) ?? m)
+        .filter(isHistoryVisible)
+      return hydrateAndResolveReplies(merged)
     }
     if (isBitchat) return roomWindow(displayMessages)
     return hiddenEarlierCount > 0 ? displayMessages.slice(hiddenEarlierCount) : displayMessages

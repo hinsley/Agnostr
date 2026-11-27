@@ -3,6 +3,7 @@ import {
   applyDmReaction,
   dmTargetId,
   findDmReactionTarget,
+  isDmTargetId,
   mergeDmMessageMetadata,
   type DmReactionUpdate,
 } from '../lib/dmMessageActions.ts'
@@ -392,8 +393,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             const rawMsgMs = decrypted.timestampMs ?? decrypted.createdAt * 1000
             const orderMs = Math.min(rawMsgMs, receivedAtMs)
 
+            const rawWireId =
+              decrypted.embeddedMessageId ||
+              (decrypted.protocol === 'nip17' ? decrypted.id : undefined)
             const baseMsg: DmMessage = {
               id: decrypted.id,
+              ...(isDmTargetId(rawWireId) ? { wireId: rawWireId } : {}),
               replyToId: decrypted.replyToId,
               peerPubkey: senderPk,
               senderPubkey: senderPk,

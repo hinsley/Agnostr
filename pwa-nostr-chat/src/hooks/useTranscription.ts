@@ -2,9 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ActiveCallSession } from '../types/calls.ts'
 import type { ToastLevel, VoiceMemoAttachment } from '../types/protocol.ts'
 import type {
+  CallTranscriptSyncDigest,
+  CallTranscriptSyncPayload,
   EndedCallTranscript,
   LiveCaptionEntry,
   MemoTranscriptState,
+  SavedCallTranscript,
   TranscriptionEngine,
   TranscriptionModelSpec,
   TranscriptionModelStatus,
@@ -15,6 +18,24 @@ import {
   LiveStreamSpeechCapturer,
   type CapturedSpeechSegment,
 } from '../lib/audioResample.ts'
+import {
+  buildCallTranscriptSyncDigest,
+  clearCallTranscriptDraft,
+  clearCallTranscriptStore,
+  clearSavedCallTranscriptsInStore,
+  createEmptyCallTranscriptStore,
+  deleteSavedCallTranscriptInStore,
+  formatCallTranscriptArtifact,
+  loadCallTranscriptStore,
+  makeCallTranscriptId,
+  mergeCallTranscriptSyncPayload,
+  pruneExpiredCallTranscriptStore,
+  recoverCrashDraftIntoStore,
+  saveCallTranscriptDraft,
+  saveCallTranscriptStore,
+  selectDeltaCallTranscripts,
+  upsertFinalizedCallTranscript,
+} from '../lib/callTranscriptStore.ts'
 import {
   clearMemoTranscriptCache,
   loadMemoTranscriptCache,
@@ -39,6 +60,7 @@ const MAX_CALL_CAPTION_ENTRIES = 500
 const TRANSFORMERS_CACHE_KEY = 'transformers-cache'
 const PARAKEET_IDB_NAME = 'parakeet-cache-db'
 const IDLE_WORKER_TEARDOWN_MS = 5 * 60 * 1000 // Reclaim WASM/ONNX RAM after 5m idle with no active call or job
+const CALL_TRANSCRIPT_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000 // Periodic 30-day retention sweep while open
 
 export interface UseTranscriptionParams {
   activeCall: ActiveCallSession | null
@@ -47,11 +69,18 @@ export interface UseTranscriptionParams {
     senderPubkey: string
   ) => Promise<string>
   pushToast: (level: ToastLevel, title: string, detail?: string) => void
+  onCallTranscriptsChanged?: () => void
 }
 
 export interface UseTranscriptionResult {
   transcription: TranscriptionEngine
   resetAllTranscription: () => void
+  exportCallTranscriptsSyncDigest: () => CallTranscriptSyncDigest
+  exportCallTranscriptsSyncPayload: (
+    knownHashes?: Record<string, string>,
+    remoteDeleted?: Record<string, number>
+  ) => CallTranscriptSyncPayload
+  mergeCallTranscriptsSyncPayload: (remote: unknown) => number
 }
 
 interface PendingLoadRequest {
@@ -97,86 +126,6 @@ interface QueuedMemoItem {
   resolvers: Array<() => void>
 }
 
-function slugifyTitle(raw: string): string {
-  const cleaned = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 42)
-  return cleaned || 'call'
-}
-
-function formatClock(ms: number): string {
-  const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-
-function formatDurationClock(totalMs: number): string {
-  const totalSec = Math.max(0, Math.floor(totalMs / 1000))
-  const hrs = Math.floor(totalSec / 3600)
-  const mins = Math.floor((totalSec % 3600) / 60)
-  const secs = totalSec % 60
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return hrs > 0 ? `${hrs}:${pad(mins)}:${pad(secs)}` : `${pad(mins)}:${pad(secs)}`
-}
-
-function formatIsoDate(ms: number): string {
-  try {
-    return new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
-  } catch {
-    return ''
-  }
-}
-
-function buildCallTranscriptArtifact(opts: {
-  callTitle: string
-  startedAt: number
-  endedAt: number
-  modelLabel: string
-  hfModelId: string
-  entries: readonly LiveCaptionEntry[]
-}): { filename: string; markdown: string; plainText: string } {
-  const stamp = new Date(opts.endedAt).toISOString().replace(/[:.]/g, '-').slice(0, 19)
-  const slug = slugifyTitle(opts.callTitle)
-  const durationLabel = formatDurationClock(Math.max(0, opts.endedAt - opts.startedAt))
-
-  const mdLines: string[] = [
-    `# Agnostr Call Transcript — ${opts.callTitle}`,
-    '',
-    `- **Date**: ${formatIsoDate(opts.startedAt)}`,
-    `- **Started**: ${formatClock(opts.startedAt)}`,
-    `- **Ended**: ${formatClock(opts.endedAt)}`,
-    `- **Duration**: ${durationLabel}`,
-    `- **Model**: ${opts.modelLabel} (${opts.hfModelId})`,
-    `- **Entries**: ${opts.entries.length}`,
-    '',
-    '---',
-    '',
-  ]
-
-  const plainLines: string[] = []
-  for (const entry of opts.entries) {
-    const who = entry.isSelf
-      ? `${entry.displayHandle} (you)`
-      : entry.displayHandle
-    const wallClock = formatClock(entry.timestamp)
-    const elapsedTag =
-      opts.startedAt > 0
-        ? ` | +${formatDurationClock(Math.max(0, entry.timestamp - opts.startedAt))}`
-        : ''
-    const tsLabel = `[${wallClock}${elapsedTag}]`
-    mdLines.push(`- **${tsLabel} ${who}**: ${entry.text}`)
-    plainLines.push(`${tsLabel} ${who}: ${entry.text}`)
-  }
-
-  return {
-    filename: `agnostr-transcript-${slug}-${stamp}.md`,
-    markdown: mdLines.join('\n'),
-    plainText: plainLines.join('\n'),
-  }
-}
-
 function deleteIndexedDbSafe(name: string): Promise<void> {
   if (typeof indexedDB === 'undefined') return Promise.resolve()
   return new Promise<void>((resolve) => {
@@ -191,10 +140,15 @@ function deleteIndexedDbSafe(name: string): Promise<void> {
   })
 }
 
+function buildFinalizedSignature(callId: string, entries: readonly LiveCaptionEntry[]): string {
+  const lastId = entries[entries.length - 1]?.id ?? ''
+  return `${callId}:${entries.length}:${lastId}`
+}
+
 export function useTranscription(
   params: UseTranscriptionParams
 ): UseTranscriptionResult {
-  const { activeCall, fetchVoiceMemoBlob, pushToast } = params
+  const { activeCall, fetchVoiceMemoBlob, pushToast, onCallTranscriptsChanged } = params
 
   const initialConfig = useMemo(() => loadTranscriptionConfig(), [])
   const [customModels, setCustomModels] = useState<TranscriptionModelSpec[]>(
@@ -253,6 +207,13 @@ export function useTranscription(
   const [endedCallTranscript, setEndedCallTranscript] =
     useState<EndedCallTranscript | null>(null)
 
+  const initialCallTranscriptStore = useMemo(() => loadCallTranscriptStore(), [])
+  const callTranscriptStoreRef = useRef<CallTranscriptSyncPayload>(initialCallTranscriptStore)
+  const [savedCallTranscripts, setSavedCallTranscripts] = useState<SavedCallTranscript[]>(
+    () => initialCallTranscriptStore.transcripts
+  )
+  const lastSavedSignatureRef = useRef<string | null>(null)
+
   const workerRef = useRef<Worker | null>(null)
   const idleTeardownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const capturerRef = useRef<LiveStreamSpeechCapturer | null>(null)
@@ -308,6 +269,150 @@ export function useTranscription(
 
   const pushToastRef = useRef(pushToast)
   pushToastRef.current = pushToast
+
+  const onCallTranscriptsChangedRef = useRef(onCallTranscriptsChanged)
+  onCallTranscriptsChangedRef.current = onCallTranscriptsChanged
+
+  const sweepExpiredCallTranscripts = useCallback(() => {
+    const { store: pruned, changed } = pruneExpiredCallTranscriptStore(
+      callTranscriptStoreRef.current
+    )
+    if (!changed) return
+    const persisted = saveCallTranscriptStore(pruned)
+    callTranscriptStoreRef.current = persisted
+    setSavedCallTranscripts(persisted.transcripts)
+    onCallTranscriptsChangedRef.current?.()
+  }, [])
+
+  const writeActiveCallDraft = useCallback((entries: readonly LiveCaptionEntry[]) => {
+    const call = activeCallRef.current
+    const meta = activeCallMetaRef.current
+    const callId = call?.callId ?? lastCallIdRef.current
+    if (!callId || entries.length === 0) return
+    const now = Date.now()
+    const startedAt =
+      call?.connectedAt ??
+      call?.startedAt ??
+      meta?.startedAt ??
+      entries[0]?.timestamp ??
+      now
+    const model = activeModelRef.current
+    saveCallTranscriptDraft({
+      v: 1,
+      callId,
+      callTitle: call?.title || meta?.title || 'Call',
+      startedAt,
+      updatedAt: now,
+      modelLabel: model.label,
+      hfModelId: model.hfModelId,
+      entries: [...entries],
+    })
+  }, [])
+
+  /**
+   * Finalize-only persistence & SHA-256 hashing.
+   * Called strictly when recording finishes (call end, live captions toggled off,
+   * direct call switch, or pagehide/unmount) — NEVER while live captions stream in.
+   */
+  const finalizeAndSaveCallTranscript = useCallback(
+    (opts: {
+      callId: string
+      callTitle: string
+      startedAt: number
+      endedAt?: number
+      entries: readonly LiveCaptionEntry[]
+      setEndedSnapshot?: boolean
+      updateState?: boolean
+      notifySync?: boolean
+    }): SavedCallTranscript | null => {
+      const {
+        callId,
+        callTitle,
+        startedAt,
+        entries,
+        setEndedSnapshot = false,
+        updateState = true,
+        notifySync = true,
+      } = opts
+      if (!callId || entries.length === 0) return null
+
+      const endedAt = opts.endedAt ?? Date.now()
+      const signature = buildFinalizedSignature(callId, entries)
+      const model = activeModelRef.current
+      const targetId = makeCallTranscriptId(callId)
+
+      let saved: SavedCallTranscript | null = null
+      let changed = false
+
+      if (lastSavedSignatureRef.current === signature) {
+        saved =
+          callTranscriptStoreRef.current.transcripts.find((t) => t.id === targetId) ?? null
+        if (saved) {
+          clearCallTranscriptDraft()
+        }
+      }
+
+      if (!saved) {
+        const res = upsertFinalizedCallTranscript(
+          callTranscriptStoreRef.current,
+          {
+            callId,
+            callTitle,
+            startedAt,
+            endedAt,
+            modelLabel: model.label,
+            hfModelId: model.hfModelId,
+            entries,
+          },
+          endedAt
+        )
+        saved = res.saved
+        changed = res.changed
+        if (saved) {
+          lastSavedSignatureRef.current = signature
+          const persisted = saveCallTranscriptStore(res.store)
+          callTranscriptStoreRef.current = persisted
+          clearCallTranscriptDraft()
+          if (updateState) {
+            setSavedCallTranscripts(persisted.transcripts)
+          }
+          if (changed && notifySync) {
+            onCallTranscriptsChangedRef.current?.()
+          }
+        }
+      }
+
+      if (setEndedSnapshot && updateState) {
+        const artifactSource = saved ?? {
+          callTitle,
+          startedAt,
+          endedAt,
+          modelLabel: model.label,
+          hfModelId: model.hfModelId,
+          entries,
+        }
+        const artifact = formatCallTranscriptArtifact(artifactSource)
+        const snapshot: EndedCallTranscript = {
+          id: saved?.id ?? `${callId}:${endedAt}`,
+          callTitle: artifactSource.callTitle,
+          startedAt: artifactSource.startedAt,
+          endedAt: artifactSource.endedAt,
+          modelLabel: artifactSource.modelLabel,
+          entries: [...artifactSource.entries],
+          filename: artifact.filename,
+          markdown: artifact.markdown,
+          plainText: artifact.plainText,
+          contentHash: saved?.contentHash,
+          savedAt: saved?.savedAt,
+        }
+        endedCallTranscriptRef.current = snapshot
+        setEndedCallTranscript(snapshot)
+      }
+
+      return saved
+    },
+    []
+  )
 
   const loadedKeyForModel = (m: TranscriptionModelSpec) =>
     `${m.engine}::${m.hfModelId}`
@@ -516,15 +621,15 @@ export function useTranscription(
             text,
             timestamp: pending.timestamp,
           }
-          setLiveCaptions((prev) => {
-            const next = [...prev, entry]
-            const capped =
-              next.length > MAX_CALL_CAPTION_ENTRIES
-                ? next.slice(-MAX_CALL_CAPTION_ENTRIES)
-                : next
-            liveCaptionsRef.current = capped
-            return capped
-          })
+          const next = [...liveCaptionsRef.current, entry]
+          const capped =
+            next.length > MAX_CALL_CAPTION_ENTRIES
+              ? next.slice(-MAX_CALL_CAPTION_ENTRIES)
+              : next
+          liveCaptionsRef.current = capped
+          setLiveCaptions(capped)
+          // Crash-safe unhashed draft write (ZERO SHA-256 hashing during active call!)
+          writeActiveCallDraft(capped)
           scheduleIdleWorkerTeardown()
           return
         }
@@ -556,7 +661,7 @@ export function useTranscription(
         }
       }
     },
-    [scheduleIdleWorkerTeardown]
+    [scheduleIdleWorkerTeardown, writeActiveCallDraft]
   )
 
   const ensureWorker = useCallback((): Worker => {
@@ -729,10 +834,26 @@ export function useTranscription(
           liveCaptionsEnabledRef.current = false
           setLiveCaptionsEnabled(false)
           stopCapturer()
+          const call = activeCallRef.current
+          const meta = activeCallMetaRef.current
+          if (call && liveCaptionsRef.current.length > 0) {
+            finalizeAndSaveCallTranscript({
+              callId: call.callId,
+              callTitle: call.title || meta?.title || 'Call',
+              startedAt:
+                call.connectedAt ??
+                call.startedAt ??
+                meta?.startedAt ??
+                liveCaptionsRef.current[0]?.timestamp ??
+                Date.now(),
+              entries: liveCaptionsRef.current,
+              setEndedSnapshot: false,
+            })
+          }
         }
       }
     },
-    [preloadModel, stopCapturer]
+    [finalizeAndSaveCallTranscript, preloadModel, stopCapturer]
   )
 
   const addCustomModel = useCallback(
@@ -1129,6 +1250,24 @@ export function useTranscription(
       liveCaptionsEnabledRef.current = false
       setLiveCaptionsEnabled(false)
       stopCapturer()
+      // Trigger B: Live captions turned OFF -> finalize, hash ONCE, and persist locally + notify sync
+      const call = activeCallRef.current
+      const meta = activeCallMetaRef.current
+      const callId = call?.callId ?? lastCallIdRef.current
+      if (callId && liveCaptionsRef.current.length > 0) {
+        finalizeAndSaveCallTranscript({
+          callId,
+          callTitle: call?.title || meta?.title || 'Call',
+          startedAt:
+            call?.connectedAt ??
+            call?.startedAt ??
+            meta?.startedAt ??
+            liveCaptionsRef.current[0]?.timestamp ??
+            Date.now(),
+          entries: liveCaptionsRef.current,
+          setEndedSnapshot: false,
+        })
+      }
       return
     }
 
@@ -1155,7 +1294,7 @@ export function useTranscription(
         )
       }
     })
-  }, [preloadModel, stopCapturer])
+  }, [finalizeAndSaveCallTranscript, preloadModel, stopCapturer])
 
   // Lifecycle sync between activeCall, autoTranscribe, liveCaptionsEnabled, and LiveStreamSpeechCapturer
   useEffect(() => {
@@ -1168,6 +1307,7 @@ export function useTranscription(
         setLiveCaptionsEnabled(false)
       }
       if (lastCallIdRef.current !== null) {
+        // Trigger A: Call ended -> finalize, hash ONCE (if changed since last save), save & expose ended snapshot
         const prevCallId = lastCallIdRef.current
         const capturedEntries = liveCaptionsRef.current
         const meta = activeCallMetaRef.current
@@ -1176,31 +1316,18 @@ export function useTranscription(
           const startedAt =
             meta?.startedAt ?? capturedEntries[0]?.timestamp ?? endedAt
           const callTitle = meta?.title || 'Call'
-          const model = activeModelRef.current
-          const artifact = buildCallTranscriptArtifact({
+          finalizeAndSaveCallTranscript({
+            callId: prevCallId,
             callTitle,
             startedAt,
             endedAt,
-            modelLabel: model.label,
-            hfModelId: model.hfModelId,
             entries: capturedEntries,
+            setEndedSnapshot: true,
           })
-          const snapshot: EndedCallTranscript = {
-            id: `${prevCallId}:${endedAt}`,
-            callTitle,
-            startedAt,
-            endedAt,
-            modelLabel: model.label,
-            entries: [...capturedEntries],
-            filename: artifact.filename,
-            markdown: artifact.markdown,
-            plainText: artifact.plainText,
-          }
-          endedCallTranscriptRef.current = snapshot
-          setEndedCallTranscript(snapshot)
         }
         lastCallIdRef.current = null
         activeCallMetaRef.current = null
+        lastSavedSignatureRef.current = null
         liveCaptionsRef.current = []
         setLiveCaptions([])
       }
@@ -1210,15 +1337,24 @@ export function useTranscription(
 
     clearIdleTeardownTimer()
 
-    activeCallMetaRef.current = {
-      callId: activeCall.callId,
-      title: activeCall.title,
-      startedAt: activeCall.connectedAt ?? activeCall.startedAt,
-    }
-
-    // Detect brand-new call join/start -> apply autoTranscribe default for this call
+    // Detect brand-new call join/start BEFORE overwriting activeCallMetaRef
     const isNewCall = lastCallIdRef.current !== currentCallId
     if (isNewCall) {
+      if (lastCallIdRef.current !== null && liveCaptionsRef.current.length > 0) {
+        // Trigger A (direct call switch): finalize previous call's transcript before resetting
+        const prevCallId = lastCallIdRef.current
+        const prevMeta = activeCallMetaRef.current
+        const endedAt = Date.now()
+        finalizeAndSaveCallTranscript({
+          callId: prevCallId,
+          callTitle: prevMeta?.title || 'Call',
+          startedAt:
+            prevMeta?.startedAt ?? liveCaptionsRef.current[0]?.timestamp ?? endedAt,
+          endedAt,
+          entries: liveCaptionsRef.current,
+          setEndedSnapshot: false,
+        })
+      }
       if (endedCallTranscriptRef.current) {
         endedCallTranscriptRef.current = null
         setEndedCallTranscript(null)
@@ -1227,6 +1363,7 @@ export function useTranscription(
         liveCaptionsRef.current = []
         setLiveCaptions([])
       }
+      lastSavedSignatureRef.current = null
       lastCallIdRef.current = currentCallId
       const shouldEnable = autoTranscribeRef.current
       if (liveCaptionsEnabledRef.current !== shouldEnable) {
@@ -1246,6 +1383,12 @@ export function useTranscription(
           }
         })
       }
+    }
+
+    activeCallMetaRef.current = {
+      callId: activeCall.callId,
+      title: activeCall.title,
+      startedAt: activeCall.connectedAt ?? activeCall.startedAt,
     }
 
     const effectiveEnabled = isNewCall
@@ -1279,12 +1422,84 @@ export function useTranscription(
   }, [
     activeCall,
     liveCaptionsEnabled,
+    finalizeAndSaveCallTranscript,
     handleCapturedSpeechSegment,
     preloadModel,
     stopCapturer,
     clearIdleTeardownTimer,
     scheduleIdleWorkerTeardown,
   ])
+
+  // Recover any unfinalized mid-call transcript draft left behind by a tab crash / OS kill
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const { store: recoveredStore, recovered } = recoverCrashDraftIntoStore(
+        callTranscriptStoreRef.current
+      )
+      if (!recovered) return
+      callTranscriptStoreRef.current = recoveredStore
+      setSavedCallTranscripts(recoveredStore.transcripts)
+      onCallTranscriptsChangedRef.current?.()
+      pushToastRef.current('info', 'Recovered call transcript', recovered.callTitle)
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  // Periodic 30-day retention sweep (on tab foreground + every 6h), hidden draft flush & Trigger C (pagehide / unmount persist)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (typeof document === 'undefined') return
+      if (document.visibilityState === 'visible') {
+        sweepExpiredCallTranscripts()
+      } else if (document.visibilityState === 'hidden') {
+        if (activeCallRef.current && liveCaptionsRef.current.length > 0) {
+          writeActiveCallDraft(liveCaptionsRef.current)
+        }
+      }
+    }
+
+    const persistUnsavedOnExit = () => {
+      const callId = activeCallRef.current?.callId ?? lastCallIdRef.current
+      const entries = liveCaptionsRef.current
+      if (!callId || entries.length === 0) return
+      const meta = activeCallMetaRef.current
+      const now = Date.now()
+      finalizeAndSaveCallTranscript({
+        callId,
+        callTitle: activeCallRef.current?.title || meta?.title || 'Call',
+        startedAt:
+          activeCallRef.current?.connectedAt ??
+          activeCallRef.current?.startedAt ??
+          meta?.startedAt ??
+          entries[0]?.timestamp ??
+          now,
+        endedAt: now,
+        entries,
+        setEndedSnapshot: false,
+        updateState: false,
+        notifySync: false,
+      })
+    }
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pagehide', persistUnsavedOnExit)
+    }
+    const sweepTimer = setInterval(sweepExpiredCallTranscripts, CALL_TRANSCRIPT_SWEEP_INTERVAL_MS)
+
+    return () => {
+      clearInterval(sweepTimer)
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange)
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('pagehide', persistUnsavedOnExit)
+      }
+      persistUnsavedOnExit()
+    }
+  }, [finalizeAndSaveCallTranscript, sweepExpiredCallTranscripts, writeActiveCallDraft])
 
   // Clean up capturer & worker on unmount
   useEffect(() => {
@@ -1298,6 +1513,8 @@ export function useTranscription(
   const clearCallTranscript = useCallback(() => {
     liveCaptionsRef.current = []
     setLiveCaptions([])
+    lastSavedSignatureRef.current = null
+    clearCallTranscriptDraft()
   }, [])
 
   const exportCallTranscriptMarkdown = useCallback(() => {
@@ -1311,7 +1528,7 @@ export function useTranscription(
       meta?.startedAt ??
       liveCaptions[0]?.timestamp ??
       now
-    const artifact = buildCallTranscriptArtifact({
+    const artifact = formatCallTranscriptArtifact({
       callTitle,
       startedAt,
       endedAt: now,
@@ -1332,23 +1549,21 @@ export function useTranscription(
     setEndedCallTranscript(null)
   }, [])
 
-  const downloadEndedCallTranscript = useCallback(() => {
-    const snap = endedCallTranscriptRef.current
-    if (!snap) return
+  const triggerMarkdownDownload = useCallback((filename: string, markdown: string) => {
     try {
-      const blob = new Blob([snap.markdown], {
+      const blob = new Blob([markdown], {
         type: 'text/markdown;charset=utf-8',
       })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = snap.filename
+      a.download = filename
       a.rel = 'noopener'
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-      pushToastRef.current('success', 'Call transcript saved', snap.filename)
+      pushToastRef.current('success', 'Call transcript saved', filename)
     } catch {
       pushToastRef.current(
         'error',
@@ -1358,10 +1573,110 @@ export function useTranscription(
     }
   }, [])
 
+  const downloadEndedCallTranscript = useCallback(() => {
+    const snap = endedCallTranscriptRef.current
+    if (!snap) return
+    triggerMarkdownDownload(snap.filename, snap.markdown)
+  }, [triggerMarkdownDownload])
+
+  const formatSavedCallTranscriptMarkdown = useCallback((transcript: SavedCallTranscript) => {
+    return formatCallTranscriptArtifact({
+      callTitle: transcript.callTitle,
+      startedAt: transcript.startedAt,
+      endedAt: transcript.endedAt,
+      modelLabel: transcript.modelLabel,
+      hfModelId: transcript.hfModelId,
+      entries: transcript.entries,
+    })
+  }, [])
+
+  const downloadSavedCallTranscript = useCallback(
+    (id: string) => {
+      const found = callTranscriptStoreRef.current.transcripts.find((t) => t.id === id)
+      if (!found) return
+      const artifact = formatSavedCallTranscriptMarkdown(found)
+      triggerMarkdownDownload(artifact.filename, artifact.markdown)
+    },
+    [formatSavedCallTranscriptMarkdown, triggerMarkdownDownload]
+  )
+
+  const deleteSavedCallTranscript = useCallback((id: string) => {
+    const { store: nextStore, changed } = deleteSavedCallTranscriptInStore(
+      callTranscriptStoreRef.current,
+      id
+    )
+    if (!changed) return
+    const persisted = saveCallTranscriptStore(nextStore)
+    callTranscriptStoreRef.current = persisted
+    setSavedCallTranscripts(persisted.transcripts)
+    if (endedCallTranscriptRef.current?.id === id) {
+      endedCallTranscriptRef.current = null
+      setEndedCallTranscript(null)
+    }
+    onCallTranscriptsChangedRef.current?.()
+    pushToastRef.current('info', 'Call transcript deleted')
+  }, [])
+
+  const clearSavedCallTranscripts = useCallback(() => {
+    const { store: nextStore, changed } = clearSavedCallTranscriptsInStore(
+      callTranscriptStoreRef.current
+    )
+    if (!changed) return
+    const persisted = saveCallTranscriptStore(nextStore)
+    callTranscriptStoreRef.current = persisted
+    setSavedCallTranscripts(persisted.transcripts)
+    endedCallTranscriptRef.current = null
+    setEndedCallTranscript(null)
+    lastSavedSignatureRef.current = null
+    onCallTranscriptsChangedRef.current?.()
+    pushToastRef.current(
+      'info',
+      'Saved call transcripts cleared',
+      'Call transcripts removed from local storage.'
+    )
+  }, [])
+
+  // O(1) sync digest read — reads precomputed collectionHash with ZERO re-hashing
+  const exportCallTranscriptsSyncDigest = useCallback((): CallTranscriptSyncDigest => {
+    return buildCallTranscriptSyncDigest(callTranscriptStoreRef.current)
+  }, [])
+
+  const exportCallTranscriptsSyncPayload = useCallback(
+    (
+      knownHashes?: Record<string, string>,
+      remoteDeleted?: Record<string, number>
+    ): CallTranscriptSyncPayload => {
+      return selectDeltaCallTranscripts(
+        callTranscriptStoreRef.current,
+        knownHashes,
+        remoteDeleted
+      )
+    },
+    []
+  )
+
+  const mergeCallTranscriptsSyncPayload = useCallback((remote: unknown): number => {
+    const { store: merged, changed, addedOrUpdatedCount } = mergeCallTranscriptSyncPayload(
+      callTranscriptStoreRef.current,
+      remote
+    )
+    if (!changed) return 0
+    const persisted = saveCallTranscriptStore(merged)
+    callTranscriptStoreRef.current = persisted
+    setSavedCallTranscripts(persisted.transcripts)
+    return addedOrUpdatedCount
+  }, [])
+
   const resetAllTranscription = useCallback(() => {
     downloadCancelledRef.current = false
     clearMemoQueue()
     clearMemoTranscriptCache()
+    clearCallTranscriptDraft()
+    clearCallTranscriptStore()
+    const emptyStore = createEmptyCallTranscriptStore()
+    callTranscriptStoreRef.current = emptyStore
+    setSavedCallTranscripts([])
+    lastSavedSignatureRef.current = null
     persistedTranscriptsRef.current = {}
     stopCapturer()
     terminateWorker()
@@ -1419,6 +1734,11 @@ export function useTranscription(
       endedCallTranscript,
       dismissEndedCallTranscript,
       downloadEndedCallTranscript,
+      savedCallTranscripts,
+      deleteSavedCallTranscript,
+      clearSavedCallTranscripts,
+      downloadSavedCallTranscript,
+      formatSavedCallTranscriptMarkdown,
     }),
     [
       models,
@@ -1450,11 +1770,19 @@ export function useTranscription(
       endedCallTranscript,
       dismissEndedCallTranscript,
       downloadEndedCallTranscript,
+      savedCallTranscripts,
+      deleteSavedCallTranscript,
+      clearSavedCallTranscripts,
+      downloadSavedCallTranscript,
+      formatSavedCallTranscriptMarkdown,
     ]
   )
 
   return {
     transcription,
     resetAllTranscription,
+    exportCallTranscriptsSyncDigest,
+    exportCallTranscriptsSyncPayload,
+    mergeCallTranscriptsSyncPayload,
   }
 }
