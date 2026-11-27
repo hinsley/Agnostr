@@ -210,6 +210,20 @@ img.ag-avatar-glubchat,
   border-color: #16A34A;
 }
 
+img.ag-avatar-other-client,
+.ag-avatar-other-client {
+  box-sizing: border-box;
+  border: 2px solid #FFFFFF;
+}
+
+[data-theme='daylight'] img.ag-avatar-other-client,
+[data-theme='daylight'] .ag-avatar-other-client,
+[data-theme='paper'] img.ag-avatar-other-client,
+[data-theme='paper'] .ag-avatar-other-client {
+  border-color: #FFFFFF;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.24);
+}
+
 /* --------------------------------------------------------------------------
    2. Unified Conversation List (256px Desktop Left Pane & Mobile Drawer)
    -------------------------------------------------------------------------- */

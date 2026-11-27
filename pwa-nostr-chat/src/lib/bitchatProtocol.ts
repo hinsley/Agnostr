@@ -539,6 +539,13 @@ export const AGNOSTR_CLIENT_TAG = 'agnostr'
 
 export type KnownClientId = 'agnostr' | 'nymchat' | 'glubchat'
 
+export function normalizeNonUnknownClient(raw?: string | null): string | null {
+  if (typeof raw !== 'string') return null
+  const clean = raw.trim()
+  if (!clean || clean.toLowerCase() === 'unknown') return null
+  return clean
+}
+
 export function detectKnownClient(opts: {
   tags?: string[][]
   clientName?: string | null
@@ -546,8 +553,9 @@ export function detectKnownClient(opts: {
   eventKind?: number
 }): KnownClientId | null {
   const rawClient =
-    (typeof opts.clientName === 'string' ? opts.clientName.trim() : '') ||
-    (opts.tags ? getTagValue(opts.tags, 'client')?.trim() ?? '' : '')
+    normalizeNonUnknownClient(opts.clientName) ??
+    (opts.tags ? normalizeNonUnknownClient(getTagValue(opts.tags, 'client')) : null) ??
+    ''
   const clientLower = rawClient.toLowerCase()
 
   if (opts.isAgnostrClient || clientLower === AGNOSTR_CLIENT_TAG) {
@@ -588,11 +596,12 @@ export function clientAvatarRingClass(
   if (known === 'agnostr') return 'ag-avatar-agnostr'
   if (known === 'nymchat') return 'ag-avatar-nymchat'
   if (known === 'glubchat') return 'ag-avatar-glubchat'
+  if (normalizeNonUnknownClient(clientName)) return 'ag-avatar-other-client'
   return ''
 }
 
 export function parseClientTag(tags: string[][], eventKind?: number): string | undefined {
-  const raw = getTagValue(tags, 'client')?.trim()
+  const raw = normalizeNonUnknownClient(getTagValue(tags, 'client'))
   if (raw) return raw
   const inferred = detectKnownClient({ tags, eventKind })
   if (inferred === 'glubchat') return 'glub.chat'
@@ -612,7 +621,7 @@ export function formatClientDisplayName(
   if (known === 'agnostr') return 'Agnostr'
   if (known === 'glubchat') return 'Glub.chat'
   if (known === 'nymchat') return 'Nymchat'
-  const clean = raw?.trim()
+  const clean = normalizeNonUnknownClient(raw)
   if (!clean) return null
   if (clean === clean.toLowerCase()) {
     return `${clean.charAt(0).toUpperCase()}${clean.slice(1)}`
@@ -907,7 +916,7 @@ export function parseGeohashChatEvent(
 
   const isTeleported = hasTagPair(event.tags, 't', 'teleport')
   const isOwn = ownPubkeys.has(pubkey)
-  const explicitClientTag = getTagValue(event.tags, 'client')?.trim()
+  const explicitClientTag = normalizeNonUnknownClient(getTagValue(event.tags, 'client')) ?? undefined
   const clientTag =
     explicitClientTag || (!isOwn ? parseClientTag(event.tags, event.kind) : undefined)
   const isAgnostrClient = isAgnostrClientTag(event.tags)
@@ -988,7 +997,7 @@ export function parseNamedBitchatChatEvent(
   const displayHandle = formatDisplayHandle(nickname, pubkey)
 
   const isOwn = ownPubkeys.has(pubkey)
-  const explicitClientTag = getTagValue(event.tags, 'client')?.trim()
+  const explicitClientTag = normalizeNonUnknownClient(getTagValue(event.tags, 'client')) ?? undefined
   const clientTag =
     explicitClientTag || (!isOwn ? parseClientTag(event.tags, event.kind) : undefined)
   const isAgnostrClient = isAgnostrClientTag(event.tags)

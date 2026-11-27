@@ -1,5 +1,5 @@
 import type { ChannelPresenceSummary, PeerInfo } from '../types/protocol.ts'
-import { detectKnownClient } from './bitchatProtocol.ts'
+import { detectKnownClient, normalizeNonUnknownClient } from './bitchatProtocol.ts'
 import { getPrecisionInfo, normalizeGeohash } from './geohash.ts'
 import { encodeNpubSafe, formatDisplayHandle } from './identity.ts'
 import { isTopicChannel } from './bitchatChannel.ts'
@@ -12,7 +12,7 @@ function canonicalizeClientHint(
   clientName?: string | null,
   isAgnostrClient?: boolean
 ): { clientName?: string; isAgnostr: boolean } {
-  const trimmed = clientName?.trim() || undefined
+  const trimmed = normalizeNonUnknownClient(clientName) ?? undefined
   const known = detectKnownClient({ clientName: trimmed, isAgnostrClient })
   if (known === 'agnostr') {
     return { clientName: 'agnostr', isAgnostr: true }
