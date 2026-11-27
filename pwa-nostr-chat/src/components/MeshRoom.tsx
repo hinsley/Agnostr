@@ -179,8 +179,8 @@ export default function MeshRoom({ nearby, nickname, geohash, onGeo, onGlobe, mo
       </form>
     </main>
     {userList && <>
-      {mobile && <div className="ag-right-drawer-scrim active" onClick={() => setUserList(false)} aria-hidden="true" />}
-      <div className={'ag-users-col' + (mobile ? ' open' : '')}>
+      {mobile && <div className="ag-right-drawer-scrim ag-mesh-roster-scrim active" onClick={() => setUserList(false)} aria-hidden="true" />}
+      <div className={'ag-users-col ag-mesh-roster-col' + (mobile ? ' open' : '')}>
         <aside className="ag-users-pane" aria-label="Mesh user list">
           <header className="ag-users-header">
             <div className="ag-users-header-left"><Users size={15} /><span className="ag-users-title">Nearby</span>

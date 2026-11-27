@@ -13,3 +13,6 @@
 .ag-mesh-notice button { margin: .35rem .4rem 0 0; }
 .ag-mesh-main .ag-stream-wrap { display: flex; flex-direction: column; min-height: 0; }
 .ag-mesh-main .ag-stream-scroll { flex: 1; min-height: 0; }
+
+/* Mesh owns its roster toggle instead of the geohash swipe controller. */
+.ag-mesh-roster-col, .ag-mesh-roster-scrim { --ag-right-drawer-p: 1; }
