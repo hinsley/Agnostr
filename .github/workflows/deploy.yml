@@ -37,7 +37,9 @@ jobs:
         run: npm run test:agwallet
 
       - name: Bitchat Bluetooth gateway protocol tests
+        working-directory: pwa-nostr-chat
         run: npm run test:nearby && npm run test:gateway
+
       - name: PWA push regression tests
         working-directory: pwa-nostr-chat
         run: npm run test:push
