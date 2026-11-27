@@ -25,7 +25,8 @@
     "android:apk": "bash scripts/build-android-apk.sh",
     "test:nearby": "node --experimental-strip-types --test scripts/check-nearby-mesh.mjs",
     "build:mac-web": "tsc -b && vite build --mode macos",
-    "mac:app": "bash scripts/build-mac-app.sh"
+    "mac:app": "bash scripts/build-mac-app.sh",
+    "test:gateway": "node --experimental-strip-types --test scripts/check-gateway-policy.mjs scripts/check-gateway-runtime.mjs"
   },
   "dependencies": {
     "@agnostr/mesh-curves": "npm:@noble/curves@2.4.0",

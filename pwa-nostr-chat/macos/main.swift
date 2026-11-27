@@ -179,7 +179,7 @@ final class AgnostrApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNav
         const supported = document.querySelector('[aria-label="Nearby Bluetooth"]');
         if (supported) supported.click();
         return document.body.innerText.includes('Nearby Bluetooth') &&
-          document.body.innerText.includes('Bluetooth chat is off.') ? 'ready' : 'waiting: ' + document.body.innerText.slice(0, 420) + ' errors: ' + window.__agnostrSmokeErrors?.slice(-4);
+          document.body.innerText.includes('Nearby Bluetooth is off') ? 'ready' : 'waiting: ' + document.body.innerText.slice(0, 420) + ' errors: ' + window.__agnostrSmokeErrors?.slice(-4);
         """, arguments: ["origin": "http://" + AssetServer.address], in: nil, in: .page) { [weak self, weak view] result in
             guard let self, let view else { return }
             if let value = try? result.get() as? String, value == "ready" {

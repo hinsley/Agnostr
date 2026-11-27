@@ -23,11 +23,11 @@ export function unpackNearbyFrame(frame: string): Uint8Array | null {
   try { return Uint8Array.from(atob(frame), char => char.charCodeAt(0)) } catch { return null }
 }
 
-export async function sendOnLink(link: NearbyLink, ...packets: MeshPacket[]) {
+export async function sendOnLink(transport: NearbyPlugin, link: NearbyLink, ...packets: MeshPacket[]) {
   const frames = packets.flatMap(packet => framesFor(packet, link.maxBytes))
   if (!frames.length || frames.length > 48) return false
   try {
     const base64 = frames.map(frame => btoa(String.fromCharCode(...frame)))
-    return (await Nearby.send({ link: link.id, frames: base64 })).accepted
+    return (await transport.send({ link: link.id, frames: base64 })).accepted
   } catch { return false }
 }

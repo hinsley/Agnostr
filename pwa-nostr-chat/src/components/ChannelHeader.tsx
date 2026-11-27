@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
   ArrowLeft,
+  Bluetooth,
   Check,
   ChevronDown,
   Gamepad2,
@@ -87,6 +88,7 @@ export interface ChannelHeaderProps {
   onOpenTrustedSettings: () => void
   onToggleSearch: () => void
   onExpandRadar: () => void
+  onOpenMesh?: () => void
   onBackToGlobe?: () => void
   onTuneChannel?: (channelKey: string) => boolean | void
   onOpenGameLauncher?: () => void
@@ -111,6 +113,7 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
   onToggleSearch,
   onExpandRadar,
   onBackToGlobe,
+  onOpenMesh,
   onTuneChannel,
   onOpenGameLauncher,
   onFocusActiveCall,
@@ -775,6 +778,10 @@ export const ChannelHeader: React.FC<ChannelHeaderProps> = ({
 
         {/* Right Header Toolbar */}
         <div className="ag-header-actions">
+          {onOpenMesh && !isDm && !isServer && (
+            <button type="button" className={`ag-circle-btn ${engine.nearby.state.active ? 'active-ok' : ''}`}
+              title="Mesh chat" aria-label="Open Mesh chat" onClick={onOpenMesh}><Bluetooth size={17} /></button>
+          )}
           {isDm && dmThread ? (
             <>
               {dmPeerCanZap && onOpenZap && (

@@ -96,7 +96,7 @@ const AgoraView = lazy(() => import('./components/AgoraView'))
 const AmailView = lazy(() => import('./components/AmailView'))
 const WalletModal = lazy(() => import('./components/WalletModal'))
 const SettingsModal = lazy(() => import('./components/SettingsModal'))
-const NearbyChatModal = lazy(() => import('./components/NearbyChatModal'))
+const MeshRoom = lazy(() => import('./components/MeshRoom'))
 const ExpandedRadarModal = lazy(() => import('./components/ExpandedRadarModal'))
 const GameSetupModal = lazy(() =>
   import('./components/games/GameSetupModal').then((m) => ({
@@ -194,9 +194,8 @@ export function App() {
       ? 'agora'
       : 'chat'
   )
-  const [nearbyOpen, setNearbyOpen] = useState(false)
   const [listTab, setListTab] = useState<ListTab>('bitchat')
-  const [bitchatView, setBitchatView] = useState<'globe' | 'room'>(() =>
+  const [bitchatView, setBitchatView] = useState<'globe' | 'room' | 'mesh'>(() =>
     typeof window !== 'undefined' && Boolean(parseBitchatChannelHash(window.location.hash))
       ? 'room'
       : 'globe'
@@ -204,6 +203,7 @@ export function App() {
   const isBitchatWorkspace = workspace === 'chat' && listTab === 'bitchat'
   const isBitchatGlobe = isBitchatWorkspace && bitchatView === 'globe'
   const isBitchatRoom = isBitchatWorkspace && bitchatView === 'room'
+  const isBitchatMesh = isNativeAppBuild && isBitchatWorkspace && bitchatView === 'mesh'
   const lastDmPeerPubkeyRef = useRef<string | null>(
     readLastDmPeer(engine.identity.masterPubkey)
   )
@@ -2536,9 +2536,6 @@ export function App() {
 
   return (
     <ContextMenuProvider>
-    {isNativeAppBuild && nearbyOpen && !panicFlash && (
-      <Suspense fallback={null}><NearbyChatModal onClose={() => setNearbyOpen(false)} /></Suspense>
-    )}
     <div
       className={`ag-app ag-shell ${panicFlash ? 'ag-panic-active' : ''}`}
       data-workspace={workspace}
@@ -2645,11 +2642,18 @@ export function App() {
                 engine={engine}
                 onClose={() => setBitchatView('room')}
                 onTuneChannel={handleTuneChannel}
-                onOpenNearby={isNativeAppBuild ? () => setNearbyOpen(true) : undefined}
+                onOpenNearby={isNativeAppBuild ? () => setBitchatView('mesh') : undefined}
                 onPlaySound={playSound}
               />
             </Suspense>
           </div>
+        ) : isBitchatMesh && !panicFlash ? (
+          <Suspense fallback={workspaceLoadingFallback}>
+            <MeshRoom nearby={engine.nearby} geohash={engine.activeGeohash}
+              nickname={engine.identity.nickname} mobile={isMobileViewport}
+              onGlobe={handleBackToBitchatGlobe}
+              onGeo={() => handleTuneChannel(engine.activeGeohash)} />
+          </Suspense>
         ) : (
           <>
             {isBitchatWorkspace ? (
@@ -2798,6 +2802,7 @@ export function App() {
                     }
                     bitchatChannelsOpen={mobileScreen === 'list'}
                     onBackToGlobe={isBitchatRoom ? handleBackToBitchatGlobe : undefined}
+                    onOpenMesh={isNativeAppBuild && isBitchatRoom ? () => setBitchatView('mesh') : undefined}
                     onTuneChannel={handleTuneChannel}
                     onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
                     onToggleUserList={handleToggleUserList}
@@ -2820,7 +2825,7 @@ export function App() {
                     <div className="ag-pwa-banner offline" role="status" aria-live="polite">
                       <div className="ag-pwa-banner-left">
                         <WifiOff size={14} />
-                        <span>Offline · Viewing cached messages</span>
+                        <span>{engine.nearby.state.peers.some(p => p.gateway) && isBitchatRoom ? 'Offline · Bluetooth gateway available for public geohash text' : 'Offline · Viewing cached messages'}</span>
                       </div>
                     </div>
                   )}

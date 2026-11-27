@@ -1,0 +1,15 @@
+.ag-mesh-main .ag-mesh-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .45rem;
+  padding: .55rem .9rem;
+  border-bottom: 1px solid var(--ag-border);
+}
+.ag-mesh-control .ag-btn,
+.ag-mesh-notice .ag-btn { padding-block: .35rem; }
+.ag-mesh-profile { font-size: .8rem; opacity: .86; margin-inline-end: auto; }
+.ag-mesh-notice { padding: .6rem .9rem; font-size: .85rem; margin: 0; }
+.ag-mesh-notice button { margin: .35rem .4rem 0 0; }
+.ag-mesh-main .ag-stream-wrap { display: flex; flex-direction: column; min-height: 0; }
+.ag-mesh-main .ag-stream-scroll { flex: 1; min-height: 0; }

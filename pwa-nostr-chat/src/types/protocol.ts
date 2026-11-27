@@ -8,6 +8,7 @@ import type { NotificationEngine } from './notifications.ts'
 import type { ServersEngine } from './servers.ts'
 import type { TranscriptionEngine } from './transcription.ts'
 import type { TranslatorEngine } from './translator.ts'
+import type { NearbyController } from '../hooks/useNearbyRuntime.ts'
 import type { WalletEngine, ZapEngine } from './wallet.ts'
 
 export type ThemeId = 'phosphor' | 'amber' | 'indigo' | 'daylight'
@@ -233,6 +234,7 @@ export interface GeoMessage {
   isBlockedPlaceholder?: boolean
   isTeleported: boolean
   isMeshBridge: boolean
+  viaMeshGateway?: boolean
   bridgeClient?: string
   clientName?: string
   isAgnostrClient?: boolean
@@ -508,6 +510,8 @@ export interface AgnostrEngine {
   sendDmReaction: (peer: string, messageId: string, emoji: string) => Promise<void>
   dmReplyingTo: GeoMessage | null
   setDmReplyingTo: (message: GeoMessage | null) => void
+
+  nearby: NearbyController
 
   // Channel & messaging actions
   tuneGeohash: (geohashOrCity: string) => boolean

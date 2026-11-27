@@ -7,21 +7,32 @@ site. PWA install/updates and Web Push are intentionally disabled inside the
 APK; they continue to work in the browser. Native background push and live updates are not included. The web app and APK do not
 automatically share local browser data or wallet keys.
 
-## Nearby Bluetooth
+## Bitchat Mesh and geohash gateway
 
-In the Android app, open the Bitchat globe, tap the Bluetooth icon, choose a
-nearby nickname, then tap **Start Bluetooth**. Approve Android's Nearby devices
-permission (or location permission on Android 11 and older). A radio link is
-required to send. This is a public, foreground-only text mesh on the Bitchat
-BLE service. It has an independent, ephemeral identity, and does not send any
-nearby content to Nostr. It does not support Bitchat private messages, online
-geohash chat over the radio, or background delivery. The UI labels locally
-accepted writes as queued, since BLE provides no end-to-end delivery receipt.
-Closing the view or leaving the Android app stops the radio.
+Open the Bitchat globe or an existing Bitchat room, tap the Bluetooth icon to
+open **Mesh**, and choose **Start Bluetooth**. Approve Android's Nearby
+devices permission (or location permission on Android 11 and older). Mesh
+uses the active profile's display name, but a distinct ephemeral radio
+identity. It has its own nearby user list and signed public text timeline.
+Mesh-room messages stay on Bluetooth and do not become public Nostr events.
 
-Run `npm run test:nearby` for signed-packet, relay, fragmentation and admission
-tests. For an end-to-end smoke test, turn Wi-Fi and mobile data off on two
-devices, leave Bluetooth on, and exchange public messages in both directions.
+If a nearby node advertises Apple Bitchat's geohash gateway capability, the
+normal Earth geohash composer can send through that node when no selected
+relay is reachable. It signs the event locally with a separate per-geohash
+session key. A Bluetooth queue does not confirm relay delivery. To help
+other nearby nodes, explicitly select **Share internet with mesh** in Mesh.
+The online device publishes verified public geohash events to the normal
+configured relays and carries live messages from its currently watched
+geohash back over BLE. Consent expires when Bluetooth stops or the profile
+changes. Android stops the radio when the app leaves the foreground.
+
+The gateway is not a general internet proxy; it does not bridge nearby mesh
+rooms with remote mesh islands, nor carry private messages, files, reactions,
+other planets, or calls. Stock Android Bitchat 2.2.0 supports the public BLE
+room but lacks the Apple geohash gateway. The PWA has no native BLE transport.
+
+Run `npm run test:nearby` and `npm run test:gateway` for signed packet, stock
+Apple packet interoperability, relay, fragmentation, and gateway loop tests.
 
 ## Toolchain and builds
 

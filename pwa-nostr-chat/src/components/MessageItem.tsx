@@ -112,6 +112,7 @@ export interface MessageItemProps {
   highlightQuery?: string
   knownHandles?: readonly string[]
   showBridgeBadges: boolean
+  localRadio?: boolean
   allowUntrustedLinks?: boolean
   isDmMode?: boolean
   isEncryptedContext?: boolean
@@ -184,6 +185,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     highlightQuery,
     knownHandles,
     showBridgeBadges,
+    localRadio = false,
     allowUntrustedLinks = false,
     isDmMode = false,
     isEncryptedContext = false,
@@ -833,8 +835,8 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
         })
       }
 
-      // 3. Peer actions for other authors
-      if (!message.isOwn) {
+      // Nearby identities are not Nostr identities: never expose Nostr trust/block operations for them.
+      if (!message.isOwn && !localRadio) {
         let addedPeerDivider = false
         const markPeerDivider = () => {
           if (addedPeerDivider) return false
@@ -1061,6 +1063,10 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 </span>
               )}
 
+              {message.viaMeshGateway && (
+                <span className="ag-mesh-inline-icon" title={message.isOwn ? 'Queued over Bluetooth; relay delivery is not confirmed' : 'Received through a Bluetooth gateway'}
+                  aria-label={message.isOwn ? 'Queued via Bluetooth gateway' : 'Received via Bluetooth gateway'}><Waves size={12} /></span>
+              )}
               {!isDmMode && showBridgeBadges && message.isMeshBridge && (
                 <span
                   className="ag-mesh-inline-icon"

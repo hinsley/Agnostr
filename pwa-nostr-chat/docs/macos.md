@@ -8,13 +8,17 @@ wallet keys. Web Push, PWA install and PWA updates are disabled here.
 
 ## Offline Nearby Bluetooth
 
-In the Bitchat globe, click the **Nearby Bluetooth** icon, choose a name,
-click **Start Bluetooth**, and allow Agnostr's macOS Bluetooth permission.
-On Android you can open the same control in the Agnostr APK or join the
-public mesh in Bitchat. Nearby chat uses signed public text and an ephemeral
-identity. It does not send chat to Nostr or support private Bitchat DMs.
-Closing the nearby panel, minimizing the Mac window or quitting stops the
-radio. Keeping the window open while switching focus does not stop it.
+Open **Mesh** using the Bluetooth icon in the Bitchat globe or room. Click
+**Start Bluetooth** and allow Agnostr in macOS Bluetooth privacy settings.
+The room uses the active profile's display name but a separate radio identity
+and has a live nearby roster. The radio stays on when switching between
+Mesh and a geohash room; minimizing the window or quitting stops it.
+
+To offer an opt-in geohash uplink/downlink for nearby offline peers, select
+**Share internet with mesh**. The currently watched Earth geohash is the
+return channel, as in Apple Bitchat. Nearby room messages remain on
+Bluetooth. See [the Android notes](android.md#bitchat-mesh-and-geohash-gateway)
+for protocol scope and tests.
 
 ## Build on a Mac
 

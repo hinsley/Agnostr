@@ -1,3 +1,5 @@
+import { useNearbyRuntime } from './useNearbyRuntime.ts'
+import { isGatewayGeohash } from '../lib/nearby/gatewayPolicy.ts'
 import { acceptChatEcho, chatRetries, publishChatWire } from '../lib/chatDelivery.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Event as NostrEvent, Filter } from 'nostr-tools'
@@ -1337,6 +1339,29 @@ export function useAgnostrEngine(): AgnostrEngine {
     [identityManager, presenceTracker]
   )
 
+  const nearby = useNearbyRuntime({
+    selectedGeohash: () => activeGeohashRef.current,
+    publish: async (event, geohash) => {
+      if (!pool || !isGatewayGeohash(geohash)) return false
+      const relayUrls = selectRelaysForGeohash(geohash, geoDirectory, customRelays, 5).channelRelays
+      return (await pool.publish(relayUrls, event)).acceptedRelays.length > 0
+    },
+    receive: (event, geohash) => {
+      if (activeGeohashRef.current !== geohash || blockedSetRef.current.has(event.pubkey)) return
+      const message = parseRetainedPulseEvent(geohash, event, (id) =>
+        messagesChannelRef.current === geohash ? messagesRef.current.find(m => m.id === id) : undefined)
+      if (!message) return
+      geoSeenIdsRef.current.add(event.id)
+      if (geoSeenIdsRef.current.size > 1200) geoSeenIdsRef.current.delete(geoSeenIdsRef.current.values().next().value!)
+      updateChannelMessages(geohash, previous => {
+        if (previous.some(m => m.id === event.id)) return null
+        return sortChannelMessagesWithPending([...previous, { ...message, viaMeshGateway: true }], 'pending-bitchat-').slice(-350)
+      }, { persist: false })
+    },
+  }, identity.masterPubkey, identity.nickname)
+  const nearbyRef = useRef(nearby)
+  nearbyRef.current = nearby
+
   // Live-bridge PULSE_RELAYS events straight into the active Bitchat room when channelRelays miss them
   useLayoutEffect(() => {
     onLivePulseRoomEventRef.current = (roomKey, ev) => {
@@ -1684,6 +1709,9 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
 
           const pk = ev.pubkey.toLowerCase()
+          if (!isHistoryReplay && !isTopic && ev.kind === KIND_GEOHASH_CHAT && !blockedSetRef.current.has(pk)) {
+            nearbyRef.current.api()?.relayEvent(ev, gh)
+          }
           if (blockedSetRef.current.has(pk)) {
             if (!ownPubkeysRef.current.has(pk) && matchesBitchatChatEventForChannel(gh, ev)) {
               const placeholder = buildBlockedGeoPlaceholder(gh, ev)
@@ -3525,8 +3553,13 @@ export function useAgnostrEngine(): AgnostrEngine {
             m.id === tempId ? { ...m, deliveryStatus: 'sending' } : m
           ), { allowBackgroundPersist: true })
           const latestRelays = activeGeohashRef.current === gh ? relaySelectionRef.current.channelRelays : []
-          if (!await pool.waitForChatRelay([...targetRelays, ...latestRelays])) {
-            throw new Error('No connected relay accepted the message.')
+          const mesh = nearbyRef.current.api()
+          const hasGateway = !isTopic && !isNonEarth && isGatewayGeohash(gh) && Boolean(mesh?.hasGateway())
+          const directReady = !(hasGateway && typeof navigator !== 'undefined' && navigator.onLine === false) &&
+            await pool.waitForChatRelay([...targetRelays, ...latestRelays])
+          const viaGateway = !directReady && hasGateway
+          if (!directReady && !viaGateway) {
+            throw new Error('No connected relay or Bluetooth gateway is available.')
           }
           if (identityManager.getWipeGeneration() !== wipeGen) return false
           const template = isTopic
@@ -3549,7 +3582,7 @@ export function useAgnostrEngine(): AgnostrEngine {
               })
 
           // Mine 8-bit NIP-13 PoW non-blocking when enabled and pubkey is known
-          if (powEnabled && powTargetBits > 0 && activeKey.pubkey) {
+          if (!viaGateway && powEnabled && powTargetBits > 0 && activeKey.pubkey) {
             const nonceTag = await mineNip13NonceTag(
               template,
               activeKey.pubkey,
@@ -3562,9 +3595,14 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
 
           if (identityManager.getWipeGeneration() !== wipeGen) return false
-          const signed = await identityManager.signEvent(template, gh)
+          const signed = viaGateway ? mesh?.offlineEvent(template, gh) : await identityManager.signEvent(template, gh)
+          if (!signed) throw new Error('Bluetooth gateway messages must be public text under 480 bytes.')
           if (identityManager.getWipeGeneration() !== wipeGen) return false
 
+          if (viaGateway && !await mesh?.sendThroughGateway(signed, gh)) {
+            throw new Error('No Bluetooth link queued your message. Try again when a gateway is nearby.')
+          }
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
           activeMsgId = signed.id
           chatRetries.confirm(tempId)
           onPublishedId?.(signed.id)
@@ -3578,7 +3616,8 @@ export function useAgnostrEngine(): AgnostrEngine {
             : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
 
           if (parsed) {
-            parsed.deliveryStatus = 'sending'
+            parsed.deliveryStatus = viaGateway ? undefined : 'sending'
+            parsed.viaMeshGateway = viaGateway || undefined
             parsed.isOwn = true
             // Atomically promote tempId -> signed.id into confirmed messages BEFORE publishing,
             // keeping unconfirmed rows pinned at the tail.
@@ -3588,6 +3627,8 @@ export function useAgnostrEngine(): AgnostrEngine {
               { allowBackgroundPersist: true }
             )
           }
+
+          if (viaGateway) return true
 
           return await publishChatWire({
             rowId: signed.id,
@@ -5462,6 +5503,7 @@ export function useAgnostrEngine(): AgnostrEngine {
       pushToast('error', 'Wallet reset blocked', error instanceof Error ? error.message : undefined)
       return
     }
+    void nearbyRef.current.api()?.stop()
     const prevPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
     trustedSetRef.current = new Set()
     blockedSetRef.current = new Set()
@@ -5805,6 +5847,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     quickCities: QUICK_CITIES,
 
     messages: visibleMessages,
+    nearby,
     peers,
     readRoomPeers: () => presenceTracker.getPeers(activeGeohash, ownPubkeys, blockedSet),
     presence,
