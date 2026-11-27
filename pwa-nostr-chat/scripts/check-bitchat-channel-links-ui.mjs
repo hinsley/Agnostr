@@ -79,7 +79,15 @@ try {
       id:'a'.repeat(64), geohash, pubkey:pk, nickname:'Fixture', displayHandle:'Fixture',
       content, createdAt:Math.floor(Date.now()/1000)-60, tags:[], isOwn:false, isTeleported:false,
       isMeshBridge:false, powBits:0, reactions:[], mentions:[],
-    }]))
+    }, ...[
+      ['b', '* Fixture waves **enthusiastically** *'],
+      ['c', '* ordinary first bullet\n* ordinary second bullet'],
+      ['d', '* Fixture waves\n* and keeps waving *'],
+    ].map(([id, content], index) => ({
+      id:id.repeat(64), geohash, pubkey:pk, nickname:'Fixture', displayHandle:'Fixture',
+      content, createdAt:Math.floor(Date.now()/1000)-50+index, tags:[], isOwn:false, isTeleported:false,
+      isMeshBridge:false, powBits:0, reactions:[], mentions:[],
+    }))]))
   }
   await cdp('Page.enable')
   await cdp('Network.enable')
@@ -101,6 +109,24 @@ try {
     await wait(()=>!!document.querySelector('.ag-msg-row .ag-geo-chip'))
   }
   await openSource()
+  await wait(() => !!document.querySelector('#msg-' + 'd'.repeat(64)))
+  const formatting = await run(() => {
+    const body = id => document.querySelector('#msg-' + id.repeat(64) + ' .ag-msg-rich')
+    return {
+      actionText: body('b').querySelector('.ag-chat-action')?.textContent,
+      boldText: body('b').querySelector('strong')?.textContent,
+      actionBullets: body('b').querySelectorAll('li').length,
+      list: [...body('c').querySelectorAll('li')].map(x => x.textContent),
+      multilineAction: body('d').querySelector('.ag-chat-action')?.textContent,
+      multilineBullets: body('d').querySelectorAll('li').length,
+    }
+  })
+  assert.equal(formatting.actionText, '* Fixture waves enthusiastically *')
+  assert.equal(formatting.boldText, 'enthusiastically')
+  assert.equal(formatting.actionBullets, 0)
+  assert.deepEqual(formatting.list, ['ordinary first bullet', 'ordinary second bullet'])
+  assert.equal(formatting.multilineAction, '* Fixture waves\n* and keeps waving *')
+  assert.equal(formatting.multilineBullets, 0)
   const rendered=await run(()=>({
     chips:[...document.querySelectorAll('.ag-msg-row .ag-geo-chip')].map(b=>b.textContent.trim()),
     links:[...document.querySelectorAll('.ag-msg-row .ag-md-link')].map(a=>[a.textContent.trim(),a.getAttribute('href')]),

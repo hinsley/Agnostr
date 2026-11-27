@@ -1073,6 +1073,7 @@ function renderBlocks(
 
 export interface RichMessageContentProps extends MarkdownCallbacks {
   content: string
+  chatActions?: boolean
   linkPreviewMode?: LinkPreviewMode
 }
 
@@ -1081,7 +1082,7 @@ export interface RichMessageContentProps extends MarkdownCallbacks {
  * Never renders inline <img> elements or unsafe link schemes.
  */
 export const RichMessageContent: React.FC<RichMessageContentProps> = React.memo(
-  ({ content, onTuneGeohash, onClickMention, highlightQuery, knownHandles, linkPreviewMode }) => {
+  ({ content, onTuneGeohash, onClickMention, highlightQuery, knownHandles, chatActions, linkPreviewMode }) => {
     const previewLinks = new Map<string, string>()
     const callbacks: MarkdownCallbacks = {
       onTuneGeohash,
@@ -1091,7 +1092,14 @@ export const RichMessageContent: React.FC<RichMessageContentProps> = React.memo(
       collectExternalLink: linkPreviewMode ? (href) => collectPreviewLink(previewLinks, href) : undefined,
     }
 
-    const blocks = renderBlocks(content, callbacks)
+    // /me and /slap use a spaced asterisk at both ends on the wire.
+    // Require the whole action envelope so ordinary list items still parse as lists.
+    const action = chatActions ? /^\* [\s\S]+ \*$/.exec(content.trim()) : null
+    const blocks = action ? (
+      <div className="ag-md-p ag-chat-action">
+        {'* '}{renderParagraphContent(action[0].slice(2, -2), callbacks, 'action-')}{' *'}
+      </div>
+    ) : renderBlocks(content, callbacks)
     return <div className="ag-msg-rich">{blocks}<InlineLinkCards links={previewLinks} mode={linkPreviewMode} /></div>
   }
 )

@@ -1142,6 +1142,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                     <div className="ag-msg-translated-main">
                       <RichMessageContent
                         content={visibleContent}
+                        chatActions
                         linkPreviewMode={linkPreviewMode}
                         onTuneGeohash={onTuneGeohash}
                         onClickMention={onClickMention}
@@ -1156,6 +1157,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 ) : (
                   <RichMessageContent
                     content={visibleContent}
+                    chatActions
                     linkPreviewMode={linkPreviewMode}
                     onTuneGeohash={onTuneGeohash}
                     onClickMention={onClickMention}
