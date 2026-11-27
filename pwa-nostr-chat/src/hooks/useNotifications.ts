@@ -22,6 +22,7 @@ import {
 import {
   canUsePublicPinnedRoomFallback,
   closeCallNotificationsViaSw,
+  closeDmPreviews,
   getBrowserNotificationPermission,
   isWebPushSupported,
   normalizePushBridgeUrl,
@@ -344,6 +345,11 @@ export function useNotifications(
     )
   }, [])
 
+  const isDmPreviewEnabledInSession = useCallback(() => {
+    const cfg = settingsRef.current
+    return cfg.enabled && cfg.dms && cfg.showPreviews && cfg.showDmPreviews
+  }, [])
+
   const updateSettings = useCallback((patch: Partial<NotificationSettings>) => {
     if (patch.enabled === false || patch.backgroundPushEnabled === false) {
       pushRegistrationEpochRef.current += 1
@@ -353,12 +359,25 @@ export function useNotifications(
     } else if (patch.enabled === true) {
       explicitlyDisabledRef.current = false
     }
-    setSettings((prev) => {
-      const next: NotificationSettings = { ...prev, ...patch }
-      settingsRef.current = next
-      saveNotificationSettings(next)
-      return next
-    })
+    // Persist privacy changes before a queued notification can resume after an await.
+    const next = { ...settingsRef.current, ...patch }
+    settingsRef.current = next
+    saveNotificationSettings(next)
+    setSettings(next)
+    if (patch.showDmPreviews === false || patch.showPreviews === false || patch.dms === false || patch.enabled === false) {
+      void closeDmPreviews(isDmPreviewEnabledInSession)
+    }
+  }, [isDmPreviewEnabledInSession])
+
+  useEffect(() => {
+    const syncDmPreview = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== NOTIFICATIONS_STORAGE_KEY) return
+      const stored = loadNotificationSettings()
+      setSettings((prev) => ({ ...prev, showDmPreviews: stored.showDmPreviews, showPreviews: stored.showPreviews }))
+      if (!stored.showDmPreviews || !stored.showPreviews || !stored.dms || !stored.enabled) void closeDmPreviews()
+    }
+    window.addEventListener('storage', syncDmPreview)
+    return () => window.removeEventListener('storage', syncDmPreview)
   }, [])
 
   // Sync browser permission on visibility return + detect existing PushManager endpoint
@@ -677,12 +696,13 @@ export function useNotifications(
               : truncatePreview(msg.content || 'Encrypted message')
 
           void showOsNotification({
-            title: cfg.showPreviews
-              ? `DM from ${thread.peerDisplayHandle}`
-              : 'New Encrypted DM',
-            body: cfg.showPreviews
-              ? previewText
-              : 'New encrypted direct message on Agnostr',
+            title: 'New Encrypted DM',
+            body: 'New encrypted direct message on Agnostr',
+            dmPreview: {
+              title: `DM from ${thread.peerDisplayHandle}`,
+              body: previewText,
+              isStillAllowed: isDmPreviewEnabledInSession,
+            },
             tag: `agnostr-dm-${thread.peerPubkey.slice(0, 12)}`,
             vibrate: cfg.vibrationEnabled ? [140, 80, 140] : undefined,
             data: {
@@ -696,7 +716,7 @@ export function useNotifications(
         }
       }
     }
-  }, [dmThreads, canSendOsNotification, handleDirectNotificationClick, rememberNotified])
+  }, [dmThreads, canSendOsNotification, handleDirectNotificationClick, isDmPreviewEnabledInSession, rememberNotified])
 
   // 4. Live Server Messages (Virtual & NIP-29) — never spams EOSE history or own messages
   useEffect(() => {
@@ -2035,6 +2055,7 @@ export function useNotifications(
     const nextStatus = isWebPushSupported() ? 'disconnected' : 'unsupported'
     setPushStatus(nextStatus)
     pushStatusRef.current = nextStatus
+    void closeDmPreviews()
     settingsRef.current = DEFAULT_NOTIFICATION_SETTINGS
     setSettings(DEFAULT_NOTIFICATION_SETTINGS)
   }, [])

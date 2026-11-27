@@ -480,6 +480,7 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   ringtoneEnabled: true,
   vibrationEnabled: true,
   showPreviews: true,
+  showDmPreviews: false,
   pushBridgeUrl: DEFAULT_PUSH_BRIDGE_URL,
   backgroundPushEnabled: true,
   publicPinnedRoomFallback: false,
@@ -604,6 +605,7 @@ export function loadNotificationSettings(): NotificationSettings {
       typeof parsed.showPreviews === 'boolean'
         ? parsed.showPreviews
         : DEFAULT_NOTIFICATION_SETTINGS.showPreviews,
+    showDmPreviews: parsed.showDmPreviews === true,
     pushBridgeUrl: resolvedBridgeUrl,
     backgroundPushEnabled: parsed.backgroundPushEnabled !== false,
     publicPinnedRoomFallback: parsed.publicPinnedRoomFallback === true,

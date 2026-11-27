@@ -78,6 +78,7 @@ export interface NotificationSettings {
   ringtoneEnabled: boolean
   vibrationEnabled: boolean
   showPreviews: boolean
+  showDmPreviews: boolean
   pushBridgeUrl: string
   backgroundPushEnabled: boolean
   publicPinnedRoomFallback: boolean
@@ -102,6 +103,8 @@ export interface NotificationPayloadData {
   geohash?: string
   noteId?: string
   callerNickname?: string
+  /** A locally decrypted preview already displayed by the receiving client. */
+  localDmPreview?: boolean
 }
 
 export interface PendingNotificationAction {

@@ -12,6 +12,7 @@ import { isNativeAppBuild } from './appPlatform.ts'
 import { bytesToHex } from './identity.ts'
 import { normalizeBitchatChannelKey } from './bitchatChannel.ts'
 import { findDisplayedPush } from './pushDisplay.ts'
+import { loadNotificationSettings } from './storage.ts'
 
 export const KIND_NIP98_HTTP_AUTH = 27235
 const APP_ICON = '/icon-192.png'
@@ -168,6 +169,8 @@ export function parseNotifyHash(rawHash: string): PendingNotificationAction | nu
 export interface ShowOsNotificationInput {
   title: string
   body: string
+  /** Optional plaintext; never sent off-device, and only used with live consent. */
+  dmPreview?: { title: string; body: string; isStillAllowed?: () => boolean }
   tag: string
   data: NotificationPayloadData
   requireInteraction?: boolean
@@ -176,56 +179,104 @@ export interface ShowOsNotificationInput {
   onDirectClick?: (payload: NotificationPayloadData) => void
 }
 
+const directDmPreviews = new Map<string, Notification>()
+
+function dmPreviewsAllowed(): boolean {
+  const settings = loadNotificationSettings()
+  return settings.enabled && settings.dms && settings.showPreviews && settings.showDmPreviews
+}
+
+export async function closeDmPreviews(isStillAllowed = dmPreviewsAllowed): Promise<void> {
+  for (const notification of directDmPreviews.values()) notification.close()
+  directDmPreviews.clear()
+  try {
+    const reg = await getPwaSwRegistration()
+    if (!reg || isStillAllowed()) return
+    for (const notification of await reg.getNotifications()) {
+      if (isStillAllowed()) return
+      if (notification.data?.localDmPreview === true) notification.close()
+    }
+  } catch {
+    // OS or browser may restrict enumeration of prior notifications.
+  }
+}
+
 export async function showOsNotification(
   input: ShowOsNotificationInput
 ): Promise<boolean> {
   if (getBrowserNotificationPermission() !== 'granted') return false
 
+  const reg = await getPwaSwRegistration()
+  // Only an exact same-event push can be upgraded without notifying twice.
+  const prior = reg ? await findDisplayedPush(reg, input.data) : undefined
+  const previewAllowed = () => input.dmPreview?.isStillAllowed?.() !== false && dmPreviewsAllowed()
+  const preview = input.data.category === 'dm' && input.dmPreview && previewAllowed()
+    ? input.dmPreview
+    : undefined
+  if (prior && (!preview || prior.data?.localDmPreview === true)) return true
+
+  const title = preview?.title ?? input.title
+  const tag = prior?.tag || input.tag
+  const data = { ...input.data, tag, ...(preview ? { localDmPreview: true } : {}) }
   const options: ExtendedNotificationOptions = {
-    body: input.body,
+    body: preview?.body ?? input.body,
     icon: APP_ICON,
     badge: APP_ICON,
-    tag: input.tag,
-    renotify: true,
+    tag,
+    renotify: !prior,
+    ...(prior ? { silent: true } : {}),
     requireInteraction: Boolean(input.requireInteraction),
-    vibrate: input.vibrate,
+    vibrate: prior ? undefined : input.vibrate,
     actions: input.actions,
-    data: { ...input.data, tag: input.tag },
+    data,
   }
 
-  // Prefer ServiceWorkerRegistration.showNotification (required on mobile PWAs & supports action buttons)
-  const reg = await getPwaSwRegistration()
+  // Prefer ServiceWorkerRegistration.showNotification (required on mobile PWAs & supports action buttons).
   if (reg && typeof reg.showNotification === 'function') {
-    // The worker may already have shown this exact delivery. If either of the
-    // verified IDs is missing, a room/channel notification is not enough proof.
-    if (await findDisplayedPush(reg, input.data)) return true
     try {
-      await reg.showNotification(input.title, options)
+      await reg.showNotification(title, options)
+      if (preview && !previewAllowed()) void closeDmPreviews(previewAllowed)
       return true
     } catch {
-      // Some browsers reject `actions` with TypeError — retry cleanly without actions before falling back
-      if (options.actions && options.actions.length > 0) {
+      if (prior) return true // Keep the generic notification rather than alerting again.
+      // Some browsers reject actions. Retry without them before falling back.
+      if (options.actions?.length) {
         try {
-          const withoutActions: ExtendedNotificationOptions = { ...options }
-          delete withoutActions.actions
-          await reg.showNotification(input.title, withoutActions)
+          const { actions: _actions, ...withoutActions } = options
+          await reg.showNotification(title, withoutActions)
           return true
         } catch {
-          // Fall back to direct Notification constructor below
+          // Fall back to the direct Notification constructor.
         }
       }
     }
   }
 
   try {
+    const directPreview = preview && previewAllowed() ? preview : undefined
     const directOpts: NotificationOptions = {
-      body: input.body,
+      body: directPreview?.body ?? input.body,
       icon: APP_ICON,
-      tag: input.tag,
+      tag,
       requireInteraction: Boolean(input.requireInteraction),
-      data: { ...input.data, tag: input.tag },
+      data: { ...input.data, tag, ...(directPreview ? { localDmPreview: true } : {}) },
     }
-    const notif = new Notification(input.title, directOpts)
+    const notif = new Notification(directPreview?.title ?? input.title, directOpts)
+    if (directPreview) {
+      directDmPreviews.get(tag)?.close()
+      directDmPreviews.set(tag, notif)
+      // Limit references on browsers that do not emit close consistently.
+      if (directDmPreviews.size > 64) {
+        const oldest = directDmPreviews.entries().next().value
+        if (oldest) {
+          oldest[1].close()
+          directDmPreviews.delete(oldest[0])
+        }
+      }
+      notif.onclose = () => {
+        if (directDmPreviews.get(tag) === notif) directDmPreviews.delete(tag)
+      }
+    }
     notif.onclick = () => {
       try {
         window.focus()
@@ -720,7 +771,8 @@ export async function sendPushPoke(opts: {
 
   const endpointUrl = `${normalized}/poke`
   const bodyJson = JSON.stringify({
-    ...opts.payload,
+    // Private push hints carry routing IDs only. DM text stays on the receiving device.
+    ...(opts.payload.category === 'dm' ? { category: 'dm' } : opts.payload),
     // Some older callers don't have a message ID, e.g. a ring-cancel hint.
     // Make retries idempotent without using a timestamp to identify private messages.
     eventId: opts.payload.eventId || randomPushRequestId(),

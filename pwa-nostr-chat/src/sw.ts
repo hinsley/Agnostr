@@ -275,7 +275,7 @@ async function showSwNotificationSafe(
   const display: ExtendedNotificationOptions = prior
     ? {
         ...options,
-        body: prior.body || options.body,
+        body: data.category === 'dm' ? options.body : prior.body || options.body,
         tag: prior.tag,
         data: resolvedData,
         renotify: false,
@@ -283,7 +283,7 @@ async function showSwNotificationSafe(
         silent: true,
       }
     : options
-  const displayTitle = prior?.title || title
+  const displayTitle = data.category === 'dm' ? title : prior?.title || title
   try {
     await swSelf.registration.showNotification(displayTitle, display)
     return { displayed: true }
@@ -381,8 +381,10 @@ swSelf.addEventListener('push', (event) => {
       deliveryEventId: normalizePushIdentifier(fields?.deliveryEventId),
       callerNickname: stringField(fields?.callerNickname),
     }
-    const title = stringField(payload.title)
-    const body = stringField(payload.body)
+    // Only the receiving app can decrypt DMs and read local preview consent.
+    // A bridge payload is never a trusted source of private notification text.
+    const title = category === 'dm' ? 'New Encrypted DM' : stringField(payload.title)
+    const body = category === 'dm' ? 'Open Agnostr to read your private message.' : stringField(payload.body)
     const windowsPromise = getAppWindows()
 
     const display = async (heading: string, options: ExtendedNotificationOptions) => {

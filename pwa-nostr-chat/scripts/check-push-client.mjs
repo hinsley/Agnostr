@@ -237,3 +237,19 @@ test('public room fallback is opt-in and does not sync private filters', async (
     signEvent: makeSigner().signEvent,
   })
 })
+
+test('encrypted DM poke sends routing IDs only, never sender or preview text', async () => {
+  const signer = makeSigner()
+  const eventId = 'e'.repeat(64)
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, bridgeUrl + '/poke')
+    assert.deepEqual(JSON.parse(init.body), { category: 'dm', recipientPubkeys: [recipient], eventId })
+    return Response.json({ ok: true, delivered: 1 })
+  }
+  const result = await notifications.sendPushPoke({
+    bridgeUrl, signEvent: signer.signEvent,
+    payload: { category: 'dm', recipientPubkeys: [recipient], eventId,
+      preview: 'private message', senderName: 'private sender' },
+  })
+  assert.equal(result.kind, 'accepted')
+})

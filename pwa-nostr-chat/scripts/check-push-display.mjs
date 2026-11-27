@@ -102,6 +102,8 @@ test('focused window is not proof of notification display', async () => {
   await sw.push(dm)
   assert.equal(sw.notifications.length, 1)
   assert.equal(sw.notifications[0].options.renotify, true)
+  assert.equal(sw.notifications[0].title, 'New Encrypted DM')
+  assert.equal(sw.notifications[0].options.body, 'Open Agnostr to read your private message.')
   assert.equal(sw.messages.length, 1)
   assert.equal(sw.messages[0].type, 'agnostr-profile-push')
   assert.equal('body' in sw.messages[0], false)
@@ -117,9 +119,9 @@ test('an exact displayed event can be replaced without a second alert', async ()
   }] })
   await sw.push(dm)
   const [{ title, options }] = sw.notifications
-  assert.equal(title, 'Already displayed')
+  assert.equal(title, 'New Encrypted DM')
   assert.equal(options.tag, 'local-event-tag')
-  assert.equal(options.body, 'existing body')
+  assert.equal(options.body, 'Open Agnostr to read your private message.')
   assert.equal(options.renotify, false)
   assert.equal(options.silent, true)
   assert.equal(options.vibrate, undefined)
@@ -136,7 +138,7 @@ test('neither a room tag nor another profile proves an exact match', async () =>
   ]) {
     const sw = worker({ existing: [{ title: 'Previous', tag: dm.tag, data }] })
     await sw.push(dm)
-    assert.equal(sw.notifications[0].title, dm.title)
+    assert.equal(sw.notifications[0].title, 'New Encrypted DM')
     assert.equal(sw.notifications[0].options.renotify, true)
   }
 })
@@ -233,7 +235,7 @@ test('unreadable payloads and optional non-string fields get safe fallback displ
   await sw.malformed()
   await sw.push({ data: { category: {}, peerPubkey: 42, serverId: { id: 'ignored' } } })
   assert.equal(sw.notifications.length, 3)
-  assert.ok(sw.notifications.every(({ title }) => title === 'Agnostr'))
+  assert.ok(sw.notifications.every(({ title }) => title === 'New Encrypted DM'))
 })
 
 test('the foreground notification path does not re-alert after an exact push was displayed', async () => {
@@ -245,14 +247,13 @@ test('the foreground notification path does not re-alert after an exact push was
     plugins: [{
       name: 'foreground-browser-stubs',
       setup(builder) {
-        builder.onResolve({ filter: /^(\.\.\/hooks\/usePwa|\.\/identity)\.ts$/ }, ({ path }) => ({
+        builder.onResolve({ filter: /^\.\.\/hooks\/usePwa\.ts$/ }, ({ path }) => ({
           path,
           namespace: 'window-stubs',
         }))
         builder.onLoad({ filter: /.*/, namespace: 'window-stubs' }, () => ({
           contents: `
             export function getPwaSwRegistration() { return Promise.resolve(globalThis.appRegistration) }
-            export function bytesToHex() { throw new Error('not used by this test') }
           `,
         }))
       },
@@ -261,13 +262,15 @@ test('the foreground notification path does not re-alert after an exact push was
   const module = { exports: {} }
   const appRegistration = {
     getNotifications: async () => [{ title: 'Previously displayed', tag: 'old-room-tag', data: dm.data }],
-    showNotificationCalls: 0,
-    async showNotification() { this.showNotificationCalls += 1 },
+    notifications: [],
+    async showNotification(title, options) { this.notifications.push({ title, options }) },
   }
+  const localStorage = new Map()
   runInNewContext(result.outputFiles[0].text, {
     module,
     exports: module.exports,
     window: {},
+    localStorage: { getItem: (key) => localStorage.get(key) ?? null },
     Notification: { permission: 'granted' },
     TextEncoder,
     TextDecoder,
@@ -278,12 +281,41 @@ test('the foreground notification path does not re-alert after an exact push was
   })
   const { showOsNotification } = module.exports
   assert.equal(await showOsNotification(dm), true)
-  assert.equal(appRegistration.showNotificationCalls, 0)
+  assert.equal(appRegistration.notifications.length, 0)
   assert.equal(await showOsNotification({
     ...dm,
     data: { ...dm.data, recipientPubkey: '2'.repeat(64) },
   }), true)
-  assert.equal(appRegistration.showNotificationCalls, 1)
+  assert.equal(appRegistration.notifications.length, 1)
+
+  const privateText = { title: 'Private sender', body: 'Only on this device' }
+  const input = { ...dm, dmPreview: privateText }
+  const storageKey = 'agnostr:v2:notifications'
+  const optIn = { enabled: true, dms: true, showPreviews: true, showDmPreviews: true }
+  for (const prefs of [{ enabled: true, dms: true, showPreviews: true }, { ...optIn, showDmPreviews: 'true' }, { ...optIn, showPreviews: false }]) {
+    localStorage.set(storageKey, JSON.stringify(prefs))
+    assert.equal(await showOsNotification(input), true)
+    assert.equal(appRegistration.notifications.length, 1)
+  }
+  localStorage.set(storageKey, JSON.stringify(optIn))
+  assert.equal(await showOsNotification(input), true)
+  const latest = appRegistration.notifications.at(-1)
+  assert.equal(latest.title, privateText.title)
+  assert.equal(latest.options.body, privateText.body)
+  assert.equal(latest.options.silent, true)
+  assert.equal(latest.options.renotify, false)
+  assert.equal(latest.options.tag, 'old-room-tag')
+  assert.equal(latest.options.data.localDmPreview, true)
+  assert.equal(latest.options.data.body, undefined)
+
+  let closed = 0
+  appRegistration.getNotifications = async () => [
+    { data: latest.options.data, close: () => { closed++ } },
+    { data: dm.data, close: () => assert.fail('Generic DM notification must stay available') },
+  ]
+  localStorage.set(storageKey, JSON.stringify({ ...optIn, showDmPreviews: false }))
+  await module.exports.closeDmPreviews()
+  assert.equal(closed, 1)
 })
 
 test('call cancellation replaces the ring without leaving a silent-only push', async () => {

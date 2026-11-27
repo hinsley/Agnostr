@@ -2864,7 +2864,7 @@ export function SettingsModal({
               <div className="ag-set-notif-row-copy">
                 <span className="ag-set-notif-row-title">Show Message Previews</span>
                 <span className="ag-set-notif-row-desc">
-                  Turn off to hide message text on lock screens and banners
+                  Turn off to hide previews on lock screens and banners. Encrypted DMs also require the opt-in below.
                 </span>
               </div>
               <input
@@ -2873,6 +2873,26 @@ export function SettingsModal({
                 checked={ns.showPreviews}
                 onChange={() => {
                   notif.updateSettings({ showPreviews: !ns.showPreviews })
+                  onPlaySound?.('click')
+                }}
+              />
+            </label>
+
+            <label className="ag-set-notif-row">
+              <div className="ag-set-notif-row-copy">
+                <span className="ag-set-notif-row-title">Show DM Text in Notifications</span>
+                <span className="ag-set-notif-row-desc">
+                  On this device only. With message previews on, decrypted DMs can appear on the lock screen or in banners.
+                  Alerts stay generic when Agnostr is closed.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                className="ag-switch"
+                checked={ns.showDmPreviews}
+                disabled={!ns.showPreviews}
+                onChange={() => {
+                  notif.updateSettings({ showDmPreviews: !ns.showDmPreviews })
                   onPlaySound?.('click')
                 }}
               />
