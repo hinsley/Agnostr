@@ -376,9 +376,10 @@ export function useNotifications(
       setSettings((prev) => ({ ...prev, showDmPreviews: stored.showDmPreviews, showPreviews: stored.showPreviews }))
       if (!stored.showDmPreviews || !stored.showPreviews || !stored.dms || !stored.enabled) void closeDmPreviews()
     }
+    if (!isDmPreviewEnabledInSession()) void closeDmPreviews()
     window.addEventListener('storage', syncDmPreview)
     return () => window.removeEventListener('storage', syncDmPreview)
-  }, [])
+  }, [isDmPreviewEnabledInSession])
 
   // Sync browser permission on visibility return + detect existing PushManager endpoint
   // (NEVER lie pushStatus='connected' before bridge registration actually confirms HTTP 200)
@@ -2055,7 +2056,7 @@ export function useNotifications(
     const nextStatus = isWebPushSupported() ? 'disconnected' : 'unsupported'
     setPushStatus(nextStatus)
     pushStatusRef.current = nextStatus
-    void closeDmPreviews()
+    void closeDmPreviews(() => false)
     settingsRef.current = DEFAULT_NOTIFICATION_SETTINGS
     setSettings(DEFAULT_NOTIFICATION_SETTINGS)
   }, [])

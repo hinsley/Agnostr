@@ -243,7 +243,13 @@ export async function showOsNotification(
       if (options.actions?.length) {
         try {
           const { actions: _actions, ...withoutActions } = options
-          await reg.showNotification(title, withoutActions)
+          const usePreview = preview && previewAllowed()
+          if (preview && !usePreview) {
+            withoutActions.body = input.body
+            withoutActions.data = { ...input.data, tag }
+          }
+          await reg.showNotification(usePreview ? title : input.title, withoutActions)
+          if (usePreview && !previewAllowed()) void closeDmPreviews(previewAllowed)
           return true
         } catch {
           // Fall back to the direct Notification constructor.
