@@ -26,11 +26,12 @@ interface ObservedJob extends DeliveryJob {
   eventId: string
 }
 
-interface QueueRequest {
-  recipient: string
+export interface QueueBatch {
   jobs: DeliveryJob[]
   observation?: { relay: string; complete: boolean; events: ObservedJob[] }
 }
+
+type QueueRequest = { recipient: string } & (QueueBatch | { batches: QueueBatch[] })
 
 interface Pending extends Target {
   recipient: string
@@ -225,15 +226,12 @@ export class PushDelivery {
     const input = await request.json<QueueRequest>()
     const counts = await this.state.blockConcurrencyWhile(async () => {
       const result = emptyCounts()
-      const existing = await this.storage.list<Pending>({ prefix: PENDING_PREFIX, limit: MAX_PENDING + 1 })
+      // Keep the order of each relay/tag observation while sharing the
+      // reads and transaction across all observations for this recipient.
+      const batches = 'batches' in input ? input.batches : [input]
       const now = Date.now()
       const writes: Record<string, unknown> = {}
       const deletes: string[] = []
-      const allJobs = input.jobs.concat(input.observation?.events ?? [])
-      const finalKeys = [...new Set(allJobs.flatMap((job) => job.targets.map(
-        (target) => DONE_PREFIX+`${job.id}:${target.endpointHash}`
-      )))]
-      const observedKeys = [...new Set((input.observation?.events ?? []).map((event) => OBS_PREFIX+event.eventId))]
       const readKeys = async <T>(keys: string[]): Promise<Map<string,T>> => {
         const result = new Map<string,T>()
         for (let i=0; i<keys.length; i+=128) {
@@ -241,8 +239,45 @@ export class PushDelivery {
         }
         return result
       }
-      const terminal = await readKeys<FinalRow>(finalKeys)
+      const relayKeys = new Map<string,string>()
+      for (const { observation } of batches) {
+        if (observation && !relayKeys.has(observation.relay)) {
+          relayKeys.set(observation.relay, BASELINE_PREFIX + await sha256Hex(observation.relay))
+        }
+      }
+      const baselines = await readKeys<number>([...relayKeys.values()])
+      // Eligibility for this observation is order-dependent: an incomplete
+      // first response must not baseline old traffic, whereas a later
+      // response for the same source can build on a complete one.
+      const initializedKeys = new Set(baselines.keys())
+      const observations = batches.map(({ observation }) => {
+        if (!observation) return null
+        const baselineKey = relayKeys.get(observation.relay)!
+        const initialized = initializedKeys.has(baselineKey)
+        if (observation.complete) initializedKeys.add(baselineKey)
+        return { ...observation, baselineKey, initialized }
+      })
+      const observedKeys = [...new Set(observations.flatMap((observation) =>
+        observation && (observation.initialized || observation.complete)
+          ? observation.events.map(({eventId}) => OBS_PREFIX+eventId) : []
+      ))]
       const observed = await readKeys<number>(observedKeys)
+      // If a gift wrap was already observed, its device delivery state is
+      // irrelevant. Skip both the terminal lookups and the pending scan
+      // during ticks that contain only previously observed events.
+      const possibleJobs = batches.flatMap(({jobs}, i) => {
+        const observation = observations[i]
+        return observation?.initialized
+          ? jobs.concat(observation.events.filter(({eventId}) => !observed.has(OBS_PREFIX+eventId)))
+          : jobs
+      })
+      const finalKeys = [...new Set(possibleJobs.flatMap((job) => job.targets.map(
+        (target) => DONE_PREFIX+`${job.id}:${target.endpointHash}`
+      )))]
+      const terminal = await readKeys<FinalRow>(finalKeys)
+      const existing = finalKeys.length
+        ? await this.storage.list<Pending>({ prefix: PENDING_PREFIX, limit: MAX_PENDING + 1 })
+        : new Map<string,Pending>()
       const track = (key: string, expires: number) => { writes[bucketKey(expires, key)] = key }
       const enqueue = async (job: DeliveryJob): Promise<boolean> => {
         let fullyQueued = true
@@ -285,23 +320,22 @@ export class PushDelivery {
       }
 
       const seenWithinRequest = new Set<string>()
-      for (const job of input.jobs) await enqueue(job)
-      if (input.observation) {
-        const { relay, complete, events } = input.observation
-        const baselineKey = BASELINE_PREFIX + await sha256Hex(relay)
-        const initialized = Boolean(await this.storage.get(baselineKey))
-        // Don't baseline an incomplete first snapshot, which could turn old unobserved
-        // messages into new notifications on the first healthy poll.
-        if (initialized || complete) {
-          for (const event of events) {
-            const key = OBS_PREFIX + event.eventId
-            if (key in writes || observed.has(key)) continue
-            if (initialized && !await enqueue(event)) continue
-            writes[key] = 1
-            track(key, now + WINDOW_MS)
-          }
-          if (complete && !initialized) writes[baselineKey] = 1
+      for (const [i, {jobs}] of batches.entries()) {
+        for (const job of jobs) await enqueue(job)
+        const observation = observations[i]
+        if (!observation) continue
+        const { baselineKey, initialized, complete, events } = observation
+        // Don't baseline an incomplete first snapshot, which could turn old
+        // unobserved messages into new notifications on the first healthy poll.
+        if (!initialized && !complete) continue
+        for (const event of events) {
+          const key = OBS_PREFIX + event.eventId
+          if (key in writes || observed.has(key)) continue
+          if (initialized && !await enqueue(event)) continue
+          writes[key] = 1
+          track(key, now + WINDOW_MS)
         }
+        if (complete && !initialized) writes[baselineKey] = 1
       }
       // Persist alarm scheduling before data so a lost request cannot strand durable work.
       await this.schedule(seenWithinRequest.size || deletes.length ? now : now + WINDOW_MS)

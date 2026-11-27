@@ -8,7 +8,7 @@ import {
   type StoredDeviceSubscription,
   type StoredUserRecord,
 } from './types.ts'
-import { addCounts, emptyCounts, nextScanPage, queueJobs, type DeliveryJob } from './delivery.ts'
+import { addCounts, emptyCounts, nextScanPage, queueJobs, type DeliveryJob, type QueueBatch } from './delivery.ts'
 import { sha256Hex } from './webpush.ts'
 
 const CRON_RELAYS = [
@@ -436,6 +436,25 @@ function validEvent(ev: NostrEvent): boolean {
   try { return verifyEvent(ev) } catch { return false }
 }
 
+/** Two relays can return the same signed event as different JS objects.
+ * Reuse verification only for the exact signed fields and signature;
+ * an unverified object with the same claimed id must not inherit trust. */
+export function relayEventVerifier(): (event: NostrEvent) => boolean {
+  const verified = new Map<string,NostrEvent>()
+  return (event) => {
+    if (!event || !Array.isArray(event.tags)) return false
+    const prior = verified.get(event.id)
+    if (prior && event.pubkey === prior.pubkey && event.kind === prior.kind &&
+        event.created_at === prior.created_at && event.content === prior.content && event.sig === prior.sig &&
+        event.tags.length === prior.tags.length && event.tags.every((tag, i) =>
+          Array.isArray(tag) && tag.length === prior.tags[i].length &&
+          tag.every((value, j) => value === prior.tags[i][j]))) return true
+    if (!validEvent(event)) return false
+    verified.set(event.id,event)
+    return true
+  }
+}
+
 function roomJob(ev: NostrEvent, record: StoredUserRecord, allowed: Set<string>): DeliveryJob | null {
   if (!validEvent(ev) || ev.pubkey === record.pubkey || record.aliasPubkeys?.includes(ev.pubkey)) return null
   const room = eventRoom(ev)
@@ -472,9 +491,9 @@ function buildJob(ev: NostrEvent, record: StoredUserRecord): DeliveryJob | null 
   return { id: `relay:${ev.id}`, targets, ttlSeconds: 86_400 }
 }
 
-function validForTag(ev: NostrEvent, tag: string): boolean {
+function validForTag(ev: NostrEvent, tag: string, verify: (event: NostrEvent) => boolean): boolean {
   return Array.isArray(ev?.tags) &&
-    getAllTagValues(ev.tags, 'p').some((pk) => pk.toLowerCase() === tag) && validEvent(ev)
+    getAllTagValues(ev.tags, 'p').some((pk) => pk.toLowerCase() === tag) && verify(ev)
 }
 
 /** Budgeted per-recipient relay scanning. Incomplete/reset scans are explicit;
@@ -487,9 +506,11 @@ export async function runNostrPushCron(env: Env, scheduledAt = Date.now()): Prom
   partialGiftScans: number
   failed: number
   discoveryDegraded: boolean
+  queueCalls: number
+  queueBatches: number
 }> {
   const {tags,rotation,periodSeconds,discoveryDegraded = false} = await nextScanPage(env,scheduledAt)
-  if (!tags.length) return { checkedPubkeys: 0, fetchedEvents: 0, delivered: 0, queued: 0, partialGiftScans: 0, failed: 0, discoveryDegraded }
+  if (!tags.length) return { checkedPubkeys: 0, fetchedEvents: 0, delivered: 0, queued: 0, partialGiftScans: 0, failed: 0, discoveryDegraded, queueCalls: 0, queueBatches: 0 }
   const now = Math.floor(scheduledAt/1000)
   // Use observed full sweep length to cover moderate backlogs without
   // making either public or encrypted Nostr reads unbounded.
@@ -531,39 +552,41 @@ export async function runNostrPushCron(env: Env, scheduledAt = Date.now()): Prom
   ])
   const seen = new Set<string>()
   const result = emptyCounts()
+  const verify = relayEventVerifier()
+  const recipientBatches = new Map<string,QueueBatch[]>()
+  const addBatch = (recipient: string, batch: QueueBatch) => {
+    const previous = recipientBatches.get(recipient)
+    if (previous) previous.push(batch)
+    else recipientBatches.set(recipient, [batch])
+  }
   for (const {relay,gift,publicEvents} of payloads) {
     for (const tag of tags) {
       const record = records.get(tag)
       if (!record) continue
       const publicJobs: DeliveryJob[] = []
       for (const ev of publicEvents.events) {
-        if (!PUBLIC_KINDS.includes(ev.kind) || !validForTag(ev,tag)) continue
+        if (!PUBLIC_KINDS.includes(ev.kind) || !validForTag(ev,tag,verify)) continue
         seen.add(ev.id)
         const job = buildJob(ev,record)
         if (job?.targets.length) publicJobs.push(job)
       }
       const events = gift.events.flatMap((ev) => {
-        if (!validForTag(ev,tag)) return []
+        if (!validForTag(ev,tag,verify)) return []
         seen.add(ev.id)
         const job = buildJob(ev,record)
         return job ? [{ ...job, eventId: ev.id }] : []
       })
-      try {
-        addCounts(result, await queueJobs(env, {
-          recipient: record.pubkey,
-          jobs: publicJobs,
-          observation: { relay: await sha256Hex(relay+':'+tag), complete: gift.complete, events },
-        }))
-      } catch {
-        result.failed += Math.max(1, publicJobs.length+events.length)
-      }
+      addBatch(record.pubkey, {
+        jobs: publicJobs,
+        observation: { relay: await sha256Hex(relay+':'+tag), complete: gift.complete, events },
+      })
     }
   }
   if (rooms.length) {
     const allowed = new Set(rooms)
     const roomEvents = roomSnapshots.flat().filter((ev) => {
       const room = eventRoom(ev)
-      return room && allowed.has(room) && validEvent(ev)
+      return room && allowed.has(room) && verify(ev)
     })
     const deduped = [...new Map(roomEvents.map((ev) => [ev.id,ev])).values()]
     for (const record of uniqueRoomRecords) {
@@ -574,12 +597,22 @@ export async function runNostrPushCron(env: Env, scheduledAt = Date.now()): Prom
         return [job]
       })
       if (!jobs.length) continue
-      try { addCounts(result,await queueJobs(env,{ recipient:record.pubkey,jobs })) }
-      catch { result.failed += jobs.length }
+      addBatch(record.pubkey, {jobs})
+    }
+  }
+  // Bound fan-out and preserve the previous priority order within a
+  // recipient while issuing only one durable enqueue per recipient.
+  for (const [recipient,batches] of recipientBatches) {
+    try { addCounts(result, await queueJobs(env, {recipient,batches})) }
+    catch {
+      result.failed += batches.reduce((count, {jobs, observation}) =>
+        count + Math.max(1, jobs.length + (observation?.events.length ?? 0)), 0)
     }
   }
   return {
     checkedPubkeys: tags.length, fetchedEvents: seen.size, delivered: result.delivered, queued: result.queued,
     partialGiftScans: payloads.filter((x) => !x.gift.complete).length, failed: result.failed, discoveryDegraded,
+    queueCalls: recipientBatches.size,
+    queueBatches: [...recipientBatches.values()].reduce((sum, batches) => sum + batches.length, 0),
   }
 }

@@ -18,6 +18,14 @@ never bypass the live device/preferences checks. On a list error the Worker
 continues with the last batch and emits an aggregate `discoveryDegraded` flag.
 Known stale cursors restart on the next budgeted refresh, not immediately.
 
+Each minute now sends the ordered relay observations and public-room jobs in
+one queue request per canonical recipient. Previously seen gift wraps read
+observation state once across relay copies and skip per-device terminal and
+pending queue lookups. Relay copies reuse signature verification only if all
+signed fields and the signature match. The relay lookback, per-source silent
+first baseline, recipient scope, and durable retry policy are unchanged.
+Aggregate `queueCalls` and `queueBatches` show the actual batching ratio.
+
 ## Endpoints
 
 | Method | Path | Auth | Purpose |

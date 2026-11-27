@@ -5,6 +5,7 @@ import worker, { PushDelivery } from '../src/index.ts'
 import { PUBKEYS_INDEX_KEY, subKeyForPubkey, DEFAULT_PUSH_PREFERENCES } from '../src/types.ts'
 import { sha256Hex } from '../src/webpush.ts'
 import { nextScanPage } from '../src/delivery.ts'
+import { relayEventVerifier } from '../src/nostrCron.ts'
 
 const signer = generateSecretKey()
 const recipientSecret = generateSecretKey()
@@ -15,8 +16,13 @@ const b64 = (value) => Buffer.from(value).toString('base64url')
 function memoryStorage() {
   const kv = new Map()
   let alarm = null
+  const operations = { keys: [], lists: [] }
   const store = {
-    async get(k) { return Array.isArray(k) ? new Map(k.filter((key) => kv.has(key)).map((key) => [key, kv.get(key)])) : kv.get(k) },
+    operations,
+    async get(k) {
+      operations.keys.push(...(Array.isArray(k) ? k : [k]))
+      return Array.isArray(k) ? new Map(k.filter((key) => kv.has(key)).map((key) => [key, kv.get(key)])) : kv.get(k)
+    },
     async put(k, val) {
       if (typeof k === 'string') kv.set(k, structuredClone(val))
       else {
@@ -25,6 +31,7 @@ function memoryStorage() {
       }
     },
     async list({ prefix, start = '', end = '\uffff', limit = Infinity }) {
+      operations.lists.push(prefix)
       return new Map([...kv].sort(([a], [b]) => a < b ? -1 : 1)
         .filter(([k]) => (prefix === undefined || k.startsWith(prefix)) && k >= start && k < end).slice(0,limit))
     },
@@ -60,6 +67,7 @@ async function fixture(names = ['a', 'b']) {
   ])
   const waits = []
   const objects = new Map()
+  const queueRequests = []
   const env = {
     VAPID_PUBLIC_KEY: b64(await crypto.subtle.exportKey('raw',keys.publicKey)),
     VAPID_PRIVATE_KEY: (await crypto.subtle.exportKey('jwk',keys.privateKey)).d,
@@ -88,11 +96,14 @@ async function fixture(names = ['a', 'b']) {
           }
           return obj
         }
-        return { fetch(url, init) { return get().worker.fetch(new Request(url, init)) } }
+        return { fetch(url, init) {
+          if (new URL(url).pathname === '/queue') queueRequests.push(JSON.parse(init.body))
+          return get().worker.fetch(new Request(url, init))
+        } }
       },
     },
   }
-  return { env, waits: async () => { while (waits.length) await Promise.all(waits.splice(0)) }, objects }
+  return { env, waits: async () => { while (waits.length) await Promise.all(waits.splice(0)) }, objects, queueRequests }
 }
 
 async function poke(env, eventId, key = signer) {
@@ -198,16 +209,61 @@ test('actual scheduled handler baselines old gift wraps, then queues newly obser
   try {
     await schedule(now*1000)
     assert.equal(providerCalls,0)
+    assert.equal(f.queueRequests.length,1)
+    assert.equal(f.queueRequests[0].batches.length,3)
     wraps = [...wraps,newlyObserved]
     await schedule((now+60)*1000)
     assert.equal(providerCalls,1)
+    const ops = f.objects.get(recipient).storage.operations
+    ops.keys.length = ops.lists.length = 0
     await schedule((now+120)*1000)
     assert.equal(providerCalls,1)
+    assert.equal(f.queueRequests.length,3, 'one queue call per recipient per minute')
+    assert.equal(ops.keys.filter(k=>k.startsWith('seen:')).length,2, 'each repeated event is looked up once across all relays')
+    assert.equal(ops.keys.filter(k=>k.startsWith('done:')).length,0)
+    assert.equal(ops.lists.filter(k=>k==='pending:').length,0)
   } finally {
     globalThis.fetch = fromFetch
   }
 })
 
+
+test('an incomplete first observation cannot baseline or notify before a later complete response in the same batch', async () => {
+  const f = await fixture(['test'])
+  const stub = f.env.PUSH_DELIVERY.get(recipient)
+  const target = { endpointHash: 'test', preferences: JSON.stringify(DEFAULT_PUSH_PREFERENCES), payload: { title: 'Fixture', body: '' } }
+  const job = eventId => ({eventId, id: 'relay:'+eventId, targets:[target], ttlSeconds:600})
+  const batch = (complete, events) => ({ jobs:[], observation:{ relay:'same-source', complete, events } })
+  const submit = batches => stub.fetch('https://delivery.internal/queue', {method:'POST',body:JSON.stringify({recipient,batches})})
+  const historical = job('old')
+  const first = await (await submit([batch(false,[historical]),batch(true,[historical])])).json()
+  assert.equal(first.queued,0)
+  const storage = f.objects.get(recipient).storage
+  assert.equal(await storage.get('seen:old'),1)
+  assert.equal(storage.operations.keys.some(k=>k.startsWith('done:')),false)
+  const prior = globalThis.fetch
+  let sent=0
+  globalThis.fetch=async () => { sent++; return new Response(null,{status:201}) }
+  try {
+    const newer = job('newer')
+    const second = await (await submit([batch(false,[historical,newer]),batch(true,[newer])])).json()
+    assert.equal(second.queued,1)
+    await f.waits()
+    assert.equal(sent,1)
+  } finally { globalThis.fetch=prior }
+})
+
+test('deduped relay verification never trusts an altered event with a claimed known id', () => {
+  const event = finalizeEvent({ kind: 1059, content: 'fixture', tags: [['p',recipient]],
+    created_at: Math.floor(Date.now()/1000) },signer)
+  const copy = JSON.parse(JSON.stringify(event))
+  const verify = relayEventVerifier()
+  assert.equal(verify(event),true)
+  assert.equal(verify(copy),true)
+  assert.equal(verify({...copy,content:'not signed'}),false)
+  assert.equal(verify({...copy,tags:[['p','b'.repeat(64)]]}),false)
+  assert.equal(verify({...copy,sig:'f'.repeat(128)}),false)
+})
 
 test('only an explicitly opted-in, matching pinned public room is queried and delivered', async () => {
   const f = await fixture(['test'])
