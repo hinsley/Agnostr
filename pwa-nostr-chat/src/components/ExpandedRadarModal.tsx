@@ -1,6 +1,7 @@
 import { Component, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import {
+  Bluetooth,
   ArrowLeft,
   ArrowUpRight,
   Check,
@@ -111,6 +112,7 @@ export interface ExpandedRadarModalProps {
   engine: AgnostrEngine
   onClose: () => void
   onTuneChannel: (geohash: string) => void
+  onOpenNearby?: () => void
   onPlaySound?: (cue: SoundCue) => void
   /** When true on mobile, renders anchored inside .ag-shell-body above the always-present bottom navbar. */
   inShell?: boolean
@@ -231,6 +233,7 @@ export function ExpandedRadarModal({
   engine,
   onClose,
   onTuneChannel,
+  onOpenNearby,
   onPlaySound,
   inShell = false,
   embedded = false,
@@ -1854,6 +1857,11 @@ export function ExpandedRadarModal({
         >
           <Grid3x3 size={17} />
         </button>
+
+        {onOpenNearby && (
+          <button type="button" className="ag-radar-fab" onClick={onOpenNearby}
+            title="Nearby Bluetooth" aria-label="Nearby Bluetooth"><Bluetooth size={17} /></button>
+        )}
 
         <div className="ag-radar-zoom-pair ag-radar-desktop-only">
           <button

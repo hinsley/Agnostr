@@ -1,0 +1,36 @@
+.ag-nearby {
+  color: var(--text-primary, #eeedf3);
+  background: var(--bg-panel, #151820);
+  box-sizing: border-box;
+  border: 1px solid var(--border-subtle, #323747);
+  border-radius: 18px;
+  padding: 0;
+  width: min(40rem, calc(100% - 24px));
+  height: min(44rem, 86dvh);
+  max-height: calc(100% - 24px);
+  overflow: hidden;
+}
+.ag-nearby[open] { display: flex; flex-direction: column; }
+.ag-nearby::backdrop { background: #080a10aa; }
+.ag-nearby-heading { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid #80809a33; }
+.ag-nearby-heading > div { flex: 1; }
+.ag-nearby-heading h2 { margin: 0; font-size: 1rem; }
+.ag-nearby-heading p, .ag-nearby-note, .ag-nearby-status, .ag-nearby-empty, .ag-nearby-compose small { color: var(--text-muted, #afb0c1); font-size: .78rem; }
+.ag-nearby-heading p { margin: 2px 0 0; }
+.ag-nearby-control { display: flex; flex-wrap: wrap; align-items: end; padding: 12px 14px 0; gap: 8px; }
+.ag-nearby-control label { display: grid; gap: 4px; flex: 1; font-size: .78rem; min-width: 8rem; }
+.ag-nearby-control input, .ag-nearby-compose textarea {
+  background: var(--bg-canvas, #0b0c10); color: inherit; padding: 7px 9px; border-radius: 8px;
+  border: 1px solid var(--border-subtle, #323747); font: inherit; min-width: 0;
+}
+.ag-nearby-status { flex: 0 0 100%; }
+.ag-nearby-note, .ag-nearby-notice { margin: 10px 14px; }
+.ag-nearby-notice { font-size: .82rem; color: #f4c287; }
+.ag-nearby-stream { min-height: 0; overflow: auto; flex: 1; padding: 5px 14px 12px; }
+.ag-nearby-stream article { margin-bottom: 8px; padding: 8px; background: #8080a51a; border-radius: 8px; }
+.ag-nearby-stream article[data-own='true'] { background: #4884fb30; }
+.ag-nearby-stream article div { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.ag-nearby-stream article span { font-size: .7rem; color: var(--text-muted, #afb0c1); }
+.ag-nearby-stream article p { margin: 3px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ag-nearby-compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: 9px 14px 11px; gap: 5px 9px; border-top: 1px solid #80809a33; }
+.ag-nearby-compose textarea { resize: none; }

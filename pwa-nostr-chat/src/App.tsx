@@ -1,3 +1,4 @@
+import { isNativeAndroidBuild } from './lib/appPlatform'
 import {
   Suspense,
   lazy,
@@ -95,6 +96,7 @@ const AgoraView = lazy(() => import('./components/AgoraView'))
 const AmailView = lazy(() => import('./components/AmailView'))
 const WalletModal = lazy(() => import('./components/WalletModal'))
 const SettingsModal = lazy(() => import('./components/SettingsModal'))
+const NearbyChatModal = lazy(() => import('./components/NearbyChatModal'))
 const ExpandedRadarModal = lazy(() => import('./components/ExpandedRadarModal'))
 const GameSetupModal = lazy(() =>
   import('./components/games/GameSetupModal').then((m) => ({
@@ -192,6 +194,7 @@ export function App() {
       ? 'agora'
       : 'chat'
   )
+  const [nearbyOpen, setNearbyOpen] = useState(false)
   const [listTab, setListTab] = useState<ListTab>('bitchat')
   const [bitchatView, setBitchatView] = useState<'globe' | 'room'>(() =>
     typeof window !== 'undefined' && Boolean(parseBitchatChannelHash(window.location.hash))
@@ -2533,6 +2536,9 @@ export function App() {
 
   return (
     <ContextMenuProvider>
+    {isNativeAndroidBuild && nearbyOpen && !panicFlash && (
+      <Suspense fallback={null}><NearbyChatModal onClose={() => setNearbyOpen(false)} /></Suspense>
+    )}
     <div
       className={`ag-app ag-shell ${panicFlash ? 'ag-panic-active' : ''}`}
       data-workspace={workspace}
@@ -2639,6 +2645,7 @@ export function App() {
                 engine={engine}
                 onClose={() => setBitchatView('room')}
                 onTuneChannel={handleTuneChannel}
+                onOpenNearby={isNativeAndroidBuild ? () => setNearbyOpen(true) : undefined}
                 onPlaySound={playSound}
               />
             </Suspense>
