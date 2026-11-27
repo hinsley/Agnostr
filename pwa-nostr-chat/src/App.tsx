@@ -393,18 +393,27 @@ export function App() {
   const isServerE2ee = Boolean(isServer && activeServer?.encrypted)
 
   // Total unread count across DMs, Servers, Bitchat rooms, Agmail, and Agora for PWA App Badge
+  const geoNotifMode = engine.notifications.settings.geoMessages
   const totalUnreadBadge = useMemo(() => {
+    const bitchatBadgeCount =
+      geoNotifMode === 'all'
+        ? engine.totalGeoUnread
+        : geoNotifMode === 'mentions'
+          ? engine.totalGeoMentions
+          : 0
     return (
       engine.totalDmUnread +
       engine.servers.totalServerUnread +
-      engine.totalGeoUnread +
+      bitchatBadgeCount +
       engine.amail.unreadInboxCount +
       engine.agora.unreadNotificationCount
     )
   }, [
+    geoNotifMode,
     engine.totalDmUnread,
     engine.servers.totalServerUnread,
     engine.totalGeoUnread,
+    engine.totalGeoMentions,
     engine.amail.unreadInboxCount,
     engine.agora.unreadNotificationCount,
   ])
@@ -823,7 +832,7 @@ export function App() {
     engine.servers.totalServerUnread,
   ])
 
-  // Subtle audio cue when fresh live geohash messages arrive
+  // Subtle audio cue when fresh live geohash messages arrive while actively viewing that Bitchat room
   const lastMsgIdRef = useRef<string | null>(null)
   const lastChannelRef = useRef<string>(engine.activeGeohash)
   useEffect(() => {
@@ -838,6 +847,16 @@ export function App() {
     if (newest.id === lastMsgIdRef.current) return
     lastMsgIdRef.current = newest.id
 
+    const isViewingBitchatRoom =
+      workspace === 'chat' &&
+      !isBitchatGlobe &&
+      engine.activeView.type === 'channel' &&
+      engine.activeView.geohash === engine.activeGeohash
+    if (!isViewingBitchatRoom) return
+
+    const geoMode = engine.notifications.settings.geoMessages
+    if (geoMode === 'off') return
+
     const nowSec = Math.floor(Date.now() / 1000)
     if (!newest.isOwn && !newest.isSystem && nowSec - newest.createdAt <= 30) {
       const mentionsUs = doesContentMentionUser(
@@ -846,9 +865,43 @@ export function App() {
         engine.identity.nickname,
         engine.identity.activePubkey
       )
-      bitchatAudio.play(mentionsUs ? 'mention' : 'receive')
+      const myActivePk = engine.identity.activePubkey.trim().toLowerCase()
+      const myMasterPk = engine.identity.masterPubkey.trim().toLowerCase()
+      let repliedToMe = false
+      if (newest.replyTo) {
+        const replyId = newest.replyTo.id?.trim()
+        const parent = replyId ? list.find((m) => m.id === replyId) : undefined
+        if (parent) {
+          const parentPk = parent.pubkey.trim().toLowerCase()
+          repliedToMe = Boolean(
+            parent.isOwn ||
+              (myActivePk && parentPk === myActivePk) ||
+              (myMasterPk && parentPk === myMasterPk)
+          )
+        } else if (newest.replyTo.pubkey) {
+          const replyPk = newest.replyTo.pubkey.trim().toLowerCase()
+          repliedToMe = Boolean(
+            (myActivePk && replyPk === myActivePk) ||
+              (myMasterPk && replyPk === myMasterPk)
+          )
+        }
+      }
+      const isDirectPing = mentionsUs || repliedToMe
+      if (geoMode === 'all' || (geoMode === 'mentions' && isDirectPing)) {
+        bitchatAudio.play(isDirectPing ? 'mention' : 'receive')
+      }
     }
-  }, [engine.messages, engine.activeGeohash, engine.identity.nickname, engine.identity.activePubkey])
+  }, [
+    workspace,
+    isBitchatGlobe,
+    engine.activeView,
+    engine.messages,
+    engine.activeGeohash,
+    engine.identity.nickname,
+    engine.identity.activePubkey,
+    engine.identity.masterPubkey,
+    engine.notifications.settings.geoMessages,
+  ])
 
   // Subtle audio cue when fresh live Server messages arrive
   const activeServerStreamKey =
@@ -1227,7 +1280,8 @@ export function App() {
       writeLastDmPeer(engine.identity.masterPubkey, targetPk)
       if (
         engine.activeView.type !== 'dm' ||
-        engine.activeView.peerPubkey.toLowerCase() !== targetPk
+        engine.activeView.peerPubkey.toLowerCase() !== targetPk ||
+        target.unreadCount > 0
       ) {
         engine.openDmThread(target.peerPubkey, target.peerNickname)
       }

@@ -176,6 +176,7 @@ export interface DeviceSyncCrdtState {
   blocked: Record<string, SyncedBlockedRecord>
   pinned: SyncedPinnedState
   dmClearedAt: Record<string, number>
+  dmReadAt?: Record<string, number>
   lud16: SyncedLightningAddressState
   nickname: SyncedNicknameState
   peerNotes?: Record<string, SyncedPeerNoteRecord>
@@ -309,6 +310,7 @@ export interface DeviceSyncMergeDiff {
   blockedChanged: boolean
   pinnedChanged: boolean
   dmClearedChanged: boolean
+  dmReadAtChanged?: boolean
   lud16Changed: boolean
   nicknameChanged: boolean
   peerNotesChanged: boolean

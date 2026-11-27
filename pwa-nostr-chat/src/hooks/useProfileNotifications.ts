@@ -9,7 +9,12 @@ import type {
 import { AGORA_SOCIAL_RELAYS } from '../lib/agoraProtocol.ts'
 import { computeRecipientHint } from '../lib/amailCrypto.ts'
 import { KIND_AMAIL_EPHEMERAL_HOP } from '../lib/amailMesh.ts'
-import { verifyEventCached } from '../lib/bitchatProtocol.ts'
+import {
+  doesContentMentionUser,
+  extractMentions,
+  KIND_GEOHASH_CHAT,
+  verifyEventCached,
+} from '../lib/bitchatProtocol.ts'
 import { CORE_DM_RELAYS } from '../lib/geoRelays.ts'
 import { showOsNotification } from '../lib/notifications.ts'
 import {
@@ -310,12 +315,16 @@ export function useProfileNotifications(
           ? Math.floor(data.ts / 1000)
           : Math.floor(Date.now() / 1000)
 
+      const lastCheckedAt = notifsRef.current[targetPk]?.lastCheckedAt ?? 0
       // Ignore stale pushes from at or before the profile was last checked/cleared
-      if (tsSec <= (notifsRef.current[targetPk]?.lastCheckedAt ?? 0)) return
+      if (tsSec <= lastCheckedAt) return
 
-      // Deduplicate against per-profile persistent seen set when deliveryEventId is provided
+      // Deduplicate against per-profile persistent seen set when deliveryEventId is provided.
+      // Delayed /poke pushes without a 64-hex deliveryEventId cannot be matched against seen IDs;
+      // suppress echoes arriving within 90s of lastCheckedAt so switching profiles never resurrects badges.
       const deliveryId =
         typeof data.deliveryEventId === 'string' ? data.deliveryEventId.trim().toLowerCase() : ''
+      if (!deliveryId && lastCheckedAt > 0 && tsSec <= lastCheckedAt + 90) return
       if (deliveryId && !rememberSeenForProfile(targetPk, deliveryId)) return
 
       notifyInactiveProfile(
@@ -446,6 +455,27 @@ export function useProfileNotifications(
           const { summary, category } = describeEventKind(ev.kind)
           const isPostEoseOnRelay = eoseByRelay.has(relayUrl)
 
+          let bitchatMentions: string[] = []
+          let bitchatQuotePk = ''
+          let bitchatHasETag = false
+          let bitchatDistinctPTags: Set<string> | null = null
+          if (ev.kind === KIND_GEOHASH_CHAT) {
+            bitchatMentions = extractMentions(ev.content ?? '')
+            bitchatDistinctPTags = new Set<string>()
+            for (const tag of ev.tags) {
+              if (!Array.isArray(tag)) continue
+              if (tag[0] === 'quote_pk' && typeof tag[1] === 'string') {
+                const candidate = tag[1].trim().toLowerCase()
+                if (/^[0-9a-f]{64}$/.test(candidate)) bitchatQuotePk = candidate
+              } else if (tag[0] === 'e' && typeof tag[1] === 'string' && tag[1].trim().length >= 16) {
+                bitchatHasETag = true
+              } else if (tag[0] === 'p' && typeof tag[1] === 'string') {
+                const candidate = tag[1].trim().toLowerCase()
+                if (/^[0-9a-f]{64}$/.test(candidate)) bitchatDistinctPTags.add(candidate)
+              }
+            }
+          }
+
           for (const targetPk of matchedTargets) {
             // Always record evId into targetPk's persistent seen set (even during pre-EOSE backfill)
             const isNewForProfile = rememberSeenForProfile(targetPk, evId)
@@ -457,6 +487,24 @@ export function useProfileNotifications(
 
             const targetProfile = profilesByIdRef.current.get(targetPk)
             if (!targetProfile) continue
+
+            // For Bitchat kind:20000, never fire "Mentioned in Bitchat" merely because targetPk
+            // appeared in a multi-party thread's `p` tag — require an actual @mention or direct reply.
+            if (ev.kind === KIND_GEOHASH_CHAT) {
+              const mentionedTarget = doesContentMentionUser(
+                ev.content ?? '',
+                bitchatMentions,
+                targetProfile.nickname,
+                targetPk
+              )
+              const isDirectReplyToTarget =
+                bitchatQuotePk === targetPk ||
+                (bitchatHasETag &&
+                  bitchatDistinctPTags !== null &&
+                  bitchatDistinctPTags.size === 1 &&
+                  bitchatDistinctPTags.has(targetPk))
+              if (!mentionedTarget && !isDirectReplyToTarget) continue
+            }
 
             // NIP-17 kind:1059 randomizes created_at up to ±2 days — absorb pre-EOSE backfill per relay
             // and only notify on genuine post-EOSE live arrivals for that relay.

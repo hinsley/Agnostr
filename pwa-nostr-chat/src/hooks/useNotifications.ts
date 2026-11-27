@@ -681,7 +681,7 @@ export function useNotifications(
         const docActive = isDocumentFocusedAndVisible()
         if (docActive && isViewingThread) continue
 
-        if (cfg.soundEnabled) {
+        if (cfg.enabled && cfg.soundEnabled) {
           soundEngine.playNotificationChime('dm', {
             vibrate: cfg.vibrationEnabled,
           })
@@ -790,7 +790,7 @@ export function useNotifications(
       const docActive = isDocumentFocusedAndVisible()
       if (docActive && isViewingChannel) continue
 
-      if (cfg.soundEnabled) {
+      if (cfg.enabled && cfg.soundEnabled) {
         soundEngine.playNotificationChime(isDirectPing ? 'mention' : 'message', {
           vibrate: cfg.vibrationEnabled,
         })
@@ -1001,6 +1001,12 @@ export function useNotifications(
   // 6. Live Bitchat Messages & /drop Location Notes (invoked directly from live relay callbacks in useAgnostrEngine)
   const notifyGeoMessage = useCallback(
     (input: NotifyGeoMessageInput) => {
+      const cfg = settingsRef.current
+      if (!cfg.enabled) return
+      if (cfg.geoMessages === 'off') return
+      const isDirectPing = Boolean(input.mentionedMe || input.repliedToMe)
+      if (cfg.geoMessages === 'mentions' && !isDirectPing) return
+
       if (input.senderPubkey) {
         const pk = input.senderPubkey.toLowerCase()
         if (blockedSetRef.current.has(pk)) return
@@ -1012,14 +1018,6 @@ export function useNotifications(
           return
         }
       }
-      const cfg = settingsRef.current
-      const isDirectPing = Boolean(input.mentionedMe || input.repliedToMe)
-      const allowByDirectPing = isDirectPing && cfg.directPings
-      const allowByChannelFilter =
-        cfg.geoMessages === 'all' ||
-        (cfg.geoMessages === 'mentions' && isDirectPing)
-
-      if (!allowByDirectPing && !allowByChannelFilter) return
       if (!rememberNotified(`geo:${input.id}`)) return
 
       const view = activeViewRef.current
@@ -1028,7 +1026,7 @@ export function useNotifications(
       const docActive = isDocumentFocusedAndVisible()
       if (docActive && isViewingRoom) return
 
-      if (cfg.soundEnabled) {
+      if (cfg.enabled && cfg.soundEnabled) {
         soundEngine.playNotificationChime(
           isDirectPing ? 'mention' : 'message',
           { vibrate: cfg.vibrationEnabled }
@@ -1086,6 +1084,9 @@ export function useNotifications(
 
   const notifyLocationNote = useCallback(
     (input: NotifyLocationNoteInput) => {
+      const cfg = settingsRef.current
+      if (!cfg.enabled) return
+      if (cfg.geoMessages !== 'all') return
       if (input.senderPubkey) {
         const pk = input.senderPubkey.toLowerCase()
         if (blockedSetRef.current.has(pk)) return
@@ -1097,8 +1098,6 @@ export function useNotifications(
           return
         }
       }
-      const cfg = settingsRef.current
-      if (cfg.geoMessages !== 'all') return
       if (!rememberNotified(`note:${input.id}`)) return
 
       const view = activeViewRef.current
@@ -1107,7 +1106,7 @@ export function useNotifications(
       const docActive = isDocumentFocusedAndVisible()
       if (docActive && isViewingRoom) return
 
-      if (cfg.soundEnabled) {
+      if (cfg.enabled && cfg.soundEnabled) {
         soundEngine.playNotificationChime('message', {
           vibrate: cfg.vibrationEnabled,
         })

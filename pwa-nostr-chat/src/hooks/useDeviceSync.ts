@@ -116,6 +116,7 @@ export interface UseDeviceSyncOptions {
   blockedPeerNames?: Record<string, string>
   pinnedChannels: PinnedChannel[]
   dmClearedAt: Record<string, number>
+  dmReadAt?: Record<string, number>
   lightningAddress: string | null
   peerNotes: Record<string, string>
   dmThreads: DmThread[]
@@ -128,6 +129,7 @@ export interface UseDeviceSyncOptions {
   onApplyBlocked: (blocked: string[], blockedNames?: Record<string, string>) => void
   onApplyPinned: (pinned: PinnedChannel[]) => void
   onApplyDmClearedAt: (clearedAt: Record<string, number>) => number
+  onApplyDmReadAt?: (readAt: Record<string, number>) => number
   onApplyLightningAddress: (addr: string | null) => void
   onApplyNickname: (nick: string) => void
   onApplyPeerNotes: (notes: Record<string, string>) => void
@@ -272,6 +274,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
+    dmReadAt,
     lightningAddress,
     peerNotes,
     dmThreads,
@@ -284,6 +287,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyBlocked,
     onApplyPinned,
     onApplyDmClearedAt,
+    onApplyDmReadAt,
     onApplyLightningAddress,
     onApplyNickname,
     onApplyPeerNotes,
@@ -393,6 +397,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
+    dmReadAt,
     lightningAddress,
     nickname,
     peerNotes,
@@ -410,6 +415,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyBlocked,
     onApplyPinned,
     onApplyDmClearedAt,
+    onApplyDmReadAt,
     onApplyLightningAddress,
     onApplyNickname,
     onApplyPeerNotes,
@@ -451,6 +457,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       blockedPeerNames,
       pinnedChannels,
       dmClearedAt,
+      dmReadAt,
       lightningAddress,
       nickname,
       peerNotes,
@@ -463,6 +470,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
+    dmReadAt,
     lightningAddress,
     nickname,
     peerNotes,
@@ -483,6 +491,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
       onApplyBlocked,
       onApplyPinned,
       onApplyDmClearedAt,
+      onApplyDmReadAt,
       onApplyLightningAddress,
       onApplyNickname,
       onApplyPeerNotes,
@@ -497,6 +506,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     onApplyBlocked,
     onApplyPinned,
     onApplyDmClearedAt,
+    onApplyDmReadAt,
     onApplyLightningAddress,
     onApplyNickname,
     onApplyPeerNotes,
@@ -1112,6 +1122,9 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
             if (diff.dmClearedChanged) {
               callbacksRef.current.onApplyDmClearedAt(merged.dmClearedAt)
             }
+            if (diff.dmReadAtChanged && merged.dmReadAt) {
+              callbacksRef.current.onApplyDmReadAt?.(merged.dmReadAt)
+            }
             if (diff.blockedChanged) {
               callbacksRef.current.onApplyBlocked(
                 extractActiveBlocked(merged),
@@ -1684,6 +1697,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
         blockedPeerNames,
         pinnedChannels,
         dmClearedAt,
+        dmReadAt,
         lightningAddress,
         nickname: effectiveNickname,
         peerNotes,
@@ -1711,6 +1725,7 @@ export function useDeviceSync(options: UseDeviceSyncOptions): {
     blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
+    dmReadAt,
     lightningAddress,
     nickname,
     peerNotes,

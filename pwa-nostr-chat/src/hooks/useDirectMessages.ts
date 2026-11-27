@@ -42,8 +42,12 @@ import {
   isEphemeralPendingMessage,
   isStuckMediaPlaceholder,
   loadDmClearedAt,
+  loadDmReadAt,
+  loadDmSeenWrapIds,
   loadDmThreads,
   saveDmClearedAt,
+  saveDmReadAt,
+  saveDmSeenWrapIds,
   saveDmThreads,
 } from '../lib/storage.ts'
 import { formatVoiceDuration } from '../lib/voiceRecorder.ts'
@@ -104,6 +108,40 @@ function formatDmPreview(msg: DmMessage): string {
   return msg.content.slice(0, 96)
 }
 
+function getMaxThreadTimestampSec(thread: DmThread | undefined, extraMaxSec?: number): number {
+  let maxSec =
+    typeof extraMaxSec === 'number' && Number.isFinite(extraMaxSec) && extraMaxSec > 0
+      ? Math.floor(extraMaxSec)
+      : 0
+  if (!thread) return maxSec
+  if (typeof thread.lastMessageAt === 'number' && Number.isFinite(thread.lastMessageAt)) {
+    maxSec = Math.max(maxSec, Math.floor(thread.lastMessageAt))
+  }
+  for (const m of thread.messages) {
+    if (typeof m.createdAt === 'number' && Number.isFinite(m.createdAt)) {
+      maxSec = Math.max(maxSec, Math.floor(m.createdAt))
+    }
+  }
+  return maxSec
+}
+
+function isDuplicateIncomingDm(existingMessages: readonly DmMessage[], candidate: DmMessage): boolean {
+  const candidateSender = candidate.senderPubkey.toLowerCase()
+  return existingMessages.some(
+    (m) =>
+      m.id === candidate.id ||
+      Boolean(candidate.wireId && m.wireId && m.wireId === candidate.wireId) ||
+      (!m.isOwn &&
+        m.senderPubkey.toLowerCase() === candidateSender &&
+        m.createdAt === candidate.createdAt &&
+        m.content === candidate.content &&
+        !candidate.voiceMemo &&
+        !candidate.imageAttachment &&
+        !m.voiceMemo &&
+        !m.imageAttachment)
+  )
+}
+
 export interface UseDirectMessagesOptions {
   pool: RelayPool | null
   identityManager: IdentityManager
@@ -112,6 +150,7 @@ export interface UseDirectMessagesOptions {
   activeGeohash: string
   activeDmPeer: string | null
   blockedPubkeys: Set<string>
+  ownPubkeys?: Set<string>
   identityVersion: number
   onIncomingDm?: (senderHandle: string, preview: string, peerPubkey: string) => void
   onNotifyPushPoke?: (payload: PushPokePayload) => void
@@ -127,6 +166,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     activeGeohash,
     activeDmPeer,
     blockedPubkeys,
+    ownPubkeys,
     identityVersion,
     onIncomingDm,
     onNotifyPushPoke,
@@ -135,14 +175,18 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
   const [threads, setThreads] = useState<DmThread[]>(() => loadDmThreads())
   const [dmClearedAt, setDmClearedAt] = useState<Record<string, number>>(() => loadDmClearedAt())
+  const [dmReadAt, setDmReadAt] = useState<Record<string, number>>(() => loadDmReadAt())
   const dmClearedAtRef = useRef<Record<string, number>>(dmClearedAt)
+  const dmReadAtRef = useRef<Record<string, number>>(dmReadAt)
   const threadsRef = useRef<DmThread[]>(threads)
   const dmSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
   const dmRelaysRef = useRef<readonly string[]>(dmRelays)
   const processedWrapIdsRef = useRef<Set<string>>(new Set())
+  const seenWrapFlushTimerRef = useRef<number | null>(null)
   const dmSubSeqRef = useRef<number>(0)
   const activeDmPeerRef = useRef<string | null>(activeDmPeer)
   const blockedRef = useRef<Set<string>>(blockedPubkeys)
+  const ownPubkeysRef = useRef<Set<string>>(ownPubkeys ?? new Set())
   const onIncomingRef = useRef(onIncomingDm)
   const onNotifyPushPokeRef = useRef(onNotifyPushPoke)
   const onErrorRef = useRef(onError)
@@ -215,12 +259,138 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   }, [dmClearedAt])
 
   useLayoutEffect(() => {
+    dmReadAtRef.current = dmReadAt
+  }, [dmReadAt])
+
+  useLayoutEffect(() => {
     activeDmPeerRef.current = activeDmPeer
   }, [activeDmPeer])
 
   useLayoutEffect(() => {
     blockedRef.current = blockedPubkeys
   }, [blockedPubkeys])
+
+  useLayoutEffect(() => {
+    ownPubkeysRef.current = ownPubkeys ?? new Set()
+  }, [ownPubkeys])
+
+  const persistSeenWrapIdsNow = useCallback(() => {
+    if (seenWrapFlushTimerRef.current !== null && typeof window !== 'undefined') {
+      window.clearTimeout(seenWrapFlushTimerRef.current)
+      seenWrapFlushTimerRef.current = null
+    }
+    saveDmSeenWrapIds(processedWrapIdsRef.current)
+  }, [])
+
+  const markWrapIdSeen = useCallback((rawId: string, schedulePersist = true) => {
+    const id = rawId.trim().toLowerCase()
+    if (!id) return
+    const set = processedWrapIdsRef.current
+    if (set.has(id)) {
+      set.delete(id)
+    }
+    set.add(id)
+    while (set.size > 2000) {
+      const oldest = set.values().next().value
+      if (!oldest) break
+      set.delete(oldest)
+    }
+    if (schedulePersist && seenWrapFlushTimerRef.current === null && typeof window !== 'undefined') {
+      seenWrapFlushTimerRef.current = window.setTimeout(() => {
+        seenWrapFlushTimerRef.current = null
+        saveDmSeenWrapIds(processedWrapIdsRef.current)
+      }, 400)
+    }
+  }, [])
+
+  const flushDmPersistence = useCallback(() => {
+    saveDmReadAt(dmReadAtRef.current)
+    saveDmClearedAt(dmClearedAtRef.current)
+    saveDmThreads(threadsRef.current)
+    persistSeenWrapIdsNow()
+    flushProfileSeenEventIds()
+  }, [persistSeenWrapIdsNow])
+
+  // Hydrate persistent seen wrap IDs + existing loaded thread message/wire IDs synchronously before subscriptions mount
+  useLayoutEffect(() => {
+    const persistedWrapIds = loadDmSeenWrapIds()
+    const seedProfileSeenIds: string[] = []
+    for (const id of persistedWrapIds) {
+      processedWrapIdsRef.current.add(id)
+      seedProfileSeenIds.push(id)
+    }
+    for (const t of threadsRef.current) {
+      for (const m of t.messages) {
+        if (m.id) {
+          const low = m.id.toLowerCase()
+          processedWrapIdsRef.current.add(low)
+          seedProfileSeenIds.push(low)
+        }
+        if (m.wireId) {
+          const low = m.wireId.toLowerCase()
+          processedWrapIdsRef.current.add(low)
+          seedProfileSeenIds.push(low)
+        }
+      }
+    }
+    if (seedProfileSeenIds.length > 0) {
+      const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      recordProfileSeenEventIds(masterPk, seedProfileSeenIds)
+    }
+  }, [identityManager, identityVersion])
+
+  // Flush debounced DM persistence on pagehide / unmount so reloads & profile switches never lose read/seen state
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onPageHide = () => {
+      flushDmPersistence()
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      window.removeEventListener('pagehide', onPageHide)
+      persistSeenWrapIdsNow()
+    }
+  }, [flushDmPersistence, persistSeenWrapIdsNow])
+
+  const markPeerReadSync = useCallback(
+    (peerPubkey: string, extraMaxSec?: number) => {
+      const pk = peerPubkey.trim().toLowerCase()
+      if (!pk) return
+      const curIdx = threadsRef.current.findIndex((t) => t.peerPubkey.toLowerCase() === pk)
+      const thread = curIdx !== -1 ? threadsRef.current[curIdx] : undefined
+      const maxThreadSec = getMaxThreadTimestampSec(thread, extraMaxSec)
+      const prevReadSec = dmReadAtRef.current[pk] ?? 0
+      const readSec = Math.max(prevReadSec, Math.floor(Date.now() / 1000), maxThreadSec)
+
+      if (readSec > prevReadSec) {
+        const nextReadAt: Record<string, number> = {
+          ...dmReadAtRef.current,
+          [pk]: readSec,
+        }
+        dmReadAtRef.current = nextReadAt
+        setDmReadAt(nextReadAt)
+        saveDmReadAt(nextReadAt)
+      }
+
+      if (curIdx !== -1 && threadsRef.current[curIdx].unreadCount > 0) {
+        const syncCopy = [...threadsRef.current]
+        syncCopy[curIdx] = { ...syncCopy[curIdx], unreadCount: 0 }
+        threadsRef.current = syncCopy
+        saveDmThreads(syncCopy)
+      }
+      setThreads((prev) => {
+        const idx = prev.findIndex((t) => t.peerPubkey.toLowerCase() === pk)
+        if (idx === -1 || prev[idx].unreadCount === 0) return prev
+        const copy = [...prev]
+        copy[idx] = { ...copy[idx], unreadCount: 0 }
+        saveDmThreads(copy)
+        return copy
+      })
+      persistSeenWrapIdsNow()
+      flushProfileSeenEventIds()
+    },
+    [persistSeenWrapIdsNow]
+  )
 
   // Immediately clear persisted unread counts on any DM thread whose peer is muted/blocked
   useEffect(() => {
@@ -254,24 +424,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   // Mark active thread read whenever opened and persist synchronously so profile switches never see stale unread counts
   useEffect(() => {
     if (!activeDmPeer) return
-    const pk = activeDmPeer.toLowerCase()
-    const curIdx = threadsRef.current.findIndex((t) => t.peerPubkey === pk)
-    if (curIdx !== -1 && threadsRef.current[curIdx].unreadCount > 0) {
-      const syncCopy = [...threadsRef.current]
-      syncCopy[curIdx] = { ...syncCopy[curIdx], unreadCount: 0 }
-      threadsRef.current = syncCopy
-      saveDmThreads(syncCopy)
-    }
-    setThreads((prev) => {
-      const idx = prev.findIndex((t) => t.peerPubkey === pk)
-      if (idx === -1 || prev[idx].unreadCount === 0) return prev
-      const copy = [...prev]
-      copy[idx] = { ...copy[idx], unreadCount: 0 }
-      saveDmThreads(copy)
-      return copy
-    })
-    flushProfileSeenEventIds()
-  }, [activeDmPeer])
+    markPeerReadSync(activeDmPeer)
+  }, [activeDmPeer, markPeerReadSync])
 
   // Subscribe to kind 1059 gift wraps for master pubkey (+ derived geohash pubkey if enabled)
   useEffect(() => {
@@ -302,15 +456,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         onEvent: (ev) => {
           if (cancelled) return
           if (ev.kind !== KIND_GIFT_WRAP) return
-          if (processedWrapIdsRef.current.has(ev.id)) return
+          const evId = ev.id.toLowerCase()
+          if (processedWrapIdsRef.current.has(evId)) return
           if (!verifyEventCached(ev)) return
           if (cancelled) return
-          processedWrapIdsRef.current.add(ev.id)
-          recordProfileSeenEventIds(masterMat.pubkey, [ev.id])
-          if (processedWrapIdsRef.current.size > 2000) {
-            const first = processedWrapIdsRef.current.values().next().value
-            if (first) processedWrapIdsRef.current.delete(first)
-          }
+          markWrapIdSeen(evId, true)
+          recordProfileSeenEventIds(masterMat.pubkey, [evId])
 
           const targetTag = ev.tags.find((t) => t[0] === 'p' && typeof t[1] === 'string')?.[1]?.toLowerCase()
           if (!targetTag) return
@@ -326,24 +477,23 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
             const senderPk = decrypted.senderPubkey.toLowerCase()
             if (blockedRef.current.has(senderPk)) return
-            if (recipientByPubkey.has(senderPk)) return // Ignore self-echo wraps
+            if (recipientByPubkey.has(senderPk) || ownPubkeysRef.current.has(senderPk)) return // Ignore self-echo wraps
+
+            const rumorSec =
+              typeof decrypted.timestampMs === 'number' && Number.isFinite(decrypted.timestampMs)
+                ? Math.floor(decrypted.timestampMs / 1000)
+                : decrypted.createdAt
 
             // Drop pre-deletion relay backlog wraps so closed DM threads never resurrect on reload,
             // while still allowing any brand-new DM sent after closeThread() to open a fresh thread.
             const clearedAtSec = dmClearedAtRef.current[senderPk] ?? 0
-            if (clearedAtSec > 0) {
-              const rumorSec =
-                typeof decrypted.timestampMs === 'number' && Number.isFinite(decrypted.timestampMs)
-                  ? Math.floor(decrypted.timestampMs / 1000)
-                  : decrypted.createdAt
-              if (rumorSec <= clearedAtSec) return
-            }
+            if (clearedAtSec > 0 && rumorSec <= clearedAtSec) return
 
             if (decrypted.ackType && decrypted.embeddedMessageId) {
               chatRetries.confirm(decrypted.embeddedMessageId)
               setThreads((prev) =>
                 prev.map((t) => {
-                  if (t.peerPubkey !== senderPk) return t
+                  if (t.peerPubkey.toLowerCase() !== senderPk) return t
                   return {
                     ...t,
                     messages: t.messages.map((m) =>
@@ -387,8 +537,31 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
             const presenceNick = presenceTracker.getNickname(senderPk)
             const initialNick = pickBestPeerNickname(senderPk, presenceNick)
-            let resolvedHandle = formatDisplayHandle(initialNick, senderPk)
+            const existingSyncThread = threadsRef.current.find(
+              (t) => t.peerPubkey.toLowerCase() === senderPk
+            )
+            const resolvedNick = pickBestPeerNickname(
+              senderPk,
+              presenceNick,
+              existingSyncThread?.peerNickname
+            )
+            const resolvedHandle = formatDisplayHandle(resolvedNick, senderPk)
             const isViewing = activeDmPeerRef.current?.toLowerCase() === senderPk
+            const readAtSec = dmReadAtRef.current[senderPk] ?? 0
+            const isAlreadyRead = isViewing || (readAtSec > 0 && rumorSec <= readAtSec)
+
+            if (isViewing) {
+              const nextReadSec = Math.max(readAtSec, Math.floor(Date.now() / 1000), rumorSec)
+              if (nextReadSec > readAtSec) {
+                const nextReadMap: Record<string, number> = {
+                  ...dmReadAtRef.current,
+                  [senderPk]: nextReadSec,
+                }
+                dmReadAtRef.current = nextReadMap
+                setDmReadAt(nextReadMap)
+                saveDmReadAt(nextReadMap)
+              }
+            }
 
             const rawMsgMs = decrypted.timestampMs ?? decrypted.createdAt * 1000
             const orderMs = Math.min(rawMsgMs, receivedAtMs)
@@ -411,30 +584,37 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               deliveryStatus: 'delivered',
             }
 
-            let added = false
+            const alreadyInSyncThread = existingSyncThread
+              ? isDuplicateIncomingDm(existingSyncThread.messages, baseMsg)
+              : false
+            const shouldNotify = !alreadyInSyncThread && !isAlreadyRead && !blockedRef.current.has(senderPk)
+
             setThreads((prev) => {
-              const existingIdx = prev.findIndex((t) => t.peerPubkey === senderPk)
+              const existingIdx = prev.findIndex((t) => t.peerPubkey.toLowerCase() === senderPk)
               if (existingIdx !== -1) {
                 const existing = prev[existingIdx]
-                if (existing.messages.some((m) => m.id === baseMsg.id)) return prev
-                added = true
+                if (isDuplicateIncomingDm(existing.messages, baseMsg)) return prev
                 const nextNick = pickBestPeerNickname(senderPk, presenceNick, existing.peerNickname)
                 const nextHandle = formatDisplayHandle(nextNick, senderPk)
-                resolvedHandle = nextHandle
                 const newMsg: DmMessage = {
                   ...baseMsg,
                   orderMs,
                 }
-                rememberLiveDmPush(newMsg, ev.id, masterMat.pubkey)
+                rememberLiveDmPush(newMsg, evId, masterMat.pubkey)
                 const nextMsgs = [...existing.messages, newMsg].sort(compareDmMessages)
                 const tail = nextMsgs[nextMsgs.length - 1]
                 const updated: DmThread = {
                   ...existing,
+                  peerPubkey: senderPk,
                   peerNickname: nextNick,
                   peerDisplayHandle: nextHandle,
                   protocol: decrypted.protocol,
                   messages: nextMsgs,
-                  unreadCount: isViewing ? 0 : existing.unreadCount + 1,
+                  unreadCount: isViewing
+                    ? 0
+                    : isAlreadyRead
+                      ? existing.unreadCount
+                      : existing.unreadCount + 1,
                   lastMessageAt: tail.createdAt,
                   lastPreview: formatDmPreview(tail),
                 }
@@ -443,27 +623,26 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                 copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
                 return copy
               }
-              added = true
               const newMsg: DmMessage = {
                 ...baseMsg,
                 orderMs,
               }
-              rememberLiveDmPush(newMsg, ev.id, masterMat.pubkey)
+              rememberLiveDmPush(newMsg, evId, masterMat.pubkey)
               const created: DmThread = {
                 peerPubkey: senderPk,
                 peerNpub: encodeNpubSafe(senderPk),
                 peerNickname: initialNick,
-                peerDisplayHandle: resolvedHandle,
+                peerDisplayHandle: formatDisplayHandle(initialNick, senderPk),
                 protocol: decrypted.protocol,
                 messages: [newMsg],
-                unreadCount: isViewing ? 0 : 1,
+                unreadCount: isAlreadyRead ? 0 : 1,
                 lastMessageAt: newMsg.createdAt,
                 lastPreview: formatDmPreview(newMsg),
               }
               return [created, ...prev].sort((a, b) => b.lastMessageAt - a.lastMessageAt)
             })
 
-            if (added && !isViewing && !blockedRef.current.has(senderPk)) {
+            if (shouldNotify) {
               onIncomingRef.current?.(resolvedHandle, previewText.slice(0, 80), senderPk)
             }
           })
@@ -475,28 +654,31 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       cancelled = true
       unsub()
     }
-  }, [pool, dmRelays, activeGeohash, identityManager, presenceTracker, identityVersion, acceptIncomingReaction])
+  }, [
+    pool,
+    dmRelays,
+    activeGeohash,
+    identityManager,
+    presenceTracker,
+    identityVersion,
+    acceptIncomingReaction,
+    markWrapIdSeen,
+  ])
 
   const ensureThread = useCallback(
     (peerPubkey: string, nicknameHint?: string, preferredProtocol?: DmProtocol): DmThread => {
-      const pk = peerPubkey.toLowerCase()
+      const pk = peerPubkey.trim().toLowerCase()
       const presenceNick = presenceTracker.getNickname(pk)
       const nick = pickBestPeerNickname(pk, nicknameHint, presenceNick)
       const handle = formatDisplayHandle(nick, pk)
       const defaultProto: DmProtocol =
         preferredProtocol ?? (identityManager.getSignMode() === 'extension' ? 'nip17' : 'bitchat')
 
-      const syncIdx = threadsRef.current.findIndex((t) => t.peerPubkey === pk)
-      if (syncIdx !== -1 && threadsRef.current[syncIdx].unreadCount > 0) {
-        const syncCopy = [...threadsRef.current]
-        syncCopy[syncIdx] = { ...syncCopy[syncIdx], unreadCount: 0 }
-        threadsRef.current = syncCopy
-        saveDmThreads(syncCopy)
-      }
+      markPeerReadSync(pk)
 
       let target: DmThread | null = null
       setThreads((prev) => {
-        const idx = prev.findIndex((t) => t.peerPubkey === pk)
+        const idx = prev.findIndex((t) => t.peerPubkey.toLowerCase() === pk)
         if (idx !== -1) {
           const existing = prev[idx]
           const nextNick = pickBestPeerNickname(
@@ -507,6 +689,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           )
           target = {
             ...existing,
+            peerPubkey: pk,
             peerNickname: nextNick,
             peerDisplayHandle: formatDisplayHandle(nextNick, pk),
             protocol: preferredProtocol ?? existing.protocol,
@@ -548,7 +731,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         }
       )
     },
-    [identityManager, presenceTracker]
+    [identityManager, presenceTracker, markPeerReadSync]
   )
 
   const sendDirectMessage = useCallback(
@@ -561,9 +744,9 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     ): Promise<boolean> => {
       const content = rawContent.trim()
       if (!content || !pool) return false
-      const pk = peerPubkey.toLowerCase()
+      const pk = peerPubkey.trim().toLowerCase()
 
-      const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+      const existingThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
       const parent = replyToId ? existingThread?.messages.find(m => m.id === replyToId) : undefined
       const target = parent && dmTargetId(parent)
       if (replyToId && !target) {
@@ -582,6 +765,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       onPublishedId?.(localMsgId)
       const nowMs = Date.now()
       const nowSec = Math.floor(nowMs / 1000)
+      markPeerReadSync(pk, nowSec)
 
       const optimisticBase: DmMessage = {
         id: localMsgId,
@@ -602,7 +786,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
       // Append optimistic message synchronously BEFORE entering FIFO queue so rapid sends appear in exact 1 -> 2 -> 3 order
       setThreads((prev) => {
-        const idx = prev.findIndex((t) => t.peerPubkey === pk)
+        const idx = prev.findIndex((t) => t.peerPubkey.toLowerCase() === pk)
         if (idx !== -1) {
           const lastOrder = getMaxOrderMs(prev[idx].messages)
           const optimistic: DmMessage = {
@@ -613,6 +797,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           const tail = nextMsgs[nextMsgs.length - 1]
           const updated: DmThread = {
             ...prev[idx],
+            peerPubkey: pk,
             messages: nextMsgs,
             lastMessageAt: tail.createdAt,
             lastPreview: formatDmPreview(tail),
@@ -642,7 +827,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       const attempt = async (): Promise<boolean> => {
         if (identityManager.getWipeGeneration() !== wipeGen) return false
         try {
-          setThreads((prev) => prev.map((t) => t.peerPubkey === pk ? { ...t, messages: t.messages.map((m) =>
+          setThreads((prev) => prev.map((t) => t.peerPubkey.toLowerCase() === pk ? { ...t, messages: t.messages.map((m) =>
             m.id === localMsgId ? { ...m, deliveryStatus: 'sending' } : m) } : t))
           if (!await pool.waitForChatRelay(targetRelays)) throw new Error('No connected DM relay accepted the message.')
           if (identityManager.getWipeGeneration() !== wipeGen) return false
@@ -655,7 +840,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             action: target ? { type: 'reply', targetId: target } : undefined,
           })
           if (identityManager.getWipeGeneration() !== wipeGen) return false
-          processedWrapIdsRef.current.add(event.id)
+          markWrapIdSeen(event.id, true)
           recordProfileSeenEventIds(identityManager.getMasterKeyMaterial().pubkey, [event.id])
           return await publishChatWire({
             rowId: localMsgId,
@@ -663,7 +848,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
             queueRetry: (retry) => dmSendQueueRef.current.enqueue(`dm:${pk}`, retry, () => false),
             update: (deliveryStatus) => setThreads((prev) => prev.map((t) => {
-              if (t.peerPubkey !== pk) return t
+              if (t.peerPubkey.toLowerCase() !== pk) return t
               const messages = t.messages.map((m) => m.id === localMsgId
                 ? { ...m, wireId, protocol, orderMs, createdAt: Math.floor(orderMs / 1000),
 
@@ -686,7 +871,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           chatRetries.hold(localMsgId, () => queueAttempt(attempt))
           setThreads((prev) =>
             prev.map((t) => {
-              if (t.peerPubkey !== pk) return t
+              if (t.peerPubkey.toLowerCase() !== pk) return t
               return {
                 ...t,
                 messages: t.messages.map((m) =>
@@ -705,7 +890,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       }
       return await queueAttempt(attempt)
     },
-    [pool, identityManager, activeGeohash, presenceTracker]
+    [pool, identityManager, activeGeohash, presenceTracker, markPeerReadSync, markWrapIdSeen]
   )
 
   const sendDirectVoiceMemo = useCallback(
@@ -729,10 +914,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         releaseOptimisticOnce()
         return false
       }
-      const pk = peerPubkey.toLowerCase()
+      const pk = peerPubkey.trim().toLowerCase()
       const cleanCaption = caption?.trim() ?? ''
 
-      const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+      const existingThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
       const parent = replyToId ? existingThread?.messages.find(m => m.id === replyToId) : undefined
       const target = parent && dmTargetId(parent)
       if (replyToId && !target) {
@@ -740,6 +925,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         onErrorRef.current?.('Cannot reply', 'This message has no shared ID in this conversation.')
         return false
       }
+      markPeerReadSync(pk)
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
       const targetRelays = [...dmRelaysRef.current]
       const wipeGen = identityManager.getWipeGeneration()
@@ -766,7 +952,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           voiceMemo,
           deliveryStatus: 'sending',
         }
-        const currentThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+        const currentThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
         const nick =
           currentThread?.peerNickname ||
           presenceTracker.getNickname(pk) ||
@@ -774,7 +960,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         const handle = formatDisplayHandle(nick, pk)
 
         setThreads((prev) => {
-          const idx = prev.findIndex((t) => t.peerPubkey === pk)
+          const idx = prev.findIndex((t) => t.peerPubkey.toLowerCase() === pk)
           if (idx !== -1) {
             if (prev[idx].messages.some((m) => m.id === localMsgId)) return prev
             const lastOrder = getMaxOrderMs(prev[idx].messages)
@@ -786,6 +972,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             const tail = nextMsgs[nextMsgs.length - 1]
             const updated: DmThread = {
               ...prev[idx],
+              peerPubkey: pk,
               messages: nextMsgs,
               lastMessageAt: tail.createdAt,
               lastPreview: formatDmPreview(tail),
@@ -841,7 +1028,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           if (inserted) {
             setThreads((prev) =>
               prev.map((t) =>
-                t.peerPubkey === pk
+                t.peerPubkey.toLowerCase() === pk
                   ? {
                       ...t,
                       messages: t.messages.map((m) =>
@@ -871,7 +1058,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             if (inserted) {
               setThreads((prev) =>
                 prev.map((t) => {
-                  if (t.peerPubkey !== pk) return t
+                  if (t.peerPubkey.toLowerCase() !== pk) return t
                   const messages = t.messages.map((m) =>
                     m.id === localMsgId ? { ...m, voiceMemo: loaded, content: cleanCaption } : m
                   )
@@ -905,7 +1092,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             action: target ? { type: 'reply', targetId: target } : undefined,
           })
           if (identityManager.getWipeGeneration() !== wipeGen) return false
-          processedWrapIdsRef.current.add(event.id)
+          markWrapIdSeen(event.id, true)
           recordProfileSeenEventIds(identityManager.getMasterKeyMaterial().pubkey, [event.id])
           return await publishChatWire({
             rowId: localMsgId,
@@ -917,7 +1104,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               setThreads((prev) =>
                 prev
                   .map((t) => {
-                    if (t.peerPubkey !== pk) return t
+                    if (t.peerPubkey.toLowerCase() !== pk) return t
                     const messages = t.messages
                       .map((m) =>
                         m.id === localMsgId
@@ -966,7 +1153,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             chatRetries.hold(localMsgId, () => queueAttempt(attempt))
             setThreads((prev) =>
               prev.map((t) => {
-                if (t.peerPubkey !== pk) return t
+                if (t.peerPubkey.toLowerCase() !== pk) return t
                 return {
                   ...t,
                   messages: t.messages.map((m) =>
@@ -992,7 +1179,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
       return await queueAttempt(attempt)
     },
-    [pool, identityManager, activeGeohash, presenceTracker]
+    [pool, identityManager, activeGeohash, presenceTracker, markPeerReadSync, markWrapIdSeen]
   )
 
   const sendDirectImageAttachment = useCallback(
@@ -1004,16 +1191,17 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       replyToId?: string
     ): Promise<boolean> => {
       if (!pool) return false
-      const pk = peerPubkey.toLowerCase()
+      const pk = peerPubkey.trim().toLowerCase()
       const cleanCaption = caption?.trim() ?? ''
 
-      const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+      const existingThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
       const parent = replyToId ? existingThread?.messages.find(m => m.id === replyToId) : undefined
       const target = parent && dmTargetId(parent)
       if (replyToId && !target) {
         onErrorRef.current?.('Cannot reply', 'This message has no shared ID in this conversation.')
         return false
       }
+      markPeerReadSync(pk)
       const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
       const targetRelays = [...dmRelaysRef.current]
       const wipeGen = identityManager.getWipeGeneration()
@@ -1049,7 +1237,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               imageAttachment,
               deliveryStatus: 'sending',
             }
-            const currentThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+            const currentThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
             const nick =
               currentThread?.peerNickname ||
               presenceTracker.getNickname(pk) ||
@@ -1058,7 +1246,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
             inserted = true
             setThreads((prev) => {
-              const idx = prev.findIndex((t) => t.peerPubkey === pk)
+              const idx = prev.findIndex((t) => t.peerPubkey.toLowerCase() === pk)
               if (idx !== -1) {
                 const lastOrder = getMaxOrderMs(prev[idx].messages)
                 const placed: DmMessage = {
@@ -1069,6 +1257,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                 const tail = nextMsgs[nextMsgs.length - 1]
                 const updated: DmThread = {
                   ...prev[idx],
+                  peerPubkey: pk,
                   messages: nextMsgs,
                   lastMessageAt: tail.createdAt,
                   lastPreview: formatDmPreview(tail),
@@ -1105,7 +1294,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               action: target ? { type: 'reply', targetId: target } : undefined,
             })
             if (identityManager.getWipeGeneration() !== wipeGen) return false
-            processedWrapIdsRef.current.add(event.id)
+            markWrapIdSeen(event.id, true)
             recordProfileSeenEventIds(identityManager.getMasterKeyMaterial().pubkey, [event.id])
             return await publishChatWire({
               rowId: localMsgId,
@@ -1113,7 +1302,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
               queueRetry: (retry) => dmSendQueueRef.current.enqueue(`dm:${pk}`, retry, () => false),
               update: (deliveryStatus) => setThreads((prev) => prev.map((t) => {
-                if (t.peerPubkey !== pk) return t
+                if (t.peerPubkey.toLowerCase() !== pk) return t
                 const messages = t.messages.map((m) => m.id === localMsgId
                   ? { ...m, wireId, protocol, orderMs, createdAt: Math.floor(orderMs / 1000),
                       imageAttachment, content: cleanCaption,
@@ -1136,7 +1325,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             if (inserted) {
               setThreads((prev) =>
                 prev.map((t) => {
-                  if (t.peerPubkey !== pk) return t
+                  if (t.peerPubkey.toLowerCase() !== pk) return t
                   return {
                     ...t,
                     messages: t.messages.map((m) =>
@@ -1156,12 +1345,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         () => false
       )
     },
-    [pool, identityManager, activeGeohash, presenceTracker]
+    [pool, identityManager, activeGeohash, presenceTracker, markPeerReadSync, markWrapIdSeen]
   )
 
   const sendDmReaction = useCallback(async (peer: string, messageId: string, emoji: string) => {
-    const pk = peer.toLowerCase()
-    const thread = threadsRef.current.find((t) => t.peerPubkey === pk)
+    const pk = peer.trim().toLowerCase()
+    const thread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
     const parent = thread?.messages.find((m) => m.id === messageId)
     const targetId = parent && dmTargetId(parent)
     if (!pool || !thread || !parent || !targetId || !emoji || emoji.length > 32 || /\s/u.test(emoji)) return
@@ -1182,7 +1371,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       const { event } = await createEncryptedDmEvent({ content: emoji, signer, recipientPubkey: pk,
         protocol: thread.protocol, action: { type: 'reaction', targetId } })
       if (!isCurrent()) return
-      processedWrapIdsRef.current.add(event.id)
+      markWrapIdSeen(event.id, true)
       recordProfileSeenEventIds(identityManager.getMasterKeyMaterial().pubkey, [event.id])
       const result = await pool.publish([...dmRelaysRef.current], event)
       if (!isCurrent()) return
@@ -1197,60 +1386,75 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         updateOptimisticReactions()
       }
     }
-  }, [pool, identityManager, activeGeohash, updateOptimisticReactions])
+  }, [pool, identityManager, activeGeohash, updateOptimisticReactions, markWrapIdSeen])
 
   const clearThread = useCallback((peerPubkey: string) => {
-    const pk = peerPubkey.toLowerCase()
+    const pk = peerPubkey.trim().toLowerCase()
+    if (!pk) return
     dropReactionsForPeer(pk)
+    const existingThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
+    const maxThreadSec = getMaxThreadTimestampSec(existingThread)
+    const clearSec = Math.max(
+      dmClearedAtRef.current[pk] ?? 0,
+      Math.floor(Date.now() / 1000),
+      maxThreadSec
+    )
     const nextClearedAt: Record<string, number> = {
       ...dmClearedAtRef.current,
-      [pk]: Math.floor(Date.now() / 1000),
+      [pk]: clearSec,
     }
     dmClearedAtRef.current = nextClearedAt
     setDmClearedAt(nextClearedAt)
     saveDmClearedAt(nextClearedAt)
     const syncNext = threadsRef.current.map((t) =>
-      t.peerPubkey === pk ? { ...t, messages: [], lastPreview: '', unreadCount: 0 } : t
+      t.peerPubkey.toLowerCase() === pk ? { ...t, peerPubkey: pk, messages: [], lastPreview: '', unreadCount: 0 } : t
     )
     threadsRef.current = syncNext
     saveDmThreads(syncNext)
     setThreads((prev) => {
       const next = prev.map((t) =>
-        t.peerPubkey === pk ? { ...t, messages: [], lastPreview: '', unreadCount: 0 } : t
+        t.peerPubkey.toLowerCase() === pk ? { ...t, peerPubkey: pk, messages: [], lastPreview: '', unreadCount: 0 } : t
       )
       saveDmThreads(next)
       return next
     })
-    flushProfileSeenEventIds()
-  }, [dropReactionsForPeer])
+    markPeerReadSync(pk, clearSec)
+  }, [dropReactionsForPeer, markPeerReadSync])
 
   const closeThread = useCallback((peerPubkey: string) => {
     const pk = peerPubkey.trim().toLowerCase()
     if (!pk) return
     dropReactionsForPeer(pk)
+    const existingThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
+    const maxThreadSec = getMaxThreadTimestampSec(existingThread)
+    const clearSec = Math.max(
+      dmClearedAtRef.current[pk] ?? 0,
+      Math.floor(Date.now() / 1000),
+      maxThreadSec
+    )
     const nextClearedAt: Record<string, number> = {
       ...dmClearedAtRef.current,
-      [pk]: Math.floor(Date.now() / 1000),
+      [pk]: clearSec,
     }
     dmClearedAtRef.current = nextClearedAt
     setDmClearedAt(nextClearedAt)
     saveDmClearedAt(nextClearedAt)
-    const syncNext = threadsRef.current.filter((t) => t.peerPubkey !== pk)
+    const syncNext = threadsRef.current.filter((t) => t.peerPubkey.toLowerCase() !== pk)
     threadsRef.current = syncNext
     saveDmThreads(syncNext)
     setThreads((prev) => {
-      const next = prev.filter((t) => t.peerPubkey !== pk)
+      const next = prev.filter((t) => t.peerPubkey.toLowerCase() !== pk)
       saveDmThreads(next)
       return next
     })
-    flushProfileSeenEventIds()
-  }, [dropReactionsForPeer])
+    markPeerReadSync(pk, clearSec)
+  }, [dropReactionsForPeer, markPeerReadSync])
 
   const mergeSyncedDmClearedAt = useCallback((remoteClearedAt: Record<string, number>): number => {
     const nextMap: Record<string, number> = { ...dmClearedAtRef.current }
     let changedCount = 0
     for (const [rawPk, rawTs] of Object.entries(remoteClearedAt)) {
-      const pk = rawPk.toLowerCase()
+      const pk = rawPk.trim().toLowerCase()
       if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawTs !== 'number' || !Number.isFinite(rawTs) || rawTs <= 0) {
         continue
       }
@@ -1268,7 +1472,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       let mutated = false
       const next: DmThread[] = []
       for (const thread of prev) {
-        const cutoff = nextMap[thread.peerPubkey.toLowerCase()] ?? 0
+        const pk = thread.peerPubkey.toLowerCase()
+        const cutoff = nextMap[pk] ?? 0
         if (cutoff <= 0) {
           next.push(thread)
           continue
@@ -1281,9 +1486,12 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         mutated = true
         if (surviving.length > 0) {
           const tail = surviving[surviving.length - 1]
+          const readCutoff = Math.max(cutoff, dmReadAtRef.current[pk] ?? 0)
+          const newerIncoming = surviving.filter((m) => !m.isOwn && m.createdAt > readCutoff).length
           next.push({
             ...thread,
             messages: surviving,
+            unreadCount: Math.min(thread.unreadCount, newerIncoming),
             lastMessageAt: tail.createdAt,
             lastPreview: formatDmPreview(tail),
           })
@@ -1292,6 +1500,59 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       if (mutated) {
         saveDmThreads(next)
         return next
+      }
+      return prev
+    })
+    return changedCount
+  }, [])
+
+  const mergeSyncedDmReadAt = useCallback((remoteReadAt: Record<string, number>): number => {
+    const nextMap: Record<string, number> = { ...dmReadAtRef.current }
+    let changedCount = 0
+    for (const [rawPk, rawTs] of Object.entries(remoteReadAt)) {
+      const pk = rawPk.trim().toLowerCase()
+      if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawTs !== 'number' || !Number.isFinite(rawTs) || rawTs <= 0) {
+        continue
+      }
+      const ts = Math.floor(rawTs)
+      if ((nextMap[pk] ?? 0) < ts) {
+        nextMap[pk] = ts
+        changedCount += 1
+      }
+    }
+    if (changedCount === 0) return 0
+    dmReadAtRef.current = nextMap
+    setDmReadAt(nextMap)
+    saveDmReadAt(nextMap)
+    const reconcileThreads = (list: DmThread[]): { next: DmThread[]; mutated: boolean } => {
+      let mutated = false
+      const next = list.map((thread) => {
+        const pk = thread.peerPubkey.toLowerCase()
+        const cutoff = Math.max(nextMap[pk] ?? 0, dmClearedAtRef.current[pk] ?? 0)
+        if (cutoff <= 0 || thread.unreadCount <= 0) return thread
+        let newerIncoming = 0
+        for (const m of thread.messages) {
+          if (!m.isOwn && m.createdAt > cutoff) {
+            newerIncoming += 1
+          }
+        }
+        const nextUnread = Math.min(thread.unreadCount, newerIncoming)
+        if (nextUnread === thread.unreadCount) return thread
+        mutated = true
+        return { ...thread, unreadCount: nextUnread }
+      })
+      return { next, mutated }
+    }
+    const syncReconciled = reconcileThreads(threadsRef.current)
+    if (syncReconciled.mutated) {
+      threadsRef.current = syncReconciled.next
+      saveDmThreads(syncReconciled.next)
+    }
+    setThreads((prev) => {
+      const res = reconcileThreads(prev)
+      if (res.mutated) {
+        saveDmThreads(res.next)
+        return res.next
       }
       return prev
     })
@@ -1334,7 +1595,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           ? peerMeta.peerNickname.trim().slice(0, 32)
           : undefined
 
-      const existingThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+      const existingThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
       const shouldUpgradeNameOnly = Boolean(
         existingThread && metaNick && isAutoAnonNickname(existingThread.peerNickname)
       )
@@ -1350,7 +1611,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       if (!changes && !shouldUpgradeNameOnly) return 0
 
       setThreads((prev) => {
-        const idx = prev.findIndex((t) => t.peerPubkey === pk)
+        const idx = prev.findIndex((t) => t.peerPubkey.toLowerCase() === pk)
         if (idx !== -1) {
           const existing = prev[idx]
           const seen = new Set(existing.messages.map(m => m.id))
@@ -1459,6 +1720,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   )
 
   const clearAllDms = useCallback(() => {
+    if (seenWrapFlushTimerRef.current !== null && typeof window !== 'undefined') {
+      window.clearTimeout(seenWrapFlushTimerRef.current)
+      seenWrapFlushTimerRef.current = null
+    }
     dmSendQueueRef.current.clearAll()
     processedWrapIdsRef.current.clear()
     pendingReactions.current.clear()
@@ -1466,6 +1731,11 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     updateOptimisticReactions()
     dmClearedAtRef.current = {}
     setDmClearedAt({})
+    saveDmClearedAt({})
+    dmReadAtRef.current = {}
+    setDmReadAt({})
+    saveDmReadAt({})
+    saveDmSeenWrapIds([])
     setThreads([])
   }, [updateOptimisticReactions])
 
@@ -1494,6 +1764,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     dmThreads: sanitizedThreads,
     visibleDmThreads,
     dmClearedAt,
+    dmReadAt,
     totalDmUnread,
     ensureThread,
     sendDirectMessage,
@@ -1503,8 +1774,10 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     clearThread,
     closeThread,
     mergeSyncedDmClearedAt,
+    mergeSyncedDmReadAt,
     mergeSyncedDmMessages,
     applySyncedDmPeerNames,
+    flushDmPersistence,
     clearAllDms,
   }
 }

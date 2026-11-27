@@ -83,6 +83,8 @@ const KEYS = {
   customRelays: `${PREFIX}custom_relays`,
   dmThreads: `${PREFIX}dm_threads`,
   dmClearedAt: `${PREFIX}dm_cleared_at`,
+  dmReadAt: `${PREFIX}dm_read_at`,
+  dmSeenWrapIds: `${PREFIX}dm_seen_wraps`,
   deviceSeed: `${PREFIX}device_seed`,
   deviceId: `${PREFIX}device_id`,
   deviceLabel: `${PREFIX}device_label`,
@@ -1001,10 +1003,16 @@ export function scrubBlockedPubkeyFromChannelStorage(pubkey: string, profile: st
 export function loadDmThreads(): DmThread[] {
   const parsed = safeJsonParse<DmThread[]>(safeGet(KEYS.dmThreads), [])
   if (!Array.isArray(parsed)) return []
+  const dmReadAt = loadDmReadAt()
+  const dmClearedAt = loadDmClearedAt()
   let needsRewrite = false
   const cleaned = parsed
-    .filter((t) => t && typeof t.peerPubkey === 'string' && Array.isArray(t.messages))
+    .filter((t) => t && typeof t.peerPubkey === 'string' && t.peerPubkey.trim().length > 0 && Array.isArray(t.messages))
     .map((t) => {
+      const pk = t.peerPubkey.trim().toLowerCase()
+      if (pk !== t.peerPubkey) {
+        needsRewrite = true
+      }
       let threadScrubbed = false
       const validMessages: DmMessage[] = []
       for (const m of t.messages) {
@@ -1024,18 +1032,54 @@ export function loadDmThreads(): DmThread[] {
       if (previewWasStuck) {
         needsRewrite = true
       }
+
+      const rawUnread =
+        typeof t.unreadCount === 'number' && Number.isFinite(t.unreadCount) && t.unreadCount > 0
+          ? Math.floor(t.unreadCount)
+          : 0
+      let reconciledUnread = rawUnread
+      const cutoff = Math.max(dmReadAt[pk] ?? 0, dmClearedAt[pk] ?? 0)
+      if (validMessages.length === 0) {
+        reconciledUnread = 0
+      } else {
+        if (cutoff > 0) {
+          let newerIncomingCount = 0
+          for (const m of validMessages) {
+            if (!m.isOwn && m.createdAt > cutoff) {
+              newerIncomingCount += 1
+            }
+          }
+          reconciledUnread = Math.min(reconciledUnread, newerIncomingCount)
+        }
+        const tail = validMessages[validMessages.length - 1]
+        if (
+          reconciledUnread > 0 &&
+          tail?.isOwn &&
+          !validMessages.some((m) => !m.isOwn && m.createdAt > tail.createdAt)
+        ) {
+          reconciledUnread = 0
+        }
+      }
+      if (reconciledUnread !== t.unreadCount) {
+        needsRewrite = true
+      }
+
       if (threadScrubbed || previewWasStuck) {
         const tail = validMessages[validMessages.length - 1]
         return {
           ...t,
+          peerPubkey: pk,
           messages: validMessages,
+          unreadCount: reconciledUnread,
           lastPreview: tail ? formatDmPreviewForStorage(tail) : '',
           lastMessageAt: tail ? tail.createdAt : t.lastMessageAt,
         }
       }
       return {
         ...t,
+        peerPubkey: pk,
         messages: validMessages,
+        unreadCount: reconciledUnread,
       }
     })
   if (needsRewrite) {
@@ -1044,17 +1088,23 @@ export function loadDmThreads(): DmThread[] {
   return cleaned
 }
 
-export function saveDmThreads(threads: DmThread[]): void {
-  const capped = threads.slice(0, 30).map((t) => {
+function buildCappedDmThreads(
+  threads: DmThread[],
+  maxThreads: number,
+  maxMessagesPerThread: number
+): DmThread[] {
+  return threads.slice(0, maxThreads).map((t) => {
+    const pk = t.peerPubkey.trim().toLowerCase()
     const persistedMsgs = t.messages
       .filter((m) => !isStuckMediaPlaceholder(m) && !isEphemeralPendingMessage(m))
-      .slice(-150)
+      .slice(-maxMessagesPerThread)
     const stripped = persistedMsgs.length !== t.messages.length
     const previewWasStuck = isStuckMediaPlaceholder({ content: t.lastPreview })
     if (stripped || previewWasStuck) {
       const tail = persistedMsgs[persistedMsgs.length - 1]
       return {
         ...t,
+        peerPubkey: pk,
         messages: persistedMsgs,
         lastPreview: tail ? formatDmPreviewForStorage(tail) : '',
         lastMessageAt: tail ? tail.createdAt : t.lastMessageAt,
@@ -1062,10 +1112,34 @@ export function saveDmThreads(threads: DmThread[]): void {
     }
     return {
       ...t,
+      peerPubkey: pk,
       messages: persistedMsgs,
     }
   })
-  safeSet(KEYS.dmThreads, JSON.stringify(capped))
+}
+
+const DM_THREAD_SAVE_TIERS: ReadonlyArray<readonly [number, number]> = [
+  [30, 150],
+  [30, 80],
+  [30, 40],
+  [30, 20],
+  [30, 10],
+  [20, 20],
+  [20, 10],
+  [10, 10],
+]
+
+export function saveDmThreads(threads: DmThread[]): void {
+  if (typeof localStorage === 'undefined') return
+  for (const [maxThreads, maxMsgs] of DM_THREAD_SAVE_TIERS) {
+    const capped = buildCappedDmThreads(threads, maxThreads, maxMsgs)
+    try {
+      localStorage.setItem(KEYS.dmThreads, JSON.stringify(capped))
+      return
+    } catch {
+      // Progressively trim on QuotaExceededError so unreadCount = 0 persistence never silently fails
+    }
+  }
 }
 
 /**
@@ -1160,6 +1234,8 @@ export function scrubAllPersistedStuckPlaceholders(): number {
 }
 
 const MAX_DM_CLEARED_ENTRIES = 500
+const MAX_DM_READ_AT_ENTRIES = 500
+const MAX_DM_SEEN_WRAP_IDS = 600
 
 export function loadDmClearedAt(): Record<string, number> {
   const parsed = safeJsonParse<Record<string, unknown>>(safeGet(KEYS.dmClearedAt), {})
@@ -1169,18 +1245,87 @@ export function loadDmClearedAt(): Record<string, number> {
     const pk = key.trim().toLowerCase()
     if (!/^[0-9a-f]{64}$/.test(pk)) continue
     if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
-      out[pk] = Math.floor(val)
+      out[pk] = Math.max(out[pk] ?? 0, Math.floor(val))
     }
   }
   return out
 }
 
 export function saveDmClearedAt(map: Record<string, number>): void {
-  const entries = Object.entries(map)
-    .filter(([k, v]) => /^[0-9a-f]{64}$/.test(k) && typeof v === 'number' && Number.isFinite(v) && v > 0)
-    .sort((a, b) => b[1] - a[1])
+  const normalized = new Map<string, number>()
+  for (const [rawKey, rawVal] of Object.entries(map)) {
+    const pk = rawKey.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk)) continue
+    if (typeof rawVal !== 'number' || !Number.isFinite(rawVal) || rawVal <= 0) continue
+    const ts = Math.floor(rawVal)
+    if ((normalized.get(pk) ?? 0) < ts) {
+      normalized.set(pk, ts)
+    }
+  }
+  const entries = Array.from(normalized.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, MAX_DM_CLEARED_ENTRIES)
   safeSet(KEYS.dmClearedAt, JSON.stringify(Object.fromEntries(entries)))
+}
+
+export function loadDmReadAt(): Record<string, number> {
+  const parsed = safeJsonParse<Record<string, unknown>>(safeGet(KEYS.dmReadAt), {})
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const out: Record<string, number> = {}
+  for (const [key, val] of Object.entries(parsed)) {
+    const pk = key.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk)) continue
+    if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+      out[pk] = Math.max(out[pk] ?? 0, Math.floor(val))
+    }
+  }
+  return out
+}
+
+export function saveDmReadAt(map: Record<string, number>): void {
+  const normalized = new Map<string, number>()
+  for (const [rawKey, rawVal] of Object.entries(map)) {
+    const pk = rawKey.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk)) continue
+    if (typeof rawVal !== 'number' || !Number.isFinite(rawVal) || rawVal <= 0) continue
+    const ts = Math.floor(rawVal)
+    if ((normalized.get(pk) ?? 0) < ts) {
+      normalized.set(pk, ts)
+    }
+  }
+  const entries = Array.from(normalized.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, MAX_DM_READ_AT_ENTRIES)
+  safeSet(KEYS.dmReadAt, JSON.stringify(Object.fromEntries(entries)))
+}
+
+export function loadDmSeenWrapIds(): string[] {
+  const parsed = safeJsonParse<unknown>(safeGet(KEYS.dmSeenWrapIds), [])
+  if (!Array.isArray(parsed)) return []
+  const ordered = new Set<string>()
+  for (const raw of parsed) {
+    if (typeof raw !== 'string') continue
+    const id = raw.trim().toLowerCase()
+    if (!id || id.length > 128) continue
+    if (ordered.has(id)) ordered.delete(id)
+    ordered.add(id)
+  }
+  const list = Array.from(ordered)
+  return list.length > MAX_DM_SEEN_WRAP_IDS ? list.slice(-MAX_DM_SEEN_WRAP_IDS) : list
+}
+
+export function saveDmSeenWrapIds(ids: Iterable<string>): void {
+  const ordered = new Set<string>()
+  for (const raw of ids) {
+    if (typeof raw !== 'string') continue
+    const id = raw.trim().toLowerCase()
+    if (!id || id.length > 128) continue
+    if (ordered.has(id)) ordered.delete(id)
+    ordered.add(id)
+  }
+  const list = Array.from(ordered)
+  const bounded = list.length > MAX_DM_SEEN_WRAP_IDS ? list.slice(-MAX_DM_SEEN_WRAP_IDS) : list
+  safeSet(KEYS.dmSeenWrapIds, JSON.stringify(bounded))
 }
 
 interface GeoDirectoryCache {
@@ -1510,6 +1655,26 @@ export function loadDeviceSyncState(): PersistedDeviceSyncState | null {
       !Array.isArray(rawCrdt.dmClearedAt)
         ? rawCrdt.dmClearedAt
         : {},
+    dmReadAt:
+      rawCrdt.dmReadAt &&
+      typeof rawCrdt.dmReadAt === 'object' &&
+      !Array.isArray(rawCrdt.dmReadAt)
+        ? (() => {
+            const entries: Array<[string, number]> = []
+            const map = new Map<string, number>()
+            for (const [rawPk, val] of Object.entries(rawCrdt.dmReadAt)) {
+              const pk = rawPk.trim().toLowerCase()
+              if (!/^[0-9a-f]{64}$/.test(pk) || typeof val !== 'number' || !Number.isFinite(val) || val <= 0) {
+                continue
+              }
+              const ts = Math.floor(val)
+              if ((map.get(pk) ?? 0) < ts) map.set(pk, ts)
+            }
+            for (const pair of map.entries()) entries.push(pair)
+            entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+            return Object.fromEntries(entries.slice(0, MAX_DM_READ_AT_ENTRIES))
+          })()
+        : {},
     lud16:
       rawCrdt.lud16 && typeof rawCrdt.lud16 === 'object'
         ? {
@@ -1614,6 +1779,7 @@ export function saveDeviceSyncState(state: PersistedDeviceSyncState): void {
       blocked: state.crdt.blocked,
       pinned: state.crdt.pinned,
       dmClearedAt: state.crdt.dmClearedAt,
+      dmReadAt: state.crdt.dmReadAt ?? {},
       lud16: state.crdt.lud16,
       nickname: state.crdt.nickname,
       peerNotes: state.crdt.peerNotes ?? {},

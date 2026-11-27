@@ -4,7 +4,7 @@ import { isGatewayGeohash } from '../lib/nearby/gatewayPolicy.ts'
 import { acceptChatEcho, chatRetries, publishChatWire } from '../lib/chatDelivery.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Event as NostrEvent, Filter } from 'nostr-tools'
-import type { PushPokePayload } from '../types/notifications.ts'
+import type { NotificationFilterMode, PushPokePayload } from '../types/notifications.ts'
 import type {
   ActiveView,
   AgnostrEngine,
@@ -106,6 +106,7 @@ import {
   bootstrapActiveProfile,
   createAndSwitchProfile,
   deleteStoredProfile,
+  flushProfileSeenEventIds,
   importAndSwitchProfile,
   snapshotCurrentProfileToVault,
   switchToProfile,
@@ -148,6 +149,7 @@ import {
   loadGeoDirectoryCache,
   loadLocalSecret,
   loadNickname,
+  loadNotificationSettings,
   loadPeerNotes,
   loadPinnedChannels,
   loadRecentChannels,
@@ -276,6 +278,64 @@ function applyReactionToMessage(
       },
     ],
   }
+}
+
+function isDirectReplyToOwnBitchatMessage(
+  parsed: Pick<GeoMessage, 'replyTo'> | null,
+  evTags: readonly string[][],
+  cachedMessages: readonly GeoMessage[],
+  ownPubkeysSet: ReadonlySet<string>,
+  myNickname: string
+): boolean {
+  const replyId = parsed?.replyTo?.id?.trim() ?? ''
+  if (replyId) {
+    const parent = cachedMessages.find((m) => m.id === replyId)
+    if (parent) {
+      return Boolean(parent.isOwn || ownPubkeysSet.has(parent.pubkey.toLowerCase()))
+    }
+  }
+
+  const nymquoteTag = evTags.find(
+    (t) => Array.isArray(t) && t[0] === 'nymquote' && typeof t[1] === 'string' && t[1].trim().length > 0
+  )
+  if (nymquoteTag) {
+    const quotePk = evTags
+      .find((t) => Array.isArray(t) && t[0] === 'quote_pk' && typeof t[1] === 'string')?.[1]
+      ?.trim()
+      .toLowerCase()
+    if (quotePk && /^[0-9a-f]{64}$/.test(quotePk)) {
+      return ownPubkeysSet.has(quotePk)
+    }
+    const cleanAuthor = nymquoteTag[1].trim().replace(/^@+/, '').toLowerCase()
+    const cleanMyNick = myNickname.trim().toLowerCase()
+    if (cleanAuthor && cleanMyNick) {
+      if (cleanAuthor === cleanMyNick) return true
+      for (const pk of ownPubkeysSet) {
+        if (pk.length >= 4 && cleanAuthor === `${cleanMyNick}#${pk.slice(-4)}`) {
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+  if (replyId) {
+    const distinctPTags = new Set<string>()
+    for (const t of evTags) {
+      if (Array.isArray(t) && t[0] === 'p' && typeof t[1] === 'string') {
+        const pk = t[1].trim().toLowerCase()
+        if (/^[0-9a-f]{64}$/.test(pk)) {
+          distinctPTags.add(pk)
+        }
+      }
+    }
+    if (distinctPTags.size === 1) {
+      const [onlyPk] = distinctPTags
+      return ownPubkeysSet.has(onlyPk)
+    }
+  }
+
+  return false
 }
 
 function backfillReplyReferences(list: GeoMessage[]): GeoMessage[] {
@@ -697,6 +757,10 @@ export function useAgnostrEngine(): AgnostrEngine {
     Record<string, Array<{ id: string; pubkey: string; isDirectPing: boolean }>>
   >({})
   const geoSeenIdsRef = useRef<Set<string>>(new Set())
+  const [initialGeoNotifMode] = useState<NotificationFilterMode>(
+    () => loadNotificationSettings().geoMessages
+  )
+  const geoNotifModeRef = useRef<NotificationFilterMode>(initialGeoNotifMode)
 
   const refreshTrustedPeerLabel = useCallback((pubkey: string, rawNickname?: string | null) => {
     const pk = pubkey.toLowerCase()
@@ -1074,6 +1138,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     const trusted = trustedSetRef.current
     const own = ownPubkeysRef.current
     const strict = strictWhitelistRef.current
+    const geoNotifMode = geoNotifModeRef.current
 
     const nextUnread: Record<string, number> = {}
     const nextMentions: Record<string, number> = {}
@@ -1091,10 +1156,19 @@ export function useAgnostrEngine(): AgnostrEngine {
 
       let unread = 0
       let mentions = 0
-      for (const item of unblocked) {
-        if (strict && !own.has(item.pubkey) && !trusted.has(item.pubkey)) continue
-        unread += 1
-        if (item.isDirectPing) mentions += 1
+      if (geoNotifMode !== 'off') {
+        for (const item of unblocked) {
+          if (strict && !own.has(item.pubkey) && !trusted.has(item.pubkey)) continue
+          if (geoNotifMode === 'mentions') {
+            if (item.isDirectPing) {
+              unread += 1
+              mentions += 1
+            }
+          } else {
+            unread += 1
+            if (item.isDirectPing) mentions += 1
+          }
+        }
       }
       if (unread > 0) nextUnread[gh] = unread
       if (mentions > 0) nextMentions[gh] = mentions
@@ -1540,9 +1614,17 @@ export function useAgnostrEngine(): AgnostrEngine {
             doesContentMentionUser(parsed.content, parsed.mentions, myNick, geoPk) ||
             (masterPk !== geoPk &&
               doesContentMentionUser(parsed.content, parsed.mentions, myNick, masterPk))
-          const repliedToMe = Boolean(
-            parsed.replyTo?.pubkey &&
-              ownPubkeysRef.current.has(parsed.replyTo.pubkey.toLowerCase())
+          const ownSet = new Set(ownPubkeysRef.current)
+          ownSet.add(geoPk.toLowerCase())
+          ownSet.add(masterPk.toLowerCase())
+          const cachedMsgs =
+            messagesChannelRef.current === gh ? messagesRef.current : loadChannelMessages(gh)
+          const repliedToMe = isDirectReplyToOwnBitchatMessage(
+            parsed,
+            ev.tags,
+            cachedMsgs,
+            ownSet,
+            myNick
           )
           incrementGeoUnread(gh, mentionedMe || repliedToMe, {
             id: parsed.id,
@@ -2020,16 +2102,17 @@ export function useAgnostrEngine(): AgnostrEngine {
                   doesContentMentionUser(parsed.content, parsed.mentions, myNick, geoPk) ||
                   (masterPk !== geoPk &&
                     doesContentMentionUser(parsed.content, parsed.mentions, myNick, masterPk))
-                const repliedToMe = Boolean(
-                  parsed.replyTo &&
-                    ((parsed.replyTo.pubkey &&
-                      ownPubkeysRef.current.has(parsed.replyTo.pubkey.toLowerCase())) ||
-                      (messagesChannelRef.current === gh &&
-                        messagesRef.current.some(
-                          (m) =>
-                            m.id === parsed.replyTo?.id &&
-                            (m.isOwn || ownPubkeysRef.current.has(m.pubkey.toLowerCase()))
-                        )))
+                const ownSet = new Set(ownPubkeysRef.current)
+                ownSet.add(geoPk.toLowerCase())
+                ownSet.add(masterPk.toLowerCase())
+                const cachedMsgs =
+                  messagesChannelRef.current === gh ? messagesRef.current : loadChannelMessages(gh)
+                const repliedToMe = isDirectReplyToOwnBitchatMessage(
+                  parsed,
+                  ev.tags,
+                  cachedMsgs,
+                  ownSet,
+                  myNick
                 )
                 if (!isViewingThisGeo && !alreadyCountedUnread) {
                   incrementGeoUnread(gh, mentionedMe || repliedToMe, {
@@ -2394,25 +2477,13 @@ export function useAgnostrEngine(): AgnostrEngine {
             doesContentMentionUser(ev.content, mentions, myNick, geoPubkey) ||
             (masterPubkey !== geoPubkey && doesContentMentionUser(ev.content, mentions, myNick, masterPubkey))
 
-          const eTag = ev.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16)
-          const replyTargetPubkey = eTag ? getTagValue(ev.tags, 'p')?.toLowerCase() : undefined
-          let repliedToMe = Boolean(
-            replyTargetPubkey &&
-              (replyTargetPubkey === geoPubkey ||
-                replyTargetPubkey === masterPubkey ||
-                ownPubkeysRef.current.has(replyTargetPubkey))
+          const repliedToMe = isDirectReplyToOwnBitchatMessage(
+            parsedPinned,
+            ev.tags,
+            existingCached,
+            ownSet,
+            myNick
           )
-          if (!repliedToMe && eTag) {
-            const cachedMsgs = loadChannelMessages(gh)
-            repliedToMe = cachedMsgs.some(
-              (m) =>
-                m.id === eTag[1] &&
-                (m.isOwn ||
-                  m.pubkey.toLowerCase() === geoPubkey ||
-                  m.pubkey.toLowerCase() === masterPubkey ||
-                  ownPubkeysRef.current.has(m.pubkey.toLowerCase()))
-            )
-          }
 
           incrementGeoUnread(gh, mentionedMe || repliedToMe, {
             id: ev.id,
@@ -2511,6 +2582,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     dmThreads,
     visibleDmThreads,
     dmClearedAt,
+    dmReadAt,
     totalDmUnread,
     ensureThread,
     sendDirectMessage,
@@ -2520,8 +2592,10 @@ export function useAgnostrEngine(): AgnostrEngine {
     clearThread,
     closeThread: closeDmThreadRaw,
     mergeSyncedDmClearedAt,
+    mergeSyncedDmReadAt,
     mergeSyncedDmMessages,
     applySyncedDmPeerNames,
+    flushDmPersistence,
     clearAllDms,
   } = useDirectMessages({
     pool,
@@ -2531,6 +2605,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     activeGeohash,
     activeDmPeer,
     blockedPubkeys: blockedSet,
+    ownPubkeys,
     identityVersion,
     onIncomingDm: (senderHandle, preview) => {
       pushToast('info', `Encrypted DM from ${senderHandle}`, preview)
@@ -2826,6 +2901,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       setProfileSwitching(true)
       try {
         resetAllGames()
+        flushDmPersistence()
+        flushProfileSeenEventIds()
         const ok = await switchToProfile(cur, tgt)
         if (!ok) {
           profileSwitchingRef.current = false
@@ -2842,7 +2919,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         )
       }
     },
-    [identityManager, pushToast, resetAllGames]
+    [identityManager, pushToast, resetAllGames, flushDmPersistence]
   )
 
   const createProfile = useCallback(
@@ -2852,6 +2929,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       setProfileSwitching(true)
       try {
         const cur = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+        flushDmPersistence()
+        flushProfileSeenEventIds()
         return await createAndSwitchProfile(cur, opts)
       } catch (err) {
         profileSwitchingRef.current = false
@@ -2864,7 +2943,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         return null
       }
     },
-    [identityManager, pushToast]
+    [identityManager, pushToast, flushDmPersistence]
   )
 
   const importProfile = useCallback(
@@ -2879,6 +2958,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       setProfileSwitching(true)
       try {
         const cur = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+        flushDmPersistence()
+        flushProfileSeenEventIds()
         const res = await importAndSwitchProfile(cur, secretInput, opts)
         if (!res.ok || (res.profile && res.profile.id === cur)) {
           profileSwitchingRef.current = false
@@ -2894,7 +2975,7 @@ export function useAgnostrEngine(): AgnostrEngine {
         }
       }
     },
-    [identityManager]
+    [identityManager, flushDmPersistence]
   )
 
   const deleteProfile = useCallback(
@@ -3303,6 +3384,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     blockedPeerNames,
     pinnedChannels,
     dmClearedAt,
+    dmReadAt,
     lightningAddress: zapsEngine.lightningAddress,
     peerNotes,
     dmThreads,
@@ -3315,6 +3397,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     onApplyBlocked: handleApplySyncedBlocked,
     onApplyPinned: handleApplySyncedPinned,
     onApplyDmClearedAt: mergeSyncedDmClearedAt,
+    onApplyDmReadAt: mergeSyncedDmReadAt,
     onApplyLightningAddress: handleApplySyncedLightningAddress,
     onApplyNickname: handleApplySyncedNickname,
     onApplyPeerNotes: handleApplySyncedPeerNotes,
@@ -5261,6 +5344,14 @@ export function useAgnostrEngine(): AgnostrEngine {
   useLayoutEffect(() => {
     pokeRecipientsRef.current = notificationsEngine.pokeRecipients
   }, [notificationsEngine.pokeRecipients])
+
+  useLayoutEffect(() => {
+    geoNotifModeRef.current = notificationsEngine.settings.geoMessages
+  }, [notificationsEngine.settings.geoMessages])
+
+  useEffect(() => {
+    recomputeGeoUnreads()
+  }, [notificationsEngine.settings.geoMessages, recomputeGeoUnreads])
 
   useLayoutEffect(() => {
     notifyGeoMessageRef.current = notifyGeoMessage

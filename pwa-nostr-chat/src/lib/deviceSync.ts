@@ -172,6 +172,7 @@ export function createEmptyCrdtState(): DeviceSyncCrdtState {
     blocked: {},
     pinned: { updatedAt: 0, items: [] },
     dmClearedAt: {},
+    dmReadAt: {},
     lud16: { value: null, updatedAt: 0 },
     nickname: { value: '', updatedAt: 0 },
     peerNotes: {},
@@ -299,10 +300,39 @@ export interface LocalSyncSnapshot {
   blockedPeerNames?: Record<string, string>
   pinnedChannels: PinnedChannel[]
   dmClearedAt: Record<string, number>
+  dmReadAt?: Record<string, number>
   lightningAddress: string | null
   nickname: string
   peerNotes: Record<string, string>
   dmPeerNames: Record<string, SyncedDmPeerNameRecord>
+}
+
+const MAX_SYNCED_DM_READ_AT = 500
+
+function capPeerTimestampMap(
+  map: Record<string, number>,
+  maxEntries = MAX_SYNCED_DM_READ_AT
+): { capped: Record<string, number>; trimmed: boolean } {
+  const normalized = new Map<string, number>()
+  for (const [rawPk, rawTs] of Object.entries(map)) {
+    const pk = rawPk.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || typeof rawTs !== 'number' || !Number.isFinite(rawTs) || rawTs <= 0) {
+      continue
+    }
+    const ts = Math.floor(rawTs)
+    if ((normalized.get(pk) ?? 0) < ts) {
+      normalized.set(pk, ts)
+    }
+  }
+  const entries = Array.from(normalized.entries())
+  if (entries.length <= maxEntries) {
+    return { capped: Object.fromEntries(entries), trimmed: false }
+  }
+  entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  return {
+    capped: Object.fromEntries(entries.slice(0, maxEntries)),
+    trimmed: true,
+  }
 }
 
 function capSyncedDmPeerNames(
@@ -518,6 +548,24 @@ export function reconcileLocalSnapshotIntoCrdt(
     }
   }
 
+  // 5b. DM Read-At watermarks (per-peer monotonic max timestamp, capped at 500 entries)
+  const rawNextDmReadAt: Record<string, number> = { ...(prev.dmReadAt ?? {}) }
+  for (const [rawPk, ts] of Object.entries(snapshot.dmReadAt ?? {})) {
+    const pk = rawPk.toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || typeof ts !== 'number' || !Number.isFinite(ts) || ts <= 0) {
+      continue
+    }
+    const cleanTs = Math.floor(ts)
+    if ((rawNextDmReadAt[pk] ?? 0) < cleanTs) {
+      rawNextDmReadAt[pk] = cleanTs
+      changed = true
+    }
+  }
+  const { capped: nextDmReadAt, trimmed: dmReadAtTrimmed } = capPeerTimestampMap(rawNextDmReadAt)
+  if (dmReadAtTrimmed) {
+    changed = true
+  }
+
   // 6. Lightning Address (`lud16`) LWW scalar
   let nextLud16 = prev.lud16
   const normalizedLud16 = snapshot.lightningAddress?.trim() || null
@@ -654,6 +702,7 @@ export function reconcileLocalSnapshotIntoCrdt(
       blocked: nextBlocked,
       pinned: nextPinned,
       dmClearedAt: nextDmCleared,
+      dmReadAt: nextDmReadAt,
       lud16: nextLud16,
       nickname: nextNickname,
       peerNotes: nextPeerNotes,
@@ -681,6 +730,7 @@ export function mergeCrdtStates(
     blockedChanged: false,
     pinnedChanged: false,
     dmClearedChanged: false,
+    dmReadAtChanged: false,
     lud16Changed: false,
     nicknameChanged: false,
     peerNotesChanged: false,
@@ -907,6 +957,27 @@ export function mergeCrdtStates(
     }
   }
 
+  // 5b. Merge DM Read-At Watermarks (per-peer monotonic max, capped at 500 newest-first)
+  const localDmReadAt = capPeerTimestampMap(local.dmReadAt ?? {}).capped
+  const rawMergedDmReadAt: Record<string, number> = { ...localDmReadAt }
+  for (const [rawPk, ts] of Object.entries(remote.dmReadAt ?? {})) {
+    const pk = rawPk.toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(pk) || typeof ts !== 'number' || !Number.isFinite(ts) || ts <= 0) {
+      continue
+    }
+    const cleanTs = Math.floor(ts)
+    if ((rawMergedDmReadAt[pk] ?? 0) < cleanTs) {
+      rawMergedDmReadAt[pk] = cleanTs
+    }
+  }
+  const { capped: mergedDmReadAt } = capPeerTimestampMap(rawMergedDmReadAt)
+  for (const [pk, ts] of Object.entries(mergedDmReadAt)) {
+    if ((localDmReadAt[pk] ?? 0) < ts) {
+      diff.dmReadAtChanged = true
+      diff.itemsUpdated += 1
+    }
+  }
+
   // 6. Merge Lightning Address (`lud16`) LWW scalar
   let mergedLud16 = local.lud16
   if (
@@ -1109,6 +1180,7 @@ export function mergeCrdtStates(
     diff.blockedChanged ||
     mergedPinned !== local.pinned ||
     diff.dmClearedChanged ||
+    Boolean(diff.dmReadAtChanged) ||
     mergedLud16 !== local.lud16 ||
     mergedNickname !== local.nickname ||
     diff.peerNotesChanged ||
@@ -1124,6 +1196,7 @@ export function mergeCrdtStates(
       blocked: mergedBlocked,
       pinned: mergedPinned,
       dmClearedAt: mergedDmCleared,
+      dmReadAt: mergedDmReadAt,
       lud16: mergedLud16,
       nickname: mergedNickname,
       peerNotes: mergedPeerNotes,
@@ -1286,6 +1359,9 @@ export function computeCrdtStateHash(crdt: DeviceSyncCrdtState): string {
     dmClearedAt: Object.keys(crdt.dmClearedAt)
       .sort()
       .map((k) => [k, crdt.dmClearedAt[k]]),
+    dmReadAt: Object.keys(crdt.dmReadAt ?? {})
+      .sort()
+      .map((k) => [k, (crdt.dmReadAt ?? {})[k]]),
     lud16: [crdt.lud16.updatedAt, crdt.lud16.value ?? ''],
     nickname: [crdt.nickname.updatedAt, crdt.nickname.value],
     peerNotes: Object.keys(notes)
@@ -1487,6 +1563,7 @@ export function fitCheckpointStateWithinBudget(
     blocked: crdt.blocked,
     pinned: crdt.pinned,
     dmClearedAt: crdt.dmClearedAt,
+    ...(crdt.dmReadAt && Object.keys(crdt.dmReadAt).length > 0 ? { dmReadAt: crdt.dmReadAt } : {}),
     lud16: crdt.lud16,
     nickname: crdt.nickname,
     peerNotes: crdt.peerNotes ?? {},
@@ -1835,7 +1912,9 @@ export async function buildSignedDeviceSyncEphemeralEvent(
 function projectWireState(state: DeviceSyncCrdtState): DeviceSyncCrdtState {
   return {
     v: 1, servers: state.servers, serverOrder: state.serverOrder, trusted: state.trusted,
-    blocked: state.blocked, pinned: state.pinned, dmClearedAt: state.dmClearedAt, lud16: state.lud16,
+    blocked: state.blocked, pinned: state.pinned, dmClearedAt: state.dmClearedAt,
+    ...(state.dmReadAt && Object.keys(state.dmReadAt).length > 0 ? { dmReadAt: state.dmReadAt } : {}),
+    lud16: state.lud16,
     nickname: state.nickname, peerNotes: state.peerNotes, dmPeerNames: state.dmPeerNames,
     devices: state.devices, amail: state.amail,
     ...(state.callTranscripts ? { callTranscripts: state.callTranscripts } : {}),
@@ -1952,6 +2031,10 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     }
   }
 
+  const dmReadAt = isRecord(raw.dmReadAt)
+    ? capPeerTimestampMap(raw.dmReadAt as Record<string, number>).capped
+    : {}
+
   const lud16 = isRecord(raw.lud16)
     ? {
         value: typeof raw.lud16.value === 'string' && raw.lud16.value.trim() ? raw.lud16.value.trim() : null,
@@ -2050,6 +2133,7 @@ export function sanitizeRemoteCrdtState(raw: unknown): DeviceSyncCrdtState | nul
     blocked,
     pinned,
     dmClearedAt,
+    dmReadAt,
     lud16,
     nickname,
     peerNotes,
