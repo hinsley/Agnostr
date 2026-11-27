@@ -202,6 +202,7 @@ import { useServers } from './useServers.ts'
 import { useToasts } from './useToasts.ts'
 import { useTranscription } from './useTranscription.ts'
 import { useTranslator } from './useTranslator.ts'
+import { useTypingIndicators } from './useTypingIndicators.ts'
 import { useZaps } from './useZaps.ts'
 
 const THEME_META_COLORS: Record<ThemeId, string> = {
@@ -850,6 +851,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   const notifyLocationNoteRef = useRef<(input: NotifyLocationNoteInput) => void>(() => {})
   const notifyAmailRef = useRef<(input: NotifyAmailInput) => boolean>(() => true)
   const notifyAgoraRef = useRef<(input: NotifyAgoraInput) => void>(() => {})
+  const clearPeerTypingRef = useRef<(pubkey: string) => void>(() => {})
   const seedMemoTranscriptRef = useRef<
     (memoKey: string, text: string, modelLabel?: string) => void
   >(() => {})
@@ -1605,6 +1607,9 @@ export function useAgnostrEngine(): AgnostrEngine {
         refreshTrustedPeerLabel(pk, parsed.nickname)
         const view = activeViewRef.current
         const isViewingThisGeo = view.type === 'channel' && view.geohash === gh
+        if (isViewingThisGeo) {
+          clearPeerTypingRef.current(pk)
+        }
         if (!isViewingThisGeo && !alreadyCountedUnread) {
           setUnreadDividerId((curr) => curr ?? parsed.id)
           const myNick = identityManager.getNickname()
@@ -2091,6 +2096,9 @@ export function useAgnostrEngine(): AgnostrEngine {
               refreshTrustedPeerLabel(pk, parsed.nickname)
               const view = activeViewRef.current
               const isViewingThisGeo = view.type === 'channel' && view.geohash === gh
+              if (isViewingThisGeo) {
+                clearPeerTypingRef.current(pk)
+              }
               if (!strictWhitelistRef.current || trustedSetRef.current.has(pk)) {
                 if (!isViewingThisGeo) {
                   setUnreadDividerId((curr) => curr ?? parsed.id)
@@ -2732,6 +2740,80 @@ export function useAgnostrEngine(): AgnostrEngine {
     () => pinnedChannels.map((p) => p.geohash),
     [pinnedChannels]
   )
+
+  // Ephemeral typing indicators across active Bitchat channels, Groups (E2EE & NIP-29), and 1-on-1 DMs
+  const {
+    typingPeers,
+    notifyTypingInput,
+    notifyTypingStopped,
+    clearPeerTyping,
+  } = useTypingIndicators({
+    pool,
+    identityManager,
+    presenceTracker,
+    activeView,
+    activeServer: serversEngine.activeServer,
+    activeServerMembers: serversEngine.members,
+    activeDmThread,
+    channelRelays: relaySelection.channelRelays,
+    dmRelays: relaySelection.dmRelays,
+    ownPubkeys,
+    blockedSet,
+    trustedSet,
+    strictWhitelistMode: settings.strictWhitelistMode,
+    enabled: settings.typingIndicatorsEnabled,
+    identityVersion,
+  })
+
+  useLayoutEffect(() => {
+    clearPeerTypingRef.current = clearPeerTyping
+  }, [clearPeerTyping])
+
+  const lastServerTypingClearKeyRef = useRef<string>('')
+  useEffect(() => {
+    if (activeView.type !== 'server') {
+      lastServerTypingClearKeyRef.current = ''
+      return
+    }
+    const scope = `${activeView.serverId}:${activeView.channelId}`
+    const msgs = serversEngine.messages
+    let latest: { id: string; pubkey: string } | null = null
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      const m = msgs[i]
+      if (!m || m.isOwn || m.isSystem) continue
+      latest = { id: m.id, pubkey: m.pubkey }
+      break
+    }
+    const nextKey = `${scope}|${latest?.id ?? ''}`
+    const prevKey = lastServerTypingClearKeyRef.current
+    lastServerTypingClearKeyRef.current = nextKey
+    if (latest && prevKey.startsWith(`${scope}|`) && prevKey !== nextKey) {
+      clearPeerTyping(latest.pubkey)
+    }
+  }, [activeView, serversEngine.messages, clearPeerTyping])
+
+  const lastDmTypingClearKeyRef = useRef<string>('')
+  useEffect(() => {
+    if (activeView.type !== 'dm') {
+      lastDmTypingClearKeyRef.current = ''
+      return
+    }
+    const peerPk = activeView.peerPubkey.toLowerCase()
+    const msgs = activeDmThread?.messages ?? []
+    let latest: { id: string; senderPubkey: string } | null = null
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      const m = msgs[i]
+      if (!m || m.isOwn) continue
+      latest = { id: m.id, senderPubkey: m.senderPubkey }
+      break
+    }
+    const nextKey = `${peerPk}|${latest?.id ?? ''}`
+    const prevKey = lastDmTypingClearKeyRef.current
+    lastDmTypingClearKeyRef.current = nextKey
+    if (latest && prevKey.startsWith(`${peerPk}|`) && prevKey !== nextKey) {
+      clearPeerTyping(latest.senderPubkey)
+    }
+  }, [activeView, activeDmThread?.messages, clearPeerTyping])
 
   // On-device AI Content Filtering (LiquidAI/d1-2B-ONNX via WebGPU/WASM)
   const contentFilterEngine = useContentFilter({
@@ -5842,6 +5924,13 @@ export function useAgnostrEngine(): AgnostrEngine {
     [updateSettings]
   )
 
+  const setTypingIndicatorsEnabled = useCallback(
+    (enabled: boolean) => {
+      updateSettings({ typingIndicatorsEnabled: enabled })
+    },
+    [updateSettings]
+  )
+
   const setStrictWhitelistMode = useCallback(
     (enabled: boolean) => {
       strictWhitelistRef.current = enabled
@@ -6330,6 +6419,10 @@ export function useAgnostrEngine(): AgnostrEngine {
     settings,
     broadcastClientTag: settings.broadcastClientTag,
     setBroadcastClientTag,
+    typingPeers,
+    notifyTypingInput,
+    notifyTypingStopped,
+    setTypingIndicatorsEnabled,
     setNickname,
     setSignMode,
     setLocalSecret,

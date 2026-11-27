@@ -409,6 +409,8 @@ export interface AppSettings {
   showBridgeBadges: boolean
   /** When true, appends NIP-89 ["client", "agnostr"] tag to Bitchat messages & presence */
   broadcastClientTag: boolean
+  /** When true (default), broadcasts ephemeral typing indicators in Bitchat channels, groups, and DMs */
+  typingIndicatorsEnabled: boolean
   /** When true (default), voice memos from untrusted non-blocked peers can play and transcribe; blocked peers are always denied */
   allowUntrustedVoiceMemos: boolean
   /** When false (default), clicking external links from untrusted senders shows a safety confirmation warning */
@@ -448,6 +450,13 @@ export type ActiveView =
   | { type: 'channel'; geohash: string }
   | { type: 'dm'; peerPubkey: string }
   | { type: 'server'; serverId: string; channelId: string }
+
+export interface TypingPeer {
+  pubkey: string
+  nickname: string
+  displayHandle: string
+  expiresAt: number
+}
 
 export interface ChannelPresenceSummary {
   onlineCount: number
@@ -602,6 +611,10 @@ export interface AgnostrEngine {
   settings: AppSettings
   broadcastClientTag: boolean
   setBroadcastClientTag: (enabled: boolean) => void
+  typingPeers: TypingPeer[]
+  notifyTypingInput: (hasDraft: boolean) => void
+  notifyTypingStopped: () => void
+  setTypingIndicatorsEnabled: (enabled: boolean) => void
   setNickname: (nickname: string) => void
   setSignMode: (mode: SignMode) => void
   setLocalSecret: (nsecOrHex: string) => boolean

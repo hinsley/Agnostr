@@ -26,6 +26,7 @@ import {
   Link2,
   Loader2,
   Lock,
+  MessageCircle,
   Mic,
   Palette,
   Pencil,
@@ -270,7 +271,7 @@ const NAV_ITEMS: readonly SettingsNavItem[] = [
     subtitle: 'Message rules, trusted & blocked',
     description: 'Decide who can reach you, manage trusted peers, and review blocked users.',
     keywords:
-      'privacy trust whitelist trusted peers only voice memos untrusted links warning confirm agnostr client tag anonymity blocked users unblock mute add peer npub',
+      'privacy trust whitelist trusted peers only voice memos untrusted links warning confirm agnostr client tag anonymity typing indicators status blocked users unblock mute add peer npub',
   },
   {
     id: 'content-filter',
@@ -3304,6 +3305,28 @@ export function SettingsModal({
               checked={broadcastClientTag}
               onChange={() => {
                 engine.setBroadcastClientTag(!broadcastClientTag)
+                onPlaySound?.('click')
+              }}
+            />
+          </label>
+
+          <label className="ag-set-notif-row">
+            <div className="ag-set-notif-row-copy">
+              <span className="ag-set-toggle-title">
+                <MessageCircle size={15} />
+                <span>Typing Indicators</span>
+              </span>
+              <span className="ag-set-notif-row-desc">
+                Let people in Bitchat channels, groups, and DMs see when you&apos;re typing a
+                message.
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              className="ag-switch"
+              checked={settings.typingIndicatorsEnabled}
+              onChange={() => {
+                engine.setTypingIndicatorsEnabled(!settings.typingIndicatorsEnabled)
                 onPlaySound?.('click')
               }}
             />

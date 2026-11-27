@@ -161,9 +161,25 @@ export const Composer: React.FC<ComposerProps> = ({
     engine.translator.settings.enabled && engine.translator.settings.outgoingEnabled
   const outgoingTargetLang = engine.translator.settings.outgoingLanguage
   const activeTargetKeyRef = useRef(activeTargetKey)
+  const notifyTypingStoppedRef = useRef(engine.notifyTypingStopped)
   useLayoutEffect(() => {
     activeTargetKeyRef.current = activeTargetKey
-  }, [activeTargetKey])
+    notifyTypingStoppedRef.current = engine.notifyTypingStopped
+  }, [activeTargetKey, engine.notifyTypingStopped])
+
+  const emitTypingForValue = useCallback(
+    (val: string) => {
+      const trimmed = val.trim()
+      engine.notifyTypingInput(trimmed.length > 0 && !trimmed.startsWith('/'))
+    },
+    [engine]
+  )
+
+  useEffect(() => {
+    return () => {
+      notifyTypingStoppedRef.current()
+    }
+  }, [])
 
   // Tear down voice recorder & staged images on Panic Wipe, key rotation, or context switch
   const prevMasterPkRef = useRef(engine.identity.masterPubkey)
@@ -179,6 +195,7 @@ export const Composer: React.FC<ComposerProps> = ({
       setTranslatingOutgoing(false)
     }
     if (pkChanged || targetChanged) {
+      notifyTypingStoppedRef.current()
       setVoiceMode(false)
       setAttachMenuOpen(false)
       setCameraModalOpen(false)
@@ -327,6 +344,7 @@ export const Composer: React.FC<ComposerProps> = ({
     const next = `/${cmd.name}${needsArg ? ' ' : ''}`
     setDraft(next)
     setCursorPos(next.length)
+    engine.notifyTypingStopped()
     textareaRef.current?.focus({ preventScroll: true })
   }
 
@@ -336,6 +354,7 @@ export const Composer: React.FC<ComposerProps> = ({
     const nextCursor = startIdx + insert.length
     setDraft(next)
     setCursorPos(nextCursor)
+    emitTypingForValue(next)
     requestAnimationFrame(() => {
       const el = textareaRef.current
       if (el) {
@@ -530,6 +549,7 @@ export const Composer: React.FC<ComposerProps> = ({
     }
 
     if (stagedSnapshot || !trimmed.startsWith('/')) clearDmReplyOnSubmit()
+    engine.notifyTypingStopped()
 
     if (stagedSnapshot) {
       const staged = detachPendingImage() ?? stagedSnapshot
@@ -818,6 +838,7 @@ export const Composer: React.FC<ComposerProps> = ({
     previewTranscript?: VoicePreviewTranscript
   ): Promise<boolean> => {
     clearDmReplyOnSubmit()
+    engine.notifyTypingStopped()
     submitSeqRef.current += 1
     const submitTargetKey = activeTargetKey
     const submitIsServer = isServer
@@ -873,6 +894,7 @@ export const Composer: React.FC<ComposerProps> = ({
     if (!trimmed || !canSign) return Promise.resolve(false)
 
     if (!trimmed.startsWith('/')) clearDmReplyOnSubmit()
+    engine.notifyTypingStopped()
     submitSeqRef.current += 1
     const submitTargetKey = activeTargetKey
     const submitIsServer = isServer
@@ -1140,6 +1162,65 @@ export const Composer: React.FC<ComposerProps> = ({
           </div>
         )}
 
+        {/* Live Typing Indicator Bar */}
+        {engine.typingPeers.length > 0 && (
+          <div className={`ag-typing-bar${isViolet ? ' dm' : ''}`} role="status" aria-live="polite">
+            <span className="ag-typing-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+            <span className="ag-typing-text truncate">
+              {engine.typingPeers.length === 1 ? (
+                <>
+                  <strong
+                    className="ag-typing-name"
+                    style={{ color: pubkeyToColor(engine.typingPeers[0].pubkey) }}
+                  >
+                    {engine.typingPeers[0].nickname}
+                  </strong>{' '}
+                  is typing a message…
+                </>
+              ) : engine.typingPeers.length === 2 ? (
+                <>
+                  <strong
+                    className="ag-typing-name"
+                    style={{ color: pubkeyToColor(engine.typingPeers[0].pubkey) }}
+                  >
+                    {engine.typingPeers[0].nickname}
+                  </strong>{' '}
+                  and{' '}
+                  <strong
+                    className="ag-typing-name"
+                    style={{ color: pubkeyToColor(engine.typingPeers[1].pubkey) }}
+                  >
+                    {engine.typingPeers[1].nickname}
+                  </strong>{' '}
+                  are typing…
+                </>
+              ) : (
+                <>
+                  <strong
+                    className="ag-typing-name"
+                    style={{ color: pubkeyToColor(engine.typingPeers[0].pubkey) }}
+                  >
+                    {engine.typingPeers[0].nickname}
+                  </strong>
+                  ,{' '}
+                  <strong
+                    className="ag-typing-name"
+                    style={{ color: pubkeyToColor(engine.typingPeers[1].pubkey) }}
+                  >
+                    {engine.typingPeers[1].nickname}
+                  </strong>{' '}
+                  and {engine.typingPeers.length - 2}{' '}
+                  {engine.typingPeers.length - 2 === 1 ? 'other' : 'others'} are typing…
+                </>
+              )}
+            </span>
+          </div>
+        )}
+
         {/* Outgoing Translation Indicator Strip (Double-Column Translator Mode) */}
         {outgoingTranslateActive && !voiceMode && (
           <div
@@ -1345,9 +1426,11 @@ export const Composer: React.FC<ComposerProps> = ({
               enterKeyHint="send"
               placeholder={placeholder}
               onChange={(e) => {
+                const nextVal = e.target.value
                 if (attachMenuOpen) setAttachMenuOpen(false)
-                setDraft(e.target.value)
-                setCursorPos(e.target.selectionStart ?? e.target.value.length)
+                setDraft(nextVal)
+                setCursorPos(e.target.selectionStart ?? nextVal.length)
+                emitTypingForValue(nextVal)
               }}
               onClick={(e) => setCursorPos(e.currentTarget.selectionStart ?? draft.length)}
               onKeyUp={(e) => setCursorPos(e.currentTarget.selectionStart ?? draft.length)}
@@ -1366,6 +1449,7 @@ export const Composer: React.FC<ComposerProps> = ({
                   setAttachMenuOpen(false)
                   clearPendingImage()
                   setPreparingImage(false)
+                  engine.notifyTypingStopped()
                   setVoiceMode(true)
                 }}
                 title={

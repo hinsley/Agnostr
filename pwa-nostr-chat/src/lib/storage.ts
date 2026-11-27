@@ -105,6 +105,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   presenceEnabled: true,
   showBridgeBadges: true,
   broadcastClientTag: true,
+  typingIndicatorsEnabled: true,
   strictWhitelistMode: false,
   allowUntrustedVoiceMemos: true,
   allowUntrustedLinks: false,
@@ -167,6 +168,10 @@ export function loadSettings(): AppSettings {
       typeof parsed.broadcastClientTag === 'boolean'
         ? parsed.broadcastClientTag
         : DEFAULT_SETTINGS.broadcastClientTag,
+    typingIndicatorsEnabled:
+      typeof parsed.typingIndicatorsEnabled === 'boolean'
+        ? parsed.typingIndicatorsEnabled
+        : DEFAULT_SETTINGS.typingIndicatorsEnabled,
     strictWhitelistMode:
       typeof parsed.strictWhitelistMode === 'boolean'
         ? parsed.strictWhitelistMode
