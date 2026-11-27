@@ -29,3 +29,7 @@ dist-apk/
 *.jks
 *.keystore
 *.p12
+
+# Native macOS build artifacts
+dist-macos/
+dist-mac/

@@ -23,7 +23,9 @@
     "test:inline-chat-voice": "node --experimental-strip-types --test scripts/check-inline-chat-voice.mjs",
     "build:android-web": "tsc -b && vite build --mode android",
     "android:apk": "bash scripts/build-android-apk.sh",
-    "test:nearby": "node --experimental-strip-types --test scripts/check-nearby-mesh.mjs"
+    "test:nearby": "node --experimental-strip-types --test scripts/check-nearby-mesh.mjs",
+    "build:mac-web": "tsc -b && vite build --mode macos",
+    "mac:app": "bash scripts/build-mac-app.sh"
   },
   "dependencies": {
     "@agnostr/mesh-curves": "npm:@noble/curves@2.4.0",

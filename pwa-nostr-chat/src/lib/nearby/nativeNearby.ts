@@ -1,3 +1,5 @@
+import { isNativeMacBuild } from "../appPlatform.ts"
+import { macNearby } from "./macNearby.ts"
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core'
 import { framesFor, type MeshPacket } from './meshWire.ts'
 
@@ -5,7 +7,7 @@ export interface NearbyLink { id: string; maxBytes: number }
 export interface NearbyState { active: boolean; links: NearbyLink[]; error?: string }
 export interface NearbyFrame { link: string; wire: string }
 
-interface NearbyPlugin {
+export interface NearbyPlugin {
   capabilities(): Promise<{ supported: boolean }>
   start(): Promise<void>
   stop(): Promise<void>
@@ -14,7 +16,7 @@ interface NearbyPlugin {
   addListener(name: 'frame', cb: (value: NearbyFrame) => void): Promise<PluginListenerHandle>
 }
 
-export const Nearby = registerPlugin<NearbyPlugin>('AgnostrNearby')
+export const Nearby = isNativeMacBuild ? macNearby() : registerPlugin<NearbyPlugin>('AgnostrNearby')
 
 export function unpackNearbyFrame(frame: string): Uint8Array | null {
   if (typeof frame !== 'string' || frame.length > 684) return null

@@ -1,4 +1,4 @@
-import { isNativeAndroidBuild } from './lib/appPlatform'
+import { isNativeAppBuild } from './lib/appPlatform'
 import {
   Suspense,
   lazy,
@@ -2536,7 +2536,7 @@ export function App() {
 
   return (
     <ContextMenuProvider>
-    {isNativeAndroidBuild && nearbyOpen && !panicFlash && (
+    {isNativeAppBuild && nearbyOpen && !panicFlash && (
       <Suspense fallback={null}><NearbyChatModal onClose={() => setNearbyOpen(false)} /></Suspense>
     )}
     <div
@@ -2645,7 +2645,7 @@ export function App() {
                 engine={engine}
                 onClose={() => setBitchatView('room')}
                 onTuneChannel={handleTuneChannel}
-                onOpenNearby={isNativeAndroidBuild ? () => setNearbyOpen(true) : undefined}
+                onOpenNearby={isNativeAppBuild ? () => setNearbyOpen(true) : undefined}
                 onPlaySound={playSound}
               />
             </Suspense>

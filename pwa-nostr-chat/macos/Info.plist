@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key><string>com.agnostr.mac</string>
+    <key>CFBundleExecutable</key><string>Agnostr</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>Agnostr</string>
+    <key>CFBundleDisplayName</key><string>Agnostr</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleIconFile</key><string>Agnostr</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Agnostr uses Bluetooth when you open Nearby Bluetooth chat to send and receive public messages without internet.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>Agnostr exchanges public Nearby Bluetooth chat messages with peers you can reach over the air.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Allow Agnostr to record voice notes and join audio calls.</string>
+    <key>NSCameraUsageDescription</key><string>Allow Agnostr to send video and scan QR codes.</string>
+</dict></plist>

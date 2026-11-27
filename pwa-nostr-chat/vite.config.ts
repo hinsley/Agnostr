@@ -21,7 +21,7 @@ export default defineConfig(({ mode }) => ({
     },
   },
   build: {
-    outDir: mode === 'android' ? 'dist-android' : 'dist',
+    outDir: mode === 'android' ? 'dist-android' : mode === 'macos' ? 'dist-macos' : 'dist',
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -93,7 +93,7 @@ export default defineConfig(({ mode }) => ({
     },
     react(),
     VitePWA({
-      disable: mode === 'android',
+      disable: mode === 'android' || mode === 'macos',
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
