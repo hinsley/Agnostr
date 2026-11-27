@@ -240,10 +240,24 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
   }) => {
     const pinnedReactions = usePinnedReactions()
     const [pickerOpen, setPickerOpen] = useState(false)
-    const [quickPickerPlacement, setQuickPickerPlacement] = useState({ left: 0, width: 234 })
+    const [quickPickerLayout, setQuickPickerLayout] = useState<{
+      left: number
+      top: number
+      maxWidth: number
+      placement: 'above' | 'below'
+      ready: boolean
+    }>({
+      left: 0,
+      top: 0,
+      maxWidth: 234,
+      placement: 'below',
+      ready: false,
+    })
     const [expandedPickerAnchor, setExpandedPickerAnchor] = useState<DOMRect | null>(null)
     const [copied, setCopied] = useState(false)
     const quickPickerWrapRef = useRef<HTMLDivElement | null>(null)
+    const reactBtnRef = useRef<HTMLButtonElement | null>(null)
+    const quickPopoverRef = useRef<HTMLDivElement | null>(null)
     const messageBodyRef = useRef<HTMLDivElement | null>(null)
     const [hoveredReaction, setHoveredReaction] = useState<{
       emoji: string
@@ -270,12 +284,9 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     useEffect(() => {
       if (!pickerOpen) return
       const onPointerDown = (e: PointerEvent) => {
-        if (
-          quickPickerWrapRef.current &&
-          e.target instanceof Node &&
-          quickPickerWrapRef.current.contains(e.target)
-        ) {
-          return
+        if (e.target instanceof Node) {
+          if (quickPickerWrapRef.current?.contains(e.target)) return
+          if (quickPopoverRef.current?.contains(e.target)) return
         }
         setPickerOpen(false)
       }
@@ -291,6 +302,109 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
         window.removeEventListener('keydown', onKeyDown)
       }
     }, [pickerOpen])
+
+    // Measure & position the portaled quick reaction box inside the current visible chat view.
+    // Opens downwards by default; flips upwards ONLY when it would otherwise extend past viewBottom.
+    useLayoutEffect(() => {
+      if (!pickerOpen || typeof window === 'undefined') return
+
+      const streamEl = reactBtnRef.current?.closest('.ag-stream-scroll') ?? null
+
+      const updateQuickPopoverPosition = () => {
+        const btn = reactBtnRef.current
+        const pop = quickPopoverRef.current
+        if (!btn || !pop) return
+
+        const trigger = btn.getBoundingClientRect()
+        const vv = window.visualViewport
+        const vpLeft = vv ? Math.max(0, vv.offsetLeft) : 0
+        const vpTop = vv ? Math.max(0, vv.offsetTop) : 0
+        const vpRight = vpLeft + (vv ? vv.width : window.innerWidth)
+        const vpBottom = vpTop + (vv ? vv.height : window.innerHeight)
+
+        const streamRect = streamEl?.getBoundingClientRect() ?? null
+        const visTopEdge = Math.max(vpTop, streamRect?.top ?? vpTop)
+        const visBottomEdge = Math.min(vpBottom, streamRect?.bottom ?? vpBottom)
+
+        // Close if trigger scrolls completely out of the visible stream view
+        if (streamRect && (trigger.bottom <= visTopEdge || trigger.top >= visBottomEdge)) {
+          setPickerOpen(false)
+          return
+        }
+
+        const viewLeft = Math.max(vpLeft, streamRect?.left ?? vpLeft) + 6
+        const viewRight = Math.min(vpRight, streamRect?.right ?? vpRight) - 6
+        const viewTop = visTopEdge + 6
+        const viewBottom = visBottomEdge - 6
+
+        const maxWidth = Math.max(36, Math.min(234, Math.floor(viewRight - viewLeft)))
+        // Apply maxWidth before measuring so wrapped 1-row/2-row height is exact in a single pass
+        pop.style.maxWidth = `${maxWidth}px`
+        const popoverRect = pop.getBoundingClientRect()
+        const actualWidth = Math.min(pop.offsetWidth || popoverRect.width, maxWidth)
+        const actualHeight = pop.offsetHeight || popoverRect.height
+
+        const belowTop = trigger.bottom + 6
+        const wouldOverflowBelow = belowTop + actualHeight > viewBottom
+        const aboveTop = trigger.top - 6 - actualHeight
+        const fitsAbove = aboveTop >= viewTop
+        const spaceAbove = trigger.top - viewTop
+        const spaceBelow = viewBottom - trigger.bottom
+        const maxAllowedTop = Math.max(viewTop, viewBottom - actualHeight)
+
+        let placement: 'above' | 'below'
+        let top: number
+        if (!wouldOverflowBelow) {
+          placement = 'below'
+          top = Math.max(viewTop, belowTop)
+        } else if (fitsAbove || spaceAbove > spaceBelow) {
+          placement = 'above'
+          top = Math.max(viewTop, Math.min(aboveTop, maxAllowedTop))
+        } else {
+          placement = 'below'
+          top = Math.max(viewTop, Math.min(belowTop, maxAllowedTop))
+        }
+
+        const maxAllowedLeft = Math.max(viewLeft, viewRight - actualWidth)
+        const left = Math.max(viewLeft, Math.min(trigger.left, maxAllowedLeft))
+        const nextLeft = Math.round(left)
+        const nextTop = Math.round(top)
+
+        setQuickPickerLayout((prev) => {
+          if (
+            prev.ready &&
+            prev.left === nextLeft &&
+            prev.top === nextTop &&
+            prev.maxWidth === maxWidth &&
+            prev.placement === placement
+          ) {
+            return prev
+          }
+          return {
+            left: nextLeft,
+            top: nextTop,
+            maxWidth,
+            placement,
+            ready: true,
+          }
+        })
+      }
+
+      updateQuickPopoverPosition()
+
+      const vv = window.visualViewport
+      streamEl?.addEventListener('scroll', updateQuickPopoverPosition, { passive: true })
+      window.addEventListener('resize', updateQuickPopoverPosition)
+      vv?.addEventListener('resize', updateQuickPopoverPosition)
+      vv?.addEventListener('scroll', updateQuickPopoverPosition)
+
+      return () => {
+        streamEl?.removeEventListener('scroll', updateQuickPopoverPosition)
+        window.removeEventListener('resize', updateQuickPopoverPosition)
+        vv?.removeEventListener('resize', updateQuickPopoverPosition)
+        vv?.removeEventListener('scroll', updateQuickPopoverPosition)
+      }
+    }, [pickerOpen, pinnedReactions.length])
 
     const hideReactionTooltip = useCallback(() => {
       setHoveredReaction(null)
@@ -1445,6 +1559,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
           {onReact && (
             <div ref={quickPickerWrapRef} style={{ position: 'relative' }}>
               <button
+                ref={reactBtnRef}
                 type="button"
                 className="ag-msg-act-btn"
                 onClick={(e) => {
@@ -1454,15 +1569,11 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                     return
                   }
                   if (!pickerOpen) {
-                    const trigger = e.currentTarget.getBoundingClientRect()
-                    const stream = e.currentTarget.closest('.ag-stream-scroll')?.getBoundingClientRect()
-                    const left = Math.max(0, stream?.left ?? 0) + 6
-                    const right = Math.min(window.innerWidth, stream?.right ?? window.innerWidth) - 6
-                    const width = Math.max(36, Math.min(234, right - left))
-                    const offset = Math.max(left, Math.min(trigger.left, right - width)) - trigger.left
-                    setQuickPickerPlacement({ left: offset, width })
+                    setQuickPickerLayout((prev) =>
+                      prev.ready ? { ...prev, ready: false } : prev
+                    )
                   }
-                  setPickerOpen(!pickerOpen)
+                  setPickerOpen((open) => !open)
                 }}
                 title="React"
                 aria-label="Add reaction"
@@ -1470,44 +1581,65 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
               >
                 <Smile size={15} />
               </button>
-              {pickerOpen && (
-                <div className="ag-emoji-popover" role="menu" aria-label="Quick reactions"
-                  style={{ left: quickPickerPlacement.left, maxWidth: quickPickerPlacement.width }}>
-                  {pinnedReactions.map((emoji) => {
-                    const reacted = myActiveEmojis.includes(emoji)
-                    return (
-                      <button
-                        key={emoji}
-                        type="button"
-                        className={`ag-emoji-opt ${reacted ? 'active' : ''}`}
-                        aria-label={`React with ${emoji}`}
-                        aria-pressed={reacted}
-                        onClick={() => {
-                          onReact(message, emoji)
-                          setPickerOpen(false)
-                          onToggleActions(null)
-                        }}
-                      >
-                        {emoji}
-                      </button>
-                    )
-                  })}
-                  <button
-                    type="button"
-                    className="ag-emoji-opt ag-emoji-expand-btn"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      const rect = e.currentTarget.getBoundingClientRect()
-                      setPickerOpen(false)
-                      setExpandedPickerAnchor(rect)
+              {pickerOpen &&
+                typeof document !== 'undefined' &&
+                createPortal(
+                  <div
+                    ref={quickPopoverRef}
+                    className={`ag-emoji-popover is-${quickPickerLayout.placement}${
+                      quickPickerLayout.ready ? ' is-ready' : ''
+                    }`}
+                    role="menu"
+                    aria-label="Quick reactions"
+                    data-no-swipe="true"
+                    data-no-long-press="true"
+                    style={{
+                      position: 'fixed',
+                      left: `${quickPickerLayout.left}px`,
+                      top: `${quickPickerLayout.top}px`,
+                      maxWidth: `${quickPickerLayout.maxWidth}px`,
                     }}
-                    title="More reactions & pin emojis"
-                    aria-label="More emoji reactions"
+                    onClick={(e) => e.stopPropagation()}
+                    onContextMenu={(e) => e.stopPropagation()}
                   >
-                    <Plus size={14} strokeWidth={2.3} />
-                  </button>
-                </div>
-              )}
+                    {pinnedReactions.map((emoji) => {
+                      const reacted = myActiveEmojis.includes(emoji)
+                      return (
+                        <button
+                          key={emoji}
+                          type="button"
+                          className={`ag-emoji-opt ${reacted ? 'active' : ''}`}
+                          aria-label={`React with ${emoji}`}
+                          aria-pressed={reacted}
+                          onClick={() => {
+                            onReact(message, emoji)
+                            setPickerOpen(false)
+                            onToggleActions(null)
+                          }}
+                        >
+                          {emoji}
+                        </button>
+                      )
+                    })}
+                    <button
+                      type="button"
+                      className="ag-emoji-opt ag-emoji-expand-btn"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        const rect =
+                          reactBtnRef.current?.getBoundingClientRect() ??
+                          e.currentTarget.getBoundingClientRect()
+                        setPickerOpen(false)
+                        setExpandedPickerAnchor(rect)
+                      }}
+                      title="More reactions & pin emojis"
+                      aria-label="More emoji reactions"
+                    >
+                      <Plus size={14} strokeWidth={2.3} />
+                    </button>
+                  </div>,
+                  document.body
+                )}
             </div>
           )}
 

@@ -15,6 +15,7 @@ export type Nip42AuthSigner = (relayUrl: string, challenge: string) => Promise<N
 export interface SubscriptionHandlers {
   onEvent: (event: NostrEvent, relayUrl: string) => void
   onEose?: (relayUrl: string) => void
+  onRelayReset?: (relayUrl: string) => void
 }
 
 export interface PublishResult {
@@ -92,12 +93,14 @@ type PendingDispatchItem =
   | {
       kind: 'event'
       conn: RelayConnection
+      ws: WebSocket
       wireSubId: string
       event: NostrEvent
     }
   | {
       kind: 'eose'
       conn: RelayConnection
+      ws: WebSocket
       wireSubId: string
     }
 
@@ -604,6 +607,8 @@ export class RelayPool {
       for (const subId of conn.activeSubIds) {
         const sub = this.subscriptions.get(subId)
         if (sub) {
+          sub.eoseReceived.delete(conn.url)
+          sub.handlers.onRelayReset?.(conn.url)
           this.sendReq(conn, sub)
         }
       }
@@ -785,6 +790,7 @@ export class RelayPool {
         this.pendingDispatchQueue.push({
           kind: 'event',
           conn: frame.conn,
+          ws: frame.ws,
           wireSubId,
           event: ev,
         })
@@ -808,6 +814,7 @@ export class RelayPool {
         this.pendingDispatchQueue.push({
           kind: 'eose',
           conn: frame.conn,
+          ws: frame.ws,
           wireSubId,
         })
         continue
@@ -886,7 +893,7 @@ export class RelayPool {
       this.pendingDispatchHead += 1
 
       const sub = this.subscriptions.get(item.wireSubId)
-      if (!sub || sub.closed || this.disposed) continue
+      if (!sub || sub.closed || this.disposed || item.conn.ws !== item.ws) continue
 
       if (item.kind === 'event') {
         sub.handlers.onEvent(item.event, item.conn.url)
@@ -959,7 +966,11 @@ export class RelayPool {
           // Replay subscriptions that may have required NIP-42 AUTH
           for (const subId of conn.activeSubIds) {
             const sub = this.subscriptions.get(subId)
-            if (sub) this.sendReq(conn, sub)
+            if (sub) {
+              sub.eoseReceived.delete(conn.url)
+              sub.handlers.onRelayReset?.(conn.url)
+              this.sendReq(conn, sub)
+            }
           }
         }
         this.scheduleTelemetryEmit()

@@ -17,13 +17,18 @@ export const PROFILES_REGISTRY_KEY = 'agnostr:v3:profiles'
 export const ACTIVE_PROFILE_ID_KEY = 'agnostr:v3:active_profile_id'
 export const LEGACY_AMAIL_OWNER_KEY = 'agnostr:v3:legacy_amail_owner'
 export const PROFILE_NOTIFS_KEY = 'agnostr:v3:profile_notifs'
+export const PROFILE_SEEN_EVENTS_KEY = 'agnostr:v3:profile_seen_events'
 
 export const GLOBAL_KEYS: ReadonlySet<string> = new Set([
   PROFILES_REGISTRY_KEY,
   ACTIVE_PROFILE_ID_KEY,
   LEGACY_AMAIL_OWNER_KEY,
   PROFILE_NOTIFS_KEY,
+  PROFILE_SEEN_EVENTS_KEY,
 ])
+
+const MAX_SEEN_EVENTS_PER_PROFILE = 600
+const SEEN_EVENTS_FLUSH_DEBOUNCE_MS = 400
 
 const PROFILE_VAULT_DB_NAME = 'agnostr-profile-vault-v1'
 const PROFILE_VAULT_DB_VERSION = 1
@@ -526,6 +531,161 @@ export function clearProfileNotificationEntry(
   return next
 }
 
+let seenEventsCache: Map<string, Set<string>> | null = null
+let seenEventsDirty = false
+let seenEventsFlushTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+let seenEventsPagehideBound = false
+const clearedSeenEventProfiles = new Set<string>()
+
+function readSeenEventsStoreFromStorage(): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>()
+  const raw = safeGet(PROFILE_SEEN_EVENTS_KEY)
+  if (!raw) return out
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return out
+    for (const [rawPk, rawIds] of Object.entries(parsed as Record<string, unknown>)) {
+      const pk = normalizePubkey(rawPk)
+      if (!pk || !Array.isArray(rawIds)) continue
+      const set = new Set<string>()
+      const start = Math.max(0, rawIds.length - MAX_SEEN_EVENTS_PER_PROFILE)
+      for (let i = start; i < rawIds.length; i += 1) {
+        const val = rawIds[i]
+        if (typeof val !== 'string') continue
+        const id = val.trim().toLowerCase()
+        if (id && id.length <= 128) set.add(id)
+      }
+      if (set.size > 0) out.set(pk, set)
+    }
+  } catch {
+    // Ignore malformed seen-events storage
+  }
+  return out
+}
+
+function trimBoundedSet(set: Set<string>, maxSize: number): void {
+  while (set.size > maxSize) {
+    const oldest = set.values().next().value
+    if (oldest === undefined) break
+    set.delete(oldest)
+  }
+}
+
+function ensureSeenEventsCache(): Map<string, Set<string>> {
+  if (!seenEventsPagehideBound && typeof window !== 'undefined') {
+    seenEventsPagehideBound = true
+    window.addEventListener('pagehide', () => {
+      flushProfileSeenEventIds()
+    })
+  }
+  if (!seenEventsCache) {
+    seenEventsCache = readSeenEventsStoreFromStorage()
+  }
+  return seenEventsCache
+}
+
+export function loadProfileSeenEventIds(pubkey: string): Set<string> {
+  const pk = normalizePubkey(pubkey)
+  if (!pk) return new Set()
+  if (!seenEventsDirty) {
+    seenEventsCache = readSeenEventsStoreFromStorage()
+  }
+  const cache = ensureSeenEventsCache()
+  return new Set(cache.get(pk) ?? [])
+}
+
+export function flushProfileSeenEventIds(): void {
+  if (seenEventsFlushTimer !== null) {
+    globalThis.clearTimeout(seenEventsFlushTimer)
+    seenEventsFlushTimer = null
+  }
+  if (!seenEventsDirty || !seenEventsCache) return
+
+  const disk = readSeenEventsStoreFromStorage()
+  for (const clearedPk of clearedSeenEventProfiles) {
+    disk.delete(clearedPk)
+  }
+
+  const mergedOut: Record<string, string[]> = {}
+  const allPks = new Set<string>([...disk.keys(), ...seenEventsCache.keys()])
+  for (const pk of allPks) {
+    if (clearedSeenEventProfiles.has(pk)) continue
+    const combined = new Set<string>()
+    const diskSet = disk.get(pk)
+    if (diskSet) {
+      for (const id of diskSet) combined.add(id)
+    }
+    const memSet = seenEventsCache.get(pk)
+    if (memSet) {
+      for (const id of memSet) combined.add(id)
+    }
+    trimBoundedSet(combined, MAX_SEEN_EVENTS_PER_PROFILE)
+    if (combined.size > 0) {
+      seenEventsCache.set(pk, combined)
+      mergedOut[pk] = Array.from(combined)
+    } else {
+      seenEventsCache.delete(pk)
+    }
+  }
+
+  safeSet(PROFILE_SEEN_EVENTS_KEY, JSON.stringify(mergedOut))
+  seenEventsDirty = false
+  clearedSeenEventProfiles.clear()
+}
+
+export function recordProfileSeenEventIds(pubkey: string, eventIds: Iterable<string>): void {
+  const pk = normalizePubkey(pubkey)
+  if (!pk) return
+  const cache = ensureSeenEventsCache()
+  let set = cache.get(pk)
+  if (!set) {
+    set = new Set<string>()
+    cache.set(pk, set)
+  }
+
+  let added = false
+  for (const rawId of eventIds) {
+    if (typeof rawId !== 'string') continue
+    const id = rawId.trim().toLowerCase()
+    if (!id || id.length > 128 || set.has(id)) continue
+    set.add(id)
+    added = true
+  }
+  if (!added) return
+
+  clearedSeenEventProfiles.delete(pk)
+  trimBoundedSet(set, MAX_SEEN_EVENTS_PER_PROFILE)
+  seenEventsDirty = true
+
+  if (seenEventsFlushTimer === null) {
+    seenEventsFlushTimer = globalThis.setTimeout(() => {
+      seenEventsFlushTimer = null
+      flushProfileSeenEventIds()
+    }, SEEN_EVENTS_FLUSH_DEBOUNCE_MS)
+  }
+}
+
+export function clearProfileSeenEventIds(pubkey: string): void {
+  const pk = normalizePubkey(pubkey)
+  if (!pk) return
+  const cache = ensureSeenEventsCache()
+  cache.delete(pk)
+  clearedSeenEventProfiles.add(pk)
+  seenEventsDirty = true
+  flushProfileSeenEventIds()
+}
+
+export function panicWipeAllProfilesSeenEventIds(): void {
+  if (seenEventsFlushTimer !== null) {
+    globalThis.clearTimeout(seenEventsFlushTimer)
+    seenEventsFlushTimer = null
+  }
+  seenEventsCache = new Map()
+  seenEventsDirty = false
+  clearedSeenEventProfiles.clear()
+  safeRemove(PROFILE_SEEN_EVENTS_KEY)
+}
+
 export async function snapshotCurrentProfileToVault(
   activePubkey: string,
   requiredEntry?: readonly [key: string, value: string],
@@ -622,6 +782,8 @@ export function syncActiveProfileMetadata(patch: {
       preservedPicture = prevRec.picture
     }
     list = list.filter((p) => p.id !== prevPk)
+    clearProfileNotificationEntry(prevPk)
+    clearProfileSeenEventIds(prevPk)
     void deleteProfileVaultBucket(prevPk)
   }
 
@@ -673,6 +835,7 @@ export async function switchToProfile(
     markProfileChecked(curPk)
     await snapshotCurrentProfileToVault(curPk)
   }
+  flushProfileSeenEventIds()
 
   clearActiveProfileStorage()
   if (targetBucket) {
@@ -709,6 +872,7 @@ export async function createAndSwitchProfile(
     markProfileChecked(curPk)
     await snapshotCurrentProfileToVault(curPk)
   }
+  flushProfileSeenEventIds()
 
   const { deviceSeedHex, pubkey, npub } = generateFreshSeedKeypair()
   const nick = opts?.nickname?.trim().slice(0, 24) || generateRandomNickname()
@@ -762,6 +926,7 @@ export async function importAndSwitchProfile(
     markProfileChecked(curPk)
     await snapshotCurrentProfileToVault(curPk)
   }
+  flushProfileSeenEventIds()
 
   const nick = opts?.nickname?.trim().slice(0, 24) || generateRandomNickname()
   const now = Date.now()
@@ -805,6 +970,7 @@ export async function deleteStoredProfile(
   const remaining = list.filter((p) => p.id !== tgtPk)
   saveProfilesRegistry(remaining)
   clearProfileNotificationEntry(tgtPk)
+  clearProfileSeenEventIds(tgtPk)
 
   if (safeGet(LEGACY_AMAIL_OWNER_KEY)?.trim().toLowerCase() === tgtPk) {
     // Sentinel prevents any other profile from reclaiming the deleted legacy DB slot

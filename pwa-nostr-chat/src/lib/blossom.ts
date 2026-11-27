@@ -242,23 +242,104 @@ interface BlossomDescriptor {
   type?: string
 }
 
+interface BlossomServerHealth {
+  lastSuccessAt: number
+  lastLatencyMs: number
+  cooldownUntil: number
+}
+
+const BLOSSOM_FAILURE_COOLDOWN_MS = 60_000
+const BLOSSOM_HEDGE_DELAY_MS = 2_200
+const BLOSSOM_DEFAULT_UPLOAD_TIMEOUT_MS = 10_000
+
+const blossomServerHealth = new Map<string, BlossomServerHealth>()
+
+function orderBlossomCandidates(rawServers: readonly string[]): string[] {
+  const unique: string[] = []
+  const seen = new Set<string>()
+  for (const raw of rawServers) {
+    const normalized = normalizeBlossomServerUrl(raw)
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    unique.push(normalized)
+  }
+  if (unique.length <= 1) return unique
+
+  const now = Date.now()
+  return unique
+    .map((server, idx) => ({ server, idx, health: blossomServerHealth.get(server) }))
+    .sort((a, b) => {
+      const aCooling = Boolean(a.health && a.health.cooldownUntil > now)
+      const bCooling = Boolean(b.health && b.health.cooldownUntil > now)
+      if (aCooling !== bCooling) return aCooling ? 1 : -1
+
+      if (!aCooling && !bCooling) {
+        const aKnown = Boolean(a.health && a.health.lastSuccessAt > 0)
+        const bKnown = Boolean(b.health && b.health.lastSuccessAt > 0)
+        if (aKnown !== bKnown) return aKnown ? -1 : 1
+        if (aKnown && bKnown && a.health && b.health) {
+          if (a.health.lastLatencyMs !== b.health.lastLatencyMs) {
+            return a.health.lastLatencyMs - b.health.lastLatencyMs
+          }
+          if (a.health.lastSuccessAt !== b.health.lastSuccessAt) {
+            return b.health.lastSuccessAt - a.health.lastSuccessAt
+          }
+        }
+        return a.idx - b.idx
+      }
+
+      const aUntil = a.health?.cooldownUntil ?? 0
+      const bUntil = b.health?.cooldownUntil ?? 0
+      if (aUntil !== bUntil) return aUntil - bUntil
+      return a.idx - b.idx
+    })
+    .map((entry) => entry.server)
+}
+
+function recordBlossomSuccess(server: string, latencyMs: number): void {
+  blossomServerHealth.set(server, {
+    lastSuccessAt: Date.now(),
+    lastLatencyMs: Math.max(1, latencyMs),
+    cooldownUntil: 0,
+  })
+}
+
+function recordBlossomFailure(server: string): void {
+  const prev = blossomServerHealth.get(server)
+  blossomServerHealth.set(server, {
+    lastSuccessAt: prev?.lastSuccessAt ?? 0,
+    lastLatencyMs: prev?.lastLatencyMs ?? Number.POSITIVE_INFINITY,
+    cooldownUntil: Date.now() + BLOSSOM_FAILURE_COOLDOWN_MS,
+  })
+}
+
+function formatServerHost(server: string): string {
+  try {
+    return new URL(server).host
+  } catch {
+    return server
+  }
+}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number
 ): Promise<Response> {
   const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(url, { ...init, signal: controller.signal })
   } finally {
-    window.clearTimeout(timer)
+    globalThis.clearTimeout(timer)
   }
 }
 
 /**
  * BUD-02 Blossom upload (`PUT /upload` with signed `kind: 24242` auth event).
- * Tries configured servers in order with automatic fallback.
+ * Orders servers by observed health/latency and uses hedged parallel failover
+ * (launching the next server after 2.2s or immediate failure, aborting slower
+ * pending requests as soon as any server accepts the upload).
  */
 export async function uploadBlobToBlossom(opts: {
   bytes: Uint8Array
@@ -266,8 +347,9 @@ export async function uploadBlobToBlossom(opts: {
   servers: readonly string[]
   signAuthEvent: (template: EventTemplate) => Promise<NostrEvent>
   timeoutMs?: number
+  precomputedSha256?: string
 }): Promise<BlossomUploadResult> {
-  const { bytes, signAuthEvent, timeoutMs = 15_000 } = opts
+  const { bytes, signAuthEvent, timeoutMs = BLOSSOM_DEFAULT_UPLOAD_TIMEOUT_MS } = opts
   if (bytes.byteLength === 0) {
     throw new Error('Cannot upload an empty media file.')
   }
@@ -276,7 +358,11 @@ export async function uploadBlobToBlossom(opts: {
   }
 
   const cleanMime = cleanMimeType(opts.mime)
-  const hashHex = await computeSha256HexAsync(bytes)
+  const precomputed = opts.precomputedSha256?.trim().toLowerCase()
+  const hashHex =
+    precomputed && /^[0-9a-f]{64}$/.test(precomputed)
+      ? precomputed
+      : await computeSha256HexAsync(bytes)
   const nowSec = Math.floor(Date.now() / 1000)
 
   const authTemplate: EventTemplate = {
@@ -294,45 +380,50 @@ export async function uploadBlobToBlossom(opts: {
   const authJsonBytes = new TextEncoder().encode(JSON.stringify(signedAuth))
   const authHeader = `Nostr ${bytesToBase64(authJsonBytes)}`
 
-  const candidates = (opts.servers.length > 0 ? opts.servers : DEFAULT_BLOSSOM_SERVERS)
-    .map((s) => normalizeBlossomServerUrl(s))
-    .filter((s): s is string => s !== null)
+  const candidates = orderBlossomCandidates(
+    opts.servers.length > 0 ? opts.servers : DEFAULT_BLOSSOM_SERVERS
+  )
 
   if (candidates.length === 0) {
     throw new Error('No valid Blossom servers configured.')
   }
 
-  const errors: string[] = []
   const bodyBuf = toArrayBuffer(bytes)
 
-  for (const server of candidates) {
+  const attemptSingleServer = async (
+    server: string,
+    controller: AbortController
+  ): Promise<{ result: BlossomUploadResult; latencyMs: number }> => {
+    const startedAt = Date.now()
+    let timedOut = false
+    const timer = globalThis.setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, timeoutMs)
+
     try {
-      const res = await fetchWithTimeout(
-        `${server}/upload`,
-        {
-          method: 'PUT',
-          mode: 'cors',
-          headers: {
-            Authorization: authHeader,
-            'Content-Type': cleanMime,
-          },
-          body: bodyBuf,
+      const res = await fetch(`${server}/upload`, {
+        method: 'PUT',
+        mode: 'cors',
+        headers: {
+          Authorization: authHeader,
+          'Content-Type': cleanMime,
         },
-        timeoutMs
-      )
+        body: bodyBuf,
+        signal: controller.signal,
+      })
 
       const text = await res.text()
       if (!res.ok) {
         const reason = res.headers.get('x-reason') || text.slice(0, 100) || `HTTP ${res.status}`
-        errors.push(`${new URL(server).host}: ${reason}`)
-        continue
+        throw new Error(reason)
       }
 
       let desc: BlossomDescriptor = {}
       try {
         desc = JSON.parse(text) as BlossomDescriptor
       } catch {
-        // Some relays return empty body; derive BUD-01 URL
+        // Some servers return empty body; derive BUD-01 URL
       }
 
       const finalUrl =
@@ -341,25 +432,103 @@ export async function uploadBlobToBlossom(opts: {
           : `${server}/${hashHex}`
 
       return {
-        url: finalUrl,
-        sha256: hashHex,
-        size: bytes.byteLength,
-        mime: cleanMime,
-        server,
+        result: {
+          url: finalUrl,
+          sha256: hashHex,
+          size: bytes.byteLength,
+          mime: cleanMime,
+          server,
+        },
+        latencyMs: Math.max(1, Date.now() - startedAt),
       }
     } catch (err) {
-      const host = (() => {
-        try {
-          return new URL(server).host
-        } catch {
-          return server
-        }
-      })()
-      errors.push(`${host}: ${err instanceof Error ? err.message : 'network error'}`)
+      if (timedOut) {
+        throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s`)
+      }
+      throw err
+    } finally {
+      globalThis.clearTimeout(timer)
     }
   }
 
-  throw new Error(`Blossom upload failed across all servers (${errors.slice(0, 3).join('; ')})`)
+  return await new Promise<BlossomUploadResult>((resolve, reject) => {
+    let settled = false
+    let nextIdx = 0
+    let inFlight = 0
+    let hedgeTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+    const activeControllers = new Map<string, AbortController>()
+    const errors: string[] = []
+
+    const clearHedgeTimer = () => {
+      if (hedgeTimer !== null) {
+        globalThis.clearTimeout(hedgeTimer)
+        hedgeTimer = null
+      }
+    }
+
+    const abortLosers = (winnerServer: string) => {
+      for (const [srv, ctrl] of activeControllers.entries()) {
+        if (srv !== winnerServer) {
+          try {
+            ctrl.abort()
+          } catch {
+            // Ignore
+          }
+        }
+      }
+      activeControllers.clear()
+    }
+
+    const launchNext = () => {
+      if (settled || nextIdx >= candidates.length) return
+      const server = candidates[nextIdx++]
+      const controller = new AbortController()
+      activeControllers.set(server, controller)
+      inFlight += 1
+
+      clearHedgeTimer()
+      if (nextIdx < candidates.length) {
+        hedgeTimer = globalThis.setTimeout(() => {
+          hedgeTimer = null
+          launchNext()
+        }, BLOSSOM_HEDGE_DELAY_MS)
+      }
+
+      void attemptSingleServer(server, controller).then(
+        ({ result, latencyMs }) => {
+          activeControllers.delete(server)
+          inFlight -= 1
+          recordBlossomSuccess(server, latencyMs)
+          if (settled) return
+          settled = true
+          clearHedgeTimer()
+          abortLosers(server)
+          resolve(result)
+        },
+        (err) => {
+          activeControllers.delete(server)
+          inFlight -= 1
+          if (settled) return
+          recordBlossomFailure(server)
+          const msg = err instanceof Error ? err.message : 'network error'
+          errors.push(`${formatServerHost(server)}: ${msg}`)
+
+          if (nextIdx < candidates.length) {
+            clearHedgeTimer()
+            launchNext()
+          } else if (inFlight === 0) {
+            settled = true
+            clearHedgeTimer()
+            reject(
+              new Error(`Blossom upload failed across all servers (${errors.slice(0, 3).join('; ')})`)
+            )
+          }
+        }
+      )
+    }
+
+    launchNext()
+  })
 }
 
 /** Legacy voice URLs have no signed digest. Use an anonymous, bounded fetch
@@ -479,6 +648,34 @@ export class VoiceBlobCache {
     return `${media.url}|${media.sha256}|${media.encryption?.ivB64 ?? 'plain'}|${media.inlineVoiceMarker ? 'voice-marker' : media.inlineMarker ? 'image-marker' : ''}`
   }
 
+  seedBlob(
+    media: MediaBlobDescriptor,
+    blob: Blob,
+    senderPubkey?: string,
+    adoptObjectUrl?: string
+  ): string {
+    const key = this.keyFor(media)
+    const pk = senderPubkey?.toLowerCase()
+    if (pk) {
+      let set = this.sendersByKey.get(key)
+      if (!set) {
+        set = new Set<string>()
+        this.sendersByKey.set(key, set)
+      }
+      set.add(pk)
+    }
+
+    const existing = this.urls.get(key)
+    if (existing) return existing
+
+    const objectUrl =
+      adoptObjectUrl && adoptObjectUrl.startsWith('blob:')
+        ? adoptObjectUrl
+        : URL.createObjectURL(blob)
+    this.urls.set(key, objectUrl)
+    return objectUrl
+  }
+
   async getOrFetch(
     media: MediaBlobDescriptor,
     assertAuthorized: () => void,
@@ -486,6 +683,12 @@ export class VoiceBlobCache {
   ): Promise<string> {
     // Always re-verify authorization even on cache hit so untrusting a peer immediately blocks access!
     assertAuthorized()
+
+    // Optimistic in-flight local voice memo before Blossom upload settles:
+    // return the local blob: URL immediately with 0ms latency and zero network fetch.
+    if (media.url.startsWith('blob:')) {
+      return media.url
+    }
 
     const key = this.keyFor(media)
     const pk = senderPubkey?.toLowerCase()
@@ -508,6 +711,8 @@ export class VoiceBlobCache {
       .then((blob) => {
         // Re-verify authorization after network I/O in case peer was untrusted mid-download
         assertAuthorized()
+        const existing = this.urls.get(key)
+        if (existing) return existing
         const objectUrl = URL.createObjectURL(blob)
         this.urls.set(key, objectUrl)
         return objectUrl

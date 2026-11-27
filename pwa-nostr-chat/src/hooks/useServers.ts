@@ -198,6 +198,12 @@ export interface UseServersOptions {
   blossomServers: string[]
   setVoiceSendPhase: (phase: VoiceSendPhase) => void
   onSeedMemoTranscript?: (memoKey: string, text: string, modelLabel?: string) => void
+  onSeedVoiceBlob?: (
+    attachment: VoiceMemoAttachment,
+    blob: Blob,
+    senderPubkey: string,
+    adoptObjectUrl?: string
+  ) => string | void
   lightningAddress?: string | null
   onIngestEventTags?: (pubkey: string, tags: string[][]) => void
   onNotifyPushPoke?: (payload: PushPokePayload) => void
@@ -228,6 +234,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     blossomServers,
     setVoiceSendPhase,
     onSeedMemoTranscript,
+    onSeedVoiceBlob,
     lightningAddress,
     onIngestEventTags,
     onNotifyPushPoke,
@@ -302,6 +309,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const lightningAddressRef = useRef<string | null>(lightningAddress ?? null)
   const onIngestEventTagsRef = useRef(onIngestEventTags)
   const onNotifyPushPokeRef = useRef(onNotifyPushPoke)
+  const onSeedVoiceBlobRef = useRef(onSeedVoiceBlob)
   const membersRef = useRef<{ serverId: string; members: Nip29Member[] }>({
     serverId: '',
     members: [],
@@ -311,7 +319,56 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const serverSendQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
   const inFlightSendCountRef = useRef<number>(0)
   const optimisticSeqRef = useRef<number>(0)
+  const optimisticVoiceUrlsRef = useRef<Set<string>>(new Set())
+  const optimisticVoiceTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
   const replyingToRef = useRef<ServerMessage | null>(replyingTo)
+
+  const trackOptimisticVoiceUrl = useCallback((url: string): string => {
+    optimisticVoiceUrlsRef.current.add(url)
+    return url
+  }, [])
+
+  const releaseOptimisticVoiceUrl = useCallback((url: string, immediate = false) => {
+    if (!optimisticVoiceUrlsRef.current.has(url)) return
+    const revokeNow = () => {
+      if (!optimisticVoiceUrlsRef.current.delete(url)) return
+      try {
+        URL.revokeObjectURL(url)
+      } catch {
+        // Ignore
+      }
+    }
+    if (immediate) {
+      revokeNow()
+      return
+    }
+    const timer = globalThis.setTimeout(() => {
+      optimisticVoiceTimersRef.current.delete(timer)
+      revokeNow()
+    }, 1500)
+    optimisticVoiceTimersRef.current.add(timer)
+  }, [])
+
+  const revokeAllOptimisticVoiceUrls = useCallback(() => {
+    for (const timer of optimisticVoiceTimersRef.current) {
+      globalThis.clearTimeout(timer)
+    }
+    optimisticVoiceTimersRef.current.clear()
+    for (const url of optimisticVoiceUrlsRef.current) {
+      try {
+        URL.revokeObjectURL(url)
+      } catch {
+        // Ignore
+      }
+    }
+    optimisticVoiceUrlsRef.current.clear()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      revokeAllOptimisticVoiceUrls()
+    }
+  }, [revokeAllOptimisticVoiceUrls])
 
   const adjustInFlightSend = useCallback((delta: number) => {
     inFlightSendCountRef.current = Math.max(0, inFlightSendCountRef.current + delta)
@@ -325,6 +382,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   useLayoutEffect(() => {
     onNotifyPushPokeRef.current = onNotifyPushPoke
   }, [onNotifyPushPoke])
+
+  useLayoutEffect(() => {
+    onSeedVoiceBlobRef.current = onSeedVoiceBlob
+  }, [onSeedVoiceBlob])
 
   useLayoutEffect(() => {
     activeServerChanKeyRef.current = activeServerChanKey
@@ -2451,12 +2512,27 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
   const sendVoiceMemo = useCallback(
     async (recorded: RecordedVoiceMemo, caption?: string): Promise<boolean> => {
-      if (!activeServer || !activeChannel || !pool) return false
-      if (recorded.size <= 0) return false
+      if (!activeServer || !activeChannel || !pool || recorded.size <= 0) {
+        revokeVoicePreviewUrl(recorded)
+        return false
+      }
 
       const server = activeServer
       const channel = activeChannel
       const chanId = channel.id
+      const isVirtual = server.kind === 'virtual'
+      const targetRelays = isVirtual
+        ? server.relays.length > 0
+          ? server.relays
+          : [...CORE_DM_RELAYS]
+        : server.relayUrl
+          ? [server.relayUrl]
+          : []
+      if (targetRelays.length === 0) {
+        revokeVoicePreviewUrl(recorded)
+        return false
+      }
+
       const targetKey = makeServerChanKey(server.id, chanId)
       const replyTarget = replyingToRef.current
       replyingToRef.current = null
@@ -2474,106 +2550,247 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       const lightningAddr = lightningAddressRef.current
       const uploadServers = [...blossomServers]
 
-      adjustInFlightSend(1)
-      try {
-        return await serverSendQueueRef.current.enqueue(
-          `srv:${server.id}:${chanId}`,
-          async () => {
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-            try {
-              const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
-              let attachment: VoiceMemoAttachment
+      // Create a dedicated local object URL for the optimistic row so revoking the
+      // recorder's preview URL never breaks optimistic playback or retries.
+      const tempId = `pending-srv-${Date.now()}-${++optimisticSeqRef.current}`
+      const nowSec = clampTimestamp(Math.floor(Date.now() / 1000))
+      const optimisticUrl = trackOptimisticVoiceUrl(URL.createObjectURL(recorded.blob))
+      revokeVoicePreviewUrl(recorded)
 
-              if (server.kind === 'virtual' && server.encrypted) {
-                setVoiceSendPhase('encrypting')
-                const { ciphertext, encryption } = await encryptVoiceBytesAesGcm(rawBytes)
-                setVoiceSendPhase('uploading')
-                const upload = await uploadBlobToBlossom({
-                  bytes: ciphertext,
-                  mime: 'application/octet-stream',
-                  servers: uploadServers,
-                  signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
-                })
-                attachment = {
-                  url: upload.url,
-                  mime: cleanMime,
-                  size: recorded.size,
-                  durationSec: recorded.durationSec,
-                  waveform: recorded.waveform,
-                  sha256: upload.sha256,
-                  encryption,
-                  server: upload.server,
-                }
-              } else {
-                setVoiceSendPhase('uploading')
-                const upload = await uploadBlobToBlossom({
-                  bytes: rawBytes,
-                  mime: cleanMime,
-                  servers: uploadServers,
-                  signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
-                })
-                attachment = {
-                  url: upload.url,
-                  mime: cleanMime,
-                  size: upload.size,
-                  durationSec: recorded.durationSec,
-                  waveform: recorded.waveform,
-                  sha256: upload.sha256,
-                  server: upload.server,
-                }
-              }
-
-              if (attachment.sha256 && recorded.previewTranscript?.trim()) {
-                onSeedMemoTranscript?.(
-                  attachment.sha256,
-                  recorded.previewTranscript,
-                  recorded.previewTranscriptModel
-                )
-              }
-
-              setVoiceSendPhase('publishing')
-              const body = server.encrypted
-                ? cleanCaption
-                : cleanCaption
-                  ? `${cleanCaption}\n${attachment.url}`
-                  : attachment.url
-
-              const ok = await publishServerMessageDirect({
-                server,
-                channel,
-                body,
-                replyTarget,
-                voiceAttachment: attachment,
-                wipeGen,
-                nick,
-                masterPk,
-                powEnabled,
-                powTargetBits,
-                lightningAddr,
-              })
-              return ok
-            } catch (err) {
-              if (identityManager.getWipeGeneration() === wipeGen) {
-                pushToast(
-                  'error',
-                  'Group voice memo failed',
-                  err instanceof Error ? err.message : 'Upload error'
-                )
-              }
-              return false
-            } finally {
-              revokeVoicePreviewUrl(recorded)
-              setVoiceSendPhase('idle')
-            }
-          },
-          () => {
-            revokeVoicePreviewUrl(recorded)
-            return false
-          }
-        )
-      } finally {
-        adjustInFlightSend(-1)
+      const optimisticAttachment: VoiceMemoAttachment = {
+        url: optimisticUrl,
+        mime: cleanMime,
+        size: recorded.size,
+        durationSec: recorded.durationSec,
+        waveform: recorded.waveform,
+        sha256: '',
       }
+
+      if (recorded.previewTranscript?.trim()) {
+        onSeedMemoTranscript?.(
+          optimisticUrl,
+          recorded.previewTranscript,
+          recorded.previewTranscriptModel
+        )
+      }
+
+      const optimistic: ServerMessage = {
+        id: tempId,
+        serverId: server.id,
+        channelId: chanId,
+        pubkey: masterPk,
+        nickname: nick,
+        displayHandle: formatDisplayHandle(nick, masterPk),
+        content: cleanCaption,
+        createdAt: nowSec,
+        tags: [],
+        isOwn: true,
+        encrypted: server.encrypted,
+        powBits: 0,
+        replyTo:
+          replyTarget && !replyTarget.isSystem
+            ? {
+                id: replyTarget.id,
+                pubkey: replyTarget.pubkey,
+                nickname: replyTarget.nickname,
+                preview: replyTarget.content.slice(0, 120),
+              }
+            : undefined,
+        reactions: [],
+        mentions: extractMentions(cleanCaption),
+        voiceMemo: optimisticAttachment,
+        deliveryStatus: 'sending',
+      }
+
+      // Immediately insert optimistic voice memo at 0ms BEFORE async encryption/Blossom upload
+      updateServerChannelMessages(
+        server.id,
+        chanId,
+        (prev) => {
+          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
+          return [...prev, { ...optimistic, createdAt: Math.max(nowSec, lastSec) }]
+        },
+        { allowBackgroundPersist: true }
+      )
+
+      let uploadedAttachment: VoiceMemoAttachment | null = null
+
+      const queueAttempt = async (fn: () => Promise<boolean>) => {
+        adjustInFlightSend(1)
+        try {
+          return await serverSendQueueRef.current.enqueue(`srv:${server.id}:${chanId}`, fn, () => {
+            if (identityManager.getWipeGeneration() !== wipeGen) {
+              releaseOptimisticVoiceUrl(optimisticUrl, true)
+            }
+            return false
+          })
+        } finally {
+          adjustInFlightSend(-1)
+        }
+      }
+
+      const attempt = async (): Promise<boolean> => {
+        if (identityManager.getWipeGeneration() !== wipeGen) {
+          releaseOptimisticVoiceUrl(optimisticUrl, true)
+          return false
+        }
+        try {
+          updateServerChannelMessages(
+            server.id,
+            chanId,
+            (prev) =>
+              prev.map((m) =>
+                m.id === tempId && m.deliveryStatus !== 'sent'
+                  ? { ...m, deliveryStatus: 'sending' }
+                  : m
+              ),
+            { allowBackgroundPersist: true }
+          )
+
+          if (!uploadedAttachment) {
+            const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
+            let attachment: VoiceMemoAttachment
+
+            if (server.kind === 'virtual' && server.encrypted) {
+              setVoiceSendPhase('encrypting')
+              const { ciphertext, ciphertextSha256, encryption } =
+                await encryptVoiceBytesAesGcm(rawBytes)
+              if (identityManager.getWipeGeneration() !== wipeGen) {
+                releaseOptimisticVoiceUrl(optimisticUrl, true)
+                return false
+              }
+              setVoiceSendPhase('uploading')
+              const upload = await uploadBlobToBlossom({
+                bytes: ciphertext,
+                mime: 'application/octet-stream',
+                servers: uploadServers,
+                precomputedSha256: ciphertextSha256,
+                signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
+              })
+              attachment = {
+                url: upload.url,
+                mime: cleanMime,
+                size: recorded.size,
+                durationSec: recorded.durationSec,
+                waveform: recorded.waveform,
+                sha256: upload.sha256,
+                encryption,
+                server: upload.server,
+              }
+            } else {
+              setVoiceSendPhase('uploading')
+              const upload = await uploadBlobToBlossom({
+                bytes: rawBytes,
+                mime: cleanMime,
+                servers: uploadServers,
+                signAuthEvent: (tmpl) => identityManager.signEvent(tmpl),
+              })
+              attachment = {
+                url: upload.url,
+                mime: cleanMime,
+                size: upload.size,
+                durationSec: recorded.durationSec,
+                waveform: recorded.waveform,
+                sha256: upload.sha256,
+                server: upload.server,
+              }
+            }
+
+            if (identityManager.getWipeGeneration() !== wipeGen) {
+              releaseOptimisticVoiceUrl(optimisticUrl, true)
+              return false
+            }
+
+            // Seed cache immediately (adopting optimisticUrl so active playback continues uninterrupted)
+            const seededUrl = onSeedVoiceBlobRef.current?.(
+              attachment,
+              recorded.blob,
+              masterPk,
+              optimisticUrl
+            )
+            if (seededUrl === optimisticUrl) {
+              optimisticVoiceUrlsRef.current.delete(optimisticUrl)
+            }
+
+            if (attachment.sha256 && recorded.previewTranscript?.trim()) {
+              onSeedMemoTranscript?.(
+                attachment.sha256,
+                recorded.previewTranscript,
+                recorded.previewTranscriptModel
+              )
+            }
+
+            uploadedAttachment = attachment
+            updateServerChannelMessages(
+              server.id,
+              chanId,
+              (prev) =>
+                prev.map((m) => (m.id === tempId ? { ...m, voiceMemo: attachment } : m)),
+              { allowBackgroundPersist: true }
+            )
+            if (seededUrl !== optimisticUrl) {
+              releaseOptimisticVoiceUrl(optimisticUrl)
+            }
+          }
+
+          const attachment = uploadedAttachment
+          setVoiceSendPhase('publishing')
+          const body = server.encrypted
+            ? cleanCaption
+            : cleanCaption
+              ? `${cleanCaption}\n${attachment.url}`
+              : attachment.url
+
+          return await publishServerMessageDirect({
+            server,
+            channel,
+            tempId,
+            body,
+            replyTarget,
+            voiceAttachment: attachment,
+            wipeGen,
+            nick,
+            masterPk,
+            powEnabled,
+            powTargetBits,
+            lightningAddr,
+          })
+        } catch (err) {
+          if (identityManager.getWipeGeneration() === wipeGen) {
+            chatRetries.hold(tempId, () => queueAttempt(attempt))
+            updateServerChannelMessages(
+              server.id,
+              chanId,
+              (prev) => {
+                let changed = false
+                const next = prev.map((m) => {
+                  if (m.id !== tempId || m.deliveryStatus === 'sent') return m
+                  changed = true
+                  return {
+                    ...m,
+                    deliveryStatus: 'failed' as ServerMessage['deliveryStatus'],
+                  }
+                })
+                return changed ? next : null
+              },
+              { allowBackgroundPersist: true }
+            )
+            pushToast(
+              'error',
+              'Group voice memo failed',
+              err instanceof Error ? err.message : 'Upload error',
+              tempId
+            )
+          } else {
+            releaseOptimisticVoiceUrl(optimisticUrl, true)
+          }
+          return false
+        } finally {
+          setVoiceSendPhase('idle')
+        }
+      }
+
+      return await queueAttempt(attempt)
     },
     [
       activeServer,
@@ -2585,6 +2802,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       settings.powTargetBits,
       setVoiceSendPhase,
       onSeedMemoTranscript,
+      updateServerChannelMessages,
+      trackOptimisticVoiceUrl,
+      releaseOptimisticVoiceUrl,
       adjustInFlightSend,
       publishServerMessageDirect,
       pushToast,
@@ -3358,6 +3578,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
 
   const resetAllServers = useCallback(() => {
     serverSendQueueRef.current.clearAll()
+    revokeAllOptimisticVoiceUrls()
     inFlightSendCountRef.current = 0
     setSending(false)
     replyingToRef.current = null
@@ -3374,7 +3595,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
     setExploredGroups([])
     setExploringRelay(false)
     setExploreError(null)
-  }, [])
+  }, [revokeAllOptimisticVoiceUrls])
 
   const totalServerUnread = useMemo(
     () => joinedServers.reduce((sum, s) => sum + s.unreadCount, 0),

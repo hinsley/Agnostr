@@ -424,6 +424,7 @@ swSelf.addEventListener('push', (event) => {
         recipientPubkey,
         category,
         title,
+        deliveryEventId: data.deliveryEventId,
         ts: Date.now(),
       })
     }

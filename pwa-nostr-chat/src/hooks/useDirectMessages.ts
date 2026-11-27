@@ -7,6 +7,7 @@ import {
   type DmReactionUpdate,
 } from '../lib/dmMessageActions.ts'
 import { rememberLiveDmPush } from '../lib/pushDisplay.ts'
+import { flushProfileSeenEventIds, recordProfileSeenEventIds } from '../lib/profileVault.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PushPokePayload } from '../types/notifications.ts'
 import type {
@@ -232,7 +233,11 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
         }
         return t
       })
-      return changed ? next : prev
+      if (changed) {
+        saveDmThreads(next)
+        return next
+      }
+      return prev
     })
   }, [blockedPubkeys])
 
@@ -245,17 +250,26 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     saveDmThreads(threads)
   }, [threads])
 
-  // Mark active thread read whenever opened
+  // Mark active thread read whenever opened and persist synchronously so profile switches never see stale unread counts
   useEffect(() => {
     if (!activeDmPeer) return
     const pk = activeDmPeer.toLowerCase()
+    const curIdx = threadsRef.current.findIndex((t) => t.peerPubkey === pk)
+    if (curIdx !== -1 && threadsRef.current[curIdx].unreadCount > 0) {
+      const syncCopy = [...threadsRef.current]
+      syncCopy[curIdx] = { ...syncCopy[curIdx], unreadCount: 0 }
+      threadsRef.current = syncCopy
+      saveDmThreads(syncCopy)
+    }
     setThreads((prev) => {
       const idx = prev.findIndex((t) => t.peerPubkey === pk)
       if (idx === -1 || prev[idx].unreadCount === 0) return prev
       const copy = [...prev]
       copy[idx] = { ...copy[idx], unreadCount: 0 }
+      saveDmThreads(copy)
       return copy
     })
+    flushProfileSeenEventIds()
   }, [activeDmPeer])
 
   // Subscribe to kind 1059 gift wraps for master pubkey (+ derived geohash pubkey if enabled)
@@ -291,6 +305,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           if (!verifyEventCached(ev)) return
           if (cancelled) return
           processedWrapIdsRef.current.add(ev.id)
+          recordProfileSeenEventIds(masterMat.pubkey, [ev.id])
           if (processedWrapIdsRef.current.size > 2000) {
             const first = processedWrapIdsRef.current.values().next().value
             if (first) processedWrapIdsRef.current.delete(first)
@@ -466,6 +481,14 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       const defaultProto: DmProtocol =
         preferredProtocol ?? (identityManager.getSignMode() === 'extension' ? 'nip17' : 'bitchat')
 
+      const syncIdx = threadsRef.current.findIndex((t) => t.peerPubkey === pk)
+      if (syncIdx !== -1 && threadsRef.current[syncIdx].unreadCount > 0) {
+        const syncCopy = [...threadsRef.current]
+        syncCopy[syncIdx] = { ...syncCopy[syncIdx], unreadCount: 0 }
+        threadsRef.current = syncCopy
+        saveDmThreads(syncCopy)
+      }
+
       let target: DmThread | null = null
       setThreads((prev) => {
         const idx = prev.findIndex((t) => t.peerPubkey === pk)
@@ -486,6 +509,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           }
           const copy = [...prev]
           copy[idx] = target
+          saveDmThreads(copy)
           return copy
         }
         target = {
@@ -499,8 +523,11 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           lastMessageAt: Math.floor(Date.now() / 1000),
           lastPreview: '',
         }
-        return [target, ...prev]
+        const next = [target, ...prev]
+        saveDmThreads(next)
+        return next
       })
+      flushProfileSeenEventIds()
 
       return (
         target ?? {
@@ -624,6 +651,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
           })
           if (identityManager.getWipeGeneration() !== wipeGen) return false
           processedWrapIdsRef.current.add(event.id)
+          recordProfileSeenEventIds(identityManager.getMasterKeyMaterial().pubkey, [event.id])
           return await publishChatWire({
             rowId: localMsgId,
             publish: (ack) => pool.publish([...new Set([...targetRelays, ...dmRelaysRef.current])], event, undefined, ack),
@@ -681,9 +709,21 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       voiceMemoOrLoader: VoiceMemoAttachment | (() => Promise<VoiceMemoAttachment>),
       caption?: string,
       protocolOverride?: DmProtocol,
-      replyToId?: string
+      replyToId?: string,
+      optimisticAttachment?: VoiceMemoAttachment,
+      onOptimisticReplaced?: () => void
     ): Promise<boolean> => {
-      if (!pool) return false
+      let releasedOptimistic = false
+      const releaseOptimisticOnce = () => {
+        if (releasedOptimistic) return
+        releasedOptimistic = true
+        onOptimisticReplaced?.()
+      }
+
+      if (!pool) {
+        releaseOptimisticOnce()
+        return false
+      }
       const pk = peerPubkey.toLowerCase()
       const cleanCaption = caption?.trim() ?? ''
 
@@ -691,6 +731,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       const parent = replyToId ? existingThread?.messages.find(m => m.id === replyToId) : undefined
       const target = parent && dmTargetId(parent)
       if (replyToId && !target) {
+        releaseOptimisticOnce()
         onErrorRef.current?.('Cannot reply', 'This message has no shared ID in this conversation.')
         return false
       }
@@ -704,138 +745,247 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
       const localMsgId = bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
 
-      return await dmSendQueueRef.current.enqueue(
-        `dm:${pk}`,
-        async () => {
-          if (identityManager.getWipeGeneration() !== wipeGen) return false
-          let inserted = false
-          try {
-            const voiceMemo =
+      const upsertVoiceRow = (voiceMemo: VoiceMemoAttachment) => {
+        const nowMs = Date.now()
+        const nowSec = Math.floor(nowMs / 1000)
+        const msgBase: DmMessage = {
+          id: localMsgId,
+          replyToId: target,
+          peerPubkey: pk,
+          senderPubkey: signer.pubkey,
+          content: cleanCaption,
+          createdAt: nowSec,
+          orderMs: nowMs,
+          isOwn: true,
+          protocol: chosenProtocol,
+          voiceMemo,
+          deliveryStatus: 'sending',
+        }
+        const currentThread = threadsRef.current.find((t) => t.peerPubkey === pk)
+        const nick =
+          currentThread?.peerNickname ||
+          presenceTracker.getNickname(pk) ||
+          `anon${pk.slice(-4)}`
+        const handle = formatDisplayHandle(nick, pk)
+
+        setThreads((prev) => {
+          const idx = prev.findIndex((t) => t.peerPubkey === pk)
+          if (idx !== -1) {
+            if (prev[idx].messages.some((m) => m.id === localMsgId)) return prev
+            const lastOrder = getMaxOrderMs(prev[idx].messages)
+            const placed: DmMessage = {
+              ...msgBase,
+              orderMs: Math.max(nowMs, lastOrder + 1),
+            }
+            const nextMsgs = [...prev[idx].messages, placed].sort(compareDmMessages)
+            const tail = nextMsgs[nextMsgs.length - 1]
+            const updated: DmThread = {
+              ...prev[idx],
+              messages: nextMsgs,
+              lastMessageAt: tail.createdAt,
+              lastPreview: formatDmPreview(tail),
+              unreadCount: 0,
+            }
+            const copy = [...prev]
+            copy[idx] = updated
+            copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+            return copy
+          }
+          const created: DmThread = {
+            peerPubkey: pk,
+            peerNpub: encodeNpubSafe(pk),
+            peerNickname: nick,
+            peerDisplayHandle: handle,
+            protocol: chosenProtocol,
+            messages: [msgBase],
+            unreadCount: 0,
+            lastMessageAt: nowSec,
+            lastPreview: formatDmPreview(msgBase),
+          }
+          return [created, ...prev]
+        })
+      }
+
+      const initialVoiceMemo =
+        optimisticAttachment ??
+        (typeof voiceMemoOrLoader === 'function' ? undefined : voiceMemoOrLoader)
+      let inserted = false
+      if (initialVoiceMemo) {
+        // Insert optimistic voice memo synchronously at 0ms BEFORE async encryption & Blossom upload
+        upsertVoiceRow(initialVoiceMemo)
+        inserted = true
+      }
+
+      let resolvedVoiceMemo: VoiceMemoAttachment | null =
+        typeof voiceMemoOrLoader === 'function' ? null : voiceMemoOrLoader
+
+      const queueAttempt = (fn: () => Promise<boolean>) =>
+        dmSendQueueRef.current.enqueue(`dm:${pk}`, fn, () => {
+          if (identityManager.getWipeGeneration() !== wipeGen) {
+            releaseOptimisticOnce()
+          }
+          return false
+        })
+
+      const attempt = async (): Promise<boolean> => {
+        if (identityManager.getWipeGeneration() !== wipeGen) {
+          releaseOptimisticOnce()
+          return false
+        }
+        try {
+          if (inserted) {
+            setThreads((prev) =>
+              prev.map((t) =>
+                t.peerPubkey === pk
+                  ? {
+                      ...t,
+                      messages: t.messages.map((m) =>
+                        m.id === localMsgId &&
+                        m.deliveryStatus !== 'read' &&
+                        m.deliveryStatus !== 'delivered' &&
+                        m.deliveryStatus !== 'sent'
+                          ? { ...m, deliveryStatus: 'sending' }
+                          : m
+                      ),
+                    }
+                  : t
+              )
+            )
+          }
+
+          if (!resolvedVoiceMemo) {
+            const loaded =
               typeof voiceMemoOrLoader === 'function'
                 ? await voiceMemoOrLoader()
                 : voiceMemoOrLoader
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-
-            const nowMs = Date.now()
-            const nowSec = Math.floor(nowMs / 1000)
-            const msgBase: DmMessage = {
-              id: localMsgId,
-              replyToId: target,
-              peerPubkey: pk,
-              senderPubkey: signer.pubkey,
-              content: cleanCaption,
-              createdAt: nowSec,
-              orderMs: nowMs,
-              isOwn: true,
-              protocol: chosenProtocol,
-              voiceMemo,
-              deliveryStatus: 'sending',
+            if (identityManager.getWipeGeneration() !== wipeGen) {
+              releaseOptimisticOnce()
+              return false
             }
-            const currentThread = threadsRef.current.find((t) => t.peerPubkey === pk)
-            const nick =
-              currentThread?.peerNickname ||
-              presenceTracker.getNickname(pk) ||
-              `anon${pk.slice(-4)}`
-            const handle = formatDisplayHandle(nick, pk)
-
-            inserted = true
-            setThreads((prev) => {
-              const idx = prev.findIndex((t) => t.peerPubkey === pk)
-              if (idx !== -1) {
-                const lastOrder = getMaxOrderMs(prev[idx].messages)
-                const placed: DmMessage = {
-                  ...msgBase,
-                  orderMs: Math.max(nowMs, lastOrder + 1),
-                }
-                const nextMsgs = [...prev[idx].messages, placed].sort(compareDmMessages)
-                const tail = nextMsgs[nextMsgs.length - 1]
-                const updated: DmThread = {
-                  ...prev[idx],
-                  messages: nextMsgs,
-                  lastMessageAt: tail.createdAt,
-                  lastPreview: formatDmPreview(tail),
-                  unreadCount: 0,
-                }
-                const copy = [...prev]
-                copy[idx] = updated
-                copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
-                return copy
-              }
-              const created: DmThread = {
-                peerPubkey: pk,
-                peerNpub: encodeNpubSafe(pk),
-                peerNickname: nick,
-                peerDisplayHandle: handle,
-                protocol: chosenProtocol,
-                messages: [msgBase],
-                unreadCount: 0,
-                lastMessageAt: nowSec,
-                lastPreview: formatDmPreview(msgBase),
-              }
-              return [created, ...prev]
-            })
-
-            const wireContent = encodeDmVoicePayload(voiceMemo, cleanCaption)
-            await pool.waitForChatRelay(targetRelays)
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-            const { event, protocol, wireId, orderMs } = await createEncryptedDmEvent({
-              content: wireContent,
-              recipientPubkey: pk,
-              signer,
-              protocol: chosenProtocol,
-              messageId: localMsgId,
-              action: target ? { type: 'reply', targetId: target } : undefined,
-            })
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
-            processedWrapIdsRef.current.add(event.id)
-            return await publishChatWire({
-              rowId: localMsgId,
-              publish: (ack) => pool.publish([...new Set([...targetRelays, ...dmRelaysRef.current])], event, undefined, ack),
-              isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
-              queueRetry: (retry) => dmSendQueueRef.current.enqueue(`dm:${pk}`, retry, () => false),
-              update: (deliveryStatus) => setThreads((prev) => prev.map((t) => {
-                if (t.peerPubkey !== pk) return t
-                const messages = t.messages.map((m) => m.id === localMsgId
-                  ? { ...m, wireId, protocol, orderMs, createdAt: Math.floor(orderMs / 1000),
-                      voiceMemo, content: cleanCaption,
-                      deliveryStatus: m.deliveryStatus === 'read' || m.deliveryStatus === 'delivered'
-                        ? m.deliveryStatus : deliveryStatus }
-                  : m).sort(compareDmMessages)
-                const tail = messages.at(-1)
-                return { ...t, protocol, messages, lastMessageAt: tail?.createdAt ?? 0,
-                  lastPreview: tail ? formatDmPreview(tail) : '' }
-              }).sort((a, b) => b.lastMessageAt - a.lastMessageAt)),
-              onSuccess: () => onNotifyPushPokeRef.current?.({
-                recipientPubkeys: [pk],
-                category: 'dm',
-                eventId: localMsgId,
-              }),
-              onFailure: (reason) => onErrorRef.current?.('Encrypted voice DM failed', reason, localMsgId),
-            })
-          } catch (err) {
-            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            resolvedVoiceMemo = loaded
             if (inserted) {
               setThreads((prev) =>
                 prev.map((t) => {
                   if (t.peerPubkey !== pk) return t
+                  const messages = t.messages.map((m) =>
+                    m.id === localMsgId ? { ...m, voiceMemo: loaded, content: cleanCaption } : m
+                  )
+                  const tail = messages.at(-1)
                   return {
                     ...t,
-                    messages: t.messages.map((m) =>
-                      m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
-                    ),
+                    messages,
+                    lastPreview: tail ? formatDmPreview(tail) : t.lastPreview,
                   }
                 })
               )
+              releaseOptimisticOnce()
+            } else {
+              upsertVoiceRow(loaded)
+              inserted = true
             }
-            onErrorRef.current?.(
-              'Encrypted voice DM error',
-              err instanceof Error ? err.message : 'Unable to send encrypted voice memo'
-            )
+          }
+
+          const voiceMemo = resolvedVoiceMemo
+          const wireContent = encodeDmVoicePayload(voiceMemo, cleanCaption)
+          if (!(await pool.waitForChatRelay(targetRelays))) {
+            throw new Error('No connected DM relay accepted the message.')
+          }
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          const { event, protocol, wireId, orderMs } = await createEncryptedDmEvent({
+            content: wireContent,
+            recipientPubkey: pk,
+            signer,
+            protocol: chosenProtocol,
+            messageId: localMsgId,
+            action: target ? { type: 'reply', targetId: target } : undefined,
+          })
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          processedWrapIdsRef.current.add(event.id)
+          recordProfileSeenEventIds(identityManager.getMasterKeyMaterial().pubkey, [event.id])
+          return await publishChatWire({
+            rowId: localMsgId,
+            publish: (ack) =>
+              pool.publish([...new Set([...targetRelays, ...dmRelaysRef.current])], event, undefined, ack),
+            isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+            queueRetry: (retry) => dmSendQueueRef.current.enqueue(`dm:${pk}`, retry, () => false),
+            update: (deliveryStatus) =>
+              setThreads((prev) =>
+                prev
+                  .map((t) => {
+                    if (t.peerPubkey !== pk) return t
+                    const messages = t.messages
+                      .map((m) =>
+                        m.id === localMsgId
+                          ? {
+                              ...m,
+                              wireId,
+                              protocol,
+                              orderMs,
+                              createdAt: Math.floor(orderMs / 1000),
+                              voiceMemo,
+                              content: cleanCaption,
+                              deliveryStatus:
+                                m.deliveryStatus === 'read' || m.deliveryStatus === 'delivered'
+                                  ? m.deliveryStatus
+                                  : deliveryStatus,
+                            }
+                          : m
+                      )
+                      .sort(compareDmMessages)
+                    const tail = messages.at(-1)
+                    return {
+                      ...t,
+                      protocol,
+                      messages,
+                      lastMessageAt: tail?.createdAt ?? 0,
+                      lastPreview: tail ? formatDmPreview(tail) : '',
+                    }
+                  })
+                  .sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+              ),
+            onSuccess: () =>
+              onNotifyPushPokeRef.current?.({
+                recipientPubkeys: [pk],
+                category: 'dm',
+                eventId: localMsgId,
+              }),
+            onFailure: (reason) =>
+              onErrorRef.current?.('Encrypted voice DM failed', reason, localMsgId),
+          })
+        } catch (err) {
+          if (identityManager.getWipeGeneration() !== wipeGen) {
+            releaseOptimisticOnce()
             return false
           }
-        },
-        () => false
-      )
+          if (inserted) {
+            chatRetries.hold(localMsgId, () => queueAttempt(attempt))
+            setThreads((prev) =>
+              prev.map((t) => {
+                if (t.peerPubkey !== pk) return t
+                return {
+                  ...t,
+                  messages: t.messages.map((m) =>
+                    m.id === localMsgId &&
+                    m.deliveryStatus !== 'read' &&
+                    m.deliveryStatus !== 'delivered' &&
+                    m.deliveryStatus !== 'sent'
+                      ? { ...m, deliveryStatus: 'failed' }
+                      : m
+                  ),
+                }
+              })
+            )
+          }
+          onErrorRef.current?.(
+            'Encrypted voice DM error',
+            err instanceof Error ? err.message : 'Unable to send encrypted voice memo',
+            inserted ? localMsgId : undefined
+          )
+          return false
+        }
+      }
+
+      return await queueAttempt(attempt)
     },
     [pool, identityManager, activeGeohash, presenceTracker]
   )
@@ -951,6 +1101,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
             })
             if (identityManager.getWipeGeneration() !== wipeGen) return false
             processedWrapIdsRef.current.add(event.id)
+            recordProfileSeenEventIds(identityManager.getMasterKeyMaterial().pubkey, [event.id])
             return await publishChatWire({
               rowId: localMsgId,
               publish: (ack) => pool.publish([...new Set([...targetRelays, ...dmRelaysRef.current])], event, undefined, ack),
@@ -1026,6 +1177,8 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
       const { event } = await createEncryptedDmEvent({ content: emoji, signer, recipientPubkey: pk,
         protocol: thread.protocol, action: { type: 'reaction', targetId } })
       if (!isCurrent()) return
+      processedWrapIdsRef.current.add(event.id)
+      recordProfileSeenEventIds(identityManager.getMasterKeyMaterial().pubkey, [event.id])
       const result = await pool.publish([...dmRelaysRef.current], event)
       if (!isCurrent()) return
       if (!result.acceptedRelays.length) throw new Error('No DM relay accepted the encrypted reaction.')
@@ -1044,9 +1197,26 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
   const clearThread = useCallback((peerPubkey: string) => {
     const pk = peerPubkey.toLowerCase()
     dropReactionsForPeer(pk)
-    setThreads((prev) =>
-      prev.map((t) => (t.peerPubkey === pk ? { ...t, messages: [], lastPreview: '', unreadCount: 0 } : t))
+    const nextClearedAt: Record<string, number> = {
+      ...dmClearedAtRef.current,
+      [pk]: Math.floor(Date.now() / 1000),
+    }
+    dmClearedAtRef.current = nextClearedAt
+    setDmClearedAt(nextClearedAt)
+    saveDmClearedAt(nextClearedAt)
+    const syncNext = threadsRef.current.map((t) =>
+      t.peerPubkey === pk ? { ...t, messages: [], lastPreview: '', unreadCount: 0 } : t
     )
+    threadsRef.current = syncNext
+    saveDmThreads(syncNext)
+    setThreads((prev) => {
+      const next = prev.map((t) =>
+        t.peerPubkey === pk ? { ...t, messages: [], lastPreview: '', unreadCount: 0 } : t
+      )
+      saveDmThreads(next)
+      return next
+    })
+    flushProfileSeenEventIds()
   }, [dropReactionsForPeer])
 
   const closeThread = useCallback((peerPubkey: string) => {
@@ -1060,11 +1230,15 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     dmClearedAtRef.current = nextClearedAt
     setDmClearedAt(nextClearedAt)
     saveDmClearedAt(nextClearedAt)
+    const syncNext = threadsRef.current.filter((t) => t.peerPubkey !== pk)
+    threadsRef.current = syncNext
+    saveDmThreads(syncNext)
     setThreads((prev) => {
       const next = prev.filter((t) => t.peerPubkey !== pk)
       saveDmThreads(next)
       return next
     })
+    flushProfileSeenEventIds()
   }, [dropReactionsForPeer])
 
   const mergeSyncedDmClearedAt = useCallback((remoteClearedAt: Record<string, number>): number => {

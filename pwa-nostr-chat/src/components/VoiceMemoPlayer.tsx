@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   Ban,
@@ -19,7 +19,7 @@ import type {
   MemoTranscriptState,
   TranscriptionModelStatus,
 } from '../types/transcription'
-import { formatVoiceDuration, WAVEFORM_BARS } from '../lib/voiceRecorder'
+import { formatVoiceDuration } from '../lib/voiceRecorder'
 
 export interface VoiceMemoPlayerProps {
   memo: VoiceMemoAttachment
@@ -48,6 +48,7 @@ export interface VoiceMemoPlayerProps {
 
 const SPEED_STEPS = [1, 1.5, 2] as const
 type PlaybackSpeed = (typeof SPEED_STEPS)[number]
+const DISPLAY_WAVEFORM_BARS = 40
 
 // Coordinate playback across voice memos so starting one pauses any other active memo
 let activeAudioEl: HTMLAudioElement | null = null
@@ -85,34 +86,50 @@ function codecLabelFromMime(mime: string): string {
   return 'AUDIO'
 }
 
+/**
+ * Builds 44 slender smoothly-interpolated rounded-pill bars from the 32-bar
+ * protocol waveform (or deterministic fallback) for continuous clip-path sweep.
+ */
 function buildWaveformBars(raw: readonly number[], seedSource: string): number[] {
-  if (raw.length === WAVEFORM_BARS) {
-    return raw.map((v) => Math.max(16, Math.min(100, Math.round(v))))
-  }
-  if (raw.length > 0) {
-    const resampled: number[] = []
-    for (let i = 0; i < WAVEFORM_BARS; i++) {
-      const idx = Math.min(raw.length - 1, Math.floor((i / WAVEFORM_BARS) * raw.length))
-      resampled.push(Math.max(16, Math.min(100, Math.round(raw[idx]))))
+  if (raw.length > 1) {
+    const out: number[] = []
+    const lastIdx = raw.length - 1
+    for (let i = 0; i < DISPLAY_WAVEFORM_BARS; i++) {
+      const pos = (i / (DISPLAY_WAVEFORM_BARS - 1)) * lastIdx
+      const lo = Math.floor(pos)
+      const hi = Math.min(lastIdx, lo + 1)
+      const frac = pos - lo
+      const interp = raw[lo] * (1 - frac) + raw[hi] * frac
+      out.push(Math.max(16, Math.min(100, Math.round(interp))))
     }
-    return resampled
+    return out
   }
-  // Deterministic fallback waveform when external client omits waveform peaks
+  if (raw.length === 1) {
+    const val = Math.max(16, Math.min(100, Math.round(raw[0])))
+    return Array.from({ length: DISPLAY_WAVEFORM_BARS }, () => val)
+  }
+
+  // Deterministic organic fallback waveform when external client omits waveform peaks
   let hash = 2166136261
   for (let i = 0; i < seedSource.length; i++) {
     hash ^= seedSource.charCodeAt(i)
     hash = Math.imul(hash, 16777619)
   }
-  const bars: number[] = []
-  for (let i = 0; i < WAVEFORM_BARS; i++) {
+  const seedBars: number[] = []
+  for (let i = 0; i < DISPLAY_WAVEFORM_BARS; i++) {
     hash ^= hash << 13
     hash ^= hash >>> 17
     hash ^= hash << 5
-    const envelope = Math.sin(((i + 1) / (WAVEFORM_BARS + 1)) * Math.PI)
-    const jitter = ((hash >>> 0) % 58) + 18
-    bars.push(Math.max(18, Math.min(96, Math.round(jitter * (0.45 + 0.55 * envelope)))))
+    const envelope = Math.sin(((i + 1) / (DISPLAY_WAVEFORM_BARS + 1)) * Math.PI)
+    const jitter = ((hash >>> 0) % 56) + 20
+    seedBars.push(Math.max(18, Math.min(96, Math.round(jitter * (0.45 + 0.55 * envelope)))))
   }
-  return bars
+  // Light 3-tap smoothing so fallback silhouettes look natural
+  return seedBars.map((val, i) => {
+    const prev = seedBars[Math.max(0, i - 1)]
+    const next = seedBars[Math.min(seedBars.length - 1, i + 1)]
+    return Math.max(16, Math.min(98, Math.round(prev * 0.2 + val * 0.6 + next * 0.2)))
+  })
 }
 
 /* --------------------------------------------------------------------------
@@ -212,9 +229,9 @@ const ShieldedVoiceCard: React.FC<ShieldedVoiceCardProps> = ({
 }
 
 /* --------------------------------------------------------------------------
-   TRUSTED VOICE MEMO PLAYER — Transcription-first, ultra-compact hierarchy.
+   TRUSTED VOICE MEMO PLAYER — Transcription-first, silky 60fps progress sweep.
    Auto-transcribes in view when `autoTranscribe` is enabled; lazily fetches
-   and verifies audio on Play (or on transcription).
+   and verifies audio on Play (with 0ms instant playback for optimistic blob: URLs).
    -------------------------------------------------------------------------- */
 interface TrustedVoicePlayerProps {
   memo: VoiceMemoAttachment
@@ -251,7 +268,7 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
   const [blobUrl, setBlobUrl] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [currentTime, setCurrentTime] = useState(0)
+  const [displayedSec, setDisplayedSec] = useState(0)
   const [duration, setDuration] = useState(memo.durationSec > 0 ? memo.durationSec : 0)
   const [speedIdx, setSpeedIdx] = useState(0)
   const [copiedTranscript, setCopiedTranscript] = useState(false)
@@ -263,27 +280,79 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
   const draggingRef = useRef(false)
   const pendingSeekRatioRef = useRef<number | null>(null)
   const autoTriggeredKeyRef = useRef<string | null>(null)
+  const progressPctRef = useRef(0)
+  const isPlayingRef = useRef(false)
+  const prevAttachmentRef = useRef<{ url: string; sha256: string }>({
+    url: memo.url,
+    sha256: memo.sha256,
+  })
+  const needsSourceRefreshOnStopRef = useRef(false)
 
   const speed: PlaybackSpeed = SPEED_STEPS[speedIdx]
   const isE2ee = Boolean(memo.encryption)
+  const isOptimisticLocal = memo.url.startsWith('blob:')
   const isViolet = isDmMode || isE2ee
 
   const bars = useMemo(
     () => buildWaveformBars(memo.waveform, memo.sha256 || memo.url),
-    [memo.waveform, memo.sha256, memo.url]
+    [memo.waveform, memo.sha256, memo.url],
   )
 
   const codecLabel = codecLabelFromMime(memo.mime)
   const sizeText = formatByteSize(memo.size)
   const techMeta = [codecLabel, sizeText, isE2ee ? 'E2EE' : ''].filter(Boolean).join(' · ')
 
-  // Reset player cleanly if the underlying attachment changes
+  const applyProgressRatio = useCallback((ratio: number) => {
+    const clamped = Math.min(1, Math.max(0, ratio))
+    const pct = clamped * 100
+    progressPctRef.current = pct
+    if (waveRef.current) {
+      waveRef.current.style.setProperty('--voice-progress', `${pct.toFixed(2)}%`)
+    }
+  }, [])
+
+  // Handle attachment identity changes while preserving seamless optimistic blob: -> Blossom URL upgrades!
   useEffect(() => {
+    const prev = prevAttachmentRef.current
+    prevAttachmentRef.current = { url: memo.url, sha256: memo.sha256 }
+
+    if (prev.url === memo.url && prev.sha256 === memo.sha256) {
+      if (memo.durationSec > 0 && duration <= 0) {
+        setDuration(memo.durationSec)
+      }
+      return
+    }
+
+    const upgradedFromOptimistic =
+      prev.url.startsWith('blob:') && !memo.url.startsWith('blob:')
+
+    if (upgradedFromOptimistic) {
+      // Optimistic local memo just confirmed with its permanent Blossom URL + cache-seeded blob.
+      // If actively playing, let current playback continue smoothly without interruption, and
+      // refresh the underlying object URL silently once playback pauses or finishes.
+      if (isPlayingRef.current) {
+        needsSourceRefreshOnStopRef.current = true
+      } else {
+        needsSourceRefreshOnStopRef.current = false
+        setBlobUrl(null)
+        setStatus('idle')
+        setErrorMsg(null)
+      }
+      if (memo.durationSec > 0) {
+        setDuration((curr) => (curr > 0 ? curr : memo.durationSec))
+      }
+      return
+    }
+
+    // Distinct memo attachment: perform clean reset
+    needsSourceRefreshOnStopRef.current = false
     setStatus('idle')
     setBlobUrl(null)
     setErrorMsg(null)
     setIsPlaying(false)
-    setCurrentTime(0)
+    isPlayingRef.current = false
+    setDisplayedSec(0)
+    applyProgressRatio(0)
     setDuration(memo.durationSec > 0 ? memo.durationSec : 0)
     pendingSeekRatioRef.current = null
     const audio = audioRef.current
@@ -293,7 +362,7 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
       audio.removeAttribute('src')
       audio.load()
     }
-  }, [memo.url, memo.sha256, memo.durationSec])
+  }, [memo.url, memo.sha256, memo.durationSec, duration, applyProgressRatio])
 
   // Stop playback immediately on unmount (including if sender is untrusted or Panic Wiped)
   useEffect(() => {
@@ -301,6 +370,7 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
     const audioEl = audioRef.current
     return () => {
       mountedRef.current = false
+      isPlayingRef.current = false
       if (audioEl) {
         releaseActiveAudio(audioEl)
         try {
@@ -320,6 +390,38 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
       audioRef.current.playbackRate = speed
     }
   }, [speed])
+
+  // 60fps requestAnimationFrame smooth progress sweep (ZERO React re-renders per frame!)
+  useEffect(() => {
+    if (!isPlaying) return
+    let rafId = 0
+    let lastSec = -1
+
+    const tick = () => {
+      const audio = audioRef.current
+      if (!audio) return
+      const total =
+        Number.isFinite(audio.duration) && audio.duration > 0
+          ? audio.duration
+          : duration > 0
+            ? duration
+            : memo.durationSec
+      if (total > 0) {
+        applyProgressRatio(audio.currentTime / total)
+      }
+      const sec = Math.floor(audio.currentTime)
+      if (sec !== lastSec) {
+        lastSec = sec
+        setDisplayedSec(sec)
+      }
+      if (!audio.paused && !audio.ended) {
+        rafId = window.requestAnimationFrame(tick)
+      }
+    }
+
+    rafId = window.requestAnimationFrame(tick)
+    return () => window.cancelAnimationFrame(rafId)
+  }, [isPlaying, duration, memo.durationSec, applyProgressRatio])
 
   // Auto-transcribe trusted voice memos once when entering viewport (when autoTranscribe is enabled)
   useEffect(() => {
@@ -345,7 +447,7 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
           triggerOnce()
         }
       },
-      { rootMargin: '200px' }
+      { rootMargin: '200px' },
     )
     observer.observe(node)
     return () => observer.disconnect()
@@ -356,13 +458,18 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
     const audio = audioRef.current
     if (!audio) return
 
-    if (blobUrl && status === 'ready') {
+    if (blobUrl && status === 'ready' && !needsSourceRefreshOnStopRef.current) {
       const total =
-        Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : duration
+        Number.isFinite(audio.duration) && audio.duration > 0
+          ? audio.duration
+          : duration > 0
+            ? duration
+            : memo.durationSec
       if (seekRatio !== undefined && total > 0) {
         const nextTime = seekRatio * total
         audio.currentTime = nextTime
-        setCurrentTime(nextTime)
+        applyProgressRatio(seekRatio)
+        setDisplayedSec(Math.floor(nextTime))
       }
       if (seekRatio === undefined && !audio.paused) {
         audio.pause()
@@ -378,10 +485,15 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
       return
     }
 
-    setStatus('loading')
+    needsSourceRefreshOnStopRef.current = false
     setErrorMsg(null)
     if (seekRatio !== undefined) {
       pendingSeekRatioRef.current = seekRatio
+      applyProgressRatio(seekRatio)
+    }
+    // Avoid flashing "Decrypting..." / spinner for 0ms local optimistic blob: memos
+    if (!isOptimisticLocal) {
+      setStatus('loading')
     }
 
     try {
@@ -418,11 +530,16 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
     const audio = audioRef.current
     if (blobUrl && status === 'ready' && audio) {
       const total =
-        Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : duration
+        Number.isFinite(audio.duration) && audio.duration > 0
+          ? audio.duration
+          : duration > 0
+            ? duration
+            : memo.durationSec
       if (total > 0) {
         const nextTime = ratio * total
         audio.currentTime = nextTime
-        setCurrentTime(nextTime)
+        applyProgressRatio(ratio)
+        setDisplayedSec(Math.floor(nextTime))
       }
     } else if (triggerLoadIfIdle) {
       void loadAndPlay(ratio)
@@ -456,16 +573,24 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
   const hasTranscriptError = memoTranscript?.status === 'error'
   const transcriptModelLabel = memoTranscript?.modelLabel || activeTranscriptionModelLabel
 
+  // Restore continuous CSS progress variable cleanly if layout swaps (compact <-> transcribed) mid-playback
+  useEffect(() => {
+    if (waveRef.current && progressPctRef.current > 0) {
+      waveRef.current.style.setProperty(
+        '--voice-progress',
+        `${progressPctRef.current.toFixed(2)}%`,
+      )
+    }
+  }, [hasTranscriptText])
+
   const effectiveDuration = duration > 0 ? duration : memo.durationSec
-  const progressRatio =
-    effectiveDuration > 0 ? Math.min(1, Math.max(0, currentTime / effectiveDuration)) : 0
   const timeDisplay =
-    status === 'loading'
+    status === 'loading' && !isOptimisticLocal
       ? isE2ee
         ? 'Decrypting…'
         : 'Loading…'
-      : isPlaying || currentTime > 0
-        ? `${formatVoiceDuration(currentTime)}/${formatVoiceDuration(effectiveDuration)}`
+      : isPlaying || displayedSec > 0
+        ? `${formatVoiceDuration(displayedSec)}/${formatVoiceDuration(effectiveDuration)}`
         : formatVoiceDuration(effectiveDuration)
 
   const waveformSlider = (slim: boolean) => (
@@ -477,7 +602,7 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
       aria-label="Voice memo playback position"
       aria-valuemin={0}
       aria-valuemax={Math.round(effectiveDuration)}
-      aria-valuenow={Math.round(currentTime)}
+      aria-valuenow={displayedSec}
       onPointerDown={(e) => {
         draggingRef.current = true
         e.currentTarget.setPointerCapture(e.pointerId)
@@ -507,29 +632,31 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
           const delta = e.key === 'ArrowRight' ? step : -step
           const next = Math.min(effectiveDuration, Math.max(0, audio.currentTime + delta))
           audio.currentTime = next
-          setCurrentTime(next)
+          applyProgressRatio(next / effectiveDuration)
+          setDisplayedSec(Math.floor(next))
         } else if (e.key === 'Home') {
           e.preventDefault()
           audio.currentTime = 0
-          setCurrentTime(0)
+          applyProgressRatio(0)
+          setDisplayedSec(0)
         } else if (e.key === 'End') {
           e.preventDefault()
           audio.currentTime = effectiveDuration
-          setCurrentTime(effectiveDuration)
+          applyProgressRatio(1)
+          setDisplayedSec(Math.floor(effectiveDuration))
         }
       }}
     >
-      {bars.map((peak, idx) => {
-        const barPos = (idx + 0.5) / WAVEFORM_BARS
-        const played = progressRatio > 0 && barPos <= progressRatio
-        return (
-          <span
-            key={idx}
-            className={`ag-voice-wave-bar ${played ? 'played' : ''}`}
-            style={{ height: `${peak}%` }}
-          />
-        )
-      })}
+      <div className="ag-voice-wave-layer base" aria-hidden="true">
+        {bars.map((peak, idx) => (
+          <span key={idx} className="ag-voice-wave-bar" style={{ height: `${peak}%` }} />
+        ))}
+      </div>
+      <div className="ag-voice-wave-layer fill" aria-hidden="true">
+        {bars.map((peak, idx) => (
+          <span key={idx} className="ag-voice-wave-bar" style={{ height: `${peak}%` }} />
+        ))}
+      </div>
     </div>
   )
 
@@ -542,30 +669,46 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
         if (Number.isFinite(el.duration) && el.duration > 0) {
           setDuration(el.duration)
           if (pendingSeekRatioRef.current !== null) {
-            const target = pendingSeekRatioRef.current * el.duration
+            const ratio = pendingSeekRatioRef.current
             pendingSeekRatioRef.current = null
+            const target = ratio * el.duration
             el.currentTime = target
-            setCurrentTime(target)
+            applyProgressRatio(ratio)
+            setDisplayedSec(Math.floor(target))
           }
         }
         el.playbackRate = speed
       }}
-      onTimeUpdate={(e) => {
-        setCurrentTime(e.currentTarget.currentTime)
+      onPlay={() => {
+        isPlayingRef.current = true
+        setIsPlaying(true)
       }}
-      onPlay={() => setIsPlaying(true)}
       onPause={() => {
+        isPlayingRef.current = false
         setIsPlaying(false)
         releaseActiveAudio(audioRef.current)
+        if (needsSourceRefreshOnStopRef.current) {
+          needsSourceRefreshOnStopRef.current = false
+          setBlobUrl(null)
+          setStatus('idle')
+        }
       }}
       onEnded={() => {
+        isPlayingRef.current = false
         setIsPlaying(false)
-        setCurrentTime(0)
+        setDisplayedSec(0)
+        applyProgressRatio(0)
         releaseActiveAudio(audioRef.current)
+        if (needsSourceRefreshOnStopRef.current) {
+          needsSourceRefreshOnStopRef.current = false
+          setBlobUrl(null)
+          setStatus('idle')
+        }
       }}
       onError={() => {
+        isPlayingRef.current = false
         setIsPlaying(false)
-        if (blobUrl) {
+        if (blobUrl && !isOptimisticLocal) {
           setStatus('error')
           setErrorMsg('Audio format could not be decoded by this browser.')
         }
@@ -703,7 +846,9 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
             status === 'loading'
               ? isE2ee
                 ? 'Fetching & decrypting audio…'
-                : memo.inlineVoiceMarker ? 'Fetching audio…' : 'Fetching & verifying SHA-256…'
+                : memo.inlineVoiceMarker
+                  ? 'Fetching audio…'
+                  : 'Fetching & verifying SHA-256…'
               : isPlaying
                 ? 'Pause'
                 : 'Play voice memo'
@@ -733,7 +878,10 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
         </button>
 
         {isE2ee && (
-          <span className="ag-voice-mini-lock" title="Client-side AES-256-GCM encrypted voice memo">
+          <span
+            className="ag-voice-mini-lock"
+            title="Client-side AES-256-GCM encrypted voice memo"
+          >
             <Lock size={11} />
           </span>
         )}
@@ -779,9 +927,7 @@ const TrustedVoicePlayer: React.FC<TrustedVoicePlayerProps> = ({
       )}
 
       {/* Quiet No-Speech Fallback */}
-      {hasNoSpeech && (
-        <p className="ag-voice-transcript-empty">No speech detected</p>
-      )}
+      {hasNoSpeech && <p className="ag-voice-transcript-empty">No speech detected</p>}
 
       {/* Transcription Error Row */}
       {hasTranscriptError && (

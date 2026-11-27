@@ -37,9 +37,15 @@ export const ReactionPickerPopover: React.FC<ReactionPickerPopoverProps> = ({
   const [pinMode, setPinMode] = useState(false)
   const [inspectedEmoji, setInspectedEmoji] = useState<string | null>(null)
   const [limitNotice, setLimitNotice] = useState(false)
-  const [coords, setCoords] = useState<{ left: number; top: number; ready: boolean }>({
+  const [coords, setCoords] = useState<{
+    left: number
+    top: number
+    placement: 'above' | 'below'
+    ready: boolean
+  }>({
     left: Math.round(anchorRect.left),
     top: Math.round(anchorRect.bottom + 6),
+    placement: 'below',
     ready: false,
   })
 
@@ -97,7 +103,8 @@ export const ReactionPickerPopover: React.FC<ReactionPickerPopoverProps> = ({
     }
   }, [onClose])
 
-  // Smartly position and clamp strictly inside the visual viewport on all 4 edges
+  // Smartly position and clamp strictly inside the visual viewport on all 4 edges.
+  // Opens downwards by default; flips upwards ONLY when it would otherwise extend past the viewport.
   useLayoutEffect(() => {
     if (typeof window === 'undefined') return
 
@@ -105,34 +112,72 @@ export const ReactionPickerPopover: React.FC<ReactionPickerPopoverProps> = ({
       const el = popoverRef.current
       if (!el) return
       const rect = el.getBoundingClientRect()
+      const popW = el.offsetWidth || rect.width
+      const popH = el.offsetHeight || rect.height
       const vv = window.visualViewport
       const vpLeft = vv ? Math.max(0, vv.offsetLeft) : 0
       const vpTop = vv ? Math.max(0, vv.offsetTop) : 0
       const vpW = vv ? vv.width : window.innerWidth
       const vpH = vv ? vv.height : window.innerHeight
 
-      const maxLeft = Math.max(vpLeft + VIEWPORT_PAD, vpLeft + vpW - rect.width - VIEWPORT_PAD)
+      const viewLeft = vpLeft + VIEWPORT_PAD
+      const viewRight = vpLeft + vpW - VIEWPORT_PAD
+      const viewTop = vpTop + VIEWPORT_PAD
+      const viewBottom = vpTop + vpH - VIEWPORT_PAD
+
+      const maxLeft = Math.max(viewLeft, viewRight - popW)
       const preferredLeft =
-        anchorRect.right - rect.width >= vpLeft + VIEWPORT_PAD
-          ? anchorRect.right - rect.width
+        anchorRect.right - popW >= viewLeft
+          ? anchorRect.right - popW
           : anchorRect.left
-      const left = Math.max(vpLeft + VIEWPORT_PAD, Math.min(preferredLeft, maxLeft))
+      const left = Math.max(viewLeft, Math.min(preferredLeft, maxLeft))
 
-      const spaceBelow = vpTop + vpH - anchorRect.bottom - VIEWPORT_PAD
-      const spaceAbove = anchorRect.top - vpTop - VIEWPORT_PAD
-      let top = anchorRect.bottom + 6
-      if (spaceBelow < rect.height + 6 && spaceAbove > spaceBelow) {
-        top = anchorRect.top - rect.height - 6
+      const belowTop = anchorRect.bottom + 6
+      const wouldOverflowBelow = belowTop + popH > viewBottom
+      const aboveTop = anchorRect.top - popH - 6
+      const fitsAbove = aboveTop >= viewTop
+      const spaceBelow = viewBottom - anchorRect.bottom
+      const spaceAbove = anchorRect.top - viewTop
+      const maxTop = Math.max(viewTop, viewBottom - popH)
+
+      let placement: 'above' | 'below'
+      let top: number
+      if (!wouldOverflowBelow) {
+        placement = 'below'
+        top = Math.max(viewTop, belowTop)
+      } else if (fitsAbove || spaceAbove > spaceBelow) {
+        placement = 'above'
+        top = Math.max(viewTop, Math.min(aboveTop, maxTop))
+      } else {
+        placement = 'below'
+        top = Math.max(viewTop, Math.min(belowTop, maxTop))
       }
-      const maxTop = Math.max(vpTop + VIEWPORT_PAD, vpTop + vpH - rect.height - VIEWPORT_PAD)
-      top = Math.max(vpTop + VIEWPORT_PAD, Math.min(top, maxTop))
 
-      setCoords({ left: Math.round(left), top: Math.round(top), ready: true })
+      const nextLeft = Math.round(left)
+      const nextTop = Math.round(top)
+      setCoords((prev) => {
+        if (
+          prev.ready &&
+          prev.left === nextLeft &&
+          prev.top === nextTop &&
+          prev.placement === placement
+        ) {
+          return prev
+        }
+        return { left: nextLeft, top: nextTop, placement, ready: true }
+      })
     }
 
     updatePosition()
+    const vv = window.visualViewport
     window.addEventListener('resize', updatePosition)
-    return () => window.removeEventListener('resize', updatePosition)
+    vv?.addEventListener('resize', updatePosition)
+    vv?.addEventListener('scroll', updatePosition)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      vv?.removeEventListener('resize', updatePosition)
+      vv?.removeEventListener('scroll', updatePosition)
+    }
   }, [anchorRect, pinnedReactions.length, query, limitNotice])
 
   const trimmedQuery = query.trim().toLowerCase()
@@ -190,7 +235,7 @@ export const ReactionPickerPopover: React.FC<ReactionPickerPopoverProps> = ({
   return createPortal(
     <div
       ref={popoverRef}
-      className={`ag-rpicker ${pinMode ? 'is-pin-mode' : ''} ${coords.ready ? 'is-ready' : ''}`}
+      className={`ag-rpicker is-${coords.placement} ${pinMode ? 'is-pin-mode' : ''} ${coords.ready ? 'is-ready' : ''}`}
       role="dialog"
       aria-label="Emoji reactions"
       data-no-swipe="true"

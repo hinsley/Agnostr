@@ -13,9 +13,12 @@ import { verifyEventCached } from '../lib/bitchatProtocol.ts'
 import { CORE_DM_RELAYS } from '../lib/geoRelays.ts'
 import { showOsNotification } from '../lib/notifications.ts'
 import {
+  flushProfileSeenEventIds,
   loadProfileNotifications,
+  loadProfileSeenEventIds,
   markProfileChecked,
   recordInactiveProfileNotification,
+  recordProfileSeenEventIds,
 } from '../lib/profileVault.ts'
 import type { RelayPool } from '../lib/relayPool.ts'
 import { bitchatAudio } from '../utils/sound.ts'
@@ -160,8 +163,34 @@ export function useProfileNotifications(
   const onSwitchProfileRef = useRef(onSwitchProfile)
   const pushToastRef = useRef(pushToast)
   const profilesByIdRef = useRef<Map<string, ProfileAccountRecord>>(new Map())
-  const seenEventIdsRef = useRef<Set<string>>(new Set())
+  const seenByProfileRef = useRef<Map<string, Set<string>>>(new Map())
   const lastSoundAtRef = useRef<number>(0)
+
+  const getSeenSetForProfile = useCallback((pk: string): Set<string> => {
+    let set = seenByProfileRef.current.get(pk)
+    if (!set) {
+      set = loadProfileSeenEventIds(pk)
+      seenByProfileRef.current.set(pk, set)
+    }
+    return set
+  }, [])
+
+  const rememberSeenForProfile = useCallback(
+    (pk: string, eventId: string): boolean => {
+      const id = eventId.trim().toLowerCase()
+      if (!id) return false
+      const set = getSeenSetForProfile(pk)
+      if (set.has(id)) return false
+      if (set.size >= MAX_SEEN_EVENT_IDS) {
+        const oldest = set.values().next().value
+        if (oldest) set.delete(oldest)
+      }
+      set.add(id)
+      recordProfileSeenEventIds(pk, [id])
+      return true
+    },
+    [getSeenSetForProfile]
+  )
 
   useLayoutEffect(() => {
     notifsRef.current = notificationsByProfile
@@ -201,6 +230,7 @@ export function useProfileNotifications(
     const next = markProfileChecked(pk)
     notifsRef.current = next
     setNotificationsByProfile(next)
+    flushProfileSeenEventIds()
   }, [])
 
   const notifyInactiveProfile = useCallback(
@@ -260,6 +290,7 @@ export function useProfileNotifications(
         recipientPubkey?: unknown
         category?: unknown
         title?: unknown
+        deliveryEventId?: unknown
         ts?: unknown
       } | null
       if (!data || data.type !== 'agnostr-profile-push') return
@@ -278,6 +309,15 @@ export function useProfileNotifications(
         typeof data.ts === 'number' && Number.isFinite(data.ts) && data.ts > 0
           ? Math.floor(data.ts / 1000)
           : Math.floor(Date.now() / 1000)
+
+      // Ignore stale pushes from at or before the profile was last checked/cleared
+      if (tsSec <= (notifsRef.current[targetPk]?.lastCheckedAt ?? 0)) return
+
+      // Deduplicate against per-profile persistent seen set when deliveryEventId is provided
+      const deliveryId =
+        typeof data.deliveryEventId === 'string' ? data.deliveryEventId.trim().toLowerCase() : ''
+      if (deliveryId && !rememberSeenForProfile(targetPk, deliveryId)) return
+
       notifyInactiveProfile(
         targetProfile,
         summary,
@@ -290,7 +330,7 @@ export function useProfileNotifications(
     return () => {
       navigator.serviceWorker.removeEventListener('message', onSwMessage)
     }
-  }, [notifyInactiveProfile])
+  }, [notifyInactiveProfile, rememberSeenForProfile])
 
   // Stable key of inactive saved profile pubkeys
   const inactivePubkeysKey = useMemo(() => {
@@ -315,6 +355,13 @@ export function useProfileNotifications(
     const hintToProfilePk = new Map<string, string>()
     for (const pk of inactivePubkeys) {
       hintToProfilePk.set(computeRecipientHint(pk), pk)
+      // Hydrate per-profile persistent seen set (merging any in-memory entries)
+      const persisted = loadProfileSeenEventIds(pk)
+      const existing = seenByProfileRef.current.get(pk)
+      if (existing) {
+        for (const id of existing) persisted.add(id)
+      }
+      seenByProfileRef.current.set(pk, persisted)
     }
 
     const mountedAtSec = Math.floor(Date.now() / 1000)
@@ -344,46 +391,24 @@ export function useProfileNotifications(
     ]
 
     let cancelled = false
-    let eoseReceived = false
-    const eoseFallbackTimer = window.setTimeout(() => {
-      eoseReceived = true
-    }, 2500)
-
-    const rememberSeen = (id: string): boolean => {
-      const seen = seenEventIdsRef.current
-      if (seen.has(id)) return false
-      if (seen.size >= MAX_SEEN_EVENT_IDS) {
-        const oldest = seen.values().next().value
-        if (oldest) seen.delete(oldest)
-      }
-      seen.add(id)
-      return true
-    }
+    const eoseByRelay = new Set<string>()
 
     const unsub = relayPool.subscribe(
       `agnostr-inactive-profiles-${inactivePubkeys.length}`,
       relays,
       filters,
       {
-        onEose: () => {
-          eoseReceived = true
+        onEose: (relayUrl) => {
+          eoseByRelay.add(relayUrl)
         },
-        onEvent: (ev) => {
+        onRelayReset: (relayUrl) => {
+          eoseByRelay.delete(relayUrl)
+        },
+        onEvent: (ev, relayUrl) => {
           if (cancelled || !ev || typeof ev.id !== 'string') return
           const evId = ev.id.toLowerCase()
-          if (!rememberSeen(evId)) return
 
-          // NIP-17 kind:1059 randomizes created_at up to 2 days — only notify on post-EOSE live arrivals
-          if (ev.kind === 1059 && !eoseReceived) {
-            return
-          }
-
-          if (!verifyEventCached(ev)) return
-          if (cancelled) return
-
-          const authorPk = ev.pubkey.toLowerCase()
           const matchedTargets = new Set<string>()
-
           if (ev.kind === KIND_AMAIL_EPHEMERAL_HOP) {
             const hint = extractAmailCapsuleRecipientHint(ev)
             if (hint) {
@@ -403,10 +428,29 @@ export function useProfileNotifications(
 
           if (matchedTargets.size === 0) return
 
+          // Skip signature verification if every matched profile has already seen this event ID
+          let anyUnseen = false
+          for (const targetPk of matchedTargets) {
+            if (!getSeenSetForProfile(targetPk).has(evId)) {
+              anyUnseen = true
+              break
+            }
+          }
+          if (!anyUnseen) return
+
+          if (!verifyEventCached(ev)) return
+          if (cancelled) return
+
+          const authorPk = ev.pubkey.toLowerCase()
           const zapSenderPk = ev.kind === 9735 ? extractZapSenderPubkey(ev) : null
           const { summary, category } = describeEventKind(ev.kind)
+          const isPostEoseOnRelay = eoseByRelay.has(relayUrl)
 
           for (const targetPk of matchedTargets) {
+            // Always record evId into targetPk's persistent seen set (even during pre-EOSE backfill)
+            const isNewForProfile = rememberSeenForProfile(targetPk, evId)
+            if (!isNewForProfile) continue
+
             if (targetPk === activePkRef.current) continue
             if (authorPk === targetPk) continue
             if (zapSenderPk && zapSenderPk === targetPk) continue
@@ -414,7 +458,11 @@ export function useProfileNotifications(
             const targetProfile = profilesByIdRef.current.get(targetPk)
             if (!targetProfile) continue
 
-            if (ev.kind !== 1059) {
+            // NIP-17 kind:1059 randomizes created_at up to ±2 days — absorb pre-EOSE backfill per relay
+            // and only notify on genuine post-EOSE live arrivals for that relay.
+            if (ev.kind === 1059) {
+              if (!isPostEoseOnRelay) continue
+            } else {
               const checkedAt = notifsRef.current[targetPk]?.lastCheckedAt || mountedAtSec
               if (ev.created_at <= checkedAt) continue
             }
@@ -428,10 +476,15 @@ export function useProfileNotifications(
 
     return () => {
       cancelled = true
-      window.clearTimeout(eoseFallbackTimer)
       unsub()
     }
-  }, [relayPool, inactivePubkeysKey, notifyInactiveProfile])
+  }, [
+    relayPool,
+    inactivePubkeysKey,
+    notifyInactiveProfile,
+    getSeenSetForProfile,
+    rememberSeenForProfile,
+  ])
 
   const otherProfilesUnreadCount = useMemo(() => {
     let total = 0

@@ -719,12 +719,57 @@ export function useAgnostrEngine(): AgnostrEngine {
   if (!voiceCacheRef.current) {
     voiceCacheRef.current = new VoiceBlobCache()
   }
+  const optimisticVoiceUrlsRef = useRef<Set<string>>(new Set())
+  const optimisticVoiceTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
+
+  const trackOptimisticVoiceUrl = useCallback((url: string): string => {
+    optimisticVoiceUrlsRef.current.add(url)
+    return url
+  }, [])
+
+  const releaseOptimisticVoiceUrl = useCallback((url: string, immediate = false) => {
+    if (!optimisticVoiceUrlsRef.current.has(url)) return
+    const revokeNow = () => {
+      if (!optimisticVoiceUrlsRef.current.delete(url)) return
+      try {
+        URL.revokeObjectURL(url)
+      } catch {
+        // Ignore
+      }
+    }
+    if (immediate) {
+      revokeNow()
+      return
+    }
+    const timer = globalThis.setTimeout(() => {
+      optimisticVoiceTimersRef.current.delete(timer)
+      revokeNow()
+    }, 1500)
+    optimisticVoiceTimersRef.current.add(timer)
+  }, [])
+
+  const revokeAllOptimisticVoiceUrls = useCallback(() => {
+    for (const timer of optimisticVoiceTimersRef.current) {
+      globalThis.clearTimeout(timer)
+    }
+    optimisticVoiceTimersRef.current.clear()
+    for (const url of optimisticVoiceUrlsRef.current) {
+      try {
+        URL.revokeObjectURL(url)
+      } catch {
+        // Ignore
+      }
+    }
+    optimisticVoiceUrlsRef.current.clear()
+  }, [])
+
   useEffect(() => {
     const cache = voiceCacheRef.current
     return () => {
+      revokeAllOptimisticVoiceUrls()
       cache?.revokeAll()
     }
-  }, [])
+  }, [revokeAllOptimisticVoiceUrls])
 
   const activeGeohashRef = useRef<string>(activeGeohash)
   const activeChannelGenRef = useRef<number>(0)
@@ -2517,6 +2562,18 @@ export function useAgnostrEngine(): AgnostrEngine {
     []
   )
 
+  const handleSeedVoiceBlob = useCallback(
+    (
+      attachment: VoiceMemoAttachment,
+      blob: Blob,
+      senderPubkey: string,
+      adoptObjectUrl?: string
+    ): string | void => {
+      return voiceCacheRef.current?.seedBlob(attachment, blob, senderPubkey, adoptObjectUrl)
+    },
+    []
+  )
+
   // Client-side Cashu Ecash Wallet + Boltz Swaps + NIP-57 Lightning Zaps
   const walletEngine = useCashuWallet({
     pushToast,
@@ -2572,6 +2629,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     onIngestEventTags: zapsEngine.ingestEventTags,
     setVoiceSendPhase: setServerVoiceSendPhase,
     onSeedMemoTranscript: handleSeedMemoTranscript,
+    onSeedVoiceBlob: handleSeedVoiceBlob,
     onNotifyPushPoke: handlePushPoke,
     sendDirectMessage,
     pushToast,
@@ -4536,47 +4594,91 @@ export function useAgnostrEngine(): AgnostrEngine {
       const wipeGen = identityManager.getWipeGeneration()
 
       if (isDm && targetDmPeer) {
+        // Create a dedicated local object URL for 0ms optimistic display so revoking the
+        // recorder's preview URL never invalidates optimistic playback or failed-send retries.
+        const optimisticUrl = trackOptimisticVoiceUrl(URL.createObjectURL(recorded.blob))
+        revokeVoicePreviewUrl(recorded)
+        const signerPk = identityManager.getKeyMaterialForGeohash(gh).pubkey.toLowerCase()
+        const optimisticAttachment: VoiceMemoAttachment = {
+          url: optimisticUrl,
+          mime: cleanMime,
+          size: recorded.size,
+          durationSec: recorded.durationSec,
+          waveform: recorded.waveform,
+          sha256: '',
+        }
+
+        if (recorded.previewTranscript?.trim()) {
+          seedMemoTranscriptRef.current(
+            optimisticUrl,
+            recorded.previewTranscript,
+            recorded.previewTranscriptModel
+          )
+        }
+
         adjustInFlightSend(1)
         beginMediaSend()
         try {
           const ok = await sendDirectVoiceMemo(
             targetDmPeer,
             async () => {
-              const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
-              setVoiceSendPhase('encrypting')
-              const { ciphertext, encryption } = await encryptVoiceBytesAesGcm(rawBytes)
+              beginMediaSend()
+              try {
+                const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
+                setVoiceSendPhase('encrypting')
+                const { ciphertext, ciphertextSha256, encryption } =
+                  await encryptVoiceBytesAesGcm(rawBytes)
 
-              setVoiceSendPhase('uploading')
-              const upload = await uploadBlobToBlossom({
-                bytes: ciphertext,
-                mime: 'application/octet-stream',
-                servers: uploadServers,
-                signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
-              })
+                setVoiceSendPhase('uploading')
+                const upload = await uploadBlobToBlossom({
+                  bytes: ciphertext,
+                  mime: 'application/octet-stream',
+                  servers: uploadServers,
+                  precomputedSha256: ciphertextSha256,
+                  signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+                })
 
-              const attachment: VoiceMemoAttachment = {
-                url: upload.url,
-                mime: cleanMime,
-                size: recorded.size,
-                durationSec: recorded.durationSec,
-                waveform: recorded.waveform,
-                sha256: upload.sha256,
-                encryption,
-                server: upload.server,
-              }
+                const attachment: VoiceMemoAttachment = {
+                  url: upload.url,
+                  mime: cleanMime,
+                  size: recorded.size,
+                  durationSec: recorded.durationSec,
+                  waveform: recorded.waveform,
+                  sha256: upload.sha256,
+                  encryption,
+                  server: upload.server,
+                }
 
-              if (attachment.sha256 && recorded.previewTranscript?.trim()) {
-                seedMemoTranscriptRef.current(
-                  attachment.sha256,
-                  recorded.previewTranscript,
-                  recorded.previewTranscriptModel
+                // Seed local cache immediately (adopting optimisticUrl so active playback continues uninterrupted)
+                const seededUrl = voiceCacheRef.current?.seedBlob(
+                  attachment,
+                  recorded.blob,
+                  signerPk,
+                  optimisticUrl
                 )
-              }
+                if (seededUrl === optimisticUrl) {
+                  optimisticVoiceUrlsRef.current.delete(optimisticUrl)
+                }
 
-              setVoiceSendPhase('publishing')
-              return attachment
+                if (attachment.sha256 && recorded.previewTranscript?.trim()) {
+                  seedMemoTranscriptRef.current(
+                    attachment.sha256,
+                    recorded.previewTranscript,
+                    recorded.previewTranscriptModel
+                  )
+                }
+
+                setVoiceSendPhase('publishing')
+                return attachment
+              } finally {
+                endMediaSend()
+              }
             },
-            cleanCaption, undefined, dm?.replyToId
+            cleanCaption,
+            undefined,
+            dm?.replyToId,
+            optimisticAttachment,
+            () => releaseOptimisticVoiceUrl(optimisticUrl)
           )
           if (ok) {
             pushToast(
@@ -4587,7 +4689,6 @@ export function useAgnostrEngine(): AgnostrEngine {
           }
           return ok
         } finally {
-          revokeVoicePreviewUrl(recorded)
           endMediaSend()
           adjustInFlightSend(-1)
         }
@@ -4603,125 +4704,296 @@ export function useAgnostrEngine(): AgnostrEngine {
       const isNonEarth = isCelestialNonEarthChannel(gh)
       const nick = identityManager.getNickname()
       const activeKey = identityManager.getKeyMaterialForGeohash(gh)
+      const activePk = activeKey.pubkey.toLowerCase()
       const isTeleported = isTopic || isNonEarth ? false : location.isTeleported
       const broadcastClientTag = settings.broadcastClientTag
       const lightningAddr = zapsEngine.lightningAddress
       const powEnabled = settings.powEnabled
       const powTargetBits = settings.powTargetBits
 
-      adjustInFlightSend(1)
-      beginMediaSend()
-      try {
-        return await bitchatSendQueueRef.current.enqueue(
-          `bitchat:${gh}`,
-          async () => {
+      // Synchronously build & insert optimistic voice memo at 0ms BEFORE async Blossom upload
+      const tempId = `pending-bitchat-${Date.now()}-${++optimisticBitchatSeqRef.current}`
+      const nowSec = Math.floor(Date.now() / 1000)
+      const optimisticUrl = trackOptimisticVoiceUrl(URL.createObjectURL(recorded.blob))
+      revokeVoicePreviewUrl(recorded)
+
+      const optimisticAttachment: VoiceMemoAttachment = {
+        url: optimisticUrl,
+        mime: cleanMime,
+        size: recorded.size,
+        durationSec: recorded.durationSec,
+        waveform: recorded.waveform,
+        sha256: '',
+      }
+
+      if (recorded.previewTranscript?.trim()) {
+        seedMemoTranscriptRef.current(
+          optimisticUrl,
+          recorded.previewTranscript,
+          recorded.previewTranscriptModel
+        )
+      }
+
+      const optimisticBase: GeoMessage = {
+        id: tempId,
+        geohash: gh,
+        pubkey: activePk,
+        nickname: nick,
+        displayHandle: formatDisplayHandle(nick, activePk),
+        content: cleanCaption,
+        createdAt: nowSec,
+        tags: [],
+        isOwn: true,
+        isTeleported: !isTopic && isTeleported,
+        isMeshBridge: false,
+        clientName: broadcastClientTag ? AGNOSTR_CLIENT_TAG : undefined,
+        isAgnostrClient: broadcastClientTag,
+        powBits: 0,
+        replyTo:
+          replyTarget && !replyTarget.isSystem
+            ? {
+                id: replyTarget.id,
+                pubkey: replyTarget.pubkey,
+                nickname: replyTarget.nickname,
+                preview: replyTarget.content.slice(0, 120),
+              }
+            : undefined,
+        reactions: [],
+        mentions: extractMentions(cleanCaption),
+        voiceMemo: optimisticAttachment,
+        deliveryStatus: 'sending',
+      }
+
+      updateChannelMessages(
+        gh,
+        (prev) => {
+          const lastSec = prev.length > 0 ? prev[prev.length - 1].createdAt : 0
+          return [...prev, { ...optimisticBase, createdAt: Math.max(nowSec, lastSec) }]
+        },
+        { allowBackgroundPersist: true }
+      )
+      revealLocalBitchatSend(gh, tempId)
+
+      let uploadedAttachment: VoiceMemoAttachment | null = null
+
+      const queueAttempt = async (fn: () => Promise<boolean>) => {
+        adjustInFlightSend(1)
+        beginMediaSend()
+        try {
+          return await bitchatSendQueueRef.current.enqueue(`bitchat:${gh}`, fn, () => {
             if (identityManager.getWipeGeneration() !== wipeGen) {
-              revokeVoicePreviewUrl(recorded)
+              releaseOptimisticVoiceUrl(optimisticUrl, true)
+            }
+            return false
+          })
+        } finally {
+          endMediaSend()
+          adjustInFlightSend(-1)
+        }
+      }
+
+      const attempt = async (): Promise<boolean> => {
+        if (identityManager.getWipeGeneration() !== wipeGen) {
+          releaseOptimisticVoiceUrl(optimisticUrl, true)
+          return false
+        }
+        let activeMsgId = tempId
+        try {
+          updateChannelMessages(
+            gh,
+            (prev) =>
+              prev.map((m) =>
+                m.id === tempId && m.deliveryStatus !== 'sent'
+                  ? { ...m, deliveryStatus: 'sending' }
+                  : m
+              ),
+            { allowBackgroundPersist: true }
+          )
+
+          if (!uploadedAttachment) {
+            const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
+
+            // Public geohash/topic channel: upload audio to Blossom + publish with NIP-92 imeta
+            setVoiceSendPhase('uploading')
+            const upload = await uploadBlobToBlossom({
+              bytes: rawBytes,
+              mime: cleanMime,
+              servers: uploadServers,
+              signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+            })
+
+            if (identityManager.getWipeGeneration() !== wipeGen) {
+              releaseOptimisticVoiceUrl(optimisticUrl, true)
               return false
             }
-            let signedMsgId: string | null = null
-            try {
-              const rawBytes = new Uint8Array(await recorded.blob.arrayBuffer())
 
-              // Public geohash/topic channel: upload audio to Blossom + publish with NIP-92 imeta
-              setVoiceSendPhase('uploading')
-              const upload = await uploadBlobToBlossom({
-                bytes: rawBytes,
-                mime: cleanMime,
-                servers: uploadServers,
-                signAuthEvent: (tmpl) => identityManager.signEvent(tmpl, gh),
+            const attachment: VoiceMemoAttachment = {
+              url: upload.url,
+              mime: cleanMime,
+              size: upload.size,
+              durationSec: recorded.durationSec,
+              waveform: recorded.waveform,
+              sha256: upload.sha256,
+              server: upload.server,
+            }
+
+            // Immediately seed local cache (adopting optimisticUrl so active playback continues uninterrupted)
+            const seededUrl = voiceCacheRef.current?.seedBlob(
+              attachment,
+              recorded.blob,
+              activePk,
+              optimisticUrl
+            )
+            if (seededUrl === optimisticUrl) {
+              optimisticVoiceUrlsRef.current.delete(optimisticUrl)
+            }
+
+            if (attachment.sha256 && recorded.previewTranscript?.trim()) {
+              seedMemoTranscriptRef.current(
+                attachment.sha256,
+                recorded.previewTranscript,
+                recorded.previewTranscriptModel
+              )
+            }
+
+            uploadedAttachment = attachment
+            updateChannelMessages(
+              gh,
+              (prev) =>
+                prev.map((m) => (m.id === tempId ? { ...m, voiceMemo: attachment } : m)),
+              { allowBackgroundPersist: true }
+            )
+            if (seededUrl !== optimisticUrl) {
+              releaseOptimisticVoiceUrl(optimisticUrl)
+            }
+          }
+
+          const attachment = uploadedAttachment
+          const latestRelays =
+            activeGeohashRef.current === gh ? relaySelectionRef.current.channelRelays : []
+          if (!(await pool.waitForChatRelay([...targetRelays, ...latestRelays]))) {
+            throw new Error('No connected relay is available.')
+          }
+          if (identityManager.getWipeGeneration() !== wipeGen) {
+            releaseOptimisticVoiceUrl(optimisticUrl, true)
+            return false
+          }
+
+          setVoiceSendPhase('signing')
+          const content = cleanCaption ? `${cleanCaption}\n${attachment.url}` : attachment.url
+          const template = isTopic
+            ? buildNamedBitchatChatTemplate({
+                content,
+                topic: gh,
+                nickname: nick,
+                replyTo: replyTarget,
+                voiceMemo: attachment,
+                broadcastClientTag,
+                lightningAddress: lightningAddr,
+              })
+            : buildGeohashChatTemplate({
+                content,
+                geohash: gh,
+                nickname: nick,
+                isTeleported,
+                replyTo: replyTarget,
+                voiceMemo: attachment,
+                broadcastClientTag,
+                lightningAddress: lightningAddr,
               })
 
-              const attachment: VoiceMemoAttachment = {
-                url: upload.url,
-                mime: cleanMime,
-                size: upload.size,
-                durationSec: recorded.durationSec,
-                waveform: recorded.waveform,
-                sha256: upload.sha256,
-                server: upload.server,
-              }
+          if (powEnabled && powTargetBits > 0 && activeKey.pubkey) {
+            const nonceTag = await mineNip13NonceTag(
+              template,
+              activeKey.pubkey,
+              powTargetBits,
+              450
+            )
+            if (nonceTag) {
+              template.tags = [...template.tags, nonceTag]
+            }
+          }
 
-              if (attachment.sha256 && recorded.previewTranscript?.trim()) {
-                seedMemoTranscriptRef.current(
-                  attachment.sha256,
-                  recorded.previewTranscript,
-                  recorded.previewTranscriptModel
-                )
-              }
+          if (identityManager.getWipeGeneration() !== wipeGen) {
+            releaseOptimisticVoiceUrl(optimisticUrl, true)
+            return false
+          }
+          const signed = await identityManager.signEvent(template, gh)
+          if (identityManager.getWipeGeneration() !== wipeGen) {
+            releaseOptimisticVoiceUrl(optimisticUrl, true)
+            return false
+          }
 
-              setVoiceSendPhase('signing')
-              const content = cleanCaption ? `${cleanCaption}\n${upload.url}` : upload.url
-              const template = isTopic
-                ? buildNamedBitchatChatTemplate({
-                    content,
-                    topic: gh,
-                    nickname: nick,
-                    replyTo: replyTarget,
-                    voiceMemo: attachment,
-                    broadcastClientTag,
-                    lightningAddress: lightningAddr,
-                  })
-                : buildGeohashChatTemplate({
-                    content,
-                    geohash: gh,
-                    nickname: nick,
-                    isTeleported,
-                    replyTo: replyTarget,
-                    voiceMemo: attachment,
-                    broadcastClientTag,
-                    lightningAddress: lightningAddr,
-                  })
+          activeMsgId = signed.id
+          chatRetries.confirm(tempId)
 
-              if (powEnabled && powTargetBits > 0 && activeKey.pubkey) {
-                const nonceTag = await mineNip13NonceTag(
-                  template,
-                  activeKey.pubkey,
-                  powTargetBits,
-                  450
-                )
-                if (nonceTag) {
-                  template.tags = [...template.tags, nonceTag]
-                }
-              }
+          const findParent = (id: string) =>
+            messagesChannelRef.current === gh
+              ? messagesRef.current.find((m) => m.id === id)
+              : undefined
+          const parsed = isTopic
+            ? parseNamedBitchatChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+            : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+          if (parsed) {
+            parsed.deliveryStatus = 'sending'
+            parsed.isOwn = true
+            // Atomically replace tempId -> signed.id into confirmed messages BEFORE publishing
+            updateChannelMessages(
+              gh,
+              (prev) => swapPendingWithSigned(prev, tempId, parsed, 'pending-bitchat-'),
+              { allowBackgroundPersist: true }
+            )
+          }
+          releaseOptimisticVoiceUrl(optimisticUrl)
 
-              if (identityManager.getWipeGeneration() !== wipeGen) return false
-              const signed = await identityManager.signEvent(template, gh)
-              if (identityManager.getWipeGeneration() !== wipeGen) return false
-
-              signedMsgId = signed.id
-              const findParent = (id: string) =>
-                messagesChannelRef.current === gh
-                  ? messagesRef.current.find((m) => m.id === id)
-                  : undefined
-              const parsed = isTopic
-                ? parseNamedBitchatChatEvent(signed, gh, ownPubkeysRef.current, findParent)
-                : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+          setVoiceSendPhase('publishing')
+          return await publishChatWire({
+            rowId: signed.id,
+            publish: (ack) =>
+              pool.publish(
+                [
+                  ...new Set([
+                    ...targetRelays,
+                    ...(activeGeohashRef.current === gh
+                      ? relaySelectionRef.current.channelRelays
+                      : []),
+                  ]),
+                ],
+                signed,
+                undefined,
+                ack
+              ),
+            isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+            queueRetry: queueAttempt,
+            update: (deliveryStatus, relayCount) =>
+              updateChannelMessages(
+                gh,
+                (prev) =>
+                  sortChannelMessagesWithPending(
+                    prev.map((m) =>
+                      m.id !== signed.id || (m.deliveryStatus === 'sent' && deliveryStatus !== 'sent')
+                        ? m
+                        : { ...m, deliveryStatus, relayCount: Math.max(m.relayCount ?? 0, relayCount) }
+                    ),
+                    'pending-bitchat-'
+                  ),
+                { allowBackgroundPersist: true }
+              ),
+            onFailure: (reason) =>
+              pushToast('error', 'Voice memo publish failed', reason, signed.id),
+            onSuccess: () => {
               if (parsed) {
-                parsed.deliveryStatus = 'sending'
-                parsed.isOwn = true
-                updateChannelMessages(
-                  gh,
-                  (prev) => {
-                    if (prev.some((m) => m.id === parsed.id)) return null
-                    return sortChannelMessagesWithPending(
-                      [...prev, parsed],
-                      'pending-bitchat-'
-                    ).slice(-350)
-                  },
-                  { allowBackgroundPersist: true }
-                )
-                revealLocalBitchatSend(gh, parsed.id)
                 const signedVoicePreview = formatBitchatPreviewText({
                   content: parsed.content,
                   hasVoice: true,
-                  mediaUrl: parsed.voiceMemo?.url ?? upload.url,
+                  mediaUrl: parsed.voiceMemo?.url ?? attachment.url,
                   tags: signed.tags,
                 })
                 upsertChannelPreview(
                   gh,
                   {
                     id: parsed.id,
+                    replaceId: tempId,
                     preview: signedVoicePreview,
                     sender: parsed.nickname || nick,
                     senderPubkey: parsed.pubkey,
@@ -4731,6 +5003,7 @@ export function useAgnostrEngine(): AgnostrEngine {
                 )
                 recordRoomMessage({
                   id: parsed.id,
+                  replaceId: tempId,
                   geohash: gh,
                   pubkey: parsed.pubkey,
                   sender: parsed.nickname || nick,
@@ -4739,60 +5012,45 @@ export function useAgnostrEngine(): AgnostrEngine {
                   isAuthoritative: activeGeohashRef.current === gh,
                 })
               }
-
-              setVoiceSendPhase('publishing')
-              return await publishChatWire({
-                rowId: signed.id,
-                publish: (ack) => pool.publish(targetRelays, signed, undefined, ack),
-                isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
-                queueRetry: (replay) => bitchatSendQueueRef.current.enqueue(`bitchat:${gh}`, replay, () => false),
-                update: (deliveryStatus, relayCount) => updateChannelMessages(gh, (prev) =>
-                  sortChannelMessagesWithPending(prev.map((m) =>
-                    m.id !== signed.id || (m.deliveryStatus === 'sent' && deliveryStatus !== 'sent')
-                    ? m : { ...m, deliveryStatus, relayCount: Math.max(m.relayCount ?? 0, relayCount) }
-                  ), 'pending-bitchat-'), { allowBackgroundPersist: true }),
-                onFailure: (reason) => pushToast('error', 'Voice memo publish failed', reason, signed.id),
-              })
-            } catch (err) {
-              if (identityManager.getWipeGeneration() === wipeGen) {
-                if (signedMsgId) {
-                  updateChannelMessages(
-                    gh,
-                    (prev) => {
-                      let changed = false
-                      const next = prev.map((m) => {
-                        if (m.id !== signedMsgId) return m
-                        changed = true
-                        return {
-                          ...m,
-                          deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
-                        }
-                      })
-                      return changed ? next : null
-                    },
-                    { allowBackgroundPersist: true }
-                  )
-                }
-                pushToast(
-                  'error',
-                  'Voice memo failed',
-                  err instanceof Error ? err.message : 'Unable to upload voice memo.'
-                )
-              }
-              return false
-            } finally {
-              revokeVoicePreviewUrl(recorded)
+            },
+          })
+        } catch (err) {
+          if (identityManager.getWipeGeneration() === wipeGen) {
+            if (activeMsgId === tempId) {
+              chatRetries.hold(tempId, () => queueAttempt(attempt))
             }
-          },
-          () => {
-            revokeVoicePreviewUrl(recorded)
-            return false
+            updateChannelMessages(
+              gh,
+              (prev) => {
+                let changed = false
+                const next = prev.map((m) => {
+                  if ((m.id !== activeMsgId && m.id !== tempId) || m.deliveryStatus === 'sent') {
+                    return m
+                  }
+                  changed = true
+                  return {
+                    ...m,
+                    deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
+                  }
+                })
+                return changed ? next : null
+              },
+              { allowBackgroundPersist: true }
+            )
+            pushToast(
+              'error',
+              'Voice memo failed',
+              err instanceof Error ? err.message : 'Unable to upload voice memo.',
+              activeMsgId
+            )
+          } else {
+            releaseOptimisticVoiceUrl(optimisticUrl, true)
           }
-        )
-      } finally {
-        endMediaSend()
-        adjustInFlightSend(-1)
+          return false
+        }
       }
+
+      return await queueAttempt(attempt)
     },
     [
       pool,
@@ -4809,6 +5067,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       revealLocalBitchatSend,
       upsertChannelPreview,
       recordRoomMessage,
+      trackOptimisticVoiceUrl,
+      releaseOptimisticVoiceUrl,
       adjustInFlightSend,
       beginMediaSend,
       endMediaSend,
@@ -5527,6 +5787,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     resetAllCalls()
     resetAllGames()
     pool.closeAll()
+    revokeAllOptimisticVoiceUrls()
     voiceCacheRef.current?.revokeAll()
     clearProtocolCaches()
     presenceTracker.clear()
@@ -5606,6 +5867,7 @@ export function useAgnostrEngine(): AgnostrEngine {
   }, [
     pool,
     presenceTracker,
+    revokeAllOptimisticVoiceUrls,
     clearPulse,
     clearAllDms,
     resetAllServers,
