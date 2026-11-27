@@ -113,6 +113,7 @@ export interface ExpandedRadarModalProps {
   onClose: () => void
   onTuneChannel: (geohash: string) => void
   onOpenNearby?: () => void
+  onOpenPinnedMesh?: () => void
   onPlaySound?: (cue: SoundCue) => void
   /** When true on mobile, renders anchored inside .ag-shell-body above the always-present bottom navbar. */
   inShell?: boolean
@@ -234,6 +235,7 @@ export function ExpandedRadarModal({
   onClose,
   onTuneChannel,
   onOpenNearby,
+  onOpenPinnedMesh,
   onPlaySound,
   inShell = false,
   embedded = false,
@@ -1163,7 +1165,8 @@ export function ExpandedRadarModal({
     )
   }
 
-  const effectiveDockTab: PulsePopoverTab = pinnedChannels.length > 0 ? liveDockTab : 'live'
+  const pinnedCount = pinnedChannels.length + (onOpenPinnedMesh ? 1 : 0)
+  const effectiveDockTab: PulsePopoverTab = pinnedCount > 0 ? liveDockTab : 'live'
   const dockSourceItems = effectiveDockTab === 'pinned' ? pinnedDockItems : liveDockItems
   const dockVisibleItems = dockSourceItems.slice(0, 5)
   const dockOverflowCount =
@@ -1699,7 +1702,7 @@ export function ExpandedRadarModal({
                 onClick={() => setPulseTab('pinned')}
               >
                 <Pin size={11} className="ag-radar-pin-icon-red" />
-                <span>Pinned ({pinnedChannels.length})</span>
+                <span>Pinned ({pinnedCount})</span>
               </button>
             </div>
             <button
@@ -1787,13 +1790,21 @@ export function ExpandedRadarModal({
                 })}
               </div>
             )
-          ) : pinnedChannels.length === 0 ? (
+          ) : pinnedCount === 0 ? (
             <p className="ag-field-hint" style={{ padding: '0.6rem' }}>
               No pinned channels yet. Select any Earth, planet, moon, or orbiting Topic Asteroid
               channel and tap Pin to plant a red 3D marker.
             </p>
           ) : (
             <div className="ag-radar-pulse-pop-list">
+              {onOpenPinnedMesh && (
+                <div className="ag-radar-pin-list-row">
+                  <button type="button" className="ag-radar-pin-list-main" onClick={onOpenPinnedMesh}>
+                    <span className="ag-radar-hud-accent mono">Mesh</span>
+                    <span className="ag-radar-pin-list-sub truncate">Nearby</span>
+                  </button>
+                </div>
+              )}
               {pinnedEarth.length > 0 && (
                 <>
                   <span className="ag-radar-pop-kicker">Pinned on Earth</span>
@@ -1892,7 +1903,7 @@ export function ExpandedRadarModal({
       </div>
 
       {/* Desktop Collapsible "Live Pulse" Floating Dock */}
-      {liveMessageCount === 0 && pinnedChannels.length === 0 ? (
+      {liveMessageCount === 0 && pinnedCount === 0 ? (
         <div className="ag-radar-live-dock-pill is-idle" role="status">
           <span className="ag-led ag-led-ok ag-led-pulse" aria-hidden="true" />
           <span className="ag-radar-live-dock-idle-text">Listening for live chat activity…</span>
@@ -1915,7 +1926,7 @@ export function ExpandedRadarModal({
             ·
           </span>
           <span className="ag-radar-live-dock-pill-count mono tabular">
-            {liveMessageCount > 0 ? liveMessageCount : pinnedChannels.length}
+            {liveMessageCount > 0 ? liveMessageCount : pinnedCount}
           </span>
           {totalDockUnread > 0 && (
             <span className="ag-radar-live-dock-unread mono tabular">
@@ -1937,7 +1948,7 @@ export function ExpandedRadarModal({
             </div>
 
             <div className="ag-radar-live-dock-head-actions">
-              {pinnedChannels.length > 0 && (
+              {pinnedCount > 0 && (
                 <div
                   className="ag-radar-live-dock-tabs"
                   role="tablist"
@@ -1987,7 +1998,17 @@ export function ExpandedRadarModal({
           </div>
 
           <div className="ag-radar-live-dock-body">
-            {dockVisibleItems.length === 0 ? (
+            {effectiveDockTab === 'pinned' && onOpenPinnedMesh && (
+              <div className="ag-radar-live-dock-row">
+                <button type="button" className="ag-radar-live-dock-row-main" onClick={onOpenPinnedMesh}>
+                  <span className="ag-radar-live-dock-row-top">
+                    <span className="ag-radar-live-dock-tag mono">Mesh</span>
+                    <span className="ag-radar-live-dock-sub truncate">Nearby</span>
+                  </span>
+                </button>
+              </div>
+            )}
+            {dockVisibleItems.length === 0 && !(effectiveDockTab === 'pinned' && onOpenPinnedMesh) ? (
               <p className="ag-radar-live-dock-empty">
                 {effectiveDockTab === 'live'
                   ? 'No recent messages yet'
@@ -2090,7 +2111,7 @@ export function ExpandedRadarModal({
               >
                 {effectiveDockTab === 'live'
                   ? `All ${liveMessageCount} live`
-                  : `All ${pinnedChannels.length} pinned`}
+                  : `All ${pinnedCount} pinned`}
               </button>
             </div>
           )}

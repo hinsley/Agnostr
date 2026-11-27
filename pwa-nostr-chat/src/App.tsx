@@ -1,4 +1,4 @@
-import { isNativeAppBuild } from './lib/appPlatform'
+import { isNativeAndroidBuild, isNativeAppBuild, isNativeMacBuild } from './lib/appPlatform'
 import {
   Suspense,
   lazy,
@@ -1145,6 +1145,16 @@ export function App() {
     bitchatAudio.play('click')
   }, [])
 
+  const handleOpenMesh = useCallback(() => {
+    setBitchatView('mesh')
+    setMobileScreen('chat')
+    setRadarExpanded(false)
+    setMobileUserListOpen(false)
+    setRoomInfoOpen(false)
+    setSearchOpen(false)
+    setSearchQuery('')
+  }, [])
+
   const handleSelectBitchat = useCallback(() => {
     const isAlreadyInBitchatTab =
       workspace === 'chat' && listTab === 'bitchat' && !settingsState.open
@@ -1163,7 +1173,7 @@ export function App() {
     setMobileScreen('chat')
 
     if (isAlreadyInBitchatTab) {
-      if (bitchatView === 'room') {
+      if (bitchatView !== 'globe') {
         setBitchatView('globe')
       }
       return
@@ -1576,11 +1586,11 @@ export function App() {
       setSearchQuery('')
       return true
     }
-    if (isBitchatRoom && isMobileViewport && mobileScreen === 'list') {
+    if ((isBitchatRoom || isBitchatMesh) && isMobileViewport && mobileScreen === 'list') {
       setMobileScreen('chat')
       return true
     }
-    if (isBitchatRoom) {
+    if (isBitchatRoom || isBitchatMesh) {
       handleBackToBitchatGlobe()
       return true
     }
@@ -1593,6 +1603,7 @@ export function App() {
     engine,
     isBitchatWorkspace,
     isBitchatRoom,
+    isBitchatMesh,
     handleBackToBitchatGlobe,
     pendingDeleteDm,
     noteEditorPeer,
@@ -1691,8 +1702,8 @@ export function App() {
     mobileUserListOpen ||
     roomInfoOpen ||
     searchOpen ||
-    (isBitchatRoom && isMobileViewport && mobileScreen === 'list') ||
-    (isBitchatWorkspace ? bitchatView === 'room' : isMobileViewport && mobileScreen === 'chat')
+    ((isBitchatRoom || isBitchatMesh) && isMobileViewport && mobileScreen === 'list') ||
+    (isBitchatWorkspace ? bitchatView !== 'globe' : isMobileViewport && mobileScreen === 'chat')
 
   useEffect(() => {
     if (hasActiveBackTarget) {
@@ -2534,6 +2545,42 @@ export function App() {
     </div>
   )
 
+  const bitchatChannelDrawer = isMobileViewport && (
+    <>
+      {/* Mobile Bitchat channel switcher and dismiss scrim. */}
+      <div
+        className={`ag-drawer-scrim ${mobileScreen === 'list' ? 'active' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+        onClick={() => setMobileScreen('chat')}
+        aria-hidden="true"
+      />
+      <div
+        className={`ag-conv-col ${mobileScreen === 'list' ? 'open' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
+        aria-hidden={mobileScreen === 'chat' && !isSwipingLeft ? true : undefined}
+        inert={mobileScreen === 'chat' && !isSwipingLeft}
+      >
+        <BitchatChannelDrawer
+          engine={engine}
+          isMobileViewport={isMobileViewport}
+          pwa={pwa}
+          onClose={() => setMobileScreen('chat')}
+          onBackToGlobe={handleBackToBitchatGlobe}
+          onTuneChannel={handleTuneChannel}
+          onOpenRoomInfo={handleOpenRoomInfo}
+          onOpenMesh={isNativeAndroidBuild ? handleOpenMesh : undefined}
+          meshSelected={isBitchatMesh}
+          onOpenSettings={handleOpenSettings}
+          onOpenOwnAgoraProfile={() => {
+            setMobileScreen('chat')
+            handleSelectWorkspace('agora')
+            engine.agora.openProfile(engine.identity.masterPubkey)
+          }}
+          onOpenInstall={handleOpenInstall}
+          onPlaySound={playSound}
+        />
+      </div>
+    </>
+  )
+
   return (
     <ContextMenuProvider>
     <div
@@ -2642,54 +2689,28 @@ export function App() {
                 engine={engine}
                 onClose={() => setBitchatView('room')}
                 onTuneChannel={handleTuneChannel}
-                onOpenNearby={isNativeAppBuild ? () => setBitchatView('mesh') : undefined}
+                onOpenNearby={isNativeMacBuild ? handleOpenMesh : undefined}
+                onOpenPinnedMesh={isNativeAndroidBuild ? handleOpenMesh : undefined}
                 onPlaySound={playSound}
               />
             </Suspense>
           </div>
         ) : isBitchatMesh && !panicFlash ? (
-          <Suspense fallback={workspaceLoadingFallback}>
-            <MeshRoom nearby={engine.nearby} geohash={engine.activeGeohash}
-              nickname={engine.identity.nickname} mobile={isMobileViewport}
-              onGlobe={handleBackToBitchatGlobe}
-              onGeo={() => handleTuneChannel(engine.activeGeohash)} />
-          </Suspense>
+          <>
+            {isNativeAndroidBuild && bitchatChannelDrawer}
+            <Suspense fallback={workspaceLoadingFallback}>
+              <MeshRoom nearby={engine.nearby} geohash={engine.activeGeohash}
+                nickname={engine.identity.nickname} mobile={isMobileViewport}
+                onGlobe={handleBackToBitchatGlobe}
+                onOpenChannels={isNativeAndroidBuild && isMobileViewport ? () => handleLeftDrawerOpenChange(true) : undefined}
+                onOpenSettings={() => handleOpenSettings('network')}
+                onGeo={() => handleTuneChannel(engine.activeGeohash)} />
+            </Suspense>
+          </>
         ) : (
           <>
             {isBitchatWorkspace ? (
-              isMobileViewport && (
-                <>
-                  {/* Mobile Bitchat channel switcher and dismiss scrim. */}
-                  <div
-                    className={`ag-drawer-scrim ${mobileScreen === 'list' ? 'active' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
-                    onClick={() => setMobileScreen('chat')}
-                    aria-hidden="true"
-                  />
-                  <div
-                    className={`ag-conv-col ${mobileScreen === 'list' ? 'open' : ''} ${isSwipingLeft ? 'is-swiping' : ''}`}
-                    aria-hidden={mobileScreen === 'chat' && !isSwipingLeft ? true : undefined}
-                    inert={mobileScreen === 'chat' && !isSwipingLeft}
-                  >
-                    <BitchatChannelDrawer
-                      engine={engine}
-                      isMobileViewport={isMobileViewport}
-                      pwa={pwa}
-                      onClose={() => setMobileScreen('chat')}
-                      onBackToGlobe={handleBackToBitchatGlobe}
-                      onTuneChannel={handleTuneChannel}
-                      onOpenRoomInfo={handleOpenRoomInfo}
-                      onOpenSettings={handleOpenSettings}
-                      onOpenOwnAgoraProfile={() => {
-                        setMobileScreen('chat')
-                        handleSelectWorkspace('agora')
-                        engine.agora.openProfile(engine.identity.masterPubkey)
-                      }}
-                      onOpenInstall={handleOpenInstall}
-                      onPlaySound={playSound}
-                    />
-                  </div>
-                </>
-              )
+              bitchatChannelDrawer
             ) : (
               <>
                 {/* Dimmed Interactive Scrim behind Mobile Left Slide-Over Sidebar */}
@@ -2802,7 +2823,7 @@ export function App() {
                     }
                     bitchatChannelsOpen={mobileScreen === 'list'}
                     onBackToGlobe={isBitchatRoom ? handleBackToBitchatGlobe : undefined}
-                    onOpenMesh={isNativeAppBuild && isBitchatRoom ? () => setBitchatView('mesh') : undefined}
+                    onOpenMesh={isNativeMacBuild && isBitchatRoom ? handleOpenMesh : undefined}
                     onTuneChannel={handleTuneChannel}
                     onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
                     onToggleUserList={handleToggleUserList}

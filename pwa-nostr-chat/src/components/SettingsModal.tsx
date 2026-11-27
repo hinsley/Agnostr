@@ -1,4 +1,4 @@
-import { isNativeAppBuild, isNativeMacBuild } from '../lib/appPlatform.ts'
+import { isNativeAndroidBuild, isNativeAppBuild, isNativeMacBuild } from '../lib/appPlatform.ts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
@@ -287,7 +287,7 @@ const NAV_ITEMS: readonly SettingsNavItem[] = [
     subtitle: 'Updates, relays & emergency wipe',
     description: 'Manage app updates, Nostr relays, Blossom media storage, and local data reset.',
     keywords:
-      'network app updates pwa install offline cache nostr relays reconnect reset custom wss blossom media servers upload encrypted danger zone emergency panic wipe erase reset identity',
+      'network bluetooth mesh nearby gateway bridge app updates pwa install offline cache nostr relays reconnect reset custom wss blossom media servers upload encrypted danger zone emergency panic wipe erase reset identity',
   },
 ]
 
@@ -4687,6 +4687,28 @@ export function SettingsModal({
 
   const renderNetworkTab = () => (
     <div className="ag-set-pane-stack">
+      {isNativeAndroidBuild && (
+        <SettingsSection title="Bluetooth Mesh" description="Talk to nearby BitChat peers without internet.">
+          <label className="ag-set-notif-row">
+            <div className="ag-set-notif-row-copy">
+              <span className="ag-set-notif-row-title">Bluetooth Mesh &amp; bridge</span>
+              <span className="ag-set-notif-row-desc">
+                While Agnostr is open, nearby peers see your current display name. When online, your device can relay
+                signed public Earth geohash messages for nearby peers. Private chats and Mesh room messages are not sent to internet relays.
+              </span>
+            </div>
+            <input type="checkbox" className="ag-switch" checked={engine.nearby.enabled}
+              disabled={!engine.nearby.state.supported && !engine.nearby.enabled}
+              onChange={(event) => { engine.nearby.setEnabled(event.currentTarget.checked); onPlaySound?.('click') }} />
+          </label>
+          <p className="ag-field-hint" role="status">{
+            engine.nearby.enabled
+              ? engine.nearby.state.error || (engine.nearby.state.active && engine.nearby.state.sharing
+                ? 'Mesh and bridging are on.' : 'Waiting for Bluetooth…')
+              : engine.nearby.state.supported ? 'Off on this device.' : 'Bluetooth Mesh is unavailable on this device.'
+          }</p>
+        </SettingsSection>
+      )}
       {/* 1. App & Updates (FIRST) */}
       <SettingsSection
         title="App & Updates"

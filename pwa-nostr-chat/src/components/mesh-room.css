@@ -16,3 +16,5 @@
 
 /* Mesh owns its roster toggle instead of the geohash swipe controller. */
 .ag-mesh-roster-col, .ag-mesh-roster-scrim { --ag-right-drawer-p: 1; }
+
+.ag-mesh-drawer-button { border: 0; padding: 0; cursor: pointer; }

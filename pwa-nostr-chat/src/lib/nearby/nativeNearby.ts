@@ -8,8 +8,8 @@ export interface NearbyState { active: boolean; links: NearbyLink[]; error?: str
 export interface NearbyFrame { link: string; wire: string }
 
 export interface NearbyPlugin {
-  capabilities(): Promise<{ supported: boolean }>
-  start(): Promise<void>
+  capabilities(): Promise<{ supported: boolean; ready?: boolean; error?: string }>
+  start(options?: { requestPermission: boolean }): Promise<void>
   stop(): Promise<void>
   send(request: { link: string; frames: string[] }): Promise<{ accepted: boolean }>
   addListener(name: 'state', cb: (value: NearbyState) => void): Promise<PluginListenerHandle>

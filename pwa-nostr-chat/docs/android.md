@@ -9,22 +9,26 @@ automatically share local browser data or wallet keys.
 
 ## Bitchat Mesh and geohash gateway
 
-Open the Bitchat globe or an existing Bitchat room, tap the Bluetooth icon to
-open **Mesh**, and choose **Start Bluetooth**. Approve Android's Nearby
-devices permission (or location permission on Android 11 and older). Mesh
-uses the active profile's display name, but a distinct ephemeral radio
-identity. It has its own nearby user list and signed public text timeline.
-Mesh-room messages stay on Bluetooth and do not become public Nostr events.
+In BitChat, select **Mesh** at the top of the **Pinned** channels list.
+Mesh is a built-in room; it does not have a pin or unpin button. On the
+globe, find it under **Live Pulse → Pinned**. In a room, find it in the
+mobile channel drawer.
 
-If a nearby node advertises Apple Bitchat's geohash gateway capability, the
-normal Earth geohash composer can send through that node when no selected
-relay is reachable. It signs the event locally with a separate per-geohash
-session key. A Bluetooth queue does not confirm relay delivery. To help
-other nearby nodes, explicitly select **Share internet with mesh** in Mesh.
-The online device publishes verified public geohash events to the normal
-configured relays and carries live messages from its currently watched
-geohash back over BLE. Consent expires when Bluetooth stops or the profile
-changes. Android stops the radio when the app leaves the foreground.
+On Android, **Settings → Network & App → Bluetooth Mesh & bridge** is one
+device-local switch, off by default. Approve Android’s Nearby devices
+permission (or location permission on Android 11 and older) and keep
+the system Bluetooth radio on. When enabled, Agnostr starts Mesh whenever
+the app is in the foreground, even if you are in another workspace.
+It pauses the radio when the app leaves the foreground, and resumes
+automatically. Mesh uses the active profile’s display name and a distinct
+ephemeral radio identity. Its messages stay on Bluetooth.
+
+The same switch allows your phone to relay signed public Earth geohash
+text for nearby peers when it has a connected internet relay. Live replies
+from your currently watched Earth geohash can travel back. If you are
+offline, the normal Earth geohash composer can use a nearby gateway; it
+signs the message locally with a separate per-geohash session key. A
+Bluetooth queue does not confirm relay delivery.
 
 The gateway is not a general internet proxy; it does not bridge nearby mesh
 rooms with remote mesh islands, nor carry private messages, files, reactions,

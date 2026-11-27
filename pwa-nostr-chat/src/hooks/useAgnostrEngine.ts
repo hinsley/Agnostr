@@ -1,3 +1,4 @@
+import { isNativeAndroidBuild } from '../lib/appPlatform.ts'
 import { useNearbyRuntime } from './useNearbyRuntime.ts'
 import { isGatewayGeohash } from '../lib/nearby/gatewayPolicy.ts'
 import { acceptChatEcho, chatRetries, publishChatWire } from '../lib/chatDelivery.ts'
@@ -1341,6 +1342,7 @@ export function useAgnostrEngine(): AgnostrEngine {
 
   const nearby = useNearbyRuntime({
     selectedGeohash: () => activeGeohashRef.current,
+    canBridge: () => navigator.onLine && pool.getTelemetrySnapshot().some(relay => relay.status === 'connected'),
     publish: async (event, geohash) => {
       if (!pool || !isGatewayGeohash(geohash)) return false
       const relayUrls = selectRelaysForGeohash(geohash, geoDirectory, customRelays, 5).channelRelays
@@ -5503,7 +5505,8 @@ export function useAgnostrEngine(): AgnostrEngine {
       pushToast('error', 'Wallet reset blocked', error instanceof Error ? error.message : undefined)
       return
     }
-    void nearbyRef.current.api()?.stop()
+    if (isNativeAndroidBuild) nearbyRef.current.setEnabled(false)
+    else void nearbyRef.current.api()?.stop()
     const prevPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
     trustedSetRef.current = new Set()
     blockedSetRef.current = new Set()

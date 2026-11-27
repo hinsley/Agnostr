@@ -21,6 +21,8 @@ export interface BitchatChannelDrawerProps {
   onBackToGlobe: () => void
   onTuneChannel: (channelKey: string) => boolean | void
   onOpenRoomInfo: () => void
+  onOpenMesh?: () => void
+  meshSelected?: boolean
   onOpenSettings: (tab?: SettingsTab) => void
   onOpenOwnAgoraProfile?: () => void
   onOpenInstall?: () => void
@@ -35,6 +37,8 @@ export function BitchatChannelDrawer({
   onBackToGlobe,
   onTuneChannel,
   onOpenRoomInfo,
+  onOpenMesh,
+  meshSelected = false,
   onOpenSettings,
   onOpenOwnAgoraProfile,
   onOpenInstall,
@@ -71,6 +75,7 @@ export function BitchatChannelDrawer({
   }
 
   const renderChannel = ({ key, pin, pulse, selected }: DrawerChannel) => {
+    selected = selected && !meshSelected
     const isTopic = isTopicChannel(key)
     const label = formatBitchatChannelLabel(key)
     const place = [pin?.label, pulse?.nearestCity, selected ? cell.nearestCity : null,
@@ -131,10 +136,26 @@ export function BitchatChannelDrawer({
       </div>
 
       <div className="ag-bitchat-drawer-body">
-        {channels.pinned.length > 0 && (
+        {(channels.pinned.length > 0 || onOpenMesh) && (
           <section className="ag-bitchat-drawer-section" aria-label="Pinned channels">
             <h3><Pin size={12} aria-hidden="true" /> Pinned</h3>
-            <ul>{channels.pinned.map(renderChannel)}</ul>
+            <ul>
+              {onOpenMesh && (
+                <li>
+                  <button type="button" className={`ag-bitchat-drawer-row${meshSelected ? ' is-selected' : ''}`}
+                    aria-current={meshSelected ? 'page' : undefined}
+                    onClick={() => { onPlaySound?.('click'); onOpenMesh(); onClose() }}>
+                    <span className="ag-bitchat-drawer-row-icon" aria-hidden="true"><Hash size={15} /></span>
+                    <span className="ag-bitchat-drawer-row-copy">
+                      <span className="ag-bitchat-drawer-row-title mono truncate">Mesh</span>
+                      <span className="ag-bitchat-drawer-row-meta truncate">Nearby</span>
+                    </span>
+                    {meshSelected && <Check className="ag-bitchat-drawer-current" size={15} aria-hidden="true" />}
+                  </button>
+                </li>
+              )}
+              {channels.pinned.map(renderChannel)}
+            </ul>
           </section>
         )}
         <section className="ag-bitchat-drawer-section" aria-label="Active channels">
@@ -145,7 +166,7 @@ export function BitchatChannelDrawer({
             </p>
           )}
         </section>
-        {channels.current && (
+        {channels.current && !meshSelected && (
           <section className="ag-bitchat-drawer-section" aria-label="Current channel">
             <h3>Current channel</h3>
             <ul>{renderChannel(channels.current)}</ul>
@@ -153,7 +174,7 @@ export function BitchatChannelDrawer({
         )}
       </div>
 
-      <div className="ag-bitchat-drawer-actions" role="group" aria-label={`Actions for ${channelLabel}`}>
+      {!meshSelected && <div className="ag-bitchat-drawer-actions" role="group" aria-label={`Actions for ${channelLabel}`}>
         <button type="button" className="ag-bitchat-drawer-action-label mono truncate"
           aria-label={`Return to ${channelLabel}`} onClick={onClose}>
           {channelLabel}
@@ -176,7 +197,7 @@ export function BitchatChannelDrawer({
         }}>
           <Info size={16} aria-hidden="true" />
         </button>
-      </div>
+      </div>}
 
       <UserProfileDock
         engine={engine}

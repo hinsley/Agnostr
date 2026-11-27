@@ -1,6 +1,7 @@
 package com.agnostr.app.nearby;
 
 import android.Manifest;
+import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
@@ -8,6 +9,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
+import androidx.lifecycle.Lifecycle;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
@@ -31,6 +33,7 @@ import org.json.JSONException;
 public class NearbyPlugin extends Plugin {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private GattMesh mesh;
+    private PluginCall pendingPermission;
 
     @Override
     public void load() {
@@ -51,44 +54,96 @@ public class NearbyPlugin extends Plugin {
         });
     }
 
+    private String permissionAlias() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ? "nearby" : "legacy";
+    }
+
+    private String permissionHint() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            ? "Allow Nearby devices in Android settings to use Bluetooth Mesh."
+            : "Allow location permission in Android settings to discover Bluetooth Mesh peers.";
+    }
+
+    private boolean foreground() {
+        return getActivity().getLifecycle().getCurrentState().isAtLeast(Lifecycle.State.STARTED);
+    }
+
     @PluginMethod
     public void capabilities(PluginCall call) {
-        Context context = getContext();
-        BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
-        boolean supported = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)
-            && manager != null && manager.getAdapter() != null;
-        call.resolve(new JSObject().put("supported", supported));
+        ui.post(() -> {
+            Context context = getContext();
+            BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+            boolean supported = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)
+                && adapter != null;
+            JSObject result = new JSObject().put("supported", supported).put("ready", false);
+            if (supported && foreground()) {
+                try {
+                    if (getPermissionState(permissionAlias()) != PermissionState.GRANTED) {
+                        result.put("error", permissionHint());
+                    } else if (!adapter.isEnabled()) {
+                        result.put("error", "Turn on Bluetooth in Android settings.");
+                    } else {
+                        result.put("ready", true);
+                    }
+                } catch (SecurityException revoked) {
+                    result.put("error", permissionHint());
+                }
+            }
+            call.resolve(result);
+        });
     }
 
     @PluginMethod
     public void start(PluginCall call) {
-        String permission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ? "nearby" : "legacy";
-        if (getPermissionState(permission) != PermissionState.GRANTED) {
-            requestPermissionForAlias(permission, call, "permissionResult");
-            return;
-        }
-        startMesh(call);
+        ui.post(() -> {
+            if (!foreground()) { call.reject("Bluetooth Mesh starts when Agnostr is open."); return; }
+            String permission = permissionAlias();
+            if (getPermissionState(permission) != PermissionState.GRANTED) {
+                if (!Boolean.TRUE.equals(call.getBoolean("requestPermission", true))) {
+                    call.reject(permissionHint());
+                } else if (pendingPermission != null) {
+                    call.reject("Android is already asking for Bluetooth permission.");
+                } else {
+                    pendingPermission = call;
+                    requestPermissionForAlias(permission, call, "permissionResult");
+                }
+                return;
+            }
+            startMesh(call);
+        });
     }
 
     @PermissionCallback
     private void permissionResult(PluginCall call) {
-        String permission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ? "nearby" : "legacy";
-        if (getPermissionState(permission) != PermissionState.GRANTED) {
-            call.reject("Allow Nearby devices in Android settings to use Bluetooth chat.");
-            return;
-        }
-        startMesh(call);
+        ui.post(() -> {
+            if (pendingPermission != call) return;
+            pendingPermission = null;
+            if (getPermissionState(permissionAlias()) != PermissionState.GRANTED) {
+                call.reject(permissionHint());
+                return;
+            }
+            startMesh(call);
+        });
     }
 
     private void startMesh(PluginCall call) {
-        ui.post(() -> {
-            try {
-                mesh.start();
-                call.resolve();
-            } catch (RuntimeException failure) {
-                call.reject(failure.getMessage() == null ? "Bluetooth chat could not start." : failure.getMessage());
-            }
-        });
+        if (!foreground()) { call.reject("Bluetooth Mesh starts when Agnostr is open."); return; }
+        try {
+            mesh.start();
+            call.resolve();
+        } catch (RuntimeException failure) {
+            call.reject(failure.getMessage() == null ? "Bluetooth chat could not start." : failure.getMessage());
+        }
+    }
+
+    private void stopMesh() {
+        if (pendingPermission != null) {
+            PluginCall canceled = pendingPermission;
+            pendingPermission = null;
+            canceled.reject("Bluetooth Mesh start canceled.");
+        }
+        if (mesh != null) mesh.stop();
     }
 
     @PluginMethod
@@ -118,18 +173,18 @@ public class NearbyPlugin extends Plugin {
     @PluginMethod
     public void stop(PluginCall call) {
         ui.post(() -> {
-            if (mesh != null) mesh.stop();
+            stopMesh();
             call.resolve();
         });
     }
 
     @Override
     protected void handleOnStop() {
-        ui.post(() -> { if (mesh != null) mesh.stop(); });
+        ui.post(this::stopMesh);
     }
 
     @Override
     protected void handleOnDestroy() {
-        ui.post(() -> { if (mesh != null) mesh.stop(); });
+        ui.post(this::stopMesh);
     }
 }

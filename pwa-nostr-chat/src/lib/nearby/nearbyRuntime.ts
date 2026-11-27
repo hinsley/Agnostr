@@ -23,13 +23,15 @@ export const emptyNearby: NearbySnapshot = {
 
 export interface NearbyPorts {
   selectedGeohash: () => string
+  canBridge?: () => boolean
   publish: (event: NostrEvent, geohash: string) => Promise<boolean>
   receive: (event: NostrEvent, geohash: string) => void
   snapshot: (state: NearbySnapshot) => void
 }
 
 export interface NearbyRuntime {
-  start(nickname: string): Promise<void>
+  start(nickname: string, options?: { managed?: boolean; requestPermission?: boolean }): Promise<void>
+  resume(nickname: string, enabled: () => boolean): Promise<void>
   stop(): Promise<void>
   share(enabled: boolean): void
   sendMesh(text: string): Promise<boolean>
@@ -44,6 +46,7 @@ type Running = {
   identity: ReturnType<typeof createMeshIdentity>
   session: ReturnType<typeof createMeshSession>
   name: string
+  managed: boolean
 }
 
 export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = Nearby): NearbyRuntime {
@@ -59,7 +62,9 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
     if (!closed) ports.snapshot(state)
   }
 
-  function announce() { return run?.identity.announce(undefined, state.sharing) }
+  function canServeGateway() { return state.sharing && (ports.canBridge?.() ?? true) }
+
+  function announce() { return run?.identity.announce(undefined, canServeGateway()) }
 
   function multicast(packet: MeshPacket, except?: string) {
     return Promise.all(radio.links.filter(link => link.id !== except).map(link => sendOnLink(transport, link, packet)))
@@ -67,7 +72,7 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
   }
 
   function flushDeposits(current: Running, only?: string) {
-    if (closed || run !== current || !state.sharing) return
+    if (closed || run !== current || !canServeGateway()) return
     let started = 0
     for (const deposit of deposits.values()) {
       if (deposit.running || (only && only !== deposit.event.id)) continue
@@ -98,7 +103,7 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
         if (packet.ttl >= 2 && policy.acceptTransit(carrier, sender)) void multicast({ ...packet, ttl: packet.ttl - 1 }, ingress)
         return
       }
-      const accepted = policy.acceptUplink(carrier, sender, state.sharing)
+      const accepted = policy.acceptUplink(carrier, sender, canServeGateway())
       if (!accepted) return
       if (deposits.size >= 20 || Array.from(deposits.values()).filter(d => d.sender === sender).length >= 5) return
       const deposit = { event: accepted, geohash: carrier.geohash, sender, tries: 0, running: false }
@@ -127,7 +132,8 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
         publish({ active: false, sharing: false, localId: null, links: 0, error: incoming.error })
         return
       }
-      publish({ active: true, links: radio.links.length, error: incoming.error })
+      if (!run) return
+      publish({ active: true, sharing: !!run && (run.managed || state.sharing), links: radio.links.length, error: incoming.error })
       const added = radio.links.filter(link => !previous.links.some(prior => prior.id === link.id))
       const intro = added.length ? announce() : null
       if (intro) for (const link of added) void sendOnLink(transport, link, intro)
@@ -156,31 +162,57 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
     if (packet && radio.links.length) void multicast(packet)
   }, 15_000)
 
+  async function start(nickname: string, { managed = false, requestPermission = true } = {}) {
+    if (closed || state.working || radio.active || !state.supported) return
+    publish({ working: true, error: undefined, ...(managed ? {} : { messages: [] }) })
+    const name = cleanNickname(nickname)
+    const identity = createMeshIdentity(name)
+    const current = { name, identity, session: createMeshSession(identity.id), managed }
+    run = current
+    publish({ localId: identity.id })
+    try {
+      await transport.start({ requestPermission })
+      // Android orders cancellation in the native plugin, including pending permissions.
+      // A delayed start from an obsolete runtime must not stop a newer Android runtime.
+      if (!managed && (closed || run !== current)) await transport.stop()
+    } catch (error) {
+      if (run === current) {
+        current.identity.erase()
+        run = null
+        publish({ localId: null, error: error instanceof Error ? error.message : 'Bluetooth could not start.' })
+      }
+    } finally { publish({ working: false }) }
+  }
+
+  let probing = false
   return {
-    async start(nickname) {
-      if (closed || state.working || radio.active || !state.supported) return
-      publish({ working: true, error: undefined, messages: [] })
-      const name = cleanNickname(nickname)
-      const identity = createMeshIdentity(name)
-      const current = { name, identity, session: createMeshSession(identity.id) }
-      run = current
-      publish({ localId: identity.id })
-      try { await transport.start(); if (closed || run !== current) await transport.stop() }
-      catch (error) {
-        if (run === current) {
-          current.identity.erase()
-          run = null
-          publish({ localId: null, error: error instanceof Error ? error.message : 'Bluetooth could not start.' })
+    start,
+    async resume(nickname, enabled) {
+      if (probing || closed || state.working || radio.active || !enabled()) return
+      probing = true
+      try {
+        const caps = await transport.capabilities()
+        if (closed || state.working || radio.active || !enabled()) return
+        if (state.supported !== caps.supported || state.error !== caps.error) {
+          publish({ supported: caps.supported, error: caps.error })
         }
-      } finally { publish({ working: false }) }
+        if (caps.ready) await start(nickname, { managed: true, requestPermission: false })
+      } catch { /* Native bridge may not be ready yet; recheck on the next foreground tick. */ }
+      finally { probing = false }
     },
     async stop() {
+      run?.identity.erase()
+      run?.session.clear()
+      run = null
+      deposits.clear()
+      policy.reset()
+      publish({ active: false, sharing: false, links: 0, localId: null, error: undefined })
       try { await transport.stop() } catch {
         publish({ error: 'Could not stop Bluetooth.' })
       }
     },
     share(enabled) {
-      if (!radio.active || !run) return
+      if (!radio.active || !run || run.managed) return
       if (!enabled) deposits.clear()
       publish({ sharing: enabled })
       const packet = announce()
@@ -214,7 +246,7 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
     },
     relayEvent(event, geohash) {
       if (!run || !radio.active || !radio.links.length || !isGatewayGeohash(geohash)) return
-      const carrier = policy.relayPacket(event, geohash, state.sharing)
+      const carrier = policy.relayPacket(event, geohash, canServeGateway())
       const packet = carrier ? run.identity.carrier(carrier) : null
       if (packet) void multicast(packet)
     },

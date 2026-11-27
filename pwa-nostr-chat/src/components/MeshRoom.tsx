@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { ArrowLeft, ArrowUp, Bluetooth, Globe, Users, X } from 'lucide-react'
+import { ArrowLeft, ArrowUp, Bluetooth, Globe, Hash, Users, X } from 'lucide-react'
+import { isNativeAndroidBuild } from '../lib/appPlatform.ts'
 import { useBackHandler } from '../hooks/useBackNavigation.ts'
 import type { NearbyController } from '../hooks/useNearbyRuntime.ts'
 import type { NearbyPeer } from '../lib/nearby/nearbyRuntime.ts'
@@ -14,12 +15,14 @@ const noop = () => {}
 const noBlob = async () => ''
 const peerAvatar = (id: string) => id.repeat(4)
 
-export default function MeshRoom({ nearby, nickname, geohash, onGeo, onGlobe, mobile }: {
+export default function MeshRoom({ nearby, nickname, geohash, onGeo, onGlobe, onOpenChannels, onOpenSettings, mobile }: {
   nearby: NearbyController
   nickname: string
   geohash: string
   onGeo: () => void
   onGlobe: () => void
+  onOpenChannels?: () => void
+  onOpenSettings: () => void
   mobile: boolean
 }) {
   const { state, api } = nearby
@@ -80,7 +83,9 @@ export default function MeshRoom({ nearby, nickname, geohash, onGeo, onGlobe, mo
               <ArrowLeft size={15} /><Globe size={15} /><span>Globe</span>
             </button>
             <div className="ag-header-identity">
-              <div className="ag-header-avatar bitchat"><Bluetooth size={17} /></div>
+              {onOpenChannels ? (
+                <button type="button" className="ag-header-avatar bitchat ag-mesh-drawer-button" onClick={onOpenChannels} aria-label="Open Bitchat channels"><Hash size={17} /></button>
+              ) : <div className="ag-header-avatar bitchat">{isNativeAndroidBuild ? <Hash size={17} /> : <Bluetooth size={17} />}</div>}
               <div className="ag-header-text">
                 <div className="ag-header-title-row"><span className="ag-header-title">Mesh</span></div>
                 <div className="ag-header-sub">{state.active ? 'Nearby Bluetooth · Public' : 'Nearby Bluetooth is off'}</div>
@@ -94,7 +99,7 @@ export default function MeshRoom({ nearby, nickname, geohash, onGeo, onGlobe, mo
           </div>
         </div>
       </header>
-      <div className="ag-mesh-control">
+      {!isNativeAndroidBuild && <div className="ag-mesh-control">
         <button className="ag-btn ag-btn-secondary" disabled={!state.supported || state.working} onClick={() => {
           setError('')
           setConfirmingShare(false)
@@ -117,15 +122,15 @@ export default function MeshRoom({ nearby, nickname, geohash, onGeo, onGlobe, mo
         {state.active && state.peers.some(peer => peer.gateway) && isGatewayGeohash(geohash) && (
           <button className="ag-btn ag-btn-secondary" onClick={onGeo}>Open {formatBitchatChannelLabel(geohash)} via gateway</button>
         )}
-      </div>
-      {confirmingShare && state.active && !state.sharing && (
+      </div>}
+      {!isNativeAndroidBuild && confirmingShare && state.active && !state.sharing && (
         <div className="ag-mesh-notice">
           Nearby devices can send signed public geohash messages to Nostr through you. Live replies from the geohash room you’re viewing can travel back. Messages in this Mesh room stay on Bluetooth.
           <button className="ag-btn ag-btn-primary" onClick={() => { api()?.share(true); setConfirmingShare(false) }}>Share this session</button>
           <button className="ag-btn ag-btn-secondary" onClick={() => setConfirmingShare(false)}>Cancel</button>
         </div>
       )}
-      {state.active && state.sharing && (
+      {!isNativeAndroidBuild && state.active && state.sharing && (
         <p className="ag-mesh-notice" role="status">{isGatewayGeohash(geohash)
           ? `Sharing this session · Return channel: ${formatBitchatChannelLabel(geohash)}`
           : 'Sharing this session · Open an Earth geohash room to carry its replies back.'}</p>
@@ -138,8 +143,14 @@ export default function MeshRoom({ nearby, nickname, geohash, onGeo, onGlobe, mo
           }}>
             <div className="ag-stream-inner">
               {!state.messages.length && <div className="ag-empty-stage">
-                <Bluetooth size={29} /><h2>Mesh</h2>
-                <p>{state.active ? 'Messages shared over nearby Bluetooth appear here.' : 'Start Bluetooth to talk to Bitchat peers without internet.'}</p>
+                {isNativeAndroidBuild ? <Hash size={29} /> : <Bluetooth size={29} />}<h2>Mesh</h2>
+                <p>{state.active ? 'Messages shared over nearby Bluetooth appear here.'
+                  : isNativeAndroidBuild
+                    ? nearby.enabled ? 'Waiting for Bluetooth to come online.' : 'Turn on Bluetooth Mesh in Settings to chat with nearby peers.'
+                    : 'Start Bluetooth to talk to Bitchat peers without internet.'}</p>
+                {isNativeAndroidBuild && !state.active && (
+                  <button type="button" className="ag-btn ag-btn-secondary" onClick={onOpenSettings}>Open Settings</button>
+                )}
               </div>}
               {state.messages.map((m, idx) => (
                 <MessageItem key={m.id}

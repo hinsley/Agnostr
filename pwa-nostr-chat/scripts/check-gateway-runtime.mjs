@@ -78,3 +78,50 @@ test('two radio nodes: opt-in geohash uplink, no relay echo, verified downlink, 
     assert.equal(offline.hasGateway(), false)
   } finally { offline.close(); online.close() }
 })
+
+test('Android device switch starts Mesh plus gateway, does not advertise while offline, and resumes without prompting', async () => {
+  const radios = radioPair(120)
+  const requests = []
+  const startRadio = radios.a.start
+  radios.a.start = async options => { requests.push(options.requestPermission); return startRadio.call(radios.a) }
+  let ready = false, hasInternet = false, enabled = true
+  radios.a.capabilities = async () => ({ supported: true, ready, error: ready ? undefined : 'Radio off' })
+  let snapshot
+  const android = makeNearbyRuntime({
+    selectedGeohash: () => 'djuq', canBridge: () => hasInternet,
+    snapshot: value => { snapshot = value }, publish: async () => true, receive() {},
+  }, radios.a)
+  const peer = makeNearbyRuntime({
+    selectedGeohash: () => 'djuq', snapshot() {}, publish: async () => false, receive() {},
+  }, radios.b)
+  try {
+    await flush()
+    await android.resume('Android', () => enabled)
+    assert.deepEqual(requests, [])
+    assert.equal(snapshot.error, 'Radio off')
+    ready = true
+    await android.start('Android', { managed: true, requestPermission: true })
+    await peer.start('Peer')
+    radios.connect()
+    await flush()
+    assert.equal(snapshot.active, true)
+    assert.equal(snapshot.sharing, true)
+    assert.equal(peer.hasGateway(), false, 'An offline phone must not advertise as a gateway')
+    hasInternet = true
+    await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(await android.sendMesh('still local'), true)
+    await flush()
+    assert.equal(peer.hasGateway(), true)
+    await android.stop()
+    assert.equal(snapshot.active, false)
+    assert.equal(snapshot.sharing, false)
+    enabled = false
+    await android.resume('Android', () => enabled)
+    assert.deepEqual(requests, [true])
+    enabled = true
+    await android.resume('Android', () => enabled)
+    assert.deepEqual(requests, [true, false])
+    assert.equal(snapshot.active, true)
+    assert.equal(snapshot.sharing, true)
+  } finally { android.close(); peer.close() }
+})
