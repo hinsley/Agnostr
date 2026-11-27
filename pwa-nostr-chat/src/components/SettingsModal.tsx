@@ -1,3 +1,4 @@
+import { isNativeAndroidBuild } from '../lib/appPlatform.ts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
@@ -3079,7 +3080,7 @@ export function SettingsModal({
 
             {!notif.isPushSupported && (
               <p className="ag-field-hint ag-field-hint-warn">
-                Web Push (PushManager) is unavailable in this browser context.
+                {isNativeAndroidBuild ? 'Background push is not available in this Android build.' : 'Web Push (PushManager) is unavailable in this browser context.'}
               </p>
             )}
 
@@ -4669,7 +4670,7 @@ export function SettingsModal({
       {/* 1. App & Updates (FIRST) */}
       <SettingsSection
         title="App & Updates"
-        description="Install as a standalone app and keep offline support up to date."
+        description={isNativeAndroidBuild ? 'Installed from an Android APK.' : 'Install as a standalone app and keep offline support up to date.'}
         badge={
           <span
             className={`ag-badge ${
@@ -4684,7 +4685,9 @@ export function SettingsModal({
           </span>
         }
       >
-        <div className="ag-set-pwa-box">
+        {isNativeAndroidBuild ? (
+          <p className="ag-field-hint">Install a newer signed APK to update this build.</p>
+        ) : <div className="ag-set-pwa-box">
           <div className="ag-set-pwa-status">
             <span
               className={`ag-led ${
@@ -4756,6 +4759,7 @@ export function SettingsModal({
             )}
           </div>
         </div>
+      }
       </SettingsSection>
 
       {/* 2. Nostr Relays */}

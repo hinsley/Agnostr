@@ -22,3 +22,10 @@ dist-ssr/
 *.njsproj
 *.sln
 *.sw?
+
+# Capacitor builds and private signing inputs
+dist-android/
+dist-apk/
+*.jks
+*.keystore
+*.p12

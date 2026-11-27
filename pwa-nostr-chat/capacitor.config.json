@@ -1,0 +1,9 @@
+{
+  "appId": "com.agnostr.app",
+  "appName": "Agnostr",
+  "webDir": "dist-android",
+  "server": {
+    "hostname": "localhost",
+    "androidScheme": "https"
+  }
+}

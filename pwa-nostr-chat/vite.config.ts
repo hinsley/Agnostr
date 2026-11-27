@@ -8,7 +8,7 @@ const mathjaxPkg = require('mathjax-full/package.json') as { version: string }
 const mathjaxVersion = mathjaxPkg.version
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   base: '/',
   define: {
     PACKAGE_VERSION: JSON.stringify(mathjaxVersion),
@@ -21,6 +21,7 @@ export default defineConfig({
     },
   },
   build: {
+    outDir: mode === 'android' ? 'dist-android' : 'dist',
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -92,6 +93,7 @@ export default defineConfig({
     },
     react(),
     VitePWA({
+      disable: mode === 'android',
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
@@ -204,4 +206,4 @@ export default defineConfig({
       },
     }),
   ],
-})
+}))

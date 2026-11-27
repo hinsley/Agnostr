@@ -1,3 +1,4 @@
+import { isNativeAndroidBuild } from './appPlatform.ts'
 import type { NotificationEngine } from '../types/notifications.ts'
 
 type NotificationOptionState = Pick<
@@ -7,6 +8,7 @@ type NotificationOptionState = Pick<
 
 /** A discoverability cue only: nothing here requests permission or changes preferences. */
 export function shouldOfferNotificationOptions(state: NotificationOptionState): boolean {
+  if (isNativeAndroidBuild) return false
   const { settings, pushStatus } = state
   // The live connection is authoritative. A separate permission value can
   // briefly lag behind it, and optional alert preferences aren't setup.

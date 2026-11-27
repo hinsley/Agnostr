@@ -1,3 +1,4 @@
+import { getShareBaseHref } from './appPlatform.ts'
 import { nip19 } from 'nostr-tools'
 import { extractCashuTokenString } from './cashuWallet.ts'
 import { decodePubkeyInput, encodeNpubSafe } from './identity.ts'
@@ -48,15 +49,6 @@ export type ParsedShareTarget =
   | ParsedLightningShareTarget
   | ParsedAgoraNoteShareTarget
   | ParsedAgoraProfileShareTarget
-
-const FALLBACK_BASE_HREF = 'https://agnostr.com/'
-
-function getAppBaseHref(): string {
-  if (typeof window !== 'undefined' && window.location) {
-    return `${window.location.origin}${window.location.pathname}`
-  }
-  return FALLBACK_BASE_HREF
-}
 
 function sanitizeNickname(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined
@@ -297,7 +289,7 @@ export function buildAgoraNoteShareUrl(
   const decodedExisting = decodeAgoraNoteOnly(noteId)
   const cleanId = decodedExisting?.noteId ?? normalizeHex64(noteId)
   if (!cleanId) {
-    return `${getAppBaseHref()}#agora=${encodeURIComponent(noteId.trim())}`
+    return `${getShareBaseHref()}#agora=${encodeURIComponent(noteId.trim())}`
   }
   const cleanAuthor =
     (authorPubkey ? decodeDmIdentifier(authorPubkey) : null) ??
@@ -309,7 +301,7 @@ export function buildAgoraNoteShareUrl(
     ...(cleanAuthor ? { author: cleanAuthor } : {}),
     ...(cleanRelays && cleanRelays.length > 0 ? { relays: cleanRelays } : {}),
   })
-  return `${getAppBaseHref()}#agora=${nevent}`
+  return `${getShareBaseHref()}#agora=${nevent}`
 }
 
 /**
@@ -319,7 +311,7 @@ export function buildAgoraNoteShareUrl(
 export function buildAgoraProfileShareUrl(pubkey: string): string {
   const hex = decodeDmIdentifier(pubkey)
   const npub = hex ? nip19.npubEncode(hex) : encodeNpubSafe(pubkey.trim())
-  return `${getAppBaseHref()}#agora=${npub}`
+  return `${getShareBaseHref()}#agora=${npub}`
 }
 
 /**
@@ -378,7 +370,7 @@ export function buildDmShareUrl(pubkey: string, nickname?: string): string {
   const npub = hex ? nip19.npubEncode(hex) : encodeNpubSafe(pubkey.trim())
   const cleanNick = sanitizeNickname(nickname)
   const suffix = cleanNick ? `&name=${encodeURIComponent(cleanNick)}` : ''
-  return `${getAppBaseHref()}#dm=${npub}${suffix}`
+  return `${getShareBaseHref()}#dm=${npub}${suffix}`
 }
 
 /**
@@ -396,7 +388,7 @@ export function buildServerInviteShareUrl(inviteCode: string): string {
       code = trimmed.slice(hashIdx + '#invite='.length).split('&')[0] || trimmed
     }
   }
-  return `${getAppBaseHref()}#invite=${encodeURIComponent(code)}`
+  return `${getShareBaseHref()}#invite=${encodeURIComponent(code)}`
 }
 
 /**

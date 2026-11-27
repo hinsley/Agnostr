@@ -1,3 +1,4 @@
+import { getShareBaseHref } from './appPlatform.ts'
 import { isValidGeohash, normalizeGeohash, resolveGeohashOrCity } from './geohash.ts'
 import { getBodyDef, isGeohashableBodyId, type GeohashableBodyId } from './solarSystem.ts'
 
@@ -261,7 +262,7 @@ export function parseBitchatChannelHash(rawHash: string): string | null {
 export function buildBitchatChannelShareUrl(key: string): string {
   const hash = formatBitchatChannelHash(key)
   if (typeof window === 'undefined') return hash
-  return `${window.location.origin}${window.location.pathname}${hash}`
+  return `${getShareBaseHref()}${hash}`
 }
 
 export interface QuickTuneResolution {

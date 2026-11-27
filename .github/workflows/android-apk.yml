@@ -1,0 +1,41 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'pwa-nostr-chat/**'
+      - '.github/workflows/android-apk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  debug-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pwa-nostr-chat
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: pwa-nostr-chat/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - run: npm ci
+      - run: npm run android:apk -- debug
+        env:
+          VITE_LINK_PREVIEW_URL: ${{ vars.VITE_LINK_PREVIEW_URL }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Agnostr-Android-debug
+          path: |
+            pwa-nostr-chat/dist-apk/*.apk
+            pwa-nostr-chat/dist-apk/*.sha256
+          if-no-files-found: error

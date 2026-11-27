@@ -14,3 +14,9 @@ at once. This cache does not fetch older messages from relays, does not include
 DMs or group chats, and does not sync between devices. Oversized events stay in
 the recent cache only; available history depends on what the client saw and
 what the browser has retained. To clear a room's saved history, use `/clear`.
+
+## Android APK
+
+Agnostr can also run as a locally bundled Capacitor Android app. See the
+[Android build and signing guide](pwa-nostr-chat/docs/android.md) for the
+toolchain, CI artifact, and release APK commands.

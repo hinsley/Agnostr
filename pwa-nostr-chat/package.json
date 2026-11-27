@@ -20,9 +20,13 @@
     "test:poker": "node --experimental-strip-types --test scripts/check-poker-governance.mjs",
     "test:notification-shortcut": "node --experimental-strip-types --test scripts/check-notification-shortcut.mjs",
     "test:inline-chat-image": "node --experimental-strip-types --test scripts/check-inline-chat-image.mjs",
-    "test:inline-chat-voice": "node --experimental-strip-types --test scripts/check-inline-chat-voice.mjs"
+    "test:inline-chat-voice": "node --experimental-strip-types --test scripts/check-inline-chat-voice.mjs",
+    "build:android-web": "tsc -b && vite build --mode android",
+    "android:apk": "bash scripts/build-android-apk.sh"
   },
   "dependencies": {
+    "@capacitor/android": "8.6.3",
+    "@capacitor/core": "8.6.3",
     "@cashu/cashu-ts": "^4.13.1",
     "@huggingface/transformers": "^4.3.2",
     "@types/three": "^0.187.0",
@@ -38,6 +42,7 @@
     "three": "^0.187.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.6.3",
     "@eslint/js": "^9.33.0",
     "@types/node": "^24.3.0",
     "@types/qrcode": "^1.5.6",

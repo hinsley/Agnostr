@@ -1,3 +1,4 @@
+import { getShareBaseHref } from './appPlatform.ts'
 import { sha256 } from '@noble/hashes/sha256'
 import { nip19, type Event as NostrEvent, type EventTemplate } from 'nostr-tools'
 import type { ImageAttachment, ReplyReference, VoiceMemoAttachment } from '../types/protocol.ts'
@@ -558,10 +559,7 @@ export function encodeServerInvite(
 
   const encoded = base64UrlEncode(utf8Encoder.encode(JSON.stringify(payload)))
   const code = `${INVITE_CODE_PREFIX}${encoded}`
-  const baseHref =
-    typeof window !== 'undefined'
-      ? `${window.location.origin}${window.location.pathname}`
-      : 'https://agnostr.com/'
+  const baseHref = getShareBaseHref()
   return {
     code,
     url: `${baseHref}#invite=${code}`,

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { isNativeAndroidBuild } from '../lib/appPlatform.ts'
 
 export type InstallPromptOutcome = 'accepted' | 'dismissed' | 'unavailable'
 
@@ -48,6 +49,7 @@ let lastAutoCheckAt = 0
 const storeListeners = new Set<() => void>()
 
 function detectInstalled(): boolean {
+  if (isNativeAndroidBuild) return true
   if (typeof window === 'undefined') return false
   const nav = navigator as NavigatorPwaExtensions
   if (nav.standalone === true) return true
@@ -78,7 +80,7 @@ let storeState: PwaStoreSnapshot = {
   isInstalled: detectInstalled(),
   swReady: typeof navigator !== 'undefined' && 'serviceWorker' in navigator && Boolean(navigator.serviceWorker.controller),
   offlineReady:
-    typeof navigator !== 'undefined' && 'serviceWorker' in navigator && Boolean(navigator.serviceWorker.controller),
+    isNativeAndroidBuild || typeof navigator !== 'undefined' && 'serviceWorker' in navigator && Boolean(navigator.serviceWorker.controller),
   updateAvailable: false,
 }
 
@@ -103,7 +105,7 @@ function patchStore(partial: Partial<PwaStoreSnapshot>): void {
 }
 
 // Capture beforeinstallprompt & appinstalled as early as possible (even before React mounts)
-if (typeof window !== 'undefined') {
+if (!isNativeAndroidBuild && typeof window !== 'undefined') {
   window.addEventListener('beforeinstallprompt', (event: Event) => {
     event.preventDefault()
     deferredPrompt = event as BeforeInstallPromptEvent
@@ -117,6 +119,7 @@ if (typeof window !== 'undefined') {
 }
 
 async function resolveRegistration(): Promise<ServiceWorkerRegistration | null> {
+  if (isNativeAndroidBuild) return null
   if (swRegistration) return swRegistration
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return null
   try {
@@ -183,7 +186,7 @@ async function runSwUpdateCheck(): Promise<boolean> {
 }
 
 function ensureSwRegistered(): void {
-  if (swInitialized || typeof window === 'undefined') return
+  if (isNativeAndroidBuild || swInitialized || typeof window === 'undefined') return
   swInitialized = true
 
   if (!('serviceWorker' in navigator)) return
@@ -235,6 +238,7 @@ function ensureSwRegistered(): void {
 }
 
 export async function getPwaSwRegistration(): Promise<ServiceWorkerRegistration | null> {
+  if (isNativeAndroidBuild) return null
   const existing = await resolveRegistration()
   if (existing) return existing
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return null
@@ -299,10 +303,10 @@ export function usePwa(badgeCount?: number): PwaState {
       if (Date.now() - lastAutoCheckAt < VISIBILITY_CHECK_THROTTLE_MS) return
       void runSwUpdateCheck()
     }
-    document.addEventListener('visibilitychange', handleVisibilityChange)
+    if (!isNativeAndroidBuild) document.addEventListener('visibilitychange', handleVisibilityChange)
 
     // Periodic 30-min SW update check so installed PWAs stay fresh
-    const periodicTimer = window.setInterval(() => {
+    const periodicTimer = isNativeAndroidBuild ? undefined : window.setInterval(() => {
       if (document.visibilityState === 'visible' && navigator.onLine) {
         void runSwUpdateCheck()
       }

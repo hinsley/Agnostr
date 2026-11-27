@@ -8,6 +8,7 @@ import type {
   PushPokePayload,
 } from '../types/notifications.ts'
 import { getPwaSwRegistration } from '../hooks/usePwa.ts'
+import { isNativeAndroidBuild } from './appPlatform.ts'
 import { bytesToHex } from './identity.ts'
 import { normalizeBitchatChannelKey } from './bitchatChannel.ts'
 import { findDisplayedPush } from './pushDisplay.ts'
@@ -23,6 +24,7 @@ interface ExtendedNotificationOptions extends NotificationOptions {
 }
 
 export function getBrowserNotificationPermission(): NotificationPermissionState {
+  if (isNativeAndroidBuild) return 'unsupported'
   if (typeof window === 'undefined' || typeof Notification === 'undefined') {
     return 'unsupported'
   }
@@ -34,6 +36,7 @@ export function getBrowserNotificationPermission(): NotificationPermissionState 
 }
 
 export function isWebPushSupported(): boolean {
+  if (isNativeAndroidBuild) return false
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return false
   }
@@ -45,6 +48,7 @@ export function isWebPushSupported(): boolean {
 }
 
 export async function requestBrowserNotificationPermission(): Promise<NotificationPermissionState> {
+  if (isNativeAndroidBuild) return 'unsupported'
   if (typeof window === 'undefined' || typeof Notification === 'undefined') {
     return 'unsupported'
   }
