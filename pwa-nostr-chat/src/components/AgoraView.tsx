@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { InlineLinkCards } from './InlineLinkCards'
 import { collectPreviewLink } from '../../../link-preview/src/url'
-import type { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type { ChangeEvent, FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
@@ -11,9 +11,13 @@ import {
   BadgeCheck,
   Ban,
   Bell,
+  BellOff,
   Bookmark,
+  BookOpen,
   Camera,
   Check,
+  ChevronDown,
+  ChevronRight,
   Compass,
   Copy,
   Eye,
@@ -22,9 +26,9 @@ import {
   Globe,
   Hash,
   Heart,
-  ImagePlus,
   Landmark,
   Languages,
+  LayoutList,
   Link2,
   Loader2,
   Lock,
@@ -38,10 +42,12 @@ import {
   Quote,
   RefreshCw,
   Repeat2,
+  Rows3,
   Search,
   Share2,
   ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   Upload,
   User,
@@ -50,17 +56,19 @@ import {
   Zap,
 } from 'lucide-react'
 import type {
+  AgoraFeedFilter,
   AgoraFeedItem,
   AgoraFeedTab,
+  AgoraGroupedNotification,
   AgoraMediaItem,
   AgoraNote,
-  AgoraNotification,
+  AgoraNotificationFilter,
   AgoraProfile,
   AgoraProfileDraft,
   AgoraProfileTab,
-  AgoraUploadedMedia,
+  AgoraReplyTreeNode,
 } from '../types/agora.ts'
-import type { AgnostrEngine } from '../types/protocol.ts'
+import type { AgnostrEngine, ImageAttachment } from '../types/protocol.ts'
 import {
   TRANSLATION_LANGUAGE_OPTIONS,
   TRANSLATOR_MODELS,
@@ -75,6 +83,11 @@ import {
   sanitizeHttpUrl,
   tokenizeAgoraContent,
 } from '../lib/agoraProtocol.ts'
+import {
+  buildThreadedReplyTree,
+  groupAgoraNotifications,
+  parseRichContentBlocks,
+} from '../lib/agoraExtras.ts'
 import { encodeNpubSafe } from '../lib/identity.ts'
 import { isNonTranslatableText } from '../lib/languageDetect.ts'
 import {
@@ -87,6 +100,11 @@ import { useMobileSwipeDrawers } from '../hooks/useMobileSwipeDrawers.ts'
 import { identiconDataUrl, shortPubkey } from '../utils/identicon.ts'
 import type { SoundCue } from '../utils/sound.ts'
 import type { LightboxImagePayload } from './ImageLightboxModal.tsx'
+import { AgoraComposer } from './AgoraComposer.tsx'
+import { AgoraProfileHoverCard } from './AgoraProfileHoverCard.tsx'
+import { AgoraArticleCard, AgoraArticleModal } from './AgoraArticleModal.tsx'
+import { AgoraCurationModal } from './AgoraCurationModal.tsx'
+import { AgoraPollCard } from './AgoraPollCard.tsx'
 import {
   requestUntrustedLinkOpen,
   tryOpenInternalAgoraLink,
@@ -119,9 +137,29 @@ const FEED_NAV_ITEMS: ReadonlyArray<{
   { id: 'following', label: 'Following', mobileLabel: 'Following', icon: Users },
   { id: 'global', label: 'Global', mobileLabel: 'Global', icon: Globe },
   { id: 'trending', label: 'Trending', mobileLabel: 'Trending', icon: Flame },
+  { id: 'articles', label: 'Articles', mobileLabel: 'Articles', icon: BookOpen },
   { id: 'bookmarks', label: 'Bookmarks', mobileLabel: 'Saved', icon: Bookmark },
   { id: 'notifications', label: 'Notifications', mobileLabel: 'Alerts', icon: Bell },
 ]
+
+const FEED_FILTER_OPTIONS: ReadonlyArray<{ id: AgoraFeedFilter; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'no-reposts', label: 'No Reposts' },
+  { id: 'media', label: 'Media' },
+  { id: 'trusted', label: 'Trusted Only' },
+]
+
+const NOTIFICATION_FILTER_OPTIONS: ReadonlyArray<{
+  id: AgoraNotificationFilter
+  label: string
+}> = [
+  { id: 'all', label: 'All' },
+  { id: 'replies', label: 'Replies & Mentions' },
+  { id: 'zaps', label: 'Zaps' },
+  { id: 'reactions', label: 'Reactions' },
+]
+
+const QUICK_ZAP_PRESETS: readonly number[] = [21, 100, 500]
 
 const PROFILE_TABS: ReadonlyArray<{ id: AgoraProfileTab; label: string }> = [
   { id: 'posts', label: 'Posts' },
@@ -335,11 +373,13 @@ interface AgoraScreenedImageProps {
   senderPubkey: string
   variant: 'media' | 'quote' | 'banner' | 'avatar' | 'thumb' | 'upload'
   alt?: string
+  hasAltText?: boolean
   className?: string
   avatarSize?: 'xs' | 'sm' | 'md' | 'lg'
   avatarFallbackPubkey?: string
   caption?: string
   allowReveal?: boolean
+  onResolvedBlobUrl?: (blobUrl: string) => void
   onOpenLightbox?: (verifiedBlobUrl: string) => void
 }
 
@@ -349,11 +389,13 @@ const AgoraScreenedImage: React.FC<AgoraScreenedImageProps> = ({
   senderPubkey,
   variant,
   alt = '',
+  hasAltText = false,
   className,
   avatarSize = 'md',
   avatarFallbackPubkey,
   caption,
   allowReveal = true,
+  onResolvedBlobUrl,
   onOpenLightbox,
 }) => {
   const { contentFilter } = engine
@@ -373,6 +415,13 @@ const AgoraScreenedImage: React.FC<AgoraScreenedImageProps> = ({
   const safeBlobUrl =
     cacheKey && verdict?.status === 'safe' ? contentFilter.getSafeImageObjectUrl(cacheKey) : null
   const revealedUrl = revealedState && revealedState.key === cacheKey ? revealedState.url : null
+  const activeVerifiedBlobUrl = safeBlobUrl ?? revealedUrl
+
+  useEffect(() => {
+    if (activeVerifiedBlobUrl && onResolvedBlobUrl) {
+      onResolvedBlobUrl(activeVerifiedBlobUrl)
+    }
+  }, [activeVerifiedBlobUrl, onResolvedBlobUrl])
   const isIllegal = Boolean(verdict?.categories.includes('illegal'))
   const isNsfw = Boolean(verdict?.categories.includes('nsfw'))
 
@@ -493,6 +542,11 @@ const AgoraScreenedImage: React.FC<AgoraScreenedImageProps> = ({
           aria-label={alt || 'Open image preview'}
         >
           <img src={safeBlobUrl} alt={alt || 'Attached image'} className={className} />
+          {hasAltText && alt && (
+            <span className="ag-agora-media-alt-badge" title={alt} aria-hidden="true">
+              ALT
+            </span>
+          )}
         </button>
       )
     }
@@ -515,6 +569,11 @@ const AgoraScreenedImage: React.FC<AgoraScreenedImageProps> = ({
           >
             <img src={revealedUrl} alt={alt || 'Revealed image'} className={className} />
           </button>
+          {hasAltText && alt && (
+            <span className="ag-agora-media-alt-badge" title={alt} aria-hidden="true">
+              ALT
+            </span>
+          )}
           <button
             type="button"
             className="ag-agora-shield-hide-btn"
@@ -947,283 +1006,165 @@ const AgoraAvatar: React.FC<{
 }
 
 /* --------------------------------------------------------------------------
-   Reusable Composer (Inline Quick Post, Thread Reply, Modal Post/Reply/Quote)
+   Real NIP-05 Verification Badge (Lazy DNS/HTTPS verified; emerald only when verified)
    -------------------------------------------------------------------------- */
-interface AgoraComposerBoxProps {
+const AgoraNip05Badge: React.FC<{
   engine: AgnostrEngine
-  placeholder: string
-  submitLabel: string
-  replyTarget?: AgoraNote
-  quoteTarget?: AgoraNote
-  inModal?: boolean
-  autoFocus?: boolean
-  onSubmitted?: () => void
-  onPlaySound?: (cue: SoundCue) => void
-}
-
-const AgoraComposerBox: React.FC<AgoraComposerBoxProps> = ({
-  engine,
-  placeholder,
-  submitLabel,
-  replyTarget,
-  quoteTarget,
-  inModal = false,
-  autoFocus = false,
-  onSubmitted,
-  onPlaySound,
-}) => {
+  pubkey: string
+  rawNip05?: string
+  fullWidth?: boolean
+  iconSize?: number
+}> = ({ engine, pubkey, rawNip05, fullWidth = false, iconSize = 12 }) => {
   const { agora } = engine
-  const [draft, setDraft] = useState('')
-  const [uploads, setUploads] = useState<AgoraUploadedMedia[]>([])
-  const [cwEnabled, setCwEnabled] = useState(false)
-  const [cwReason, setCwReason] = useState('')
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const display = formatNip05Display(rawNip05)
 
   useEffect(() => {
-    if (autoFocus) {
-      window.setTimeout(() => textareaRef.current?.focus(), 40)
+    if (rawNip05 && pubkey) {
+      agora.ensureNip05Verified(pubkey, rawNip05)
     }
-  }, [autoFocus])
+  }, [agora, pubkey, rawNip05])
 
-  const resizeTextarea = useCallback((el: HTMLTextAreaElement | null) => {
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(220, Math.max(60, el.scrollHeight))}px`
-  }, [])
+  if (!display) return null
+  const pkLower = pubkey.toLowerCase()
+  const status =
+    agora.nip05StatusByPubkey[pkLower] ?? agora.nip05StatusByPubkey[pubkey] ?? 'unverified'
 
-  const handleFilesSelected = async (e: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? [])
-    e.target.value = ''
-    if (files.length === 0) return
+  if (status === 'invalid') return null
 
-    const remaining = Math.max(0, 4 - uploads.length)
-    for (const file of files.slice(0, remaining)) {
-      try {
-        const uploaded = await agora.uploadMedia(file)
-        setUploads((prev) => [...prev, uploaded].slice(0, 4))
-      } catch (err) {
-        engine.pushToast(
-          'error',
-          'Upload failed',
-          err instanceof Error ? err.message : 'Unable to upload media to Blossom.'
-        )
-      }
-    }
-  }
-
-  const handleSubmit = async () => {
-    const trimmed = draft.trim()
-    if ((!trimmed && uploads.length === 0) || agora.publishing || agora.uploadingMedia) return
-
-    const opts = {
-      media: uploads.length > 0 ? uploads : undefined,
-      contentWarning: cwEnabled ? cwReason.trim() || 'Sensitive content' : undefined,
-    }
-
-    const res = replyTarget
-      ? await agora.replyToNote(replyTarget, trimmed, opts)
-      : quoteTarget
-        ? await agora.quoteNote(quoteTarget, trimmed, opts)
-        : await agora.publishNote(trimmed, opts)
-
-    if (res.ok) {
-      setDraft('')
-      setUploads([])
-      setCwEnabled(false)
-      setCwReason('')
-      if (textareaRef.current) {
-        textareaRef.current.style.height = '60px'
-      }
-      onPlaySound?.('send')
-      onSubmitted?.()
-    } else {
-      engine.pushToast('error', 'Could not publish note', res.error || 'Try again in a moment.')
-    }
-  }
-
-  const handleKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-      e.preventDefault()
-      void handleSubmit()
-    }
-  }
-
-  const replyAuthorName = replyTarget
-    ? getProfileDisplayName(agora.getProfile(replyTarget.pubkey), replyTarget.pubkey)
-    : null
-  const quoteAuthorProfile = quoteTarget ? agora.getProfile(quoteTarget.pubkey) : null
-  const quoteAuthorName = quoteTarget
-    ? getProfileDisplayName(quoteAuthorProfile, quoteTarget.pubkey)
-    : null
-
-  const canPost =
-    (draft.trim().length > 0 || uploads.length > 0) && !agora.publishing && !agora.uploadingMedia
-
+  const verified = status === 'verified'
   return (
-    <div className={`ag-agora-composer${inModal ? ' in-modal' : ''}`}>
-      <AgoraAvatar
-        engine={engine}
-        pubkey={agora.myPubkey}
-        picture={agora.myProfile?.picture}
-        size="md"
-        alt={getProfileDisplayName(agora.myProfile, agora.myPubkey)}
-      />
+    <span
+      className={`ag-agora-nip05${verified ? ' is-verified' : ' is-unverified'}`}
+      style={fullWidth ? { maxWidth: 'none' } : undefined}
+      title={verified ? `Verified NIP-05: ${display}` : display}
+    >
+      {verified && (
+        <BadgeCheck size={iconSize} className="ag-agora-nip05-badge" aria-hidden="true" />
+      )}
+      <span className="truncate">{display}</span>
+    </span>
+  )
+}
 
-      <div className="ag-agora-composer-main">
-        {replyAuthorName && (
-          <div className="ag-agora-composer-reply-ctx">
-            <span>Replying to</span>
-            <strong>@{replyAuthorName}</strong>
+/* --------------------------------------------------------------------------
+   Shimmer Loading Skeleton Card
+   -------------------------------------------------------------------------- */
+const AgoraSkeletonCard: React.FC = () => (
+  <div className="ag-agora-skeleton-card" aria-hidden="true">
+    <div className="ag-agora-skeleton-avatar" />
+    <div className="ag-agora-skeleton-main">
+      <div className="ag-agora-skeleton-line w-38" />
+      <div className="ag-agora-skeleton-line w-92" />
+      <div className="ag-agora-skeleton-line w-74" />
+      <div className="ag-agora-skeleton-actions">
+        <span className="ag-agora-skeleton-pill" />
+        <span className="ag-agora-skeleton-pill" />
+        <span className="ag-agora-skeleton-pill" />
+        <span className="ag-agora-skeleton-pill" />
+      </div>
+    </div>
+  </div>
+)
+
+/* --------------------------------------------------------------------------
+   Profile Following / Followers List Modal
+   -------------------------------------------------------------------------- */
+const AgoraSocialListModal: React.FC<{
+  engine: AgnostrEngine
+  title: string
+  pubkeys: readonly string[]
+  onOpenProfile: (pubkey: string) => void
+  onToggleFollow: (pubkey: string) => void
+  onClose: () => void
+}> = ({ engine, title, pubkeys, onOpenProfile, onToggleFollow, onClose }) => {
+  const { agora } = engine
+
+  useBackHandler(true, onClose)
+
+  useEffect(() => {
+    if (pubkeys.length > 0) {
+      agora.ensureProfiles(pubkeys.slice(0, 80))
+    }
+  }, [agora, pubkeys])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose])
+
+  const modal = (
+    <div
+      className="ag-agora-modal-backdrop"
+      role="presentation"
+      data-no-swipe="true"
+      onClick={onClose}
+    >
+      <div
+        className="ag-agora-modal ag-agora-social-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="ag-agora-modal-head">
+          <div className="ag-agora-social-modal-title-wrap">
+            <h3 className="ag-agora-modal-title">{title}</h3>
+            <span className="ag-badge ag-badge-muted mono tabular">{pubkeys.length}</span>
           </div>
-        )}
+          <button
+            type="button"
+            className="ag-agora-icon-btn"
+            onClick={onClose}
+            aria-label={`Close ${title}`}
+          >
+            <X size={17} />
+          </button>
+        </header>
 
-        <textarea
-          ref={textareaRef}
-          className="ag-agora-composer-textarea"
-          value={draft}
-          onChange={(e) => {
-            setDraft(e.target.value)
-            resizeTextarea(e.currentTarget)
-          }}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          rows={2}
-          aria-label={placeholder}
-        />
-
-        {cwEnabled && (
-          <div className="ag-agora-cw-row">
-            <ShieldAlert size={14} aria-hidden="true" />
-            <input
-              type="text"
-              className="ag-agora-cw-input"
-              value={cwReason}
-              onChange={(e) => setCwReason(e.target.value)}
-              placeholder="Content warning reason (optional)…"
-              maxLength={120}
-              aria-label="Content warning reason"
-            />
-            <button
-              type="button"
-              className="ag-agora-filter-clear"
-              onClick={() => {
-                setCwEnabled(false)
-                setCwReason('')
-              }}
-              aria-label="Remove content warning"
-            >
-              <X size={13} />
-            </button>
-          </div>
-        )}
-
-        {uploads.length > 0 && (
-          <div className="ag-agora-upload-grid">
-            {uploads.map((item) => (
-              <div key={item.url} className="ag-agora-upload-thumb">
-                {item.kind === 'video' ? (
-                  <video src={item.url} muted playsInline preload="metadata" />
-                ) : (
-                  <AgoraScreenedImage
-                    engine={engine}
-                    url={item.url}
-                    senderPubkey={agora.myPubkey}
-                    variant="upload"
-                    alt={item.alt || 'Uploaded media'}
-                  />
-                )}
-                <button
-                  type="button"
-                  className="ag-agora-upload-remove"
-                  onClick={() => setUploads((prev) => prev.filter((u) => u.url !== item.url))}
-                  aria-label="Remove attachment"
-                >
-                  <X size={12} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {quoteTarget && quoteAuthorName && (
-          <div className="ag-agora-quote-card" style={{ cursor: 'default' }}>
-            <div className="ag-agora-quote-head">
-              <AgoraAvatar
-                engine={engine}
-                pubkey={quoteTarget.pubkey}
-                picture={quoteAuthorProfile?.picture}
-                size="xs"
-              />
-              <span className="ag-agora-quote-author">{quoteAuthorName}</span>
-              <span className="ag-agora-dot-sep">·</span>
-              <span className="ag-agora-time tabular">
-                {formatRelativeSeconds(quoteTarget.createdAt)}
-              </span>
+        <div className="ag-agora-modal-body">
+          {pubkeys.length === 0 ? (
+            <div className="ag-agora-empty">
+              <Users size={20} />
+              <p className="ag-agora-empty-sub">No accounts found yet.</p>
             </div>
-            <div className="ag-agora-quote-body">{quoteTarget.content}</div>
-          </div>
-        )}
-
-        <div className="ag-agora-composer-bar">
-          <div className="ag-agora-composer-tools">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*,video/*"
-              multiple
-              style={{ display: 'none' }}
-              onChange={(e) => void handleFilesSelected(e)}
-            />
-            <button
-              type="button"
-              className="ag-agora-icon-btn"
-              disabled={agora.uploadingMedia || uploads.length >= 4}
-              onClick={() => fileInputRef.current?.click()}
-              title="Upload image or video via Blossom"
-              aria-label="Upload image or video"
-            >
-              {agora.uploadingMedia ? (
-                <Loader2 size={16} className="ag-agora-spin" />
-              ) : (
-                <ImagePlus size={16} />
-              )}
-            </button>
-
-            <button
-              type="button"
-              className={`ag-agora-icon-btn${cwEnabled ? ' active' : ''}`}
-              onClick={() => setCwEnabled((v) => !v)}
-              aria-pressed={cwEnabled}
-              title="Add NIP-36 content warning"
-              aria-label="Toggle content warning"
-            >
-              <ShieldAlert size={16} />
-            </button>
-          </div>
-
-          <div className="ag-agora-composer-right">
-            {draft.length > 0 && (
-              <span
-                className={`ag-agora-char-count tabular${draft.length > 2000 ? ' warn' : ''}`}
-              >
-                {draft.length.toLocaleString()}
-              </span>
-            )}
-            <button
-              type="button"
-              className="ag-agora-post-btn"
-              disabled={!canPost}
-              onClick={() => void handleSubmit()}
-            >
-              {agora.publishing ? <Loader2 size={13} className="ag-agora-spin" /> : null}
-              <span>{agora.publishing ? 'Posting…' : submitLabel}</span>
-            </button>
-          </div>
+          ) : (
+            <div className="ag-agora-voice-list">
+              {pubkeys.slice(0, 120).map((pk) => {
+                const prof: AgoraProfile = agora.getProfile(pk) ?? {
+                  pubkey: pk,
+                  npub: encodeNpubSafe(pk),
+                  updatedAt: 0,
+                }
+                return (
+                  <AgoraVoiceRow
+                    key={pk}
+                    engine={engine}
+                    profile={prof}
+                    isSelf={pk.toLowerCase() === agora.myPubkey.toLowerCase()}
+                    following={agora.isFollowing(pk)}
+                    onOpenProfile={(targetPk) => {
+                      onClose()
+                      onOpenProfile(targetPk)
+                    }}
+                    onToggleFollow={onToggleFollow}
+                  />
+                )
+              })}
+            </div>
+          )}
         </div>
       </div>
     </div>
   )
+
+  return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal
 }
 
 /* --------------------------------------------------------------------------
@@ -1552,10 +1493,13 @@ const AgoraQuotedNoteCard: React.FC<{
 interface AgoraNoteCardProps {
   note: AgoraNote
   repostedBy?: string
+  repostedByList?: string[]
   engine: AgnostrEngine
   focused?: boolean
   isAncestor?: boolean
   showThreadConnector?: boolean
+  kbdFocused?: boolean
+  kbdIndex?: number
   revealedCw: boolean
   onRevealCw: (noteId: string) => void
   translationScopeKey: string
@@ -1570,16 +1514,21 @@ interface AgoraNoteCardProps {
   onOpenAmailCompose?: (pubkey: string, nickname?: string) => void
   onOpenZap?: (target: ZapTarget) => void
   onOpenLightbox?: (payload: LightboxImagePayload) => void
+  onHoverAuthorStart?: (pubkey: string, el: HTMLElement) => void
+  onHoverAuthorEnd?: () => void
   onPlaySound?: (cue: SoundCue) => void
 }
 
 const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   note,
   repostedBy,
+  repostedByList,
   engine,
   focused = false,
   isAncestor = false,
   showThreadConnector = false,
+  kbdFocused = false,
+  kbdIndex,
   revealedCw,
   onRevealCw,
   translationScopeKey,
@@ -1594,11 +1543,17 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   onOpenAmailCompose,
   onOpenZap,
   onOpenLightbox,
+  onHoverAuthorStart,
+  onHoverAuthorEnd,
   onPlaySound,
 }) => {
   const { agora, translator } = engine
   const [menuOpen, setMenuOpen] = useState(false)
   const [repostMenuOpen, setRepostMenuOpen] = useState(false)
+  const [zapMenuOpen, setZapMenuOpen] = useState(false)
+  const [quickZappingSats, setQuickZappingSats] = useState<number | null>(null)
+  const [zapBurstActive, setZapBurstActive] = useState(false)
+  const [expandedLong, setExpandedLong] = useState(false)
   const [zapTooltip, setZapTooltip] = useState<{
     left: number
     top: number
@@ -1606,6 +1561,17 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   } | null>(null)
   const menuWrapRef = useRef<HTMLDivElement | null>(null)
   const repostWrapRef = useRef<HTMLDivElement | null>(null)
+  const zapWrapRef = useRef<HTMLDivElement | null>(null)
+  const verifiedBlobsRef = useRef<Map<string, string>>(new Map())
+  const zapBurstTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (zapBurstTimerRef.current !== null) {
+        window.clearTimeout(zapBurstTimerRef.current)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (!zapTooltip) return
@@ -1619,7 +1585,7 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   }, [zapTooltip])
 
   useEffect(() => {
-    if (!menuOpen && !repostMenuOpen) return
+    if (!menuOpen && !repostMenuOpen && !zapMenuOpen) return
     const onPointerDown = (e: PointerEvent) => {
       const target = e.target as Node | null
       if (menuOpen && menuWrapRef.current && target && !menuWrapRef.current.contains(target)) {
@@ -1633,11 +1599,15 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
       ) {
         setRepostMenuOpen(false)
       }
+      if (zapMenuOpen && zapWrapRef.current && target && !zapWrapRef.current.contains(target)) {
+        setZapMenuOpen(false)
+      }
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setMenuOpen(false)
         setRepostMenuOpen(false)
+        setZapMenuOpen(false)
       }
     }
     window.addEventListener('pointerdown', onPointerDown)
@@ -1646,18 +1616,28 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
       window.removeEventListener('pointerdown', onPointerDown)
       window.removeEventListener('keydown', onKey)
     }
-  }, [menuOpen, repostMenuOpen])
+  }, [menuOpen, repostMenuOpen, zapMenuOpen])
 
   const authorProfile = agora.getProfile(note.pubkey)
   const authorName = getProfileDisplayName(authorProfile, note.pubkey)
-  const nip05 = formatNip05Display(authorProfile?.nip05)
-  const reposterProfile = repostedBy ? agora.getProfile(repostedBy) : null
-  const reposterName = repostedBy ? getProfileDisplayName(reposterProfile, repostedBy) : null
+  const effectiveReposters = useMemo(() => {
+    if (repostedByList && repostedByList.length > 0) return repostedByList
+    return repostedBy ? [repostedBy] : []
+  }, [repostedBy, repostedByList])
+  const primaryReposterPk = effectiveReposters[0]
+  const reposterProfile = primaryReposterPk ? agora.getProfile(primaryReposterPk) : null
+  const reposterName = primaryReposterPk
+    ? getProfileDisplayName(reposterProfile, primaryReposterPk)
+    : null
+  const extraReposterCount = Math.max(0, effectiveReposters.length - 1)
 
   const stats = agora.getNoteStats(note.id)
   const isSelf = note.pubkey.toLowerCase() === agora.myPubkey.toLowerCase()
   const following = agora.isFollowing(note.pubkey)
   const bookmarked = agora.isBookmarked(note.id)
+  const threadRootId = note.rootId || note.id
+  const threadMuted = agora.isThreadMuted(threadRootId)
+  const inlinePoll = agora.pollsById[note.id]
 
   const originalTokens = useMemo(
     () => tokenizeAgoraContent(note.content, note.media),
@@ -1700,6 +1680,9 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   const showingOriginal = showOriginalKeys.has(origToggleKey)
   const useTranslatedBody = hasMeaningfulTranslation && !showingOriginal
 
+  const activeBodyText =
+    useTranslatedBody && translationEntry?.text ? translationEntry.text : note.content
+
   const displayTokens = useMemo(
     () =>
       useTranslatedBody && translationEntry?.text
@@ -1707,6 +1690,26 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
         : originalTokens,
     [note.media, originalTokens, translationEntry?.text, useTranslatedBody]
   )
+
+  const contentBlocks = useMemo(
+    () => parseRichContentBlocks(activeBodyText),
+    [activeBodyText]
+  )
+
+  const isLongNote = useMemo(() => {
+    if (focused) return false
+    if (activeBodyText.length > 560) return true
+    let lineBreaks = 0
+    for (let i = 0; i < activeBodyText.length; i += 1) {
+      if (activeBodyText.charCodeAt(i) === 10) {
+        lineBreaks += 1
+        if (lineBreaks >= 10) return true
+      }
+    }
+    return false
+  }, [activeBodyText, focused])
+
+  const isClamped = isLongNote && !expandedLong
 
   const translatedFromLabel = useMemo(
     () =>
@@ -1746,6 +1749,44 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
 
   const handleOpenMediaLightbox = (item: AgoraMediaItem, verifiedBlobUrl: string) => {
     if (!onOpenLightbox || item.kind !== 'image' || !verifiedBlobUrl) return
+    verifiedBlobsRef.current.set(item.url, verifiedBlobUrl)
+
+    const galleryEntries: Array<{
+      blobUrl: string
+      image: ImageAttachment
+      caption?: string
+    }> = []
+    let clickedIndex = 0
+
+    for (const m of mediaSlice) {
+      if (m.kind !== 'image') continue
+      const safeUrl = sanitizeHttpUrl(m.url)
+      const cacheKey =
+        safeUrl && isSafeHttpsUrl(safeUrl) ? makeAgoraImageCacheKey(note.pubkey, safeUrl) : ''
+      const resolvedBlob =
+        (m.url === item.url ? verifiedBlobUrl : null) ||
+        verifiedBlobsRef.current.get(m.url) ||
+        (cacheKey ? engine.contentFilter.getSafeImageObjectUrl(cacheKey) : null) ||
+        null
+      if (!resolvedBlob) continue
+      if (m.url === item.url) {
+        clickedIndex = galleryEntries.length
+      }
+      const dims = parseDimTuple(m.dim)
+      galleryEntries.push({
+        blobUrl: resolvedBlob,
+        image: {
+          url: m.url,
+          mime: m.mime || 'image/jpeg',
+          sha256: '',
+          size: 0,
+          width: dims.width,
+          height: dims.height,
+          alt: m.alt,
+        },
+      })
+    }
+
     const { width, height } = parseDimTuple(item.dim)
     onOpenLightbox({
       blobUrl: verifiedBlobUrl,
@@ -1759,18 +1800,181 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
         alt: item.alt,
       },
       senderDisplayHandle: authorName,
-      caption: item.alt || undefined,
+      gallery: galleryEntries.length > 1 ? galleryEntries : undefined,
+      initialIndex: galleryEntries.length > 1 ? clickedIndex : undefined,
     })
   }
 
+  const buildZapTarget = (): ZapTarget => ({
+    pubkey: note.pubkey,
+    nickname: authorName,
+    lud16: authorProfile?.lud16 ?? engine.zaps.getPeerLightningAddress(note.pubkey) ?? null,
+    eventId: note.id,
+    channelLabel: 'Agora',
+  })
+
   const handleZap = () => {
     onPlaySound?.('click')
-    onOpenZap?.({
-      pubkey: note.pubkey,
-      nickname: authorName,
-      lud16: authorProfile?.lud16 ?? null,
-      eventId: note.id,
-      channelLabel: 'Agora',
+    onOpenZap?.(buildZapTarget())
+  }
+
+  const handleQuickZap = async (sats: number) => {
+    setZapMenuOpen(false)
+    setZapTooltip(null)
+    if (quickZappingSats !== null) return
+
+    const target = buildZapTarget()
+    if (engine.wallet.credentialsLocked || engine.wallet.totalBalanceSats < sats) {
+      if (onOpenZap) {
+        onPlaySound?.('click')
+        onOpenZap(target)
+      } else {
+        engine.pushToast(
+          'info',
+          'Wallet balance required',
+          `Need at least ${sats.toLocaleString()} sats unlocked in your Agwallet.`
+        )
+      }
+      return
+    }
+
+    setQuickZappingSats(sats)
+    try {
+      let zapped = false
+      const resolvedLud16 = target.lud16?.trim() || null
+
+      if (resolvedLud16) {
+        try {
+          const inv = await engine.zaps.requestZapInvoice({ target, amountSats: sats })
+          const payRes = await engine.wallet.payBolt11Invoice(inv.invoice, {
+            counterparty: authorName,
+            memo: `Zap ${authorName} on Agora`,
+            txType: 'zap_out',
+          })
+          zapped = Boolean(payRes.paid)
+        } catch {
+          // Fall back to NIP-61 Nutzap below
+        }
+      }
+
+      if (!zapped) {
+        try {
+          await engine.zaps.sendNutzap({ target, amountSats: sats })
+          zapped = true
+        } catch {
+          // Fall through to full ZapModal so user can see options/QR
+        }
+      }
+
+      if (zapped) {
+        agora.recordOptimisticZap(note.id, sats)
+        onPlaySound?.('send')
+        setZapBurstActive(true)
+        if (zapBurstTimerRef.current !== null) {
+          window.clearTimeout(zapBurstTimerRef.current)
+        }
+        zapBurstTimerRef.current = window.setTimeout(() => {
+          zapBurstTimerRef.current = null
+          setZapBurstActive(false)
+        }, 680)
+        engine.pushToast('success', `Zapped ${sats.toLocaleString()} sats`, `Sent to ${authorName}`)
+      } else if (onOpenZap) {
+        onOpenZap(target)
+      } else {
+        engine.pushToast('warning', 'Quick zap unavailable', 'Open the Zap dialog to choose a payment method.')
+      }
+    } finally {
+      setQuickZappingSats(null)
+    }
+  }
+
+  const renderInlineTokens = (source: string) => {
+    const toks = tokenizeAgoraContent(source, note.media)
+    return toks.map((tok, idx) => {
+      if (tok.type === 'text') {
+        return <React.Fragment key={idx}>{tok.text}</React.Fragment>
+      }
+      if (tok.type === 'hashtag') {
+        return (
+          <button
+            key={idx}
+            type="button"
+            className="ag-agora-tag-link"
+            onClick={(e) => {
+              e.stopPropagation()
+              onSelectHashtag(tok.tag)
+            }}
+          >
+            #{tok.tag}
+          </button>
+        )
+      }
+      if (tok.type === 'mention') {
+        const mProfile = agora.getProfile(tok.pubkey)
+        const mName = getProfileDisplayName(mProfile, tok.pubkey)
+        return (
+          <button
+            key={idx}
+            type="button"
+            className="ag-agora-mention-link"
+            onClick={(e) => {
+              e.stopPropagation()
+              onOpenProfile(tok.pubkey)
+            }}
+            onMouseEnter={(e) => onHoverAuthorStart?.(tok.pubkey, e.currentTarget)}
+            onMouseLeave={() => onHoverAuthorEnd?.()}
+          >
+            @{mName}
+          </button>
+        )
+      }
+      if (tok.type === 'link') {
+        const warnUntrustedLinks =
+          !isSelf && !engine.isTrusted(note.pubkey) && !engine.settings.allowUntrustedLinks
+        return (
+          <a
+            key={idx}
+            href={tok.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`ag-agora-ext-link${warnUntrustedLinks ? ' ag-untrusted-link' : ''}`}
+            title={
+              warnUntrustedLinks
+                ? 'Untrusted sender — click to review link before opening'
+                : undefined
+            }
+            onClick={(e) => {
+              e.stopPropagation()
+              if (warnUntrustedLinks) {
+                e.preventDefault()
+                requestUntrustedLinkOpen({
+                  url: tok.url,
+                  senderHandle: authorName,
+                  senderPubkey: note.pubkey,
+                })
+                return
+              }
+              if (parseAgoraShareUrl(tok.url) && tryOpenInternalAgoraLink(tok.url)) {
+                e.preventDefault()
+              }
+            }}
+            onAuxClick={(e) => {
+              if (warnUntrustedLinks && e.button === 1) {
+                e.preventDefault()
+                e.stopPropagation()
+                requestUntrustedLinkOpen({
+                  url: tok.url,
+                  senderHandle: authorName,
+                  senderPubkey: note.pubkey,
+                })
+              }
+            }}
+          >
+            {tok.display}
+          </a>
+        )
+      }
+      return null
     })
   }
 
@@ -1778,6 +1982,7 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
     'ag-agora-card',
     !focused ? 'is-clickable' : 'is-focused',
     isAncestor ? 'is-ancestor' : '',
+    kbdFocused ? 'is-kbd-focused' : '',
   ]
     .filter(Boolean)
     .join(' ')
@@ -1785,11 +1990,12 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
   return (
     <article
       className={cardClasses}
+      data-agora-kbd-idx={kbdIndex !== undefined ? String(kbdIndex) : undefined}
       onClick={() => {
         if (!focused) onOpenThread(note.id)
       }}
     >
-      {repostedBy && reposterName && (
+      {primaryReposterPk && reposterName && (
         <div className="ag-agora-repost-bar">
           <Repeat2 size={13} aria-hidden="true" />
           <span>Reposted by</span>
@@ -1797,11 +2003,18 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
             type="button"
             onClick={(e) => {
               e.stopPropagation()
-              onOpenProfile(repostedBy)
+              onOpenProfile(primaryReposterPk)
             }}
+            onMouseEnter={(e) => onHoverAuthorStart?.(primaryReposterPk, e.currentTarget)}
+            onMouseLeave={() => onHoverAuthorEnd?.()}
           >
             {reposterName}
           </button>
+          {extraReposterCount > 0 && (
+            <span>
+              and {extraReposterCount} {extraReposterCount === 1 ? 'other' : 'others'}
+            </span>
+          )}
         </div>
       )}
 
@@ -1814,6 +2027,8 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
               e.stopPropagation()
               onOpenProfile(note.pubkey)
             }}
+            onMouseEnter={(e) => onHoverAuthorStart?.(note.pubkey, e.currentTarget)}
+            onMouseLeave={() => onHoverAuthorEnd?.()}
             aria-label={`View ${authorName}'s profile`}
           >
             <AgoraAvatar
@@ -1837,15 +2052,16 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                   e.stopPropagation()
                   onOpenProfile(note.pubkey)
                 }}
+                onMouseEnter={(e) => onHoverAuthorStart?.(note.pubkey, e.currentTarget)}
+                onMouseLeave={() => onHoverAuthorEnd?.()}
               >
                 {authorName}
               </button>
-              {nip05 && (
-                <span className="ag-agora-nip05" title={nip05}>
-                  <BadgeCheck size={12} aria-hidden="true" />
-                  <span className="truncate">{nip05}</span>
-                </span>
-              )}
+              <AgoraNip05Badge
+                engine={engine}
+                pubkey={note.pubkey}
+                rawNip05={authorProfile?.nip05}
+              />
               <span className="ag-agora-dot-sep" aria-hidden="true">
                 ·
               </span>
@@ -1881,6 +2097,7 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                   e.stopPropagation()
                   setMenuOpen((v) => !v)
                   setRepostMenuOpen(false)
+                  setZapMenuOpen(false)
                 }}
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
@@ -1918,6 +2135,27 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                   >
                     <Copy size={14} />
                     <span>Copy nevent1</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="ag-agora-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false)
+                      onPlaySound?.('click')
+                      if (threadMuted) {
+                        void agora.unmuteThread(threadRootId).then((ok) => {
+                          if (ok) engine.pushToast('info', 'Thread unmuted')
+                        })
+                      } else {
+                        void agora.muteThread(threadRootId).then((ok) => {
+                          if (ok) engine.pushToast('info', 'Thread muted', 'Notifications suppressed for this thread.')
+                        })
+                      }
+                    }}
+                  >
+                    {threadMuted ? <Bell size={14} /> : <BellOff size={14} />}
+                    <span>{threadMuted ? 'Unmute Thread' : 'Mute Thread'}</span>
                   </button>
                   {!isSelf && (
                     <button
@@ -1976,6 +2214,27 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                       <span>Zap author</span>
                     </button>
                   )}
+                  {isSelf && (
+                    <button
+                      type="button"
+                      className="ag-agora-menu-item danger"
+                      role="menuitem"
+                      onClick={() => {
+                        setMenuOpen(false)
+                        onPlaySound?.('click')
+                        void agora.deleteNote(note.id).then((res) => {
+                          if (res.ok) {
+                            engine.pushToast('success', 'Post deleted', 'Published NIP-09 deletion request.')
+                          } else {
+                            engine.pushToast('error', 'Delete failed', res.error)
+                          }
+                        })
+                      }}
+                    >
+                      <Trash2 size={14} />
+                      <span>Delete Post</span>
+                    </button>
+                  )}
                   {!isSelf && (
                     <button
                       type="button"
@@ -2012,93 +2271,67 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
           ) : (
             <>
               {displayTokens.some((t) => t.type !== 'quote') && (
-                <div className="ag-agora-body">
-                  {displayTokens.map((tok, idx) => {
-                    if (tok.type === 'text') {
-                      return <React.Fragment key={idx}>{tok.text}</React.Fragment>
-                    }
-                    if (tok.type === 'hashtag') {
+                <div className="ag-agora-body-wrap">
+                  <div className={`ag-agora-body${isClamped ? ' is-clamped' : ''}`}>
+                    {contentBlocks.map((block, bIdx) => {
+                      if (block.type === 'code') {
+                        return (
+                          <pre
+                            key={bIdx}
+                            className="ag-agora-code-block"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {block.lang && (
+                              <span className="ag-agora-code-lang mono">{block.lang}</span>
+                            )}
+                            <code>{block.code}</code>
+                          </pre>
+                        )
+                      }
+                      if (block.type === 'blockquote') {
+                        return (
+                          <blockquote key={bIdx} className="ag-agora-blockquote">
+                            {renderInlineTokens(block.text)}
+                          </blockquote>
+                        )
+                      }
+                      if (block.type === 'heading') {
+                        return (
+                          <div key={bIdx} className={`ag-agora-heading level-${block.level}`}>
+                            {renderInlineTokens(block.text)}
+                          </div>
+                        )
+                      }
                       return (
-                        <button
-                          key={idx}
-                          type="button"
-                          className="ag-agora-tag-link"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onSelectHashtag(tok.tag)
-                          }}
-                        >
-                          #{tok.tag}
-                        </button>
+                        <p key={bIdx} className="ag-agora-paragraph">
+                          {renderInlineTokens(block.text)}
+                        </p>
                       )
-                    }
-                    if (tok.type === 'mention') {
-                      const mProfile = agora.getProfile(tok.pubkey)
-                      const mName = getProfileDisplayName(mProfile, tok.pubkey)
-                      return (
-                        <button
-                          key={idx}
-                          type="button"
-                          className="ag-agora-mention-link"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onOpenProfile(tok.pubkey)
-                          }}
-                        >
-                          @{mName}
-                        </button>
-                      )
-                    }
-                    if (tok.type === 'link') {
-                      const warnUntrustedLinks =
-                        !isSelf &&
-                        !engine.isTrusted(note.pubkey) &&
-                        !engine.settings.allowUntrustedLinks
-                      return (
-                        <a
-                          key={idx}
-                          href={tok.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className={`ag-agora-ext-link${warnUntrustedLinks ? ' ag-untrusted-link' : ''}`}
-                          title={
-                            warnUntrustedLinks
-                              ? 'Untrusted sender — click to review link before opening'
-                              : undefined
-                          }
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            if (warnUntrustedLinks) {
-                              e.preventDefault()
-                              requestUntrustedLinkOpen({
-                                url: tok.url,
-                                senderHandle: authorName,
-                                senderPubkey: note.pubkey,
-                              })
-                              return
-                            }
-                            if (parseAgoraShareUrl(tok.url) && tryOpenInternalAgoraLink(tok.url)) {
-                              e.preventDefault()
-                            }
-                          }}
-                          onAuxClick={(e) => {
-                            if (warnUntrustedLinks && e.button === 1) {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              requestUntrustedLinkOpen({
-                                url: tok.url,
-                                senderHandle: authorName,
-                                senderPubkey: note.pubkey,
-                              })
-                            }
-                          }}
-                        >
-                          {tok.display}
-                        </a>
-                      )
-                    }
-                    return null
-                  })}
+                    })}
+                  </div>
+                  {isLongNote && (
+                    <button
+                      type="button"
+                      className="ag-agora-show-more-btn"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setExpandedLong((v) => !v)
+                      }}
+                    >
+                      {expandedLong ? 'Show less' : 'Show more'}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {inlinePoll && (
+                <div className="ag-agora-inline-poll" onClick={(e) => e.stopPropagation()}>
+                  <AgoraPollCard
+                    engine={engine}
+                    poll={inlinePoll}
+                    onOpenProfile={onOpenProfile}
+                    onPlaySound={onPlaySound}
+                  />
                 </div>
               )}
 
@@ -2187,7 +2420,11 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                         senderPubkey={note.pubkey}
                         variant="media"
                         alt={item.alt || 'Attached image'}
+                        hasAltText={Boolean(item.alt?.trim())}
                         caption={item.alt || undefined}
+                        onResolvedBlobUrl={(blobUrl) => {
+                          verifiedBlobsRef.current.set(item.url, blobUrl)
+                        }}
                         onOpenLightbox={(verifiedBlobUrl) =>
                           handleOpenMediaLightbox(item, verifiedBlobUrl)
                         }
@@ -2260,6 +2497,7 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
                 onClick={() => {
                   setRepostMenuOpen((v) => !v)
                   setMenuOpen(false)
+                  setZapMenuOpen(false)
                 }}
                 aria-haspopup="menu"
                 aria-expanded={repostMenuOpen}
@@ -2325,65 +2563,110 @@ const AgoraNoteCard: React.FC<AgoraNoteCardProps> = ({
               {stats.likes > 0 && <span className="tabular">{formatCompactCount(stats.likes)}</span>}
             </button>
 
-            <button
-              type="button"
-              className={`ag-agora-act-btn zap${stats.zappedByMe ? ' is-zapped' : ''}`}
-              onClick={() => {
-                setZapTooltip(null)
-                handleZap()
-              }}
-              onMouseEnter={(e) => {
-                const breakdown = stats.zapBreakdown
-                if (stats.zapSats <= 0 || !breakdown || breakdown.length === 0) return
-                const rect = e.currentTarget.getBoundingClientRect()
-                const placement: 'above' | 'below' = rect.top < 76 ? 'below' : 'above'
-                const top = placement === 'below' ? rect.bottom + 8 : rect.top - 8
-                const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
-                const left = Math.max(120, Math.min(vw - 120, rect.left + rect.width / 2))
-                setZapTooltip({ left, top, placement })
-                const toFetch = breakdown
-                  .slice(0, 5)
-                  .map((z) => z.pubkey)
-                  .filter((pk) => /^[0-9a-f]{64}$/i.test(pk))
-                if (toFetch.length > 0) {
-                  agora.ensureProfiles(toFetch)
+            <div className="ag-agora-action-wrap" ref={zapWrapRef}>
+              <button
+                type="button"
+                className={`ag-agora-act-btn zap${stats.zappedByMe ? ' is-zapped' : ''}${
+                  zapBurstActive ? ' is-zap-burst' : ''
+                }`}
+                disabled={quickZappingSats !== null}
+                onClick={() => {
+                  setZapTooltip(null)
+                  setMenuOpen(false)
+                  setRepostMenuOpen(false)
+                  setZapMenuOpen((v) => !v)
+                }}
+                onMouseEnter={(e) => {
+                  if (zapMenuOpen) return
+                  const breakdown = stats.zapBreakdown
+                  if (stats.zapSats <= 0 || !breakdown || breakdown.length === 0) return
+                  const rect = e.currentTarget.getBoundingClientRect()
+                  const placement: 'above' | 'below' = rect.top < 76 ? 'below' : 'above'
+                  const top = placement === 'below' ? rect.bottom + 8 : rect.top - 8
+                  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+                  const left = Math.max(120, Math.min(vw - 120, rect.left + rect.width / 2))
+                  setZapTooltip({ left, top, placement })
+                  const toFetch = breakdown
+                    .slice(0, 5)
+                    .map((z) => z.pubkey)
+                    .filter((pk) => /^[0-9a-f]{64}$/i.test(pk))
+                  if (toFetch.length > 0) {
+                    agora.ensureProfiles(toFetch)
+                  }
+                }}
+                onMouseLeave={() => setZapTooltip(null)}
+                onFocus={(e) => {
+                  if (zapMenuOpen) return
+                  const breakdown = stats.zapBreakdown
+                  if (stats.zapSats <= 0 || !breakdown || breakdown.length === 0) return
+                  const rect = e.currentTarget.getBoundingClientRect()
+                  const placement: 'above' | 'below' = rect.top < 76 ? 'below' : 'above'
+                  const top = placement === 'below' ? rect.bottom + 8 : rect.top - 8
+                  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+                  const left = Math.max(120, Math.min(vw - 120, rect.left + rect.width / 2))
+                  setZapTooltip({ left, top, placement })
+                  const toFetch = breakdown
+                    .slice(0, 5)
+                    .map((z) => z.pubkey)
+                    .filter((pk) => /^[0-9a-f]{64}$/i.test(pk))
+                  if (toFetch.length > 0) {
+                    agora.ensureProfiles(toFetch)
+                  }
+                }}
+                onBlur={() => setZapTooltip(null)}
+                aria-haspopup="menu"
+                aria-expanded={zapMenuOpen}
+                aria-label={
+                  stats.zapSats > 0 ? `Zap (${stats.zapSats.toLocaleString()} sats zapped)` : 'Zap'
                 }
-              }}
-              onMouseLeave={() => setZapTooltip(null)}
-              onFocus={(e) => {
-                const breakdown = stats.zapBreakdown
-                if (stats.zapSats <= 0 || !breakdown || breakdown.length === 0) return
-                const rect = e.currentTarget.getBoundingClientRect()
-                const placement: 'above' | 'below' = rect.top < 76 ? 'below' : 'above'
-                const top = placement === 'below' ? rect.bottom + 8 : rect.top - 8
-                const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
-                const left = Math.max(120, Math.min(vw - 120, rect.left + rect.width / 2))
-                setZapTooltip({ left, top, placement })
-                const toFetch = breakdown
-                  .slice(0, 5)
-                  .map((z) => z.pubkey)
-                  .filter((pk) => /^[0-9a-f]{64}$/i.test(pk))
-                if (toFetch.length > 0) {
-                  agora.ensureProfiles(toFetch)
+                title={
+                  stats.zapSats > 0 && stats.zapBreakdown && stats.zapBreakdown.length > 0
+                    ? undefined
+                    : stats.zapSats > 0
+                      ? `${stats.zapSats.toLocaleString()} sats zapped`
+                      : 'Quick Zap'
                 }
-              }}
-              onBlur={() => setZapTooltip(null)}
-              aria-label={
-                stats.zapSats > 0 ? `Zap (${stats.zapSats.toLocaleString()} sats zapped)` : 'Zap'
-              }
-              title={
-                stats.zapSats > 0 && stats.zapBreakdown && stats.zapBreakdown.length > 0
-                  ? undefined
-                  : stats.zapSats > 0
-                    ? `${stats.zapSats.toLocaleString()} sats zapped`
-                    : 'Zap'
-              }
-            >
-              <Zap size={15} fill={stats.zappedByMe ? 'currentColor' : 'none'} />
-              {stats.zapSats > 0 && (
-                <span className="tabular">{formatCompactCount(stats.zapSats)}</span>
+              >
+                {quickZappingSats !== null ? (
+                  <Loader2 size={15} className="ag-agora-spin" />
+                ) : (
+                  <Zap size={15} fill={stats.zappedByMe ? 'currentColor' : 'none'} />
+                )}
+                {stats.zapSats > 0 && (
+                  <span className="tabular">{formatCompactCount(stats.zapSats)}</span>
+                )}
+              </button>
+
+              {zapMenuOpen && (
+                <div className="ag-agora-zap-popover" role="menu" aria-label="Quick zap presets">
+                  {QUICK_ZAP_PRESETS.map((sats) => (
+                    <button
+                      key={sats}
+                      type="button"
+                      role="menuitem"
+                      className="ag-agora-zap-preset-btn tabular"
+                      onClick={() => void handleQuickZap(sats)}
+                    >
+                      <Zap size={11} fill="currentColor" aria-hidden="true" />
+                      <span>{sats}</span>
+                    </button>
+                  ))}
+                  {onOpenZap && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="ag-agora-zap-custom-btn"
+                      onClick={() => {
+                        setZapMenuOpen(false)
+                        handleZap()
+                      }}
+                    >
+                      Custom…
+                    </button>
+                  )}
+                </div>
               )}
-            </button>
+            </div>
 
             {zapTooltip &&
               stats.zapSats > 0 &&
@@ -2926,6 +3209,16 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
 
   const [manualComposerModal, setManualComposerModal] = useState<ComposerModalState | null>(null)
   const [editProfileOpen, setEditProfileOpen] = useState(false)
+  const [curationModalOpen, setCurationModalOpen] = useState(false)
+  const [socialListModal, setSocialListModal] = useState<{
+    title: string
+    pubkeys: string[]
+  } | null>(null)
+  const [notifFilter, setNotifFilter] = useState<AgoraNotificationFilter>('all')
+  const [collapsedBranches, setCollapsedBranches] = useState<Set<string>>(() => new Set())
+  const [showScrollTop, setShowScrollTop] = useState(false)
+  const [kbdFocusedIndex, setKbdFocusedIndex] = useState(-1)
+  const [hoverCard, setHoverCard] = useState<{ pubkey: string; rect: DOMRect } | null>(null)
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false)
   const [hiddenTrendsOpen, setHiddenTrendsOpen] = useState(false)
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false)
@@ -2938,6 +3231,64 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const [ptrDragging, setPtrDragging] = useState(false)
   const [ptrRefreshing, setPtrRefreshing] = useState(false)
   const ptrTimerRef = useRef<number | null>(null)
+  const scrollPositionsRef = useRef<Map<string, number>>(new Map())
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null)
+  const hoverOpenTimerRef = useRef<number | null>(null)
+  const hoverCloseTimerRef = useRef<number | null>(null)
+
+  const clearHoverTimers = useCallback(() => {
+    if (hoverOpenTimerRef.current !== null) {
+      window.clearTimeout(hoverOpenTimerRef.current)
+      hoverOpenTimerRef.current = null
+    }
+    if (hoverCloseTimerRef.current !== null) {
+      window.clearTimeout(hoverCloseTimerRef.current)
+      hoverCloseTimerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => clearHoverTimers()
+  }, [clearHoverTimers])
+
+  const handleHoverAuthorStart = useCallback(
+    (pubkey: string, el: HTMLElement) => {
+      if (isMobileViewport) return
+      clearHoverTimers()
+      hoverOpenTimerRef.current = window.setTimeout(() => {
+        hoverOpenTimerRef.current = null
+        if (!el.isConnected) return
+        setHoverCard({ pubkey, rect: el.getBoundingClientRect() })
+      }, 320)
+    },
+    [clearHoverTimers, isMobileViewport]
+  )
+
+  const handleHoverAuthorEnd = useCallback(() => {
+    if (hoverOpenTimerRef.current !== null) {
+      window.clearTimeout(hoverOpenTimerRef.current)
+      hoverOpenTimerRef.current = null
+    }
+    if (hoverCloseTimerRef.current !== null) {
+      window.clearTimeout(hoverCloseTimerRef.current)
+    }
+    hoverCloseTimerRef.current = window.setTimeout(() => {
+      hoverCloseTimerRef.current = null
+      setHoverCard(null)
+    }, 200)
+  }, [])
+
+  const handleHoverCardEnter = useCallback(() => {
+    if (hoverCloseTimerRef.current !== null) {
+      window.clearTimeout(hoverCloseTimerRef.current)
+      hoverCloseTimerRef.current = null
+    }
+  }, [])
+
+  const dismissHoverCard = useCallback(() => {
+    clearHoverTimers()
+    setHoverCard(null)
+  }, [clearHoverTimers])
 
   // Activate lazy Agora subscriptions on mount
   useEffect(() => {
@@ -2971,6 +3322,13 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
     if (open) setLeftDrawerOpen(false)
   }, [])
 
+  const anySubModalOpen =
+    Boolean(activeComposerModal) ||
+    editProfileOpen ||
+    curationModalOpen ||
+    Boolean(socialListModal) ||
+    Boolean(agora.activeArticle)
+
   const {
     bindRef: agoraStageRef,
     leftProgress: leftDrawerProgress,
@@ -2980,21 +3338,41 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   } = useMobileSwipeDrawers({
     leftOpen: leftDrawerOpen,
     rightOpen: rightDrawerOpen,
-    disabled: Boolean(activeComposerModal) || editProfileOpen || ptrDragging,
+    disabled: anySubModalOpen || ptrDragging,
     onLeftOpenChange: handleLeftDrawerOpenChange,
     onRightOpenChange: handleRightDrawerOpenChange,
   })
 
+  const handleNavigateBack = useCallback(() => {
+    dismissHoverCard()
+    if (agora.canNavigateBack) {
+      agora.navigateBack()
+    } else if (agora.thread) {
+      agora.closeThread()
+    } else if (agora.profileView) {
+      agora.closeProfile()
+    }
+  }, [agora, dismissHoverCard])
+
   useBackHandler(Boolean(activeComposerModal), closeComposerModal)
-  useBackHandler(!activeComposerModal && !editProfileOpen && Boolean(agora.thread), agora.closeThread)
   useBackHandler(
-    !activeComposerModal && !editProfileOpen && !agora.thread && Boolean(agora.profileView),
+    !activeComposerModal &&
+      !editProfileOpen &&
+      !curationModalOpen &&
+      !socialListModal &&
+      !agora.activeArticle &&
+      agora.canNavigateBack,
+    agora.navigateBack
+  )
+  useBackHandler(
+    !anySubModalOpen && !agora.canNavigateBack && Boolean(agora.thread),
+    agora.closeThread
+  )
+  useBackHandler(
+    !anySubModalOpen && !agora.canNavigateBack && !agora.thread && Boolean(agora.profileView),
     agora.closeProfile
   )
-  useBackHandler(
-    !activeComposerModal && !editProfileOpen && (leftDrawerOpen || rightDrawerOpen),
-    closeDrawers
-  )
+  useBackHandler(!anySubModalOpen && (leftDrawerOpen || rightDrawerOpen), closeDrawers)
 
   useEffect(() => {
     if (!activeComposerModal && !leftDrawerOpen && !rightDrawerOpen) return
@@ -3012,48 +3390,111 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
     return () => window.removeEventListener('keydown', onKey)
   }, [activeComposerModal, leftDrawerOpen, rightDrawerOpen, closeComposerModal, closeDrawers])
 
+  const inThread = agora.thread !== null
+  const inProfile = !inThread && agora.profileView !== null
+  const inSearch = !inThread && !inProfile && Boolean(agora.searchQuery || agora.activeHashtag)
+  const inNotifications = !inThread && !inProfile && !inSearch && agora.activeTab === 'notifications'
+  const inArticles = !inThread && !inProfile && !inSearch && agora.activeTab === 'articles'
+  const inStandardFeed = !inThread && !inProfile && !inSearch && !inNotifications && !inArticles
+  const showInlineComposer =
+    inStandardFeed &&
+    (agora.activeTab === 'following' ||
+      agora.activeTab === 'global' ||
+      agora.activeTab === 'trending')
+
+  const currentViewKey = inThread
+    ? `thread:${agora.thread?.focusedNoteId ?? ''}`
+    : inProfile
+      ? `profile:${agora.profileView?.pubkey ?? ''}`
+      : inSearch
+        ? `search:${agora.activeHashtag || agora.searchQuery}`
+        : `tab:${agora.activeTab}:${agora.activeListId ?? ''}`
+
+  const saveCurrentScroll = useCallback(() => {
+    if (streamRef.current) {
+      scrollPositionsRef.current.set(currentViewKey, streamRef.current.scrollTop)
+    }
+  }, [currentViewKey])
+
+  // Track scroll position per view key & toggle floating Back-to-Top pill
+  useEffect(() => {
+    const el = streamRef.current
+    if (!el) return
+    const onScroll = () => {
+      const top = el.scrollTop
+      scrollPositionsRef.current.set(currentViewKey, top)
+      setShowScrollTop(top > 600)
+      setHoverCard((prev) => (prev ? null : prev))
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [currentViewKey])
+
+  // Restore saved scrollTop cleanly on view transitions & reset keyboard focus
+  useEffect(() => {
+    setKbdFocusedIndex(-1)
+    dismissHoverCard()
+    const savedTop = scrollPositionsRef.current.get(currentViewKey) ?? 0
+    const rafId = window.requestAnimationFrame(() => {
+      if (streamRef.current) {
+        streamRef.current.scrollTop = savedTop
+        setShowScrollTop(savedTop > 600)
+      }
+    })
+    return () => window.cancelAnimationFrame(rafId)
+  }, [currentViewKey, dismissHoverCard])
+
   const handleSelectTab = useCallback(
     (tab: AgoraFeedTab) => {
+      saveCurrentScroll()
+      dismissHoverCard()
       onPlaySound?.('click')
       setLeftDrawerOpen(false)
       setRightDrawerOpen(false)
       if (agora.thread) agora.closeThread()
       if (agora.profileView) agora.closeProfile()
       if (agora.searchQuery || agora.activeHashtag) agora.clearSearch()
+      if (agora.activeListId) agora.setActiveListId(null)
+      const sameTab = !inThread && !inProfile && !inSearch && agora.activeTab === tab
       agora.setActiveTab(tab)
       if (tab === 'notifications') {
         agora.markNotificationsRead()
       }
-      streamRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+      if (sameTab) {
+        streamRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+      }
     },
-    [agora, onPlaySound]
+    [agora, dismissHoverCard, inProfile, inSearch, inThread, onPlaySound, saveCurrentScroll]
   )
 
   const handleOpenProfile = useCallback(
     (pubkey: string) => {
+      saveCurrentScroll()
+      dismissHoverCard()
       onPlaySound?.('click')
       setLeftDrawerOpen(false)
       setRightDrawerOpen(false)
-      if (agora.thread) agora.closeThread()
       agora.openProfile(pubkey)
-      streamRef.current?.scrollTo({ top: 0 })
     },
-    [agora, onPlaySound]
+    [agora, dismissHoverCard, onPlaySound, saveCurrentScroll]
   )
 
   const handleOpenThread = useCallback(
     (noteId: string) => {
+      saveCurrentScroll()
+      dismissHoverCard()
       onPlaySound?.('click')
       setLeftDrawerOpen(false)
       setRightDrawerOpen(false)
       agora.openThread(noteId)
-      streamRef.current?.scrollTo({ top: 0 })
     },
-    [agora, onPlaySound]
+    [agora, dismissHoverCard, onPlaySound, saveCurrentScroll]
   )
 
   const handleSelectHashtag = useCallback(
     (tag: string) => {
+      saveCurrentScroll()
+      dismissHoverCard()
       onPlaySound?.('click')
       setLeftDrawerOpen(false)
       setRightDrawerOpen(false)
@@ -3062,9 +3503,8 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
       setSearchDraft(`#${tag}`)
       setMobileSearchOpen(false)
       agora.selectHashtag(tag)
-      streamRef.current?.scrollTo({ top: 0 })
     },
-    [agora, onPlaySound]
+    [agora, dismissHoverCard, onPlaySound, saveCurrentScroll]
   )
 
   const handleSearchSubmit = useCallback(
@@ -3075,6 +3515,8 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
         agora.clearSearch()
         return
       }
+      saveCurrentScroll()
+      dismissHoverCard()
       onPlaySound?.('click')
       setLeftDrawerOpen(false)
       setRightDrawerOpen(false)
@@ -3082,9 +3524,8 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
       if (agora.profileView) agora.closeProfile()
       void agora.runSearch(q)
       if (isMobileViewport) setMobileSearchOpen(false)
-      streamRef.current?.scrollTo({ top: 0 })
     },
-    [agora, isMobileViewport, onPlaySound, searchDraft]
+    [agora, dismissHoverCard, isMobileViewport, onPlaySound, saveCurrentScroll, searchDraft]
   )
 
   const handleClearSearch = useCallback(() => {
@@ -3117,28 +3558,24 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
     [agora, onPlaySound]
   )
 
+  const handleToggleBranchCollapse = useCallback((noteId: string) => {
+    setCollapsedBranches((prev) => {
+      const next = new Set(prev)
+      if (next.has(noteId)) next.delete(noteId)
+      else next.add(noteId)
+      return next
+    })
+  }, [])
+
   const myDisplayName = getProfileDisplayName(agora.myProfile, agora.myPubkey)
   const myNpub = useMemo(() => encodeNpubSafe(agora.myPubkey), [agora.myPubkey])
-
-  const inThread = agora.thread !== null
-  const inProfile = !inThread && agora.profileView !== null
-  const inSearch = !inThread && !inProfile && Boolean(agora.searchQuery || agora.activeHashtag)
-  const inNotifications = !inThread && !inProfile && !inSearch && agora.activeTab === 'notifications'
-  const showInlineComposer =
-    !inThread &&
-    !inProfile &&
-    !inSearch &&
-    (agora.activeTab === 'following' ||
-      agora.activeTab === 'global' ||
-      agora.activeTab === 'trending')
 
   const isMyProfileOpen =
     inProfile && agora.profileView?.pubkey.toLowerCase() === agora.myPubkey.toLowerCase()
 
   const ptrEnabled =
     isMobileViewport &&
-    !activeComposerModal &&
-    !editProfileOpen &&
+    !anySubModalOpen &&
     !leftDrawerOpen &&
     !rightDrawerOpen &&
     !isSwipingLeftDrawer &&
@@ -3395,6 +3832,10 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
         : 'Pull to refresh'
 
   const activeTabTitle = useMemo(() => {
+    if (agora.activeListId) {
+      const list = agora.customLists.find((l) => l.id === agora.activeListId)
+      if (list) return list.title
+    }
     switch (agora.activeTab) {
       case 'following':
         return 'Following'
@@ -3402,12 +3843,92 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
         return 'Global'
       case 'trending':
         return 'Trending'
+      case 'articles':
+        return 'Articles'
       case 'bookmarks':
         return 'Bookmarks'
       case 'notifications':
         return 'Notifications'
     }
-  }, [agora.activeTab])
+  }, [agora.activeListId, agora.activeTab, agora.customLists])
+
+  const displayedFeedItems: AgoraFeedItem[] = useMemo(() => {
+    let items = agora.feedItems
+    if (agora.activeListId) {
+      const activeList = agora.customLists.find((l) => l.id === agora.activeListId)
+      if (activeList && activeList.pubkeys.length > 0) {
+        const allowSet = new Set(activeList.pubkeys.map((pk) => pk.toLowerCase()))
+        items = items.filter((item) => allowSet.has(item.note.pubkey.toLowerCase()))
+      }
+    }
+    if (agora.activeTab === 'following' || agora.activeTab === 'global') {
+      if (agora.feedFilter === 'no-reposts') {
+        items = items.filter((item) => item.kind !== 'repost')
+      } else if (agora.feedFilter === 'media') {
+        items = items.filter((item) => item.note.media.length > 0)
+      } else if (agora.feedFilter === 'trusted') {
+        const myPk = agora.myPubkey.toLowerCase()
+        items = items.filter(
+          (item) => item.note.pubkey.toLowerCase() === myPk || engine.isTrusted(item.note.pubkey)
+        )
+      }
+    }
+    return items
+  }, [
+    agora.activeListId,
+    agora.activeTab,
+    agora.customLists,
+    agora.feedFilter,
+    agora.feedItems,
+    agora.myPubkey,
+    engine,
+  ])
+
+  const standalonePolls = useMemo(() => {
+    if (!inStandardFeed || (agora.activeTab !== 'following' && agora.activeTab !== 'global')) {
+      return []
+    }
+    if (agora.polls.length === 0) return []
+    const inlineNoteIds = new Set(displayedFeedItems.map((it) => it.note.id))
+    return agora.polls.filter((p) => !inlineNoteIds.has(p.id)).slice(0, 3)
+  }, [agora.activeTab, agora.polls, displayedFeedItems, inStandardFeed])
+
+  const replyTree = useMemo(
+    () =>
+      agora.thread
+        ? buildThreadedReplyTree(agora.thread.focusedNoteId, agora.thread.replies)
+        : [],
+    [agora.thread]
+  )
+
+  const groupedNotifications: AgoraGroupedNotification[] = useMemo(() => {
+    const filtered = agora.notifications.filter((n) => {
+      if (notifFilter === 'all') return true
+      if (notifFilter === 'replies') return n.kind === 'reply' || n.kind === 'mention'
+      if (notifFilter === 'zaps') return n.kind === 'zap'
+      if (notifFilter === 'reactions') return n.kind === 'like' || n.kind === 'repost'
+      return true
+    })
+    return groupAgoraNotifications(filtered)
+  }, [agora.notifications, notifFilter])
+
+  // Automatic infinite scroll via IntersectionObserver sentinel
+  useEffect(() => {
+    if (!inStandardFeed || !agora.hasMore || agora.loadingMore) return
+    const sentinel = loadMoreSentinelRef.current
+    const root = streamRef.current
+    if (!sentinel || !root || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          void agora.loadMore()
+        }
+      },
+      { root, rootMargin: '280px' }
+    )
+    io.observe(sentinel)
+    return () => io.disconnect()
+  }, [agora, inStandardFeed, displayedFeedItems.length])
 
   const profileTarget = agora.profileView
     ? agora.getProfile(agora.profileView.pubkey)
@@ -3643,23 +4164,146 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
     translateMessage,
   ])
 
+  const kbdNotes: AgoraNote[] = useMemo(() => {
+    if (inProfile) return profileDisplayedNotes
+    if (inSearch) return agora.searchResults
+    if (inStandardFeed) return displayedFeedItems.map((it) => it.note)
+    return []
+  }, [agora.searchResults, displayedFeedItems, inProfile, inSearch, inStandardFeed, profileDisplayedNotes])
+
+  // Desktop keyboard navigation (j/k, Enter/o, l, r, b, z, n, /, Esc)
+  useEffect(() => {
+    if (isMobileViewport) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (anySubModalOpen || leftDrawerOpen || rightDrawerOpen) return
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      const target = e.target as HTMLElement | null
+      if (target) {
+        const tag = target.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+          return
+        }
+      }
+
+      const key = e.key
+      if (key === '/') {
+        e.preventDefault()
+        if (searchInputRef.current) {
+          searchInputRef.current.focus()
+        } else {
+          setMobileSearchOpen(true)
+          window.setTimeout(() => searchInputRef.current?.focus(), 40)
+        }
+        return
+      }
+
+      if (key === 'n') {
+        e.preventDefault()
+        onPlaySound?.('click')
+        setManualComposerModal({ kind: 'post' })
+        return
+      }
+
+      if (key === 'Escape') {
+        if (agora.canNavigateBack) {
+          e.preventDefault()
+          handleNavigateBack()
+        } else if (kbdFocusedIndex >= 0) {
+          e.preventDefault()
+          setKbdFocusedIndex(-1)
+        }
+        return
+      }
+
+      if (kbdNotes.length === 0) return
+
+      if (key === 'j' || key === 'k') {
+        e.preventDefault()
+        const nextIdx =
+          key === 'j'
+            ? Math.min(kbdNotes.length - 1, kbdFocusedIndex + 1)
+            : Math.max(0, kbdFocusedIndex <= 0 ? 0 : kbdFocusedIndex - 1)
+        setKbdFocusedIndex(nextIdx)
+        window.requestAnimationFrame(() => {
+          const cardEl = streamRef.current?.querySelector<HTMLElement>(
+            `[data-agora-kbd-idx="${nextIdx}"]`
+          )
+          cardEl?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        })
+        return
+      }
+
+      const focusedNote = kbdFocusedIndex >= 0 ? kbdNotes[kbdFocusedIndex] : undefined
+      if (!focusedNote) return
+
+      if (key === 'Enter' || key === 'o') {
+        e.preventDefault()
+        handleOpenThread(focusedNote.id)
+      } else if (key === 'l') {
+        e.preventDefault()
+        onPlaySound?.('click')
+        void agora.toggleLike(focusedNote)
+      } else if (key === 'r') {
+        e.preventDefault()
+        onPlaySound?.('click')
+        setManualComposerModal({ kind: 'reply', targetNote: focusedNote })
+      } else if (key === 'b') {
+        e.preventDefault()
+        onPlaySound?.('click')
+        void agora.toggleBookmark(focusedNote.id)
+      } else if (key === 'z' && onOpenZap) {
+        e.preventDefault()
+        onPlaySound?.('click')
+        const prof = agora.getProfile(focusedNote.pubkey)
+        onOpenZap({
+          pubkey: focusedNote.pubkey,
+          nickname: getProfileDisplayName(prof, focusedNote.pubkey),
+          lud16: prof?.lud16 ?? engine.zaps.getPeerLightningAddress(focusedNote.pubkey) ?? null,
+          eventId: focusedNote.id,
+          channelLabel: 'Agora',
+        })
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [
+    agora,
+    anySubModalOpen,
+    engine.zaps,
+    handleNavigateBack,
+    handleOpenThread,
+    isMobileViewport,
+    kbdFocusedIndex,
+    kbdNotes,
+    leftDrawerOpen,
+    onOpenZap,
+    onPlaySound,
+    rightDrawerOpen,
+  ])
+
   const renderNoteCard = (
     note: AgoraNote,
     opts?: {
       repostedBy?: string
+      repostedByList?: string[]
       focused?: boolean
       isAncestor?: boolean
       showThreadConnector?: boolean
+      kbdIndex?: number
     }
   ) => (
     <AgoraNoteCard
       key={opts?.repostedBy ? `repost:${opts.repostedBy}:${note.id}` : note.id}
       note={note}
       repostedBy={opts?.repostedBy}
+      repostedByList={opts?.repostedByList}
       engine={engine}
       focused={opts?.focused}
       isAncestor={opts?.isAncestor}
       showThreadConnector={opts?.showThreadConnector}
+      kbdFocused={opts?.kbdIndex !== undefined && opts.kbdIndex === kbdFocusedIndex}
+      kbdIndex={opts?.kbdIndex}
       revealedCw={revealedCwIds.has(note.id)}
       onRevealCw={handleRevealCw}
       translationScopeKey={translationScopeKey}
@@ -3674,16 +4318,21 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
       onOpenAmailCompose={onOpenAmailCompose}
       onOpenZap={onOpenZap}
       onOpenLightbox={onOpenLightbox}
+      onHoverAuthorStart={handleHoverAuthorStart}
+      onHoverAuthorEnd={handleHoverAuthorEnd}
       onPlaySound={onPlaySound}
     />
   )
 
-  const renderFeedItem = (item: AgoraFeedItem) => (
+  const renderFeedItem = (item: AgoraFeedItem, idx: number) => (
     <AgoraNoteCard
       key={item.key}
       note={item.note}
       repostedBy={item.kind === 'repost' ? item.repostedBy : undefined}
+      repostedByList={item.kind === 'repost' ? item.repostedByList : undefined}
       engine={engine}
+      kbdFocused={idx === kbdFocusedIndex}
+      kbdIndex={idx}
       revealedCw={revealedCwIds.has(item.note.id)}
       onRevealCw={handleRevealCw}
       translationScopeKey={translationScopeKey}
@@ -3698,73 +4347,170 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
       onOpenAmailCompose={onOpenAmailCompose}
       onOpenZap={onOpenZap}
       onOpenLightbox={onOpenLightbox}
+      onHoverAuthorStart={handleHoverAuthorStart}
+      onHoverAuthorEnd={handleHoverAuthorEnd}
       onPlaySound={onPlaySound}
     />
   )
 
-  const renderNotificationRow = (notif: AgoraNotification) => {
-    const actorProfile = agora.getProfile(notif.actorPubkey)
-    const actorName = getProfileDisplayName(actorProfile, notif.actorPubkey)
-    const targetNote = notif.targetNoteId ? agora.getNote(notif.targetNoteId) : null
-    const snippet = notif.content?.trim() || targetNote?.content?.trim() || ''
+  const countTreeDescendants = (node: AgoraReplyTreeNode): number => {
+    let total = node.children.length
+    for (const child of node.children) {
+      total += countTreeDescendants(child)
+    }
+    return total
+  }
+
+  const renderReplyBranch = (node: AgoraReplyTreeNode): React.ReactNode => {
+    const depth = Math.min(4, Math.max(0, node.depth))
+    const hasChildren = node.children.length > 0
+    const isCollapsed = collapsedBranches.has(node.note.id)
+    const descendantCount = hasChildren ? countTreeDescendants(node) : 0
+
+    return (
+      <div
+        key={node.note.id}
+        className={`ag-agora-reply-branch depth-${depth}`}
+        style={{ '--ag-reply-depth': String(depth) } as React.CSSProperties}
+      >
+        {renderNoteCard(node.note, {
+          showThreadConnector: hasChildren && !isCollapsed,
+        })}
+        {hasChildren && (
+          <div className="ag-agora-branch-toggle-wrap">
+            <button
+              type="button"
+              className="ag-agora-branch-toggle"
+              onClick={() => handleToggleBranchCollapse(node.note.id)}
+              aria-expanded={!isCollapsed}
+            >
+              {isCollapsed ? (
+                <ChevronRight size={13} aria-hidden="true" />
+              ) : (
+                <ChevronDown size={13} aria-hidden="true" />
+              )}
+              <span>
+                {isCollapsed ? 'Show' : 'Hide'} {descendantCount}{' '}
+                {descendantCount === 1 ? 'reply' : 'replies'}
+              </span>
+            </button>
+          </div>
+        )}
+        {hasChildren && !isCollapsed && (
+          <div className="ag-agora-reply-children">
+            {node.children.map((child) => renderReplyBranch(child))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderGroupedNotificationRow = (group: AgoraGroupedNotification) => {
+    const primaryPk = group.actors[0] || group.items[0]?.actorPubkey || ''
+    const primaryProfile = primaryPk ? agora.getProfile(primaryPk) : null
+    const primaryName = primaryPk ? getProfileDisplayName(primaryProfile, primaryPk) : 'Someone'
+    const secondPk = group.actors[1]
+    const secondName = secondPk
+      ? getProfileDisplayName(agora.getProfile(secondPk), secondPk)
+      : null
+    const extraCount = Math.max(0, group.actors.length - 2)
+    const targetNote = group.targetNoteId ? agora.getNote(group.targetNoteId) : null
+    const snippet = group.content?.trim() || targetNote?.content?.trim() || ''
 
     const actionText =
-      notif.kind === 'reply'
-        ? 'replied to your note'
-        : notif.kind === 'mention'
+      group.kind === 'reply'
+        ? 'replied to your post'
+        : group.kind === 'mention'
           ? 'mentioned you'
-          : notif.kind === 'like'
-            ? 'liked your note'
-            : notif.kind === 'repost'
-              ? 'reposted your note'
-              : 'zapped your note'
+          : group.kind === 'like'
+            ? 'liked your post'
+            : group.kind === 'repost'
+              ? 'reposted your post'
+              : 'zapped your post'
 
     const Icon =
-      notif.kind === 'reply'
+      group.kind === 'reply'
         ? MessageCircle
-        : notif.kind === 'mention'
+        : group.kind === 'mention'
           ? AtSign
-          : notif.kind === 'like'
+          : group.kind === 'like'
             ? Heart
-            : notif.kind === 'repost'
+            : group.kind === 'repost'
               ? Repeat2
               : Zap
 
+    const stackedActors = group.actors.slice(0, 3)
+
     return (
       <button
-        key={notif.id}
+        key={group.key}
         type="button"
         className="ag-agora-notif-row"
         onClick={() => {
-          const destNoteId = notif.targetNoteId || notif.noteId
+          const destNoteId = group.targetNoteId || group.noteId
           if (destNoteId) handleOpenThread(destNoteId)
-          else handleOpenProfile(notif.actorPubkey)
+          else if (primaryPk) handleOpenProfile(primaryPk)
         }}
       >
-        <span className={`ag-agora-notif-icon ${notif.kind}`} aria-hidden="true">
+        <span className={`ag-agora-notif-icon ${group.kind}`} aria-hidden="true">
           <Icon size={14} />
         </span>
 
-        <AgoraAvatar
-          engine={engine}
-          pubkey={notif.actorPubkey}
-          picture={actorProfile?.picture}
-          size="sm"
-          alt={actorName}
-        />
+        {stackedActors.length > 1 ? (
+          <div className="ag-agora-notif-avatar-stack" aria-hidden="true">
+            {stackedActors.map((pk) => {
+              const prof = agora.getProfile(pk)
+              return (
+                <AgoraAvatar
+                  key={pk}
+                  engine={engine}
+                  pubkey={pk}
+                  picture={prof?.picture}
+                  size="xs"
+                  alt=""
+                />
+              )
+            })}
+          </div>
+        ) : (
+          <AgoraAvatar
+            engine={engine}
+            pubkey={primaryPk}
+            picture={primaryProfile?.picture}
+            size="sm"
+            alt={primaryName}
+          />
+        )}
 
         <div className="ag-agora-notif-body">
           <div className="ag-agora-notif-top">
-            <strong>{actorName}</strong>
+            <strong>
+              {primaryName}
+              {secondName && extraCount > 0 ? ',' : ''}
+            </strong>
+            {secondName && extraCount === 0 && (
+              <>
+                <span>and</span>
+                <strong>{secondName}</strong>
+              </>
+            )}
+            {secondName && extraCount > 0 && (
+              <>
+                <strong>{secondName}</strong>
+                <span>
+                  and {extraCount} {extraCount === 1 ? 'other' : 'others'}
+                </span>
+              </>
+            )}
             <span>{actionText}</span>
-            {notif.kind === 'zap' && notif.zapSats && notif.zapSats > 0 && (
+            {group.kind === 'zap' && group.totalZapSats && group.totalZapSats > 0 && (
               <span className="ag-agora-notif-sats tabular">
-                +{notif.zapSats.toLocaleString()} sats
+                +{group.totalZapSats.toLocaleString()} sats
               </span>
             )}
             <span className="ag-agora-dot-sep">·</span>
             <span className="ag-agora-time tabular">
-              {formatRelativeSeconds(notif.createdAt)}
+              {formatRelativeSeconds(group.createdAt)}
             </span>
           </div>
           {snippet && <div className="ag-agora-notif-snippet">{snippet}</div>}
@@ -3845,10 +4591,17 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                 </button>
               </header>
               <div className="ag-agora-modal-body">
-                <AgoraComposerBox
+                <AgoraComposer
                   engine={engine}
                   inModal
                   autoFocus
+                  draftKey={
+                    activeComposerModal.kind === 'reply'
+                      ? `reply:${activeComposerModal.targetNote.id}`
+                      : activeComposerModal.kind === 'quote'
+                        ? `quote:${activeComposerModal.targetNote.id}`
+                        : 'modal:new'
+                  }
                   placeholder={placeholder}
                   submitLabel={submitLabel}
                   replyTarget={
@@ -3876,7 +4629,11 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const isSwipingAnyDrawer = isSwipingLeftDrawer || isSwipingRightDrawer
 
   return (
-    <div className="ag-agora-workspace" aria-label="Agora social feed" data-no-swipe="true">
+    <div
+      className={`ag-agora-workspace${agora.density === 'compact' ? ' is-compact' : ''}`}
+      aria-label="Agora social feed"
+      data-no-swipe="true"
+    >
       <div
         ref={agoraStageRef}
         className="ag-agora-shell"
@@ -4017,7 +4774,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                   <button
                     type="button"
                     className="ag-agora-icon-btn"
-                    onClick={agora.closeThread}
+                    onClick={handleNavigateBack}
                     aria-label="Back from thread"
                   >
                     <ArrowLeft size={17} />
@@ -4037,7 +4794,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                   <button
                     type="button"
                     className="ag-agora-icon-btn"
-                    onClick={agora.closeProfile}
+                    onClick={handleNavigateBack}
                     aria-label="Back from profile"
                   >
                     <ArrowLeft size={17} />
@@ -4211,6 +4968,30 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                 title="Discover"
               >
                 <Compass size={18} />
+              </button>
+
+              <button
+                type="button"
+                className={`ag-agora-icon-btn ag-agora-density-btn${
+                  agora.density === 'compact' ? ' active' : ''
+                }`}
+                onClick={() => {
+                  onPlaySound?.('click')
+                  agora.setDensity(agora.density === 'compact' ? 'comfortable' : 'compact')
+                }}
+                aria-pressed={agora.density === 'compact'}
+                aria-label={
+                  agora.density === 'compact'
+                    ? 'Switch to comfortable density'
+                    : 'Switch to compact density'
+                }
+                title={
+                  agora.density === 'compact'
+                    ? 'Density: Compact (click for Comfortable)'
+                    : 'Density: Comfortable (click for Compact)'
+                }
+              >
+                {agora.density === 'compact' ? <LayoutList size={15} /> : <Rows3 size={15} />}
               </button>
 
               <button
@@ -4449,8 +5230,9 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                 {agora.thread.focusedNote ? (
                   <>
                     {renderNoteCard(agora.thread.focusedNote, { focused: true })}
-                    <AgoraComposerBox
+                    <AgoraComposer
                       engine={engine}
+                      draftKey={`reply:${agora.thread.focusedNote.id}`}
                       replyTarget={agora.thread.focusedNote}
                       placeholder={`Reply to @${getProfileDisplayName(
                         agora.getProfile(agora.thread.focusedNote.pubkey),
@@ -4474,8 +5256,10 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                   </div>
                 )}
 
-                {agora.thread.replies.length > 0 ? (
-                  agora.thread.replies.map((reply) => renderNoteCard(reply))
+                {replyTree.length > 0 ? (
+                  <div className="ag-agora-reply-tree">
+                    {replyTree.map((branch) => renderReplyBranch(branch))}
+                  </div>
                 ) : !agora.thread.loading && agora.thread.focusedNote ? (
                   <div className="ag-agora-empty">
                     <p className="ag-agora-empty-sub">No replies yet — start the conversation above.</p>
@@ -4623,14 +5407,20 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                   </div>
 
                   <div className="ag-agora-profile-name-block">
-                    <h2 className="ag-agora-profile-name">{profileTargetName}</h2>
-                    <div className="ag-agora-profile-handles">
-                      {formatNip05Display(profileTarget?.nip05) && (
-                        <span className="ag-agora-nip05" style={{ maxWidth: 'none' }}>
-                          <BadgeCheck size={13} aria-hidden="true" />
-                          <span>{formatNip05Display(profileTarget?.nip05)}</span>
-                        </span>
+                    <div className="ag-agora-profile-name-row">
+                      <h2 className="ag-agora-profile-name">{profileTargetName}</h2>
+                      {!isMyProfileOpen && agora.profileView.followsMe && (
+                        <span className="ag-agora-follows-you-pill">Follows you</span>
                       )}
+                    </div>
+                    <div className="ag-agora-profile-handles">
+                      <AgoraNip05Badge
+                        engine={engine}
+                        pubkey={agora.profileView.pubkey}
+                        rawNip05={profileTarget?.nip05}
+                        fullWidth
+                        iconSize={13}
+                      />
                       <button
                         type="button"
                         className="ag-agora-npub-copy mono"
@@ -4713,10 +5503,34 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                         <span className="truncate">{profileTarget.lud16}</span>
                       </span>
                     )}
-                    <span className="ag-agora-profile-meta-item tabular">
+                    <button
+                      type="button"
+                      className="ag-agora-profile-meta-item ag-agora-profile-stat-btn tabular"
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setSocialListModal({
+                          title: `${profileTargetName} · Following`,
+                          pubkeys: agora.profileView!.followingPubkeys,
+                        })
+                      }}
+                    >
                       <strong>{agora.profileView.followingPubkeys.length.toLocaleString()}</strong>
                       <span>Following</span>
-                    </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="ag-agora-profile-meta-item ag-agora-profile-stat-btn tabular"
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setSocialListModal({
+                          title: `${profileTargetName} · Followers`,
+                          pubkeys: agora.profileView!.followerPubkeys,
+                        })
+                      }}
+                    >
+                      <strong>{agora.profileView.followerPubkeys.length.toLocaleString()}</strong>
+                      <span>Followers</span>
+                    </button>
                   </div>
                 </div>
 
@@ -4739,12 +5553,13 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                 </div>
 
                 {agora.profileView.loading && profileDisplayedNotes.length === 0 ? (
-                  <div className="ag-agora-empty">
-                    <Loader2 size={22} className="ag-agora-spin" />
-                    <p className="ag-agora-empty-sub">Loading profile notes…</p>
+                  <div className="ag-agora-skeleton-list">
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
                   </div>
                 ) : profileDisplayedNotes.length > 0 ? (
-                  profileDisplayedNotes.map((n) => renderNoteCard(n))
+                  profileDisplayedNotes.map((n, idx) => renderNoteCard(n, { kbdIndex: idx }))
                 ) : (
                   <div className="ag-agora-empty">
                     <p className="ag-agora-empty-sub">No {agora.profileView.tab} yet.</p>
@@ -4776,12 +5591,13 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                 )}
 
                 {agora.searchLoading && agora.searchResults.length === 0 ? (
-                  <div className="ag-agora-empty">
-                    <Loader2 size={22} className="ag-agora-spin" />
-                    <p className="ag-agora-empty-sub">Searching Nostr relays…</p>
+                  <div className="ag-agora-skeleton-list">
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
                   </div>
                 ) : agora.searchResults.length > 0 ? (
-                  agora.searchResults.map((n) => renderNoteCard(n))
+                  agora.searchResults.map((n, idx) => renderNoteCard(n, { kbdIndex: idx }))
                 ) : (
                   <div className="ag-agora-empty">
                     <p className="ag-agora-empty-title">No matching notes</p>
@@ -4793,30 +5609,150 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
               </>
             )}
 
-            {/* ===== VIEW D: NOTIFICATIONS ===== */}
-            {inNotifications &&
-              (agora.notifications.length > 0 ? (
-                agora.notifications.map(renderNotificationRow)
-              ) : (
-                <div className="ag-agora-empty">
-                  <Bell size={22} />
-                  <p className="ag-agora-empty-title">All caught up</p>
-                  <p className="ag-agora-empty-sub">
-                    Replies, mentions, likes, reposts, and zaps on your notes appear here.
-                  </p>
+            {/* ===== VIEW D: GROUPED & FILTERABLE NOTIFICATIONS ===== */}
+            {inNotifications && (
+              <>
+                <div
+                  className="ag-agora-feed-filters"
+                  role="tablist"
+                  aria-label="Filter notifications"
+                >
+                  {NOTIFICATION_FILTER_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={notifFilter === opt.id}
+                      className={`ag-agora-filter-pill${notifFilter === opt.id ? ' active' : ''}`}
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setNotifFilter(opt.id)
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
                 </div>
-              ))}
+
+                {groupedNotifications.length > 0 ? (
+                  groupedNotifications.map(renderGroupedNotificationRow)
+                ) : (
+                  <div className="ag-agora-empty">
+                    <Bell size={22} />
+                    <p className="ag-agora-empty-title">
+                      {notifFilter === 'all' ? 'All caught up' : 'No matching notifications'}
+                    </p>
+                    <p className="ag-agora-empty-sub">
+                      Replies, mentions, likes, reposts, and zaps on your posts appear here.
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* ===== VIEW D2: LONG-FORM ARTICLES (NIP-23) ===== */}
+            {inArticles && (
+              <>
+                {agora.loadingFeed && agora.articles.length === 0 ? (
+                  <div className="ag-agora-skeleton-list">
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
+                  </div>
+                ) : agora.articles.length > 0 ? (
+                  <div className="ag-agora-articles-list">
+                    {agora.articles.map((article) => (
+                      <AgoraArticleCard
+                        key={article.id}
+                        engine={engine}
+                        article={article}
+                        onOpen={(art) => {
+                          onPlaySound?.('click')
+                          agora.openArticle(art.id)
+                        }}
+                        onOpenProfile={handleOpenProfile}
+                        onSelectHashtag={handleSelectHashtag}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="ag-agora-empty">
+                    <BookOpen size={22} />
+                    <p className="ag-agora-empty-title">No long-form articles yet</p>
+                    <p className="ag-agora-empty-sub">
+                      NIP-23 essays and long-form articles from Nostr relays appear here.
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
 
             {/* ===== VIEW E: STANDARD FEED (Following / Global / Trending / Bookmarks) ===== */}
-            {!inThread && !inProfile && !inSearch && !inNotifications && (
+            {inStandardFeed && (
               <>
                 {showInlineComposer && (
-                  <AgoraComposerBox
+                  <AgoraComposer
                     engine={engine}
+                    draftKey="feed:new"
                     placeholder="What's happening on Nostr?"
                     submitLabel="Post"
                     onPlaySound={onPlaySound}
                   />
+                )}
+
+                {(agora.activeTab === 'following' || agora.activeTab === 'global') && (
+                  <div className="ag-agora-feed-filters" role="region" aria-label="Feed filters and lists">
+                    <div className="ag-agora-filter-pills">
+                      {FEED_FILTER_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          className={`ag-agora-filter-pill${
+                            agora.feedFilter === opt.id ? ' active' : ''
+                          }`}
+                          aria-pressed={agora.feedFilter === opt.id}
+                          onClick={() => {
+                            onPlaySound?.('click')
+                            agora.setFeedFilter(opt.id)
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+
+                      {agora.customLists.map((list) => {
+                        const listActive = agora.activeListId === list.id
+                        return (
+                          <button
+                            key={list.id}
+                            type="button"
+                            className={`ag-agora-filter-pill is-list${listActive ? ' active' : ''}`}
+                            aria-pressed={listActive}
+                            onClick={() => {
+                              onPlaySound?.('click')
+                              agora.setActiveListId(listActive ? null : list.id)
+                            }}
+                            title={list.description || `${list.pubkeys.length} accounts`}
+                          >
+                            <span className="truncate">{list.title}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+
+                    <button
+                      type="button"
+                      className="ag-agora-curation-btn"
+                      onClick={() => {
+                        onPlaySound?.('click')
+                        setCurationModalOpen(true)
+                      }}
+                      title="Manage muted words, muted threads, and custom people lists"
+                    >
+                      <SlidersHorizontal size={12} aria-hidden="true" />
+                      <span>Mutes &amp; Lists</span>
+                    </button>
+                  </div>
                 )}
 
                 {agora.pendingNewCount > 0 && (
@@ -4839,10 +5775,24 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                   </div>
                 )}
 
+                {standalonePolls.length > 0 && (
+                  <div className="ag-agora-polls-strip" role="region" aria-label="Active Nostr polls">
+                    {standalonePolls.map((poll) => (
+                      <AgoraPollCard
+                        key={poll.id}
+                        engine={engine}
+                        poll={poll}
+                        onOpenProfile={handleOpenProfile}
+                        onPlaySound={onPlaySound}
+                      />
+                    ))}
+                  </div>
+                )}
+
                 {agora.activeTab === 'following' &&
                   !agora.loadingFeed &&
                   agora.followingPubkeys.length === 0 &&
-                  agora.feedItems.length === 0 && (
+                  displayedFeedItems.length === 0 && (
                     <div className="ag-agora-onboarding">
                       <div className="ag-agora-onboarding-head">
                         <div>
@@ -4882,16 +5832,18 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                     </div>
                   )}
 
-                {agora.loadingFeed && agora.feedItems.length === 0 ? (
-                  <div className="ag-agora-empty">
-                    <Loader2 size={22} className="ag-agora-spin" />
-                    <p className="ag-agora-empty-sub">Connecting to Agora Nostr relays…</p>
+                {agora.loadingFeed && displayedFeedItems.length === 0 ? (
+                  <div className="ag-agora-skeleton-list" role="status" aria-label="Loading posts">
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
                   </div>
-                ) : agora.feedItems.length > 0 ? (
+                ) : displayedFeedItems.length > 0 ? (
                   <>
-                    {agora.feedItems.map(renderFeedItem)}
+                    {displayedFeedItems.map((item, idx) => renderFeedItem(item, idx))}
                     {agora.hasMore && (
-                      <div className="ag-agora-load-more-wrap">
+                      <div ref={loadMoreSentinelRef} className="ag-agora-load-more-wrap">
                         <button
                           type="button"
                           className="ag-agora-load-more-btn"
@@ -4914,6 +5866,24 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                       Tap the bookmark icon on any note to save it to your NIP-51 list.
                     </p>
                   </div>
+                ) : agora.feedFilter !== 'all' || agora.activeListId ? (
+                  <div className="ag-agora-empty">
+                    <SlidersHorizontal size={22} />
+                    <p className="ag-agora-empty-title">No posts match this filter</p>
+                    <p className="ag-agora-empty-sub">
+                      Try switching back to All or clearing the active list filter.
+                    </p>
+                    <button
+                      type="button"
+                      className="ag-agora-pill-btn"
+                      onClick={() => {
+                        agora.setFeedFilter('all')
+                        agora.setActiveListId(null)
+                      }}
+                    >
+                      Reset filters
+                    </button>
+                  </div>
                 ) : agora.activeTab !== 'following' || agora.followingPubkeys.length > 0 ? (
                   <div className="ag-agora-empty">
                     <Globe size={22} />
@@ -4926,6 +5896,38 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
               </>
             )}
           </div>
+
+          {/* Floating Back-to-Top Pill */}
+          {showScrollTop && (
+            <button
+              type="button"
+              className="ag-agora-scroll-top-btn"
+              onClick={() => {
+                onPlaySound?.('click')
+                streamRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+              }}
+              aria-label="Scroll back to top"
+            >
+              <ArrowUp size={14} aria-hidden="true" />
+              <span>Top</span>
+            </button>
+          )}
+
+          {/* Thumb-Friendly Mobile Floating Compose FAB */}
+          {!anySubModalOpen && !leftDrawerOpen && !rightDrawerOpen && (
+            <button
+              type="button"
+              className="ag-agora-mobile-fab"
+              onClick={() => {
+                onPlaySound?.('click')
+                setManualComposerModal({ kind: 'post' })
+              }}
+              aria-label="Compose new post"
+              title="New Post"
+            >
+              <PenSquare size={19} aria-hidden="true" />
+            </button>
+          )}
         </section>
 
         {/* ================= RIGHT DISCOVERY RAIL (Desktop >= 1180px | Slide-Over Tray <= 867px) ================= */}
@@ -5087,6 +6089,59 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
           engine={engine}
           onClose={() => setEditProfileOpen(false)}
           onPlaySound={onPlaySound}
+        />
+      )}
+
+      <AgoraArticleModal
+        engine={engine}
+        article={agora.activeArticle}
+        onClose={agora.closeArticle}
+        onOpenProfile={(pk) => {
+          agora.closeArticle()
+          handleOpenProfile(pk)
+        }}
+        onOpenZap={onOpenZap}
+        onSelectHashtag={(tag) => {
+          agora.closeArticle()
+          handleSelectHashtag(tag)
+        }}
+        onPlaySound={onPlaySound}
+      />
+
+      <AgoraCurationModal
+        open={curationModalOpen}
+        engine={engine}
+        onClose={() => setCurationModalOpen(false)}
+        onPlaySound={onPlaySound}
+      />
+
+      {!isMobileViewport && hoverCard && !anySubModalOpen && (
+        <AgoraProfileHoverCard
+          engine={engine}
+          pubkey={hoverCard.pubkey}
+          anchorRect={hoverCard.rect}
+          onMouseEnter={handleHoverCardEnter}
+          onMouseLeave={handleHoverAuthorEnd}
+          onOpenProfile={(pk) => {
+            dismissHoverCard()
+            handleOpenProfile(pk)
+          }}
+          onOpenDm={(pk, nick) => {
+            dismissHoverCard()
+            onOpenDm(pk, nick)
+          }}
+          onPlaySound={onPlaySound}
+        />
+      )}
+
+      {socialListModal && (
+        <AgoraSocialListModal
+          engine={engine}
+          title={socialListModal.title}
+          pubkeys={socialListModal.pubkeys}
+          onOpenProfile={handleOpenProfile}
+          onToggleFollow={handleToggleFollow}
+          onClose={() => setSocialListModal(null)}
         />
       )}
     </div>

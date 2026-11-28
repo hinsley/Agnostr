@@ -842,6 +842,28 @@ export function buildDeletionTemplate(eventId: string, kind: number): EventTempl
   }
 }
 
+export function buildDeleteEventTemplate(
+  eventIds: readonly string[],
+  reason?: string
+): EventTemplate {
+  const tags: string[][] = []
+  const seen = new Set<string>()
+  for (const rawId of eventIds) {
+    if (!isHex64(rawId)) continue
+    const id = rawId.toLowerCase()
+    if (seen.has(id)) continue
+    seen.add(id)
+    tags.push(['e', id])
+  }
+  tags.push(['k', String(KIND_AGORA_NOTE)])
+  return {
+    kind: KIND_AGORA_DELETE,
+    created_at: Math.floor(Date.now() / 1000),
+    tags,
+    content: reason?.trim().slice(0, 200) ?? '',
+  }
+}
+
 /* --------------------------------------------------------------------------
    NIP-02 Follow List (kind: 3)
    -------------------------------------------------------------------------- */

@@ -2,13 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Event as NostrEvent, EventTemplate, Filter } from 'nostr-tools'
 import type {
   AgoraActionResult,
+  AgoraArticle,
+  AgoraCustomList,
+  AgoraDensity,
   AgoraEngine,
+  AgoraFeedFilter,
   AgoraFeedItem,
   AgoraFeedTab,
+  AgoraMuteList,
+  AgoraNip05Status,
   AgoraNip65RelayList,
   AgoraNote,
   AgoraNoteStats,
   AgoraNotification,
+  AgoraPoll,
+  AgoraPollResults,
   AgoraProfile,
   AgoraProfileDraft,
   AgoraProfileTab,
@@ -28,6 +36,7 @@ import {
   AGORA_SOCIAL_RELAYS,
   EMPTY_NOTE_STATS,
   KIND_AGORA_BOOKMARK_LIST,
+  KIND_AGORA_DELETE,
   KIND_AGORA_FOLLOW_LIST,
   KIND_AGORA_NOTE,
   KIND_AGORA_PROFILE,
@@ -37,6 +46,7 @@ import {
   KIND_AGORA_ZAP_RECEIPT,
   buildAgoraNoteTemplate,
   buildBookmarkListTemplate,
+  buildDeleteEventTemplate,
   buildDeletionTemplate,
   buildFollowListTemplate,
   buildProfileMetadataTemplate,
@@ -54,6 +64,36 @@ import {
   parseZapReceipt,
   sanitizeHttpUrl,
 } from '../lib/agoraProtocol.ts'
+import {
+  buildAgoraPollResponseTemplate,
+  buildAgoraPollTemplate,
+  buildMuteListTemplate,
+  buildPeopleListTemplate,
+  clearAllAgoraExtrasStorage,
+  deduplicateFeedItems,
+  doesNoteMatchMuteList,
+  EMPTY_MUTE_LIST,
+  getCachedNip05Status,
+  KIND_AGORA_ARTICLE,
+  KIND_AGORA_MUTE_LIST,
+  KIND_AGORA_PEOPLE_LIST,
+  KIND_AGORA_POLL,
+  KIND_AGORA_POLL_RESPONSE,
+  loadAgoraDensity,
+  loadCachedCustomLists,
+  loadCachedFeed,
+  loadCachedMuteList,
+  parseAgoraArticle,
+  parseAgoraPoll,
+  parseAgoraPollResponse,
+  parseMuteList,
+  parsePeopleList,
+  saveAgoraDensity,
+  saveCachedCustomLists,
+  saveCachedFeed,
+  saveCachedMuteList,
+  verifyNip05Identifier,
+} from '../lib/agoraExtras.ts'
 import {
   cleanMimeType,
   DEFAULT_BLOSSOM_SERVERS,
@@ -84,6 +124,7 @@ export interface UseAgoraOptions {
   identityManager: IdentityManager
   masterPubkey: string
   blockedSet: Set<string>
+  trustedSet?: ReadonlySet<string>
   customRelays: readonly string[]
   blossomServers: readonly string[]
   pushToast?: (level: ToastLevel, title: string, detail?: string) => void
@@ -91,6 +132,49 @@ export interface UseAgoraOptions {
   onProfileNameSaved?: (name: string) => void
   onNotifyAgora?: (input: NotifyAgoraInput) => void
   onNotifyPushPoke?: (payload: PushPokePayload) => void
+}
+
+type AgoraNavStackEntry =
+  | { kind: 'thread'; noteId: string; relayHints?: string[] }
+  | { kind: 'profile'; pubkey: string }
+  | { kind: 'article'; articleId: string }
+
+interface PollVoteBucket {
+  /** voterPubkey -> { optionId, createdAt } (latest vote wins per voter) */
+  votesByVoter: Map<string, { optionId: string; createdAt: number }>
+}
+
+function buildPollResultsFromBucket(
+  bucket: PollVoteBucket | undefined,
+  myPubkey: string
+): AgoraPollResults {
+  if (!bucket || bucket.votesByVoter.size === 0) {
+    return { totalVotes: 0, countsByOption: {} }
+  }
+  const countsByOption: Record<string, number> = {}
+  let myOptionId: string | undefined
+  for (const [voterPk, entry] of bucket.votesByVoter.entries()) {
+    countsByOption[entry.optionId] = (countsByOption[entry.optionId] ?? 0) + 1
+    if (voterPk === myPubkey) {
+      myOptionId = entry.optionId
+    }
+  }
+  return {
+    totalVotes: bucket.votesByVoter.size,
+    countsByOption,
+    ...(myOptionId ? { myOptionId } : {}),
+  }
+}
+
+function slugifyListTitle(title: string): string {
+  const base = title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+  const rand = Math.random().toString(36).slice(2, 6)
+  return `${base || 'list'}-${rand}`
 }
 
 interface StoredProfileEntry {
@@ -438,6 +522,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     identityManager,
     masterPubkey,
     blockedSet,
+    trustedSet,
     customRelays,
     blossomServers,
   } = options
@@ -475,10 +560,22 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
   const activeRef = useRef(false)
   activeRef.current = active
 
-  // Primary tabs & refresh
+  // Primary tabs, filters, density & refresh
   const [activeTab, setActiveTabState] = useState<AgoraFeedTab>('following')
   const activeTabRef = useRef<AgoraFeedTab>(activeTab)
   activeTabRef.current = activeTab
+
+  const [feedFilter, setFeedFilter] = useState<AgoraFeedFilter>('all')
+  const [activeListId, setActiveListIdState] = useState<string | null>(null)
+  const activeListIdRef = useRef<string | null>(activeListId)
+  activeListIdRef.current = activeListId
+
+  const [density, setDensityState] = useState<AgoraDensity>(() => loadAgoraDensity())
+  const setDensity = useCallback((next: AgoraDensity) => {
+    const clean: AgoraDensity = next === 'compact' ? 'compact' : 'comfortable'
+    setDensityState(clean)
+    saveAgoraDensity(clean)
+  }, [])
 
   const [refreshNonce, setRefreshNonce] = useState(0)
   const [loadingFeed, setLoadingFeed] = useState(false)
@@ -489,11 +586,15 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     trending: false,
     bookmarks: false,
     notifications: false,
+    articles: false,
   })
 
-  // Feed item stores
-  const [followingItems, setFollowingItems] = useState<AgoraFeedItem[]>([])
-  const [globalItems, setGlobalItems] = useState<AgoraFeedItem[]>([])
+  // Feed item stores (hydrated instantly from localStorage cache for zero-flash paint)
+  const [followingItems, setFollowingItems] = useState<AgoraFeedItem[]>(() =>
+    loadCachedFeed('following')
+  )
+  const [globalItems, setGlobalItems] = useState<AgoraFeedItem[]>(() => loadCachedFeed('global'))
+  const [listFeedItems, setListFeedItems] = useState<AgoraFeedItem[]>([])
   const [trendingCandidates, setTrendingCandidates] = useState<AgoraNote[]>([])
   const [pendingNewCount, setPendingNewCount] = useState(0)
   const [hiddenTrendingTopics, setHiddenTrendingTopics] = useState<string[]>(() =>
@@ -504,7 +605,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     [hiddenTrendingTopics]
   )
 
-  // Normalized caches
+  // Normalized caches (pre-seed notesById from cached feeds so threads/bookmarks resolve immediately)
   const [profilesByPubkey, setProfilesByPubkey] = useState<Record<string, AgoraProfile>>(() =>
     loadCachedProfiles()
   )
@@ -529,12 +630,73 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     }
   }, [hasDiscoverLud16])
 
-  const [notesById, setNotesById] = useState<Record<string, AgoraNote>>({})
+  const [notesById, setNotesById] = useState<Record<string, AgoraNote>>(() => {
+    const out: Record<string, AgoraNote> = {}
+    for (const item of [...loadCachedFeed('following'), ...loadCachedFeed('global')]) {
+      out[item.note.id] = item.note
+    }
+    return out
+  })
   const notesRef = useRef<Record<string, AgoraNote>>(notesById)
   notesRef.current = notesById
 
   const [statsByNoteId, setStatsByNoteId] = useState<Record<string, AgoraNoteStats>>({})
   const statsBucketsRef = useRef<Map<string, NoteStatsBucket>>(new Map())
+
+  // NIP-65 outbox relay cache per author pubkey
+  const [authorRelaysByPubkey, setAuthorRelaysByPubkey] = useState<
+    Record<string, AgoraNip65RelayList>
+  >({})
+  const authorRelaysRef = useRef<Record<string, AgoraNip65RelayList>>(authorRelaysByPubkey)
+  authorRelaysRef.current = authorRelaysByPubkey
+  const authorRelayInFlightRef = useRef<Set<string>>(new Set())
+  const authorRelayNegativeRef = useRef<Map<string, number>>(new Map())
+
+  // Real NIP-05 verification state
+  const [nip05StatusByPubkey, setNip05StatusByPubkey] = useState<
+    Record<string, AgoraNip05Status>
+  >({})
+  const nip05CheckedKeyByPubkeyRef = useRef<Map<string, string>>(new Map())
+  const nip05InFlightRef = useRef<Set<string>>(new Set())
+
+  // NIP-51 Mute List & Custom People Lists
+  const [muteList, setMuteList] = useState<AgoraMuteList>(() => loadCachedMuteList())
+  const muteListRef = useRef<AgoraMuteList>(muteList)
+  muteListRef.current = muteList
+  const mutePubkeySet = useMemo(() => new Set(muteList.pubkeys), [muteList.pubkeys])
+  const muteThreadSet = useMemo(() => new Set(muteList.threads), [muteList.threads])
+  const myMuteEventRef = useRef<NostrEvent | null>(null)
+
+  const [customLists, setCustomLists] = useState<AgoraCustomList[]>(() => loadCachedCustomLists())
+  const customListsRef = useRef<AgoraCustomList[]>(customLists)
+  customListsRef.current = customLists
+
+  // NIP-23 Long-Form Articles
+  const [articlesById, setArticlesById] = useState<Record<string, AgoraArticle>>({})
+  const articlesByIdRef = useRef<Record<string, AgoraArticle>>(articlesById)
+  articlesByIdRef.current = articlesById
+  const [activeArticleId, setActiveArticleId] = useState<string | null>(null)
+  const activeArticleIdRef = useRef<string | null>(activeArticleId)
+  activeArticleIdRef.current = activeArticleId
+
+  // NIP-88 Native Polls & Votes
+  const [pollsById, setPollsById] = useState<Record<string, AgoraPoll>>({})
+  const pollsByIdRef = useRef<Record<string, AgoraPoll>>(pollsById)
+  pollsByIdRef.current = pollsById
+  const [pollResultsById, setPollResultsById] = useState<Record<string, AgoraPollResults>>({})
+  const pollVotesRef = useRef<Map<string, PollVoteBucket>>(new Map())
+
+  // Deleted own note IDs (NIP-09)
+  const deletedNoteIdsRef = useRef<Set<string>>(new Set())
+  const [deletedVersion, setDeletedVersion] = useState(0)
+
+  // Navigation history stack (for true Back navigation across threads, profiles & articles)
+  const navStackRef = useRef<AgoraNavStackEntry[]>([])
+  const [navStackDepth, setNavStackDepth] = useState(0)
+
+  // Debounced feed cache persistence timers
+  const followingCacheTimerRef = useRef<number | null>(null)
+  const globalCacheTimerRef = useRef<number | null>(null)
 
   // Social graph & lists
   const [followingPubkeys, setFollowingPubkeys] = useState<string[]>([])
@@ -1165,6 +1327,299 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     [ensureNotes, ensureProfiles, ensureStatsForNotes]
   )
 
+  // Debounced feed cache persistence (top 50 items per tab)
+  useEffect(() => {
+    if (!active || followingItems.length === 0) return
+    if (followingCacheTimerRef.current !== null) {
+      window.clearTimeout(followingCacheTimerRef.current)
+    }
+    followingCacheTimerRef.current = window.setTimeout(() => {
+      followingCacheTimerRef.current = null
+      saveCachedFeed('following', followingItems)
+    }, 900)
+    return () => {
+      if (followingCacheTimerRef.current !== null) {
+        window.clearTimeout(followingCacheTimerRef.current)
+        followingCacheTimerRef.current = null
+      }
+    }
+  }, [active, followingItems])
+
+  useEffect(() => {
+    if (!active || globalItems.length === 0) return
+    if (globalCacheTimerRef.current !== null) {
+      window.clearTimeout(globalCacheTimerRef.current)
+    }
+    globalCacheTimerRef.current = window.setTimeout(() => {
+      globalCacheTimerRef.current = null
+      saveCachedFeed('global', globalItems)
+    }, 900)
+    return () => {
+      if (globalCacheTimerRef.current !== null) {
+        window.clearTimeout(globalCacheTimerRef.current)
+        globalCacheTimerRef.current = null
+      }
+    }
+  }, [active, globalItems])
+
+  // NIP-65 outbox relay batch fetcher & selector
+  const ensureAuthorRelays = useCallback(
+    (pubkeys: readonly string[]) => {
+      const nowMs = Date.now()
+      const missing: string[] = []
+      const seen = new Set<string>()
+      for (const raw of pubkeys) {
+        if (!isHex64(raw)) continue
+        const pk = raw.toLowerCase()
+        if (seen.has(pk)) continue
+        seen.add(pk)
+        if (authorRelaysRef.current[pk]) continue
+        if (authorRelayInFlightRef.current.has(pk)) continue
+        const negAt = authorRelayNegativeRef.current.get(pk)
+        if (negAt && nowMs - negAt < NEGATIVE_CACHE_TTL_MS) continue
+        missing.push(pk)
+        if (missing.length >= 60) break
+      }
+      if (missing.length === 0) return
+
+      for (const pk of missing) authorRelayInFlightRef.current.add(pk)
+      const relays = Array.from(new Set([...AGORA_PROFILE_RELAYS, ...socialRelaysRef.current])).slice(
+        0,
+        6
+      )
+      const bestByPk = new Map<string, AgoraNip65RelayList>()
+
+      const { promise } = queryOneShot(
+        'outbox',
+        relays,
+        [{ kinds: [KIND_AGORA_RELAY_LIST], authors: missing, limit: missing.length * 2 }],
+        {
+          timeoutMs: 3600,
+          targetEose: Math.min(2, relays.length),
+          onEvent: (ev) => {
+            if (!verifyEventCached(ev)) return
+            const parsed = parseNip65RelayList(ev)
+            if (!parsed) return
+            const pk = ev.pubkey.toLowerCase()
+            const prev = bestByPk.get(pk)
+            if (!prev || parsed.updatedAt > prev.updatedAt) {
+              bestByPk.set(pk, parsed)
+            }
+          },
+        }
+      )
+
+      void promise.then(() => {
+        const doneMs = Date.now()
+        if (bestByPk.size > 0) {
+          setAuthorRelaysByPubkey((prev) => {
+            const next = { ...prev }
+            for (const [pk, list] of bestByPk.entries()) {
+              if (!next[pk] || list.updatedAt >= next[pk].updatedAt) {
+                next[pk] = list
+              }
+            }
+            authorRelaysRef.current = next
+            return next
+          })
+        }
+        for (const pk of missing) {
+          authorRelayInFlightRef.current.delete(pk)
+          if (!bestByPk.has(pk) && !authorRelaysRef.current[pk]) {
+            authorRelayNegativeRef.current.set(pk, doneMs)
+          }
+        }
+      })
+    },
+    [queryOneShot]
+  )
+
+  const getOutboxRelaysForAuthors = useCallback(
+    (pubkeys: readonly string[], maxExtra = 4): string[] => {
+      const counts = new Map<string, number>()
+      const baseRelays = socialRelaysRef.current
+      const baseSet = new Set(baseRelays)
+      for (const raw of pubkeys) {
+        const pk = raw.toLowerCase()
+        const list = authorRelaysRef.current[pk]
+        if (!list) continue
+        for (const url of list.write.slice(0, 3)) {
+          if (baseSet.has(url)) continue
+          counts.set(url, (counts.get(url) ?? 0) + 1)
+        }
+      }
+      const extras = Array.from(counts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, maxExtra)
+        .map(([url]) => url)
+      return Array.from(new Set([...baseRelays, ...extras])).slice(0, 10)
+    },
+    []
+  )
+
+  // Real NIP-05 lazy HTTPS verification
+  const ensureNip05Verified = useCallback((pubkey: string, nip05?: string) => {
+    if (!isHex64(pubkey)) return
+    const pk = pubkey.toLowerCase()
+    const cleanNip05 = nip05?.trim().toLowerCase() ?? ''
+    if (!cleanNip05) return
+
+    const checkKey = `${pk}:${cleanNip05}`
+    if (nip05CheckedKeyByPubkeyRef.current.get(pk) === checkKey) return
+
+    const cached = getCachedNip05Status(cleanNip05, pk)
+    if (cached) {
+      nip05CheckedKeyByPubkeyRef.current.set(pk, checkKey)
+      setNip05StatusByPubkey((prev) => (prev[pk] === cached ? prev : { ...prev, [pk]: cached }))
+      return
+    }
+
+    if (nip05InFlightRef.current.has(checkKey)) return
+    nip05InFlightRef.current.add(checkKey)
+    setNip05StatusByPubkey((prev) =>
+      prev[pk] === 'verified' || prev[pk] === 'checking' ? prev : { ...prev, [pk]: 'checking' }
+    )
+
+    void verifyNip05Identifier(cleanNip05, pk).then((status) => {
+      nip05InFlightRef.current.delete(checkKey)
+      if (status === 'verified' || status === 'invalid') {
+        nip05CheckedKeyByPubkeyRef.current.set(pk, checkKey)
+      }
+      setNip05StatusByPubkey((prev) => (prev[pk] === status ? prev : { ...prev, [pk]: status }))
+    })
+  }, [])
+
+  // NIP-23 articles ingestion
+  const ingestArticlesBatch = useCallback(
+    (incoming: readonly AgoraArticle[]) => {
+      if (incoming.length === 0) return
+      let changed = false
+      const next = { ...articlesByIdRef.current }
+      // Deduplicate parameterized replaceable (pubkey + dTag) keeping newest createdAt
+      const byCoord = new Map<string, AgoraArticle>()
+      for (const existing of Object.values(next)) {
+        byCoord.set(`${existing.pubkey}:${existing.dTag}`, existing)
+      }
+      const authorPks: string[] = []
+      for (const art of incoming) {
+        if (blockedSetRef.current.has(art.pubkey)) continue
+        const coord = `${art.pubkey}:${art.dTag}`
+        const prev = byCoord.get(coord)
+        if (prev && prev.createdAt > art.createdAt) continue
+        if (prev && prev.id === art.id) continue
+        if (prev && prev.id !== art.id) {
+          delete next[prev.id]
+        }
+        next[art.id] = art
+        byCoord.set(coord, art)
+        authorPks.push(art.pubkey)
+        changed = true
+      }
+      if (!changed) return
+      articlesByIdRef.current = next
+      setArticlesById(next)
+      if (authorPks.length > 0) ensureProfiles(authorPks)
+    },
+    [ensureProfiles]
+  )
+
+  // NIP-88 polls & vote responses ingestion
+  const syncPollResultsForIds = useCallback((pollIds: readonly string[]) => {
+    if (pollIds.length === 0) return
+    const pk = myPubkeyRef.current
+    setPollResultsById((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const id of pollIds) {
+        const computed = buildPollResultsFromBucket(pollVotesRef.current.get(id), pk)
+        const old = prev[id]
+        if (
+          !old ||
+          old.totalVotes !== computed.totalVotes ||
+          old.myOptionId !== computed.myOptionId ||
+          JSON.stringify(old.countsByOption) !== JSON.stringify(computed.countsByOption)
+        ) {
+          next[id] = computed
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [])
+
+  const fetchPollResponses = useCallback(
+    (polls: readonly AgoraPoll[]) => {
+      if (polls.length === 0) return
+      const pollById = new Map<string, AgoraPoll>()
+      for (const p of polls) pollById.set(p.id, p)
+      const ids = Array.from(pollById.keys()).slice(0, 30)
+      const relays = socialRelaysRef.current
+      const touched = new Set<string>()
+
+      const { promise } = queryOneShot(
+        'poll-votes',
+        relays,
+        [{ kinds: [KIND_AGORA_POLL_RESPONSE], '#e': ids, limit: 300 }],
+        {
+          timeoutMs: 3600,
+          targetEose: Math.min(2, relays.length),
+          onEvent: (ev) => {
+            if (!verifyEventCached(ev)) return
+            const parsed = parseAgoraPollResponse(ev)
+            if (!parsed || blockedSetRef.current.has(parsed.voterPubkey)) return
+            const poll = pollById.get(parsed.pollId)
+            if (!poll) return
+            if (poll.endsAt && parsed.createdAt > poll.endsAt) return
+            if (!poll.options.some((o) => o.id === parsed.optionId)) return
+
+            let bucket = pollVotesRef.current.get(parsed.pollId)
+            if (!bucket) {
+              bucket = { votesByVoter: new Map() }
+              pollVotesRef.current.set(parsed.pollId, bucket)
+            }
+            const existing = bucket.votesByVoter.get(parsed.voterPubkey)
+            if (!existing || parsed.createdAt >= existing.createdAt) {
+              bucket.votesByVoter.set(parsed.voterPubkey, {
+                optionId: parsed.optionId,
+                createdAt: parsed.createdAt,
+              })
+              touched.add(parsed.pollId)
+            }
+          },
+        }
+      )
+
+      void promise.then(() => {
+        if (touched.size > 0) {
+          syncPollResultsForIds(Array.from(touched))
+        }
+      })
+    },
+    [queryOneShot, syncPollResultsForIds]
+  )
+
+  const ingestPollsBatch = useCallback(
+    (incoming: readonly AgoraPoll[]) => {
+      if (incoming.length === 0) return
+      let changed = false
+      const added: AgoraPoll[] = []
+      const next = { ...pollsByIdRef.current }
+      for (const poll of incoming) {
+        if (blockedSetRef.current.has(poll.pubkey)) continue
+        if (next[poll.id]) continue
+        next[poll.id] = poll
+        added.push(poll)
+        changed = true
+      }
+      if (!changed) return
+      pollsByIdRef.current = next
+      setPollsById(next)
+      ensureProfiles(added.map((p) => p.pubkey))
+      fetchPollResponses(added)
+    },
+    [ensureProfiles, fetchPollResponses]
+  )
+
   // Activate lazily when Agora is visited
   const activate = useCallback(() => {
     setActive(true)
@@ -1174,16 +1629,21 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
   useEffect(() => {
     myFollowEventRef.current = null
     myBookmarkEventRef.current = null
+    myMuteEventRef.current = null
     setFollowingPubkeys([])
     setMyNip65Relays(null)
     notifByIdRef.current.clear()
     setNotifications([])
     pendingItemsRef.current.clear()
     setPendingNewCount(0)
+    navStackRef.current = []
+    setNavStackDepth(0)
+    setActiveArticleId(null)
+    setActiveListIdState(null)
     discoveryWarmedRef.current = false
   }, [myPubkey])
 
-  // 1. Bootstrap my own profile, follow list (kind:3), NIP-65 relays (kind:10002), bookmarks (kind:10003)
+  // 1. Bootstrap my own profile, follow list (kind:3), NIP-65 relays (kind:10002), bookmarks (kind:10003), mute list (kind:10000), & people lists (kind:30000)
   useEffect(() => {
     if (!active || !isHex64(myPubkey)) return
 
@@ -1192,6 +1652,8 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     let bestFollow: NostrEvent | null = null
     let bestNip65: AgoraNip65RelayList | null = null
     let bestBookmark: NostrEvent | null = null
+    let bestMute: NostrEvent | null = null
+    const bestPeopleListsByD = new Map<string, AgoraCustomList>()
 
     const { promise, cancel } = queryOneShot(
       'boot',
@@ -1203,9 +1665,11 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             KIND_AGORA_FOLLOW_LIST,
             KIND_AGORA_RELAY_LIST,
             KIND_AGORA_BOOKMARK_LIST,
+            KIND_AGORA_MUTE_LIST,
+            KIND_AGORA_PEOPLE_LIST,
           ],
           authors: [myPubkey],
-          limit: 20,
+          limit: 40,
         },
       ],
       {
@@ -1231,6 +1695,17 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             if (!bestBookmark || ev.created_at > bestBookmark.created_at) {
               bestBookmark = ev
             }
+          } else if (ev.kind === KIND_AGORA_MUTE_LIST) {
+            if (!bestMute || ev.created_at > bestMute.created_at) {
+              bestMute = ev
+            }
+          } else if (ev.kind === KIND_AGORA_PEOPLE_LIST) {
+            const parsedList = parsePeopleList(ev)
+            if (!parsedList) return
+            const prev = bestPeopleListsByD.get(parsedList.dTag)
+            if (!prev || parsedList.updatedAt > prev.updatedAt) {
+              bestPeopleListsByD.set(parsedList.dTag, parsedList)
+            }
           }
         },
       }
@@ -1248,6 +1723,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         if (parsed) {
           setFollowingPubkeys(parsed.pubkeys)
           ensureProfiles(parsed.pubkeys.slice(0, 60))
+          ensureAuthorRelays(parsed.pubkeys.slice(0, 60))
         }
       }
       if (bestNip65) {
@@ -1265,13 +1741,40 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
           saveCachedBookmarks(merged)
         }
       }
+      if (bestMute) {
+        myMuteEventRef.current = bestMute
+        const parsed = parseMuteList(bestMute)
+        if (parsed && parsed.updatedAt >= muteListRef.current.updatedAt) {
+          muteListRef.current = parsed
+          setMuteList(parsed)
+          saveCachedMuteList(parsed)
+        }
+      }
+      if (bestPeopleListsByD.size > 0) {
+        const mergedByD = new Map<string, AgoraCustomList>()
+        for (const local of customListsRef.current) {
+          mergedByD.set(local.dTag, local)
+        }
+        for (const remote of bestPeopleListsByD.values()) {
+          const existing = mergedByD.get(remote.dTag)
+          if (!existing || remote.updatedAt >= existing.updatedAt) {
+            mergedByD.set(remote.dTag, remote)
+          }
+        }
+        const mergedLists = Array.from(mergedByD.values()).sort(
+          (a, b) => b.updatedAt - a.updatedAt
+        )
+        customListsRef.current = mergedLists
+        setCustomLists(mergedLists)
+        saveCachedCustomLists(mergedLists)
+      }
     })
 
     return () => {
       cancelled = true
       cancel()
     }
-  }, [active, myPubkey, queryOneShot, ingestProfilesBatch, ensureProfiles])
+  }, [active, myPubkey, queryOneShot, ingestProfilesBatch, ensureProfiles, ensureAuthorRelays])
 
   // Lightweight boot-time fetch of our own master `kind: 0` profile even before visiting Agora
   const bootSelfProfileFetchedForRef = useRef<string>('')
@@ -1298,10 +1801,22 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
 
     const emitLiveAgoraNotif = (
       createdAtSec: number,
-      input: Omit<NotifyAgoraInput, 'actorName'>
+      input: Omit<NotifyAgoraInput, 'actorName'>,
+      threadRootId?: string
     ) => {
       if (createdAtSec < subStartSec - 15) return
       if (!receivedEose && createdAtSec < subStartSec - 5) return
+      const ml = muteListRef.current
+      if (ml.pubkeys.includes(input.actorPubkey.toLowerCase())) return
+      if (ml.threads.length > 0) {
+        const candidates = [
+          input.noteId?.toLowerCase(),
+          threadRootId?.toLowerCase(),
+          input.noteId ? notesRef.current[input.noteId.toLowerCase()]?.rootId : undefined,
+          input.noteId ? notesRef.current[input.noteId.toLowerCase()]?.replyToId : undefined,
+        ]
+        if (candidates.some((cid) => cid && ml.threads.includes(cid))) return
+      }
       const prof = profilesRef.current[input.actorPubkey]
       const actorName =
         prof?.displayName?.trim() ||
@@ -1399,13 +1914,17 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             })
             ensureProfiles([actor])
             if (targetId) ensureNotes([targetId])
-            emitLiveAgoraNotif(note.createdAt, {
-              id: evId,
-              kind: note.isReply ? 'reply' : note.quoteIds.length > 0 ? 'quote' : 'mention',
-              actorPubkey: actor,
-              noteId: note.id,
-              preview: note.content.slice(0, 220),
-            })
+            emitLiveAgoraNotif(
+              note.createdAt,
+              {
+                id: evId,
+                kind: note.isReply ? 'reply' : note.quoteIds.length > 0 ? 'quote' : 'mention',
+                actorPubkey: actor,
+                noteId: note.id,
+                preview: note.content.slice(0, 220),
+              },
+              note.rootId ?? targetId
+            )
             scheduleFlush()
             return
           }
@@ -1474,14 +1993,25 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     }
   }, [active, myPubkey, relayPool, ensureProfiles, ensureNotes, ingestNotesBatch])
 
-  // 3. Active feed subscription (`following`, `global`, `trending`, `bookmarks`)
+  // 3. Active feed subscription (`following`, `global`, `trending`, `bookmarks`, `articles`)
   const followingKey = useMemo(
     () => followingPubkeys.slice(0, 250).join(','),
     [followingPubkeys]
   )
 
+  const activeCustomList = useMemo(
+    () => (activeListId ? customLists.find((l) => l.dTag === activeListId) ?? null : null),
+    [activeListId, customLists]
+  )
+
+  const activeListPubkeysKey = useMemo(
+    () => (activeCustomList ? activeCustomList.pubkeys.slice(0, 200).join(',') : ''),
+    [activeCustomList]
+  )
+
   useEffect(() => {
     if (!active) return
+    if (activeListId) return
 
     pendingItemsRef.current.clear()
     setPendingNewCount(0)
@@ -1502,6 +2032,51 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
 
     const relays = socialRelaysRef.current
 
+    if (activeTab === 'articles') {
+      setLoadingFeed(true)
+      const followed = followingRef.current.slice(0, 120)
+      const articleRelays =
+        followed.length > 0 ? getOutboxRelaysForAuthors(followed, 4) : relays
+      const collected = new Map<string, AgoraArticle>()
+      const filters: Filter[] = [{ kinds: [KIND_AGORA_ARTICLE], limit: 45 }]
+      if (followed.length > 0) {
+        filters.unshift({
+          kinds: [KIND_AGORA_ARTICLE],
+          authors: Array.from(new Set([...followed, myPubkeyRef.current])),
+          limit: 40,
+        })
+      }
+
+      const { promise, cancel } = queryOneShot('articles', articleRelays, filters, {
+        timeoutMs: 4400,
+        targetEose: Math.min(2, articleRelays.length),
+        onEvent: (ev) => {
+          if (!verifyEventCached(ev)) return
+          const parsed = parseAgoraArticle(ev)
+          if (!parsed || blockedSetRef.current.has(parsed.pubkey)) return
+          const coord = `${parsed.pubkey}:${parsed.dTag}`
+          const prev = collected.get(coord)
+          if (!prev || parsed.createdAt > prev.createdAt) {
+            collected.set(coord, parsed)
+          }
+        },
+      })
+
+      let cancelled = false
+      void promise.then(() => {
+        if (cancelled) return
+        if (collected.size > 0) {
+          ingestArticlesBatch(Array.from(collected.values()))
+        }
+        setLoadingFeed(false)
+      })
+
+      return () => {
+        cancelled = true
+        cancel()
+      }
+    }
+
     if (activeTab === 'trending') {
       setLoadingFeed(true)
       const sinceSec = Math.floor(Date.now() / 1000) - 24 * 3600
@@ -1517,6 +2092,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             const note = parseAgoraNote(ev)
             if (!note || note.isReply) return
             if (blockedSetRef.current.has(note.pubkey)) return
+            if (deletedNoteIdsRef.current.has(note.id)) return
             if (!collected.has(note.id)) {
               collected.set(note.id, note)
             }
@@ -1561,6 +2137,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
               const note = parseAgoraNote(ev)
               if (!note || note.isReply || seen.has(note.id)) return
               if (blockedSetRef.current.has(note.pubkey)) return
+              if (deletedNoteIdsRef.current.has(note.id)) return
               seen.add(note.id)
               found.push(note)
             },
@@ -1584,6 +2161,9 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         ? Array.from(new Set([...followingRef.current.slice(0, 240), myPubkeyRef.current]))
         : undefined
 
+    const feedRelays =
+      activeTab === 'following' && authors ? getOutboxRelaysForAuthors(authors, 4) : relays
+
     const filters: Filter[] =
       activeTab === 'following'
         ? [{ kinds: [KIND_AGORA_NOTE, KIND_AGORA_REPOST], authors, limit: 70 }]
@@ -1591,7 +2171,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
 
     let initialHydrated = false
     let eoseCount = 0
-    const targetEose = Math.max(1, Math.min(2, relays.length))
+    const targetEose = Math.max(1, Math.min(2, feedRelays.length))
     const backfillBuffer: AgoraFeedItem[] = []
     let backfillFlushTimer: number | null = null
     let topSortAt = 0
@@ -1625,6 +2205,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     const graceTimer = window.setTimeout(markHydrated, LIVE_BUFFER_GRACE_MS)
 
     const handleFeedItem = (item: AgoraFeedItem) => {
+      if (deletedNoteIdsRef.current.has(item.note.id)) return
       if (blockedSetRef.current.has(item.note.pubkey)) return
       if (item.repostedBy && blockedSetRef.current.has(item.repostedBy)) return
 
@@ -1654,12 +2235,13 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       }
     }
 
-    const unsub = relayPool.subscribe(`ag-feed-${activeTab}`, relays, filters, {
+    const unsub = relayPool.subscribe(`ag-feed-${activeTab}`, feedRelays, filters, {
       onEvent: (ev) => {
         if (ev.kind === KIND_AGORA_NOTE) {
           const note = parseAgoraNote(ev)
           if (!note) return
           if (note.isReply) return
+          if (deletedNoteIdsRef.current.has(note.id)) return
           handleFeedItem({
             key: `note:${note.id}`,
             kind: 'note',
@@ -1670,6 +2252,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
           const repost = parseAgoraRepost(ev)
           if (!repost) return
           if (blockedSetRef.current.has(repost.repostedBy)) return
+          if (deletedNoteIdsRef.current.has(repost.targetNoteId)) return
           const targetNote = repost.embeddedNote ?? notesRef.current[repost.targetNoteId]
           if (targetNote) {
             handleFeedItem({
@@ -1709,20 +2292,180 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
   }, [
     active,
     activeTab,
+    activeListId,
     followingKey,
     refreshNonce,
     relayPool,
     queryOneShot,
     ingestNotesBatch,
+    ingestArticlesBatch,
+    getOutboxRelaysForAuthors,
     warmDependenciesForNotes,
     ensureNotes,
     ensureStatsForNotes,
   ])
 
+  // 3b. Custom NIP-51 People List feed loader
+  useEffect(() => {
+    if (!active || !activeListId) {
+      setListFeedItems([])
+      return
+    }
+    const list = customListsRef.current.find((l) => l.dTag === activeListId)
+    if (!list || list.pubkeys.length === 0) {
+      setListFeedItems([])
+      setLoadingFeed(false)
+      return
+    }
+
+    setLoadingFeed(true)
+    const authors = list.pubkeys.slice(0, 200)
+    ensureAuthorRelays(authors.slice(0, 60))
+    const listRelays = getOutboxRelaysForAuthors(authors, 4)
+    const collected: AgoraFeedItem[] = []
+    const seenKeys = new Set<string>()
+
+    const { promise, cancel } = queryOneShot(
+      'list-feed',
+      listRelays,
+      [{ kinds: [KIND_AGORA_NOTE, KIND_AGORA_REPOST], authors, limit: 75 }],
+      {
+        timeoutMs: 4200,
+        targetEose: Math.min(2, listRelays.length),
+        onEvent: (ev) => {
+          if (ev.kind === KIND_AGORA_NOTE) {
+            const note = parseAgoraNote(ev)
+            if (!note || note.isReply) return
+            if (blockedSetRef.current.has(note.pubkey) || deletedNoteIdsRef.current.has(note.id)) {
+              return
+            }
+            const key = `note:${note.id}`
+            if (seenKeys.has(key)) return
+            seenKeys.add(key)
+            collected.push({ key, kind: 'note', note, sortAt: note.createdAt })
+          } else if (ev.kind === KIND_AGORA_REPOST) {
+            const repost = parseAgoraRepost(ev)
+            if (!repost || blockedSetRef.current.has(repost.repostedBy)) return
+            if (deletedNoteIdsRef.current.has(repost.targetNoteId)) return
+            const target = repost.embeddedNote ?? notesRef.current[repost.targetNoteId]
+            if (!target || blockedSetRef.current.has(target.pubkey)) return
+            const key = `repost:${repost.repostedBy}:${target.id}`
+            if (seenKeys.has(key)) return
+            seenKeys.add(key)
+            collected.push({
+              key,
+              kind: 'repost',
+              note: target,
+              repostedBy: repost.repostedBy,
+              repostedAt: repost.repostedAt,
+              sortAt: repost.repostedAt,
+            })
+          }
+        },
+      }
+    )
+
+    let cancelled = false
+    void promise.then(() => {
+      if (cancelled) return
+      if (collected.length > 0) {
+        const notes = collected.map((i) => i.note)
+        const extraPks = collected
+          .map((i) => i.repostedBy)
+          .filter((pk): pk is string => Boolean(pk))
+        ingestNotesBatch(notes)
+        warmDependenciesForNotes(notes, extraPks)
+      }
+      setListFeedItems(mergeFeedItems([], collected, blockedSetRef.current))
+      setLoadingFeed(false)
+    })
+
+    return () => {
+      cancelled = true
+      cancel()
+    }
+  }, [
+    active,
+    activeListId,
+    activeListPubkeysKey,
+    refreshNonce,
+    ensureAuthorRelays,
+    getOutboxRelaysForAuthors,
+    queryOneShot,
+    ingestNotesBatch,
+    warmDependenciesForNotes,
+  ])
+
+  // 3c. Active NIP-88 Polls loader (followed + global recent)
+  useEffect(() => {
+    if (!active) return
+    const followed = followingRef.current.slice(0, 160)
+    const pollRelays =
+      followed.length > 0 ? getOutboxRelaysForAuthors(followed, 3) : socialRelaysRef.current
+    const filters: Filter[] = [{ kinds: [KIND_AGORA_POLL], limit: 25 }]
+    if (followed.length > 0) {
+      filters.unshift({
+        kinds: [KIND_AGORA_POLL],
+        authors: Array.from(new Set([...followed, myPubkeyRef.current])),
+        limit: 25,
+      })
+    }
+
+    const found = new Map<string, AgoraPoll>()
+    const { promise, cancel } = queryOneShot('polls', pollRelays, filters, {
+      timeoutMs: 4200,
+      targetEose: Math.min(2, pollRelays.length),
+      onEvent: (ev) => {
+        if (!verifyEventCached(ev)) return
+        const parsed = parseAgoraPoll(ev)
+        if (!parsed || blockedSetRef.current.has(parsed.pubkey)) return
+        if (!found.has(parsed.id)) {
+          found.set(parsed.id, parsed)
+        }
+      },
+    })
+
+    let cancelled = false
+    void promise.then(() => {
+      if (cancelled) return
+      if (found.size > 0) {
+        ingestPollsBatch(Array.from(found.values()))
+      }
+    })
+
+    return () => {
+      cancelled = true
+      cancel()
+    }
+  }, [
+    active,
+    followingKey,
+    refreshNonce,
+    getOutboxRelaysForAuthors,
+    queryOneShot,
+    ingestPollsBatch,
+  ])
+
   const setActiveTab = useCallback((tab: AgoraFeedTab) => {
+    setActiveListIdState(null)
     setActiveTabState(tab)
     pendingItemsRef.current.clear()
     setPendingNewCount(0)
+  }, [])
+
+  const setActiveListId = useCallback((id: string | null) => {
+    const clean = id?.trim() || null
+    setActiveListIdState(clean)
+    pendingItemsRef.current.clear()
+    setPendingNewCount(0)
+    if (
+      clean &&
+      (activeTabRef.current === 'notifications' ||
+        activeTabRef.current === 'articles' ||
+        activeTabRef.current === 'bookmarks')
+    ) {
+      setActiveTabState('following')
+    }
   }, [])
 
   const flushPendingNotes = useCallback(() => {
@@ -1750,22 +2493,80 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     setRefreshNonce((n) => n + 1)
   }, [])
 
-  // Computed visible feedItems per active tab (always filtering blockedPubkeys)
+  // Computed visible feedItems per active tab / custom list (with mutes, dedup & feedFilter)
   const feedItems = useMemo<AgoraFeedItem[]>(() => {
-    if (activeTab === 'following') {
-      return followingItems.filter(
+    // Depend on deletedVersion so NIP-09 deletions immediately reflect in memos
+    void deletedVersion
+    const deleted = deletedNoteIdsRef.current
+
+    const applyFeedFilter = (items: AgoraFeedItem[]): AgoraFeedItem[] => {
+      if (feedFilter === 'all') return items
+      if (feedFilter === 'no-reposts') {
+        return items.filter((item) => item.kind !== 'repost')
+      }
+      if (feedFilter === 'media') {
+        return items.filter((item) => item.note.media.length > 0)
+      }
+      if (feedFilter === 'trusted') {
+        if (!trustedSet) return items
+        return items.filter(
+          (item) => item.note.pubkey === myPubkey || trustedSet.has(item.note.pubkey)
+        )
+      }
+      return items
+    }
+
+    if (activeListId && activeCustomList) {
+      const memberSet = new Set(activeCustomList.pubkeys)
+      const combined: AgoraFeedItem[] = [...listFeedItems]
+      const seenKeys = new Set(combined.map((i) => i.key))
+      for (const item of [...followingItems, ...globalItems]) {
+        if (seenKeys.has(item.key)) continue
+        const authorMatches =
+          memberSet.has(item.note.pubkey) ||
+          (item.repostedBy ? memberSet.has(item.repostedBy) : false)
+        if (!authorMatches) continue
+        seenKeys.add(item.key)
+        combined.push(item)
+      }
+      const filtered = combined.filter(
         (item) =>
+          !deleted.has(item.note.id) &&
           !blockedSet.has(item.note.pubkey) &&
-          (!item.repostedBy || !blockedSet.has(item.repostedBy))
+          (!item.repostedBy || !blockedSet.has(item.repostedBy)) &&
+          !doesNoteMatchMuteList(item.note, muteList)
       )
+      return applyFeedFilter(deduplicateFeedItems(filtered))
+    }
+
+    if (activeTab === 'following') {
+      const filtered = followingItems.filter(
+        (item) =>
+          !deleted.has(item.note.id) &&
+          !blockedSet.has(item.note.pubkey) &&
+          (!item.repostedBy || !blockedSet.has(item.repostedBy)) &&
+          !doesNoteMatchMuteList(item.note, muteList)
+      )
+      return applyFeedFilter(deduplicateFeedItems(filtered))
     }
     if (activeTab === 'global') {
-      return globalItems.filter((item) => !blockedSet.has(item.note.pubkey))
+      const filtered = globalItems.filter(
+        (item) =>
+          !deleted.has(item.note.id) &&
+          !blockedSet.has(item.note.pubkey) &&
+          !doesNoteMatchMuteList(item.note, muteList)
+      )
+      return applyFeedFilter(deduplicateFeedItems(filtered))
     }
     if (activeTab === 'trending') {
       const nowSec = Math.floor(Date.now() / 1000)
-      return trendingCandidates
-        .filter((note) => !blockedSet.has(note.pubkey))
+      const items = trendingCandidates
+        .filter(
+          (note) =>
+            !deleted.has(note.id) &&
+            !blockedSet.has(note.pubkey) &&
+            !doesNoteMatchMuteList(note, muteList)
+        )
         .map((note) => ({
           note,
           score: computeTrendingScore(note, statsByNoteId[note.id], nowSec),
@@ -1777,10 +2578,12 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
           note,
           sortAt: note.createdAt,
         }))
+      return applyFeedFilter(items)
     }
     if (activeTab === 'bookmarks') {
       const items: AgoraFeedItem[] = []
       for (const id of bookmarkedIds) {
+        if (deleted.has(id)) continue
         const note = notesById[id]
         if (!note || blockedSet.has(note.pubkey)) continue
         items.push({
@@ -1794,6 +2597,13 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     }
     return []
   }, [
+    deletedVersion,
+    feedFilter,
+    trustedSet,
+    myPubkey,
+    activeListId,
+    activeCustomList,
+    listFeedItems,
     activeTab,
     followingItems,
     globalItems,
@@ -1802,11 +2612,13 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     bookmarkedIds,
     notesById,
     blockedSet,
+    muteList,
   ])
 
-  const hasMore = Boolean(hasMoreByTab[activeTab])
+  const hasMore = activeListId ? false : Boolean(hasMoreByTab[activeTab])
 
   const loadMore = useCallback(async () => {
+    if (activeListIdRef.current) return
     const tab = activeTabRef.current
     if (tab !== 'following' && tab !== 'global') return
     const current = tab === 'following' ? followingItems : globalItems
@@ -1822,16 +2634,21 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     }
 
     setLoadingMore(true)
-    const relays = socialRelaysRef.current
+    const authors =
+      tab === 'following'
+        ? Array.from(new Set([...followingRef.current.slice(0, 240), myPubkeyRef.current]))
+        : undefined
+    const relays =
+      tab === 'following' && authors
+        ? getOutboxRelaysForAuthors(authors, 4)
+        : socialRelaysRef.current
     const until = oldestSortAt - 1
     const filters: Filter[] =
       tab === 'following'
         ? [
             {
               kinds: [KIND_AGORA_NOTE, KIND_AGORA_REPOST],
-              authors: Array.from(
-                new Set([...followingRef.current.slice(0, 240), myPubkeyRef.current])
-              ),
+              authors,
               until,
               limit: 45,
             },
@@ -1848,7 +2665,14 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       onEvent: (ev) => {
         if (ev.kind === KIND_AGORA_NOTE) {
           const note = parseAgoraNote(ev)
-          if (!note || note.isReply || blockedSetRef.current.has(note.pubkey)) return
+          if (
+            !note ||
+            note.isReply ||
+            blockedSetRef.current.has(note.pubkey) ||
+            deletedNoteIdsRef.current.has(note.id)
+          ) {
+            return
+          }
           const key = `note:${note.id}`
           if (existingKeys.has(key) || fetchedKeys.has(key)) return
           fetchedKeys.add(key)
@@ -1856,6 +2680,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         } else if (ev.kind === KIND_AGORA_REPOST) {
           const repost = parseAgoraRepost(ev)
           if (!repost || blockedSetRef.current.has(repost.repostedBy)) return
+          if (deletedNoteIdsRef.current.has(repost.targetNoteId)) return
           const target = repost.embeddedNote ?? notesRef.current[repost.targetNoteId]
           if (!target || blockedSetRef.current.has(target.pubkey)) return
           const key = `repost:${repost.repostedBy}:${target.id}`
@@ -1892,7 +2717,15 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     } finally {
       setLoadingMore(false)
     }
-  }, [followingItems, globalItems, loadingMore, queryOneShot, ingestNotesBatch, warmDependenciesForNotes])
+  }, [
+    followingItems,
+    globalItems,
+    loadingMore,
+    getOutboxRelaysForAuthors,
+    queryOneShot,
+    ingestNotesBatch,
+    warmDependenciesForNotes,
+  ])
 
   // Lookups
   const getProfile = useCallback((pubkey: string): AgoraProfile | null => {
@@ -1923,10 +2756,23 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     [bookmarkedSet]
   )
 
-  // Filtered notifications & unread counter
+  // Filtered notifications & unread counter (suppresses blocked pubkeys, muted pubkeys & muted threads)
   const visibleNotifications = useMemo(
-    () => notifications.filter((n) => !blockedSet.has(n.actorPubkey)),
-    [notifications, blockedSet]
+    () =>
+      notifications.filter((n) => {
+        if (blockedSet.has(n.actorPubkey) || mutePubkeySet.has(n.actorPubkey)) return false
+        if (muteThreadSet.size > 0) {
+          if (n.targetNoteId && muteThreadSet.has(n.targetNoteId)) return false
+          if (n.noteId && muteThreadSet.has(n.noteId)) return false
+          const note = n.noteId ? notesById[n.noteId] : undefined
+          if (note?.rootId && muteThreadSet.has(note.rootId)) return false
+          if (note?.replyToId && muteThreadSet.has(note.replyToId)) return false
+          const target = n.targetNoteId ? notesById[n.targetNoteId] : undefined
+          if (target?.rootId && muteThreadSet.has(target.rootId)) return false
+        }
+        return true
+      }),
+    [notifications, blockedSet, mutePubkeySet, muteThreadSet, notesById]
   )
 
   const unreadNotificationCount = useMemo(() => {
@@ -2082,6 +2928,117 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     async (content: string, opts?: AgoraPublishNoteOptions): Promise<AgoraActionResult> =>
       await publishNoteInternal(content, opts),
     [publishNoteInternal]
+  )
+
+  const publishThread = useCallback(
+    async (
+      parts: Array<{ content: string; opts?: AgoraPublishNoteOptions }>
+    ): Promise<AgoraActionResult> => {
+      const validParts = parts
+        .filter(
+          (p) =>
+            p.content.trim().length > 0 || Boolean(p.opts?.media && p.opts.media.length > 0)
+        )
+        .slice(0, 12)
+      if (validParts.length === 0) {
+        return { ok: false, publishedRelays: 0, error: 'Write at least one post in your thread.' }
+      }
+
+      const rootRes = await publishNoteInternal(validParts[0].content, validParts[0].opts)
+      if (!rootRes.ok || !rootRes.note) {
+        return rootRes
+      }
+
+      let prevNote: AgoraNote = rootRes.note
+      for (let i = 1; i < validParts.length; i += 1) {
+        const part = validParts[i]
+        const stepRes = await publishNoteInternal(part.content, {
+          ...part.opts,
+          replyTo: prevNote,
+        })
+        if (!stepRes.ok || !stepRes.note) {
+          return {
+            ok: false,
+            eventId: rootRes.eventId,
+            note: rootRes.note,
+            publishedRelays: rootRes.publishedRelays,
+            error: stepRes.error ?? `Failed to publish thread part ${i + 1}.`,
+          }
+        }
+        prevNote = stepRes.note
+      }
+
+      return rootRes
+    },
+    [publishNoteInternal]
+  )
+
+  const deleteNote = useCallback(
+    async (noteId: string): Promise<AgoraActionResult> => {
+      if (!isHex64(noteId)) {
+        return { ok: false, publishedRelays: 0, error: 'Invalid note ID.' }
+      }
+      const id = noteId.toLowerCase()
+      const existing = notesRef.current[id]
+      if (existing && existing.pubkey.toLowerCase() !== myPubkeyRef.current) {
+        return { ok: false, publishedRelays: 0, error: 'You can only delete your own notes.' }
+      }
+
+      setPublishing(true)
+      try {
+        const template = buildDeleteEventTemplate([id], 'Deleted by author')
+        const signed = await signMasterEvent(template)
+        const res = await relayPool.publish(writeRelaysRef.current, signed)
+
+        deletedNoteIdsRef.current.add(id)
+        setDeletedVersion((v) => v + 1)
+
+        // Purge immediately from all local feeds, caches, thread, and profile views
+        if (notesRef.current[id]) {
+          const nextNotes = { ...notesRef.current }
+          delete nextNotes[id]
+          notesRef.current = nextNotes
+          setNotesById(nextNotes)
+        }
+        setFollowingItems((prev) => prev.filter((item) => item.note.id !== id))
+        setGlobalItems((prev) => prev.filter((item) => item.note.id !== id))
+        setListFeedItems((prev) => prev.filter((item) => item.note.id !== id))
+        setTrendingCandidates((prev) => prev.filter((n) => n.id !== id))
+        setSearchResults((prev) => prev.filter((n) => n.id !== id))
+        setThread((prev) => {
+          if (!prev) return prev
+          if (prev.focusedNoteId === id) return null
+          return {
+            ...prev,
+            ancestors: prev.ancestors.filter((n) => n.id !== id),
+            replies: prev.replies.filter((n) => n.id !== id),
+          }
+        })
+        setProfileView((prev) => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            posts: prev.posts.filter((n) => n.id !== id),
+            replies: prev.replies.filter((n) => n.id !== id),
+            likes: prev.likes.filter((n) => n.id !== id),
+          }
+        })
+
+        const ok = res.acceptedRelays.length > 0 || res.sentCount > 0
+        return {
+          ok,
+          eventId: signed.id,
+          publishedRelays: res.acceptedRelays.length,
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to delete note.'
+        pushToastRef.current?.('error', 'Delete failed', msg)
+        return { ok: false, publishedRelays: 0, error: msg }
+      } finally {
+        setPublishing(false)
+      }
+    },
+    [relayPool, signMasterEvent]
   )
 
   const replyToNote = useCallback(
@@ -2404,19 +3361,423 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     [signMasterEvent]
   )
 
+  // NIP-51 Mute List mutations (`kind: 10000`)
+  const persistAndPublishMuteList = useCallback(
+    async (next: AgoraMuteList): Promise<boolean> => {
+      muteListRef.current = next
+      setMuteList(next)
+      saveCachedMuteList(next)
+      try {
+        const template = buildMuteListTemplate(next, myMuteEventRef.current)
+        const signed = await signMasterEvent(template)
+        myMuteEventRef.current = signed
+        await relayPool.publish(writeRelaysRef.current, signed)
+        return true
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Mute saved locally; relay publish failed.'
+        pushToastRef.current?.('warning', 'Mute saved locally', msg)
+        return true
+      }
+    },
+    [relayPool, signMasterEvent]
+  )
+
+  const addMutedWord = useCallback(
+    async (rawWord: string): Promise<boolean> => {
+      const trimmed = rawWord.trim()
+      if (!trimmed) return false
+      const prev = muteListRef.current
+      const nowSec = Math.floor(Date.now() / 1000)
+
+      if (trimmed.startsWith('#')) {
+        const cleanTag = trimmed.replace(/^#+/, '').trim().toLowerCase()
+        if (!cleanTag) return false
+        if (prev.hashtags.includes(cleanTag)) return true
+        return await persistAndPublishMuteList({
+          ...prev,
+          hashtags: [cleanTag, ...prev.hashtags].slice(0, 200),
+          updatedAt: nowSec,
+        })
+      }
+
+      const cleanWord = trimmed.toLowerCase()
+      if (prev.words.includes(cleanWord)) return true
+      return await persistAndPublishMuteList({
+        ...prev,
+        words: [cleanWord, ...prev.words].slice(0, 200),
+        updatedAt: nowSec,
+      })
+    },
+    [persistAndPublishMuteList]
+  )
+
+  const removeMutedWord = useCallback(
+    async (rawWord: string): Promise<boolean> => {
+      const trimmed = rawWord.trim()
+      if (!trimmed) return false
+      const prev = muteListRef.current
+      const nowSec = Math.floor(Date.now() / 1000)
+
+      if (trimmed.startsWith('#')) {
+        const cleanTag = trimmed.replace(/^#+/, '').trim().toLowerCase()
+        const nextHashtags = prev.hashtags.filter((t) => t !== cleanTag)
+        if (nextHashtags.length === prev.hashtags.length) return false
+        return await persistAndPublishMuteList({
+          ...prev,
+          hashtags: nextHashtags,
+          updatedAt: nowSec,
+        })
+      }
+
+      const cleanWord = trimmed.toLowerCase()
+      const nextWords = prev.words.filter((w) => w !== cleanWord)
+      const nextHashtags = prev.hashtags.filter((t) => t !== cleanWord)
+      if (nextWords.length === prev.words.length && nextHashtags.length === prev.hashtags.length) {
+        return false
+      }
+      return await persistAndPublishMuteList({
+        ...prev,
+        words: nextWords,
+        hashtags: nextHashtags,
+        updatedAt: nowSec,
+      })
+    },
+    [persistAndPublishMuteList]
+  )
+
+  const muteThread = useCallback(
+    async (rootId: string): Promise<boolean> => {
+      if (!isHex64(rootId)) return false
+      const id = rootId.toLowerCase()
+      const prev = muteListRef.current
+      if (prev.threads.includes(id)) return true
+      return await persistAndPublishMuteList({
+        ...prev,
+        threads: [id, ...prev.threads].slice(0, 200),
+        updatedAt: Math.floor(Date.now() / 1000),
+      })
+    },
+    [persistAndPublishMuteList]
+  )
+
+  const unmuteThread = useCallback(
+    async (rootId: string): Promise<boolean> => {
+      if (!isHex64(rootId)) return false
+      const id = rootId.toLowerCase()
+      const prev = muteListRef.current
+      const nextThreads = prev.threads.filter((t) => t !== id)
+      if (nextThreads.length === prev.threads.length) return false
+      return await persistAndPublishMuteList({
+        ...prev,
+        threads: nextThreads,
+        updatedAt: Math.floor(Date.now() / 1000),
+      })
+    },
+    [persistAndPublishMuteList]
+  )
+
+  const isThreadMuted = useCallback(
+    (rootId: string): boolean => {
+      if (!rootId) return false
+      return muteThreadSet.has(rootId.toLowerCase())
+    },
+    [muteThreadSet]
+  )
+
+  // NIP-51 Custom People Lists (`kind: 30000`)
+  const createCustomList = useCallback(
+    async (
+      title: string,
+      pubkeys: string[] = [],
+      description?: string
+    ): Promise<AgoraCustomList | null> => {
+      const cleanTitle = title.trim().slice(0, 80)
+      if (!cleanTitle) return null
+      const cleanPubkeys = Array.from(
+        new Set(pubkeys.filter((pk) => isHex64(pk)).map((pk) => pk.toLowerCase()))
+      ).slice(0, 200)
+      const cleanDesc = description?.trim().slice(0, 280) || undefined
+
+      const existingDTags = new Set(customListsRef.current.map((l) => l.dTag))
+      let dTag = slugifyListTitle(cleanTitle)
+      while (existingDTags.has(dTag)) {
+        dTag = slugifyListTitle(cleanTitle)
+      }
+
+      const nowSec = Math.floor(Date.now() / 1000)
+      const draftList: AgoraCustomList = {
+        id: `local:${dTag}`,
+        dTag,
+        title: cleanTitle,
+        description: cleanDesc,
+        pubkeys: cleanPubkeys,
+        updatedAt: nowSec,
+      }
+
+      const nextLists = [draftList, ...customListsRef.current].slice(0, 50)
+      customListsRef.current = nextLists
+      setCustomLists(nextLists)
+      saveCachedCustomLists(nextLists)
+
+      try {
+        const template = buildPeopleListTemplate(draftList)
+        const signed = await signMasterEvent(template)
+        await relayPool.publish(writeRelaysRef.current, signed)
+        const finalized: AgoraCustomList = { ...draftList, id: signed.id.toLowerCase() }
+        const withId = customListsRef.current.map((l) => (l.dTag === dTag ? finalized : l))
+        customListsRef.current = withId
+        setCustomLists(withId)
+        saveCachedCustomLists(withId)
+        return finalized
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'List saved locally; relay publish failed.'
+        pushToastRef.current?.('warning', 'List saved locally', msg)
+        return draftList
+      }
+    },
+    [relayPool, signMasterEvent]
+  )
+
+  const updateCustomList = useCallback(
+    async (
+      dTag: string,
+      patch: { title?: string; description?: string; pubkeys?: string[] }
+    ): Promise<boolean> => {
+      const existing = customListsRef.current.find((l) => l.dTag === dTag)
+      if (!existing) return false
+
+      const nextTitle =
+        patch.title !== undefined ? patch.title.trim().slice(0, 80) || existing.title : existing.title
+      const nextDesc =
+        patch.description !== undefined
+          ? patch.description.trim().slice(0, 280) || undefined
+          : existing.description
+      const nextPubkeys =
+        patch.pubkeys !== undefined
+          ? Array.from(
+              new Set(patch.pubkeys.filter((pk) => isHex64(pk)).map((pk) => pk.toLowerCase()))
+            ).slice(0, 200)
+          : existing.pubkeys
+
+      const updated: AgoraCustomList = {
+        ...existing,
+        title: nextTitle,
+        description: nextDesc,
+        pubkeys: nextPubkeys,
+        updatedAt: Math.floor(Date.now() / 1000),
+      }
+
+      const nextLists = customListsRef.current.map((l) => (l.dTag === dTag ? updated : l))
+      customListsRef.current = nextLists
+      setCustomLists(nextLists)
+      saveCachedCustomLists(nextLists)
+
+      try {
+        const template = buildPeopleListTemplate(updated)
+        const signed = await signMasterEvent(template)
+        await relayPool.publish(writeRelaysRef.current, signed)
+        const finalized: AgoraCustomList = { ...updated, id: signed.id.toLowerCase() }
+        const withId = customListsRef.current.map((l) => (l.dTag === dTag ? finalized : l))
+        customListsRef.current = withId
+        setCustomLists(withId)
+        saveCachedCustomLists(withId)
+        return true
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'List updated locally; relay publish failed.'
+        pushToastRef.current?.('warning', 'List updated locally', msg)
+        return true
+      }
+    },
+    [relayPool, signMasterEvent]
+  )
+
+  const deleteCustomList = useCallback(
+    async (dTag: string): Promise<boolean> => {
+      const existing = customListsRef.current.find((l) => l.dTag === dTag)
+      if (!existing) return false
+
+      const nextLists = customListsRef.current.filter((l) => l.dTag !== dTag)
+      customListsRef.current = nextLists
+      setCustomLists(nextLists)
+      saveCachedCustomLists(nextLists)
+
+      if (activeListIdRef.current === dTag) {
+        setActiveListIdState(null)
+        setListFeedItems([])
+      }
+
+      try {
+        const tags: string[][] = [
+          ['a', `${KIND_AGORA_PEOPLE_LIST}:${myPubkeyRef.current}:${dTag}`],
+          ['k', String(KIND_AGORA_PEOPLE_LIST)],
+        ]
+        if (isHex64(existing.id)) {
+          tags.push(['e', existing.id.toLowerCase()])
+        }
+        const delEvent = await signMasterEvent({
+          kind: KIND_AGORA_DELETE,
+          created_at: Math.floor(Date.now() / 1000),
+          tags,
+          content: '',
+        })
+        await relayPool.publish(writeRelaysRef.current, delEvent)
+      } catch {
+        // Keep local deletion even if relay ignores NIP-09 address deletion
+      }
+      return true
+    },
+    [relayPool, signMasterEvent]
+  )
+
+  // NIP-88 Native Polls (`kind: 1068` & `kind: 1018`)
+  const publishPoll = useCallback(
+    async (
+      question: string,
+      options: string[],
+      durationSec?: number
+    ): Promise<AgoraActionResult> => {
+      const cleanQuestion = question.trim()
+      const cleanOptions = options.map((o) => o.trim()).filter(Boolean).slice(0, 5)
+      if (!cleanQuestion) {
+        return { ok: false, publishedRelays: 0, error: 'Enter a poll question first.' }
+      }
+      if (cleanOptions.length < 2) {
+        return { ok: false, publishedRelays: 0, error: 'Add at least two poll options.' }
+      }
+
+      setPublishing(true)
+      try {
+        const relays = writeRelaysRef.current
+        const template = buildAgoraPollTemplate(cleanQuestion, cleanOptions, durationSec, relays[0])
+        const signed = await signMasterEvent(template)
+        const res = await relayPool.publish(relays, signed)
+        const parsed = parseAgoraPoll(signed)
+        if (parsed) {
+          ingestPollsBatch([parsed])
+        }
+        const ok = res.acceptedRelays.length > 0 || res.sentCount > 0
+        return {
+          ok,
+          eventId: signed.id,
+          publishedRelays: res.acceptedRelays.length,
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to publish poll.'
+        pushToastRef.current?.('error', 'Poll failed', msg)
+        return { ok: false, publishedRelays: 0, error: msg }
+      } finally {
+        setPublishing(false)
+      }
+    },
+    [ingestPollsBatch, relayPool, signMasterEvent]
+  )
+
+  const votePoll = useCallback(
+    async (poll: AgoraPoll, optionId: string): Promise<boolean> => {
+      if (!poll.options.some((o) => o.id === optionId)) return false
+      const nowSec = Math.floor(Date.now() / 1000)
+      if (poll.endsAt && nowSec > poll.endsAt) {
+        pushToastRef.current?.('info', 'Poll closed', 'This poll has already ended.')
+        return false
+      }
+
+      const myPk = myPubkeyRef.current
+      let bucket = pollVotesRef.current.get(poll.id)
+      if (!bucket) {
+        bucket = { votesByVoter: new Map() }
+        pollVotesRef.current.set(poll.id, bucket)
+      }
+      const prevVote = bucket.votesByVoter.get(myPk)
+      bucket.votesByVoter.set(myPk, { optionId, createdAt: nowSec })
+      syncPollResultsForIds([poll.id])
+
+      try {
+        const template = buildAgoraPollResponseTemplate(poll, optionId)
+        const signed = await signMasterEvent(template)
+        const pollHintRelays: string[] = []
+        for (const tag of poll.rawEvent.tags) {
+          if (tag[0] === 'relay' && typeof tag[1] === 'string') {
+            const clean = normalizeRelayUrl(tag[1])
+            if (clean) pollHintRelays.push(clean)
+          }
+        }
+        const relays = Array.from(new Set([...writeRelaysRef.current, ...pollHintRelays])).slice(
+          0,
+          8
+        )
+        await relayPool.publish(relays, signed)
+        return true
+      } catch (err) {
+        if (prevVote) {
+          bucket.votesByVoter.set(myPk, prevVote)
+        } else {
+          bucket.votesByVoter.delete(myPk)
+        }
+        syncPollResultsForIds([poll.id])
+        const msg = err instanceof Error ? err.message : 'Could not publish vote.'
+        pushToastRef.current?.('error', 'Vote failed', msg)
+        return false
+      }
+    },
+    [relayPool, signMasterEvent, syncPollResultsForIds]
+  )
+
+  // Navigation history stack helper
+  const pushNavSnapshot = useCallback((nextEntry: AgoraNavStackEntry) => {
+    let current: AgoraNavStackEntry | null = null
+    if (activeArticleIdRef.current) {
+      current = { kind: 'article', articleId: activeArticleIdRef.current }
+    } else if (profileViewRef.current) {
+      current = { kind: 'profile', pubkey: profileViewRef.current.pubkey }
+    } else if (threadRef.current) {
+      current = { kind: 'thread', noteId: threadRef.current.focusedNoteId }
+    }
+    if (!current) return
+    const same =
+      current.kind === nextEntry.kind &&
+      ((current.kind === 'thread' &&
+        nextEntry.kind === 'thread' &&
+        current.noteId === nextEntry.noteId) ||
+        (current.kind === 'profile' &&
+          nextEntry.kind === 'profile' &&
+          current.pubkey === nextEntry.pubkey) ||
+        (current.kind === 'article' &&
+          nextEntry.kind === 'article' &&
+          current.articleId === nextEntry.articleId))
+    if (same) return
+    navStackRef.current = [...navStackRef.current.slice(-23), current]
+    setNavStackDepth(navStackRef.current.length)
+  }, [])
+
   // Thread Viewer (`openThread`, `openThreadById`, `closeThread`)
-  const openThreadById = useCallback(
-    async (noteId: string, relayHints?: readonly string[]): Promise<void> => {
+  const openThreadByIdInternal = useCallback(
+    async (
+      noteId: string,
+      relayHints?: readonly string[],
+      opts?: { skipPush?: boolean }
+    ): Promise<void> => {
       if (!isHex64(noteId)) return
       const id = noteId.toLowerCase()
+      if (!opts?.skipPush) {
+        pushNavSnapshot({
+          kind: 'thread',
+          noteId: id,
+          relayHints: relayHints ? Array.from(relayHints) : undefined,
+        })
+      }
       const gen = ++threadGenRef.current
       setActive(true)
       profileViewGenRef.current += 1
       setProfileView(null)
+      setActiveArticleId(null)
 
       const rawCached = notesRef.current[id] ?? null
       const cached =
-        rawCached && !blockedSetRef.current.has(rawCached.pubkey) ? rawCached : null
+        rawCached &&
+        !blockedSetRef.current.has(rawCached.pubkey) &&
+        !deletedNoteIdsRef.current.has(rawCached.id)
+          ? rawCached
+          : null
       const initialRootId = cached?.rootId ?? id
 
       setThread({
@@ -2428,6 +3789,10 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         loading: true,
       })
 
+      if (cached) {
+        ensureAuthorRelays([cached.pubkey])
+      }
+
       const relaySet = new Set<string>()
       if (relayHints) {
         for (const raw of relayHints) {
@@ -2435,33 +3800,45 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
           if (clean) relaySet.add(clean)
         }
       }
-      for (const r of socialRelaysRef.current) relaySet.add(r)
+      const outboxRelays = cached
+        ? getOutboxRelaysForAuthors([cached.pubkey], 3)
+        : socialRelaysRef.current
+      for (const r of outboxRelays) relaySet.add(r)
       for (const r of AGORA_SOCIAL_RELAYS) relaySet.add(r)
       for (const r of AGORA_PROFILE_RELAYS) relaySet.add(r)
       const relays = Array.from(relaySet).slice(0, 12)
 
-      let focused = cached
+      let focused: AgoraNote | null = cached
 
       if (!focused) {
+        let fetchedFocused: AgoraNote | null = null
         const { promise } = queryOneShot('thread-focus', relays, [{ ids: [id] }], {
           timeoutMs: 4200,
           targetEose: Math.min(2, relays.length),
           onEvent: (ev) => {
             if (!verifyEventCached(ev)) return
             const parsed = parseAgoraNote(ev)
-            if (parsed && parsed.id === id && !blockedSetRef.current.has(parsed.pubkey)) {
-              focused = parsed
+            if (
+              parsed &&
+              parsed.id === id &&
+              !blockedSetRef.current.has(parsed.pubkey) &&
+              !deletedNoteIdsRef.current.has(parsed.id)
+            ) {
+              fetchedFocused = parsed
             }
           },
         })
         await promise
         if (threadGenRef.current !== gen) return
-        if (focused) {
-          ingestNotesBatch([focused])
-          warmDependenciesForNotes([focused])
+        if (fetchedFocused) {
+          const resolvedNote: AgoraNote = fetchedFocused
+          focused = resolvedNote
+          ingestNotesBatch([resolvedNote])
+          warmDependenciesForNotes([resolvedNote])
+          ensureAuthorRelays([resolvedNote.pubkey])
           setThread((prev) =>
             prev && prev.focusedNoteId === id
-              ? { ...prev, rootNoteId: focused?.rootId ?? id, focusedNote: focused }
+              ? { ...prev, rootNoteId: resolvedNote.rootId ?? id, focusedNote: resolvedNote }
               : prev
           )
         }
@@ -2476,7 +3853,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
 
       const replyTargets = Array.from(new Set([rootId, id]))
       const threadFilters: Filter[] = [
-        { kinds: [KIND_AGORA_NOTE], '#e': replyTargets, limit: 140 },
+        { kinds: [KIND_AGORA_NOTE], '#e': replyTargets, limit: 160 },
       ]
       if (fetchIds.size > 0) {
         threadFilters.push({ ids: Array.from(fetchIds) })
@@ -2487,7 +3864,9 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         foundMap.set(focused.id, focused)
       }
       for (const existing of Object.values(notesRef.current)) {
-        if (blockedSetRef.current.has(existing.pubkey)) continue
+        if (blockedSetRef.current.has(existing.pubkey) || deletedNoteIdsRef.current.has(existing.id)) {
+          continue
+        }
         if (
           existing.id === rootId ||
           existing.id === focused?.replyToId ||
@@ -2498,14 +3877,23 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         }
       }
 
-      const { promise } = queryOneShot('thread-tree', relays, threadFilters, {
+      const treeRelays = focused
+        ? Array.from(new Set([...relays, ...getOutboxRelaysForAuthors([focused.pubkey], 3)])).slice(
+            0,
+            12
+          )
+        : relays
+
+      const { promise } = queryOneShot('thread-tree', treeRelays, threadFilters, {
         timeoutMs: 4200,
-        targetEose: Math.min(2, relays.length),
+        targetEose: Math.min(2, treeRelays.length),
         onEvent: (ev) => {
           if (!verifyEventCached(ev)) return
           const parsed = parseAgoraNote(ev)
           if (!parsed) return
-          if (blockedSetRef.current.has(parsed.pubkey)) return
+          if (blockedSetRef.current.has(parsed.pubkey) || deletedNoteIdsRef.current.has(parsed.id)) {
+            return
+          }
           foundMap.set(parsed.id, parsed)
         },
       })
@@ -2532,7 +3920,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         if (extraMissing.size === 0) break
         const { promise: ancPromise } = queryOneShot(
           'thread-anc',
-          relays,
+          treeRelays,
           [{ ids: Array.from(extraMissing) }],
           {
             timeoutMs: 2800,
@@ -2540,7 +3928,11 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
             onEvent: (ev) => {
               if (!verifyEventCached(ev)) return
               const parsed = parseAgoraNote(ev)
-              if (parsed && !blockedSetRef.current.has(parsed.pubkey)) {
+              if (
+                parsed &&
+                !blockedSetRef.current.has(parsed.pubkey) &&
+                !deletedNoteIdsRef.current.has(parsed.id)
+              ) {
                 foundMap.set(parsed.id, parsed)
               }
             },
@@ -2559,7 +3951,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         seenAnc.add(cursor)
         const parent = foundMap.get(cursor) ?? notesRef.current[cursor]
         if (!parent) break
-        if (!blockedSetRef.current.has(parent.pubkey)) {
+        if (!blockedSetRef.current.has(parent.pubkey) && !deletedNoteIdsRef.current.has(parent.id)) {
           ancestors.unshift(parent)
         }
         cursor = parent.replyToId
@@ -2570,18 +3962,48 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         (foundMap.has(rootId) || notesRef.current[rootId])
       ) {
         const rootNote = foundMap.get(rootId) ?? notesRef.current[rootId]
-        if (rootNote && !blockedSetRef.current.has(rootNote.pubkey)) {
+        if (
+          rootNote &&
+          !blockedSetRef.current.has(rootNote.pubkey) &&
+          !deletedNoteIdsRef.current.has(rootNote.id)
+        ) {
           ancestors.unshift(rootNote)
           seenAnc.add(rootId)
         }
       }
 
-      const replies = Array.from(foundMap.values())
-        .filter((n) => {
-          if (n.id === id || seenAnc.has(n.id)) return false
-          if (blockedSetRef.current.has(n.pubkey)) return false
-          return n.replyToId === id || (rootId === id && n.rootId === id)
-        })
+      // Collect full nested descendant reply subtree via BFS so buildThreadedReplyTree renders all levels
+      const childrenByParent = new Map<string, AgoraNote[]>()
+      for (const n of foundMap.values()) {
+        if (n.id === id || seenAnc.has(n.id)) continue
+        if (blockedSetRef.current.has(n.pubkey) || deletedNoteIdsRef.current.has(n.id)) continue
+        const parentKey = n.replyToId ?? (n.rootId === id ? id : undefined)
+        if (!parentKey) continue
+        const arr = childrenByParent.get(parentKey)
+        if (arr) arr.push(n)
+        else childrenByParent.set(parentKey, [n])
+      }
+      const descendantIds = new Set<string>()
+      const bfsQueue: string[] = [id]
+      while (bfsQueue.length > 0 && descendantIds.size < 300) {
+        const cur = bfsQueue.shift()!
+        const kids = childrenByParent.get(cur)
+        if (!kids) continue
+        for (const kid of kids) {
+          if (descendantIds.has(kid.id)) continue
+          descendantIds.add(kid.id)
+          bfsQueue.push(kid.id)
+        }
+      }
+      if (rootId === id) {
+        for (const n of foundMap.values()) {
+          if (n.id === id || seenAnc.has(n.id)) continue
+          if (blockedSetRef.current.has(n.pubkey) || deletedNoteIdsRef.current.has(n.id)) continue
+          if (n.rootId === id) descendantIds.add(n.id)
+        }
+      }
+      const replies = Array.from(descendantIds)
+        .map((rid) => foundMap.get(rid)!)
         .sort((a, b) => a.createdAt - b.createdAt)
 
       warmDependenciesForNotes([...ancestors, ...(focused ? [focused] : []), ...replies])
@@ -2595,32 +4017,54 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         loading: false,
       })
     },
-    [ingestNotesBatch, queryOneShot, warmDependenciesForNotes]
+    [
+      ensureAuthorRelays,
+      getOutboxRelaysForAuthors,
+      ingestNotesBatch,
+      pushNavSnapshot,
+      queryOneShot,
+      warmDependenciesForNotes,
+    ]
+  )
+
+  const openThreadById = useCallback(
+    async (noteId: string, relayHints?: readonly string[]): Promise<void> => {
+      await openThreadByIdInternal(noteId, relayHints)
+    },
+    [openThreadByIdInternal]
   )
 
   const openThread = useCallback(
     (noteId: string) => {
-      void openThreadById(noteId)
+      void openThreadByIdInternal(noteId)
     },
-    [openThreadById]
+    [openThreadByIdInternal]
   )
 
   const closeThread = useCallback(() => {
     threadGenRef.current += 1
+    navStackRef.current = []
+    setNavStackDepth(0)
     setThread(null)
   }, [])
 
   // Profile Viewer (`openProfile`, `setProfileTab`, `closeProfile`)
-  const openProfile = useCallback(
-    (pubkey: string) => {
+  const openProfileInternal = useCallback(
+    (pubkey: string, opts?: { skipPush?: boolean }) => {
       if (!isHex64(pubkey)) return
       const pk = pubkey.toLowerCase()
+      if (!opts?.skipPush) {
+        pushNavSnapshot({ kind: 'profile', pubkey: pk })
+      }
       const gen = ++profileViewGenRef.current
       setActive(true)
+      threadGenRef.current += 1
+      setThread(null)
+      setActiveArticleId(null)
 
       // Seed immediately from cached notes for instant paint
       const cachedAuthorNotes = Object.values(notesRef.current)
-        .filter((n) => n.pubkey === pk)
+        .filter((n) => n.pubkey === pk && !deletedNoteIdsRef.current.has(n.id))
         .sort((a, b) => b.createdAt - a.createdAt)
 
       setProfileView({
@@ -2630,17 +4074,21 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         replies: cachedAuthorNotes.filter((n) => n.isReply),
         likes: [],
         followingPubkeys: pk === myPubkeyRef.current ? followingRef.current : [],
+        followerPubkeys: [],
+        followsMe: false,
         loading: true,
       })
 
       ensureProfiles([pk], true)
+      ensureAuthorRelays([pk])
 
       void (async () => {
-        const relays = socialRelaysRef.current
+        const relays = getOutboxRelaysForAuthors([pk], 3)
         const noteMap = new Map<string, AgoraNote>()
         for (const n of cachedAuthorNotes) noteMap.set(n.id, n)
 
         let bestFollowEv: NostrEvent | null = null
+        const followerSet = new Set<string>()
         const likedOrder: string[] = []
         const likedSet = new Set<string>()
 
@@ -2650,19 +4098,34 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
           [
             { kinds: [KIND_AGORA_NOTE], authors: [pk], limit: 80 },
             { kinds: [KIND_AGORA_FOLLOW_LIST], authors: [pk], limit: 2 },
+            { kinds: [KIND_AGORA_FOLLOW_LIST], '#p': [pk], limit: 80 },
             { kinds: [KIND_AGORA_REACTION], authors: [pk], limit: 40 },
           ],
           {
             timeoutMs: 4200,
             targetEose: Math.min(2, relays.length),
             onEvent: (ev) => {
-              if (ev.pubkey.toLowerCase() !== pk) return
+              const evAuthor = ev.pubkey.toLowerCase()
+              if (ev.kind === KIND_AGORA_FOLLOW_LIST) {
+                if (evAuthor === pk) {
+                  if (!bestFollowEv || ev.created_at > bestFollowEv.created_at) {
+                    bestFollowEv = ev
+                  }
+                } else if (!blockedSetRef.current.has(evAuthor)) {
+                  const followsPk = ev.tags.some(
+                    (t) => t[0] === 'p' && typeof t[1] === 'string' && t[1].toLowerCase() === pk
+                  )
+                  if (followsPk) {
+                    followerSet.add(evAuthor)
+                  }
+                }
+                return
+              }
+              if (evAuthor !== pk) return
               if (ev.kind === KIND_AGORA_NOTE) {
                 const parsed = parseAgoraNote(ev)
-                if (parsed) noteMap.set(parsed.id, parsed)
-              } else if (ev.kind === KIND_AGORA_FOLLOW_LIST) {
-                if (!bestFollowEv || ev.created_at > bestFollowEv.created_at) {
-                  bestFollowEv = ev
+                if (parsed && !deletedNoteIdsRef.current.has(parsed.id)) {
+                  noteMap.set(parsed.id, parsed)
                 }
               } else if (ev.kind === KIND_AGORA_REACTION) {
                 if (ev.content.trim() === '-') return
@@ -2689,6 +4152,14 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         warmDependenciesForNotes(allNotes)
 
         const parsedFollows = bestFollowEv ? parseFollowList(bestFollowEv)?.pubkeys ?? [] : []
+        const followerPubkeys = Array.from(followerSet).slice(0, 120)
+        if (followerPubkeys.length > 0) {
+          ensureProfiles(followerPubkeys.slice(0, 30))
+        }
+        if (parsedFollows.length > 0) {
+          ensureProfiles(parsedFollows.slice(0, 30))
+        }
+        const followsMe = pk !== myPubkeyRef.current && parsedFollows.includes(myPubkeyRef.current)
         const posts = allNotes.filter((n) => !n.isReply)
         const replies = allNotes.filter((n) => n.isReply)
 
@@ -2706,7 +4177,11 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
               targetEose: Math.min(2, relays.length),
               onEvent: (ev) => {
                 const parsed = parseAgoraNote(ev)
-                if (parsed && !blockedSetRef.current.has(parsed.pubkey)) {
+                if (
+                  parsed &&
+                  !blockedSetRef.current.has(parsed.pubkey) &&
+                  !deletedNoteIdsRef.current.has(parsed.id)
+                ) {
                   likedFound.push(parsed)
                 }
               },
@@ -2723,7 +4198,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
         const likes: AgoraNote[] = []
         for (const id of targetLikeIds) {
           const n = notesRef.current[id]
-          if (n && !blockedSetRef.current.has(n.pubkey)) {
+          if (n && !blockedSetRef.current.has(n.pubkey) && !deletedNoteIdsRef.current.has(n.id)) {
             likes.push(n)
           }
         }
@@ -2741,12 +4216,29 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
                 : pk === myPubkeyRef.current
                   ? followingRef.current
                   : prev.followingPubkeys,
+            followerPubkeys,
+            followsMe,
             loading: false,
           }
         })
       })()
     },
-    [ensureProfiles, ingestNotesBatch, queryOneShot, warmDependenciesForNotes]
+    [
+      ensureAuthorRelays,
+      ensureProfiles,
+      getOutboxRelaysForAuthors,
+      ingestNotesBatch,
+      pushNavSnapshot,
+      queryOneShot,
+      warmDependenciesForNotes,
+    ]
+  )
+
+  const openProfile = useCallback(
+    (pubkey: string) => {
+      openProfileInternal(pubkey)
+    },
+    [openProfileInternal]
   )
 
   const setProfileTab = useCallback((tab: AgoraProfileTab) => {
@@ -2755,8 +4247,71 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
 
   const closeProfile = useCallback(() => {
     profileViewGenRef.current += 1
+    navStackRef.current = []
+    setNavStackDepth(0)
     setProfileView(null)
   }, [])
+
+  // Long-form Article Reader (`openArticle`, `closeArticle`)
+  const openArticleInternal = useCallback(
+    (articleId: string, opts?: { skipPush?: boolean }) => {
+      const cleanId = articleId.trim().toLowerCase()
+      if (!cleanId) return
+      if (!opts?.skipPush) {
+        pushNavSnapshot({ kind: 'article', articleId: cleanId })
+      }
+      setActive(true)
+      threadGenRef.current += 1
+      setThread(null)
+      profileViewGenRef.current += 1
+      setProfileView(null)
+      setActiveArticleId(cleanId)
+    },
+    [pushNavSnapshot]
+  )
+
+  const openArticle = useCallback(
+    (articleId: string) => {
+      openArticleInternal(articleId)
+    },
+    [openArticleInternal]
+  )
+
+  const closeArticle = useCallback(() => {
+    navStackRef.current = []
+    setNavStackDepth(0)
+    setActiveArticleId(null)
+  }, [])
+
+  // History-aware Back navigation across threads, profiles & articles
+  const canNavigateBack = navStackDepth > 0
+
+  const navigateBack = useCallback(() => {
+    const stack = navStackRef.current
+    if (stack.length > 0) {
+      const prev = stack[stack.length - 1]
+      navStackRef.current = stack.slice(0, -1)
+      setNavStackDepth(navStackRef.current.length)
+      if (prev.kind === 'thread') {
+        void openThreadByIdInternal(prev.noteId, prev.relayHints, { skipPush: true })
+      } else if (prev.kind === 'profile') {
+        openProfileInternal(prev.pubkey, { skipPush: true })
+      } else if (prev.kind === 'article') {
+        openArticleInternal(prev.articleId, { skipPush: true })
+      }
+      return
+    }
+    // Empty stack: cleanly dismiss whichever overlay is currently open
+    if (activeArticleIdRef.current) {
+      setActiveArticleId(null)
+    } else if (profileViewRef.current) {
+      profileViewGenRef.current += 1
+      setProfileView(null)
+    } else if (threadRef.current) {
+      threadGenRef.current += 1
+      setThread(null)
+    }
+  }, [openArticleInternal, openProfileInternal, openThreadByIdInternal])
 
   // Search & Hashtag explorer
   const clearSearch = useCallback(() => {
@@ -3086,6 +4641,14 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       window.clearTimeout(statsStateFlushTimerRef.current)
       statsStateFlushTimerRef.current = null
     }
+    if (followingCacheTimerRef.current !== null) {
+      window.clearTimeout(followingCacheTimerRef.current)
+      followingCacheTimerRef.current = null
+    }
+    if (globalCacheTimerRef.current !== null) {
+      window.clearTimeout(globalCacheTimerRef.current)
+      globalCacheTimerRef.current = null
+    }
 
     pendingItemsRef.current.clear()
     bootSelfProfileFetchedForRef.current = ''
@@ -3101,9 +4664,17 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     statsFetchedAtRef.current.clear()
     statsBucketsRef.current.clear()
     dirtyStatsIdsRef.current.clear()
+    authorRelayInFlightRef.current.clear()
+    authorRelayNegativeRef.current.clear()
+    nip05CheckedKeyByPubkeyRef.current.clear()
+    nip05InFlightRef.current.clear()
+    pollVotesRef.current.clear()
+    deletedNoteIdsRef.current.clear()
+    navStackRef.current = []
     notifByIdRef.current.clear()
     myFollowEventRef.current = null
     myBookmarkEventRef.current = null
+    myMuteEventRef.current = null
     discoveryWarmedRef.current = false
     threadGenRef.current += 1
     profileViewGenRef.current += 1
@@ -3117,19 +4688,34 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     } catch {
       // Ignore storage errors
     }
+    clearAllAgoraExtrasStorage()
 
     setActive(false)
     setActiveTabState('following')
+    setFeedFilter('all')
+    setActiveListIdState(null)
+    setDensityState('comfortable')
     setLoadingFeed(false)
     setLoadingMore(false)
     setFollowingItems([])
     setGlobalItems([])
+    setListFeedItems([])
     setTrendingCandidates([])
     setPendingNewCount(0)
     setHiddenTrendingTopics([])
     setProfilesByPubkey({})
     setNotesById({})
     setStatsByNoteId({})
+    setAuthorRelaysByPubkey({})
+    setNip05StatusByPubkey({})
+    setMuteList(EMPTY_MUTE_LIST)
+    setCustomLists([])
+    setArticlesById({})
+    setActiveArticleId(null)
+    setPollsById({})
+    setPollResultsById({})
+    setNavStackDepth(0)
+    setDeletedVersion(0)
     setFollowingPubkeys([])
     setBookmarkedIds([])
     setMyNip65Relays(null)
@@ -3157,6 +4743,8 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       if (noteFlushTimerRef.current !== null) window.clearTimeout(noteFlushTimerRef.current)
       if (statsFetchTimerRef.current !== null) window.clearTimeout(statsFetchTimerRef.current)
       if (statsStateFlushTimerRef.current !== null) window.clearTimeout(statsStateFlushTimerRef.current)
+      if (followingCacheTimerRef.current !== null) window.clearTimeout(followingCacheTimerRef.current)
+      if (globalCacheTimerRef.current !== null) window.clearTimeout(globalCacheTimerRef.current)
     }
   }, [])
 
@@ -3190,7 +4778,10 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
   }, [profileView, blockedSet])
 
   const visibleSearchResults = useMemo(
-    () => searchResults.filter((n) => !blockedSet.has(n.pubkey)),
+    () =>
+      searchResults.filter(
+        (n) => !blockedSet.has(n.pubkey) && !deletedNoteIdsRef.current.has(n.id)
+      ),
     [searchResults, blockedSet]
   )
 
@@ -3198,6 +4789,25 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     () => searchProfiles.filter((p) => !blockedSet.has(p.pubkey)),
     [searchProfiles, blockedSet]
   )
+
+  const articles = useMemo<AgoraArticle[]>(() => {
+    return Object.values(articlesById)
+      .filter((a) => !blockedSet.has(a.pubkey))
+      .sort((a, b) => b.publishedAt - a.publishedAt || b.createdAt - a.createdAt)
+  }, [articlesById, blockedSet])
+
+  const activeArticle = useMemo<AgoraArticle | null>(() => {
+    if (!activeArticleId) return null
+    const art = articlesById[activeArticleId] ?? null
+    if (!art || blockedSet.has(art.pubkey)) return null
+    return art
+  }, [activeArticleId, articlesById, blockedSet])
+
+  const polls = useMemo<AgoraPoll[]>(() => {
+    return Object.values(pollsById)
+      .filter((p) => !blockedSet.has(p.pubkey) && !mutePubkeySet.has(p.pubkey))
+      .sort((a, b) => b.createdAt - a.createdAt)
+  }, [pollsById, blockedSet, mutePubkeySet])
 
   const myProfile = profilesByPubkey[myPubkey] ?? null
 
@@ -3213,6 +4823,12 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
 
       activeTab,
       setActiveTab,
+      feedFilter,
+      setFeedFilter,
+      activeListId,
+      setActiveListId,
+      density,
+      setDensity,
       feedItems,
       loadingFeed,
       loadingMore,
@@ -3222,9 +4838,15 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       refresh,
       loadMore,
 
+      canNavigateBack,
+      navigateBack,
+
       profilesByPubkey,
       notesById,
       statsByNoteId,
+      authorRelaysByPubkey,
+      nip05StatusByPubkey,
+      ensureNip05Verified,
       getProfile,
       getNote,
       getNoteStats,
@@ -3235,6 +4857,27 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       isFollowing,
       bookmarkedIds,
       isBookmarked,
+      muteList,
+      addMutedWord,
+      removeMutedWord,
+      muteThread,
+      unmuteThread,
+      isThreadMuted,
+      customLists,
+      createCustomList,
+      updateCustomList,
+      deleteCustomList,
+
+      articles,
+      articlesById,
+      activeArticle,
+      openArticle,
+      closeArticle,
+      polls,
+      pollsById,
+      pollResultsById,
+      publishPoll,
+      votePoll,
 
       notifications: visibleNotifications,
       unreadNotificationCount,
@@ -3268,6 +4911,8 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       publishing,
       uploadingMedia,
       publishNote,
+      publishThread,
+      deleteNote,
       replyToNote,
       quoteNote,
       repostNote,
@@ -3288,6 +4933,12 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       myNip65Relays,
       activeTab,
       setActiveTab,
+      feedFilter,
+      setFeedFilter,
+      activeListId,
+      setActiveListId,
+      density,
+      setDensity,
       feedItems,
       loadingFeed,
       loadingMore,
@@ -3296,9 +4947,14 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       flushPendingNotes,
       refresh,
       loadMore,
+      canNavigateBack,
+      navigateBack,
       profilesByPubkey,
       notesById,
       statsByNoteId,
+      authorRelaysByPubkey,
+      nip05StatusByPubkey,
+      ensureNip05Verified,
       getProfile,
       getNote,
       getNoteStats,
@@ -3308,6 +4964,26 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       isFollowing,
       bookmarkedIds,
       isBookmarked,
+      muteList,
+      addMutedWord,
+      removeMutedWord,
+      muteThread,
+      unmuteThread,
+      isThreadMuted,
+      customLists,
+      createCustomList,
+      updateCustomList,
+      deleteCustomList,
+      articles,
+      articlesById,
+      activeArticle,
+      openArticle,
+      closeArticle,
+      polls,
+      pollsById,
+      pollResultsById,
+      publishPoll,
+      votePoll,
       visibleNotifications,
       unreadNotificationCount,
       markNotificationsRead,
@@ -3336,6 +5012,8 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       publishing,
       uploadingMedia,
       publishNote,
+      publishThread,
+      deleteNote,
       replyToNote,
       quoteNote,
       repostNote,

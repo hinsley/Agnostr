@@ -3203,3 +3203,2009 @@
     height: 24px;
   }
 }
+
+/* ==========================================================================
+   Agora 3-Wave Upgrade Styles (Waves 1, 2 & 3)
+   Skeletons, Infinite Scroll, Back-to-Top, Mobile FAB, Keyboard Focus,
+   Compact Density, Nested Reply Trees, Rich Code/Quotes, Clamping, Filters,
+   Deluxe Composer, Polls, Articles, Curation Modal, Grouped Notifications,
+   Real NIP-05 Verification, Hover Cards, ALT Badges, Quick-Zaps & Social Lists
+   ========================================================================== */
+
+/* Anchor floating controls cleanly inside center stream column */
+.ag-agora-center {
+  position: relative;
+}
+
+/* 1. Compact Density Mode */
+.ag-agora-workspace.is-compact .ag-agora-card {
+  padding: 0.56rem 0.82rem 0.48rem;
+}
+
+.ag-agora-workspace.is-compact .ag-agora-card-row {
+  gap: 0.52rem;
+}
+
+.ag-agora-workspace.is-compact .ag-agora-body {
+  font-size: 13.5px;
+  line-height: 1.42;
+}
+
+.ag-agora-workspace.is-compact .ag-agora-actions {
+  margin-top: 0.25rem;
+}
+
+.ag-agora-workspace.is-compact .ag-agora-media-grid {
+  max-height: 260px;
+}
+
+.ag-agora-workspace.is-compact .ag-agora-notif-row {
+  padding: 0.56rem 0.85rem;
+}
+
+/* 2. Shimmer Skeleton Loading Cards */
+.ag-agora-skeleton-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.ag-agora-skeleton-card {
+  display: flex;
+  gap: 0.72rem;
+  padding: 0.9rem 0.95rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-agora-skeleton-avatar,
+.ag-agora-skeleton-line,
+.ag-agora-skeleton-pill {
+  background: linear-gradient(
+    90deg,
+    var(--bg-elevated) 25%,
+    var(--bg-subtle) 50%,
+    var(--bg-elevated) 75%
+  );
+  background-size: 220% 100%;
+  animation: ag-agora-shimmer 1.4s ease-in-out infinite;
+}
+
+.ag-agora-skeleton-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.ag-agora-skeleton-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.48rem;
+}
+
+.ag-agora-skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+}
+
+.ag-agora-skeleton-line.w-38 {
+  width: 38%;
+  height: 13px;
+}
+
+.ag-agora-skeleton-line.w-92 {
+  width: 92%;
+}
+
+.ag-agora-skeleton-line.w-74 {
+  width: 74%;
+}
+
+.ag-agora-skeleton-actions {
+  display: flex;
+  gap: 1.15rem;
+  margin-top: 0.22rem;
+}
+
+.ag-agora-skeleton-pill {
+  width: 36px;
+  height: 14px;
+  border-radius: 999px;
+}
+
+@keyframes ag-agora-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+/* 3. Keyboard Navigation Focus Outline */
+.ag-agora-card.is-kbd-focused {
+  background-color: color-mix(in srgb, var(--accent-soft) 50%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* 4. Floating Back-to-Top Pill & Mobile Compose FAB */
+.ag-agora-scroll-top-btn {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 16;
+  height: 34px;
+  padding: 0 0.78rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  box-shadow: var(--shadow-md);
+  transition:
+    transform var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-scroll-top-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.ag-agora-mobile-fab {
+  display: none;
+  position: absolute;
+  right: 1rem;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  z-index: 17;
+  width: 50px;
+  height: 50px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  color: var(--text-inverse);
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  transition:
+    transform var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-agora-mobile-fab:hover {
+  background-color: var(--accent-hover);
+}
+
+.ag-agora-mobile-fab:active {
+  transform: scale(0.95);
+}
+
+/* 5. Nested Threaded Reply Trees */
+.ag-agora-reply-tree {
+  display: flex;
+  flex-direction: column;
+}
+
+.ag-agora-reply-branch {
+  position: relative;
+  min-width: 0;
+}
+
+.ag-agora-reply-children {
+  margin-left: 1.15rem;
+  border-left: 2px solid var(--border-subtle);
+  padding-left: 0.25rem;
+  min-width: 0;
+}
+
+.ag-agora-reply-branch.depth-4 > .ag-agora-reply-children {
+  margin-left: 0.35rem;
+}
+
+.ag-agora-branch-toggle-wrap {
+  padding: 0.16rem 0.95rem 0.42rem 3.45rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-agora-branch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.26rem;
+  height: 24px;
+  padding: 0 0.52rem;
+  border-radius: var(--radius-full);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-agora-branch-toggle:hover {
+  background-color: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* 6. Long-Note Clamping & Rich Content Blocks (Code, Blockquote, Headings) */
+.ag-agora-body-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.26rem;
+  min-width: 0;
+}
+
+.ag-agora-body.is-clamped {
+  position: relative;
+  max-height: 276px;
+  overflow: hidden;
+}
+
+.ag-agora-body.is-clamped::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 54px;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent 0%, var(--bg-canvas) 95%);
+}
+
+.ag-agora-show-more-btn {
+  align-self: flex-start;
+  padding: 0.14rem 0.45rem;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--accent);
+  background: transparent;
+}
+
+.ag-agora-show-more-btn:hover {
+  background-color: var(--accent-soft);
+}
+
+.ag-agora-paragraph {
+  margin: 0 0 0.42rem;
+}
+
+.ag-agora-paragraph:last-child {
+  margin-bottom: 0;
+}
+
+.ag-agora-heading {
+  font-weight: 750;
+  color: var(--text-primary);
+  margin: 0.35rem 0 0.25rem;
+  line-height: 1.3;
+}
+
+.ag-agora-heading.level-1 {
+  font-size: 16.5px;
+}
+
+.ag-agora-heading.level-2 {
+  font-size: 15px;
+}
+
+.ag-agora-heading.level-3 {
+  font-size: 14px;
+}
+
+.ag-agora-blockquote {
+  margin: 0.38rem 0;
+  padding: 0.38rem 0.72rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 13.5px;
+}
+
+.ag-agora-code-block {
+  margin: 0.42rem 0;
+  padding: 0.62rem 0.75rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.48;
+  color: var(--text-primary);
+  white-space: pre;
+}
+
+.ag-agora-code-lang {
+  display: block;
+  margin-bottom: 0.34rem;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.ag-agora-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-word;
+}
+
+/* 7. Feed Filter Pills, Custom Lists & Mutes/Lists Button */
+.ag-agora-feed-filters {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.48rem;
+  padding: 0.52rem 0.92rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background-color: var(--bg-canvas);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.ag-agora-filter-pills {
+  display: flex;
+  align-items: center;
+  gap: 0.34rem;
+  flex-wrap: wrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ag-agora-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  height: 27px;
+  padding: 0 0.64rem;
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  max-width: 168px;
+  transition:
+    color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-agora-filter-pill:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.ag-agora-filter-pill.active {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.ag-agora-filter-pill.is-list {
+  border-style: dashed;
+}
+
+.ag-agora-filter-pill.is-list.active {
+  border-style: solid;
+}
+
+.ag-agora-curation-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  height: 27px;
+  padding: 0 0.64rem;
+  border-radius: var(--radius-full);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  flex-shrink: 0;
+  transition:
+    color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.ag-agora-curation-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+/* 8. Real NIP-05 Verification Badges */
+.ag-agora-nip05.is-verified,
+.ag-agora-nip05.verified {
+  color: var(--status-ok);
+  font-weight: 600;
+}
+
+.ag-agora-nip05-badge,
+.ag-agora-nip05-icon {
+  color: var(--status-ok);
+  flex-shrink: 0;
+}
+
+.ag-agora-nip05.is-unverified {
+  color: var(--text-muted);
+}
+
+/* 9. Media ALT Badge */
+.ag-agora-media-cell {
+  position: relative;
+}
+
+.ag-agora-media-alt-badge {
+  position: absolute;
+  left: 0.45rem;
+  bottom: 0.45rem;
+  z-index: 2;
+  padding: 0.1rem 0.38rem;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #ffffff;
+  background-color: rgba(8, 10, 14, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  pointer-events: none;
+}
+
+/* 10. 1-Click Quick-Zap Popover & Burst Animation */
+.ag-agora-zap-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 28;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.26rem;
+  padding: 0.3rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  white-space: nowrap;
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-agora-zap-preset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.18rem;
+  height: 26px;
+  padding: 0 0.5rem;
+  border-radius: var(--radius-full);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--status-warn);
+  background-color: var(--status-warn-soft);
+  border: 1px solid color-mix(in srgb, var(--status-warn) 32%, transparent);
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    transform 80ms ease;
+}
+
+.ag-agora-zap-preset-btn:hover {
+  background-color: var(--status-warn);
+  color: #111318;
+  transform: translateY(-1px);
+}
+
+.ag-agora-zap-custom-btn {
+  height: 26px;
+  padding: 0 0.52rem;
+  border-radius: var(--radius-full);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-agora-zap-custom-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.ag-agora-act-btn.zap.is-zap-burst {
+  color: var(--status-warn);
+  animation: ag-agora-zap-pop 0.62s var(--ease-spring);
+}
+
+@keyframes ag-agora-zap-pop {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-warn) 65%, transparent);
+  }
+  40% {
+    transform: scale(1.22);
+    box-shadow: 0 0 0 8px transparent;
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* 11. Grouped Notifications Stacked Avatars */
+.ag-agora-notif-avatar-stack {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding-right: 0.15rem;
+}
+
+.ag-agora-notif-avatar-stack .ag-agora-avatar {
+  margin-left: -8px;
+  border: 2px solid var(--bg-canvas);
+  box-sizing: content-box;
+}
+
+.ag-agora-notif-avatar-stack .ag-agora-avatar:first-child {
+  margin-left: 0;
+}
+
+/* 12. Profile Social Context (Follows You, Clickable Following/Followers & Social Modal) */
+.ag-agora-profile-name-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.ag-agora-follows-you-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem 0.48rem;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-agora-profile-stat-btn {
+  padding: 0.14rem 0.36rem;
+  margin: -0.14rem -0.36rem;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+}
+
+.ag-agora-profile-stat-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--accent);
+}
+
+.ag-agora-profile-stat-btn:hover strong {
+  color: var(--accent);
+}
+
+.ag-agora-social-modal {
+  width: min(440px, 100%);
+}
+
+.ag-agora-social-modal-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.48rem;
+  min-width: 0;
+}
+
+/* 13. Deluxe AgoraComposer (Drafts, Autocomplete, Drag/Drop, ALT/Reorder, Thread & Poll Modes) */
+.ag-agora-composer {
+  position: relative;
+}
+
+.ag-agora-composer.is-dragging {
+  background-color: color-mix(in srgb, var(--accent-soft) 55%, var(--bg-canvas));
+}
+
+.ag-agora-drop-overlay {
+  position: absolute;
+  inset: 0.35rem;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: var(--radius-md);
+  border: 2px dashed var(--accent);
+  background-color: var(--bg-glass);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.ag-agora-composer-input-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.ag-agora-ac-popover {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  max-height: 230px;
+  overflow-y: auto;
+  padding: 0.28rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+
+.ag-agora-ac-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.42rem 0.52rem;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  color: var(--text-primary);
+  font-size: 13px;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-agora-ac-item:hover,
+.ag-agora-ac-item.active {
+  background-color: var(--accent-soft);
+}
+
+.ag-agora-ac-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ag-agora-ac-emoji {
+  width: 24px;
+  text-align: center;
+  font-size: 17px;
+  flex-shrink: 0;
+}
+
+.ag-agora-ac-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ag-agora-ac-primary {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 12.5px;
+}
+
+.ag-agora-ac-secondary {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ag-agora-draft-chip {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--status-ok);
+  background-color: var(--status-ok-soft);
+  padding: 0.1rem 0.42rem;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+}
+
+.ag-agora-composer-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  height: 28px;
+  padding: 0 0.58rem;
+  border-radius: var(--radius-full);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  transition:
+    color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+}
+
+.ag-agora-composer-pill-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.ag-agora-composer-pill-btn.active {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.ag-agora-composer-pill-btn.danger:hover:not(:disabled) {
+  color: var(--status-danger);
+  border-color: color-mix(in srgb, var(--status-danger) 45%, transparent);
+}
+
+.ag-agora-upload-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.ag-agora-upload-alt-btn {
+  position: absolute;
+  left: 0.32rem;
+  bottom: 0.32rem;
+  z-index: 3;
+  height: 21px;
+  padding: 0 0.42rem;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #ffffff;
+  background-color: rgba(10, 12, 16, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+}
+
+.ag-agora-upload-alt-btn.has-alt,
+.ag-agora-upload-alt-btn.active {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+
+.ag-agora-upload-reorder {
+  position: absolute;
+  right: 0.32rem;
+  bottom: 0.32rem;
+  z-index: 3;
+  display: inline-flex;
+  gap: 0.16rem;
+}
+
+.ag-agora-upload-move-btn {
+  width: 21px;
+  height: 21px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  background-color: rgba(10, 12, 16, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.ag-agora-upload-move-btn:hover:not(:disabled) {
+  background-color: var(--accent);
+}
+
+.ag-agora-upload-alt-editor {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0.36rem 0.52rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+}
+
+.ag-agora-alt-pill {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.36rem;
+  border-radius: 4px;
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  flex-shrink: 0;
+}
+
+.ag-agora-upload-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ag-agora-thread-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.42rem;
+}
+
+.ag-agora-thread-part {
+  padding: 0.5rem 0.62rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent);
+  display: flex;
+  flex-direction: column;
+  gap: 0.34rem;
+}
+
+.ag-agora-thread-part-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.ag-agora-thread-part-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.ag-agora-thread-part-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ag-agora-thread-textarea {
+  width: 100%;
+  min-height: 46px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.45;
+  resize: none;
+  outline: none;
+}
+
+.ag-agora-poll-editor {
+  margin-top: 0.42rem;
+  padding: 0.62rem 0.7rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ag-agora-poll-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.ag-agora-poll-editor-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-agora-poll-editor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.36rem;
+}
+
+.ag-agora-poll-editor-option {
+  display: flex;
+  align-items: center;
+  gap: 0.36rem;
+}
+
+.ag-agora-poll-option-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 0.58rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.ag-agora-poll-option-input:focus {
+  border-color: var(--accent);
+}
+
+.ag-agora-poll-editor-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.ag-agora-poll-durations {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.ag-agora-poll-dur-btn {
+  height: 25px;
+  padding: 0 0.48rem;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-agora-poll-dur-btn.active {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
+.ag-over {
+  color: var(--status-danger) !important;
+}
+
+/* 14. Inline & Ribbon NIP-88 Poll Cards */
+.ag-agora-polls-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.72rem 0.92rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-agora-inline-poll {
+  margin: 0.45rem 0 0.25rem;
+}
+
+.ag-agora-poll-card {
+  padding: 0.75rem 0.85rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.ag-agora-poll-card.is-ended {
+  opacity: 0.9;
+}
+
+.ag-agora-poll-header {
+  display: flex;
+  align-items: center;
+  gap: 0.36rem;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.ag-agora-poll-author-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  min-width: 0;
+  max-width: 190px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.ag-agora-poll-author-name {
+  min-width: 0;
+}
+
+.ag-agora-poll-badge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+  padding: 0.08rem 0.44rem;
+  border-radius: var(--radius-full);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+.ag-agora-poll-question {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.38;
+}
+
+.ag-agora-poll-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.36rem;
+}
+
+.ag-agora-poll-option-btn {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  width: 100%;
+  min-height: 36px;
+  padding: 0.42rem 0.68rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  transition: border-color var(--dur-fast) ease;
+}
+
+.ag-agora-poll-option-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.ag-agora-poll-option-btn.is-selected {
+  border-color: var(--accent);
+}
+
+.ag-agora-poll-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 0;
+  background-color: color-mix(in srgb, var(--accent) 18%, transparent);
+  transition: width 260ms ease;
+  pointer-events: none;
+}
+
+.ag-agora-poll-option-btn.is-selected .ag-agora-poll-bar-fill {
+  background-color: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.ag-agora-poll-option-label {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  font-weight: 550;
+  min-width: 0;
+}
+
+.ag-agora-poll-check {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ag-agora-poll-option-stats {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.ag-agora-poll-pct {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-agora-poll-votes {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.ag-agora-poll-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.36rem;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ag-agora-poll-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+}
+
+/* 15. NIP-23 Long-Form Articles (Cards & Reader Modal) */
+.ag-agora-articles-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.ag-agora-article-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.9rem 0.95rem;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-agora-article-card:hover {
+  background-color: var(--bg-hover);
+}
+
+.ag-agora-article-card-cover {
+  width: 100%;
+  max-height: 210px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-elevated);
+}
+
+.ag-agora-article-card-cover img {
+  width: 100%;
+  height: 100%;
+  max-height: 210px;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-agora-article-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.36rem;
+  min-width: 0;
+}
+
+.ag-agora-article-author-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.36rem;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.ag-agora-article-author-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.ag-agora-article-author-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.26rem;
+  min-width: 0;
+}
+
+.ag-agora-article-readtime {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+}
+
+.ag-agora-article-card-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 750;
+  line-height: 1.32;
+  color: var(--text-primary);
+}
+
+.ag-agora-article-card-summary {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.48;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ag-agora-article-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.14rem;
+}
+
+.ag-agora-article-tag {
+  height: 23px;
+  padding: 0 0.5rem;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+.ag-agora-article-modal {
+  width: min(740px, 100%);
+  max-height: calc(var(--ag-vvh, 100dvh) - 2rem);
+  border-radius: var(--radius-xl);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ag-agora-article-modal-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.72rem 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.ag-agora-article-modal-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-secondary);
+}
+
+.ag-agora-article-modal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.ag-agora-article-modal-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 1.15rem 1.35rem 1.8rem;
+}
+
+.ag-agora-article-modal-cover {
+  margin-bottom: 1rem;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-agora-article-modal-cover img {
+  width: 100%;
+  max-height: 320px;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-agora-article-modal-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding-bottom: 1rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-agora-article-modal-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.26;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.ag-agora-article-modal-summary {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.ag-agora-article-modal-authorbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.ag-agora-article-author-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.08rem;
+  min-width: 0;
+}
+
+.ag-agora-article-author-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+}
+
+.ag-agora-article-prose {
+  display: flex;
+  flex-direction: column;
+  gap: 0.72rem;
+  font-size: 15px;
+  line-height: 1.66;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.ag-agora-article-h1,
+.ag-agora-article-h2,
+.ag-agora-article-h3 {
+  margin: 0.6rem 0 0.12rem;
+  font-weight: 750;
+  line-height: 1.3;
+  color: var(--text-primary);
+}
+
+.ag-agora-article-h1 {
+  font-size: 19px;
+}
+
+.ag-agora-article-h2 {
+  font-size: 17px;
+}
+
+.ag-agora-article-h3 {
+  font-size: 15.5px;
+}
+
+.ag-agora-article-p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.ag-agora-article-quote {
+  margin: 0.25rem 0;
+  padding: 0.55rem 0.85rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+
+/* 16. Hover Profile Preview Card (Desktop Portaled) */
+.ag-agora-hover-card {
+  position: fixed;
+  z-index: 9992;
+  width: min(320px, calc(100vw - 24px));
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: ag-fade-in var(--dur-fast) ease;
+}
+
+.ag-agora-hover-banner {
+  height: 62px;
+  background: linear-gradient(135deg, var(--accent-soft) 0%, var(--bg-elevated) 100%);
+  overflow: hidden;
+}
+
+.ag-agora-hover-banner img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ag-agora-hover-body {
+  padding: 0 0.85rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.34rem;
+}
+
+.ag-agora-hover-top {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: -22px;
+}
+
+.ag-agora-hover-avatar-btn {
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-surface);
+  display: inline-flex;
+}
+
+.ag-agora-hover-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  padding-top: 24px;
+}
+
+.ag-agora-follow-btn,
+.ag-agora-hover-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  height: 29px;
+  padding: 0 0.72rem;
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-inverse);
+  background-color: var(--accent);
+  border: 1px solid var(--accent);
+  transition: background-color var(--dur-fast) ease;
+}
+
+.ag-agora-follow-btn:hover:not(:disabled),
+.ag-agora-hover-action-btn:hover {
+  background-color: var(--accent-hover);
+}
+
+.ag-agora-follow-btn.following {
+  color: var(--text-primary);
+  background-color: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+
+.ag-agora-hover-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+  margin-top: 0.14rem;
+}
+
+.ag-agora-hover-name {
+  font-size: 14.5px;
+  font-weight: 750;
+  color: var(--text-primary);
+  text-align: left;
+  min-width: 0;
+}
+
+.ag-agora-hover-name:hover {
+  text-decoration: underline;
+}
+
+.ag-agora-trusted-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.08rem 0.42rem;
+  border-radius: var(--radius-full);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--status-ok);
+  background-color: var(--status-ok-soft);
+  flex-shrink: 0;
+}
+
+.ag-agora-hover-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ag-agora-hover-npub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ag-agora-hover-bio {
+  margin: 0.18rem 0 0;
+  font-size: 12.5px;
+  line-height: 1.44;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+/* 17. Curation Modal (NIP-51 Mutes & Custom Lists) */
+.ag-agora-curation-modal {
+  width: min(560px, 100%);
+  max-height: calc(var(--ag-vvh, 100dvh) - 2rem);
+  border-radius: var(--radius-xl);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ag-agora-curation-head {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0;
+  border-bottom: none;
+  flex-shrink: 0;
+}
+
+.ag-agora-curation-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.9rem 1.05rem;
+  border-bottom: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.ag-agora-curation-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 750;
+  color: var(--text-primary);
+}
+
+.ag-agora-curation-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ag-agora-curation-tab {
+  position: relative;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.38rem;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-secondary);
+}
+
+.ag-agora-curation-tab.active {
+  color: var(--accent);
+}
+
+.ag-agora-curation-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 18%;
+  right: 18%;
+  height: 2.5px;
+  border-radius: 2px 2px 0 0;
+  background-color: var(--accent);
+}
+
+.ag-agora-curation-count {
+  padding: 0.06rem 0.38rem;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 700;
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+
+.ag-agora-curation-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  padding: 0.95rem 1.05rem 1.15rem;
+}
+
+.ag-agora-curation-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.ag-agora-curation-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ag-agora-curation-section-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+}
+
+.ag-agora-curation-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.42;
+}
+
+.ag-agora-curation-add-form,
+.ag-agora-curation-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.ag-agora-curation-input {
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 0.65rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.ag-agora-curation-add-form .ag-agora-curation-input {
+  flex: 1 1 180px;
+  width: auto;
+}
+
+.ag-agora-curation-input:focus {
+  border-color: var(--accent);
+}
+
+.ag-agora-curation-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.36rem;
+}
+
+.ag-agora-mute-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  height: 27px;
+  padding: 0 0.36rem 0 0.58rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.ag-agora-mute-chip-rm {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.ag-agora-mute-chip-rm:hover {
+  color: var(--status-danger);
+  background-color: var(--status-danger-soft);
+}
+
+.ag-agora-curation-empty {
+  margin: 0;
+  padding: 0.75rem 0.6rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px dashed var(--border-subtle);
+  font-size: 12.5px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.ag-agora-curation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ag-agora-curation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  padding: 0.62rem 0.72rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-agora-curation-row-info {
+  flex: 1 1 180px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.14rem;
+}
+
+.ag-agora-curation-row-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.ag-agora-curation-row-sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ag-agora-curation-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.ag-agora-list-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.78rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+}
+
+.ag-agora-list-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ag-agora-list-editor-head h3 {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.ag-agora-list-editor-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.ag-agora-member-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.ag-agora-member-picker-head {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0 0.58rem;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background-color: var(--bg-input);
+  color: var(--text-muted);
+}
+
+.ag-agora-member-picker-head:focus-within {
+  border-color: var(--accent);
+}
+
+.ag-agora-member-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.ag-agora-member-list {
+  max-height: 210px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ag-agora-member-row {
+  display: flex;
+  align-items: center;
+  gap: 0.52rem;
+  width: 100%;
+  padding: 0.38rem 0.52rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  transition: border-color var(--dur-fast) ease;
+}
+
+.ag-agora-member-row.is-selected {
+  border-color: var(--accent);
+  background-color: color-mix(in srgb, var(--accent-soft) 55%, var(--bg-surface));
+}
+
+.ag-agora-member-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ag-agora-member-name {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.ag-agora-member-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ag-agora-member-check {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ag-agora-member-row.is-selected .ag-agora-member-check {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+/* 18. Daylight Theme Refinements */
+[data-theme='daylight'] .ag-agora-hover-card,
+[data-theme='daylight'] .ag-agora-article-modal,
+[data-theme='daylight'] .ag-agora-curation-modal,
+[data-theme='daylight'] .ag-agora-ac-popover,
+[data-theme='daylight'] .ag-agora-zap-popover {
+  background-color: #ffffff;
+  box-shadow: 0 16px 42px rgba(15, 23, 42, 0.16);
+}
+
+[data-theme='daylight'] .ag-agora-poll-card,
+[data-theme='daylight'] .ag-agora-scroll-top-btn {
+  background-color: #ffffff;
+}
+
+[data-theme='daylight'] .ag-agora-code-block,
+[data-theme='daylight'] .ag-agora-blockquote,
+[data-theme='daylight'] .ag-agora-curation-row,
+[data-theme='daylight'] .ag-agora-list-editor {
+  background-color: #f8fafc;
+}
+
+/* 19. Mobile Responsive (<= 867px & <= 640px — 390px zero horizontal overflow) */
+@media (max-width: 867px) {
+  .ag-agora-mobile-fab {
+    display: inline-flex;
+  }
+
+  .ag-agora-scroll-top-btn {
+    right: 1rem;
+    bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (max-width: 640px) {
+  .ag-agora-header-actions {
+    gap: 0.16rem;
+  }
+
+  .ag-agora-header .ag-agora-icon-btn {
+    width: 30px;
+    height: 30px;
+  }
+
+  .ag-agora-feed-filters {
+    padding: 0.46rem 0.68rem;
+  }
+
+  .ag-agora-reply-children {
+    margin-left: 0.58rem;
+    padding-left: 0.16rem;
+  }
+
+  .ag-agora-reply-branch.depth-3 > .ag-agora-reply-children,
+  .ag-agora-reply-branch.depth-4 > .ag-agora-reply-children {
+    margin-left: 0.25rem;
+  }
+
+  .ag-agora-branch-toggle-wrap {
+    padding: 0.14rem 0.68rem 0.36rem 2.75rem;
+  }
+
+  .ag-agora-article-modal-scroll {
+    padding: 0.9rem 0.95rem 1.35rem;
+  }
+
+  .ag-agora-article-modal-title {
+    font-size: 19px;
+  }
+
+  .ag-agora-zap-popover {
+    left: 0;
+    transform: none;
+  }
+
+  .ag-agora-poll-option-input,
+  .ag-agora-curation-input,
+  .ag-agora-member-search {
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-agora-skeleton-avatar,
+  .ag-agora-skeleton-line,
+  .ag-agora-skeleton-pill,
+  .ag-agora-act-btn.zap.is-zap-burst {
+    animation: none;
+  }
+}

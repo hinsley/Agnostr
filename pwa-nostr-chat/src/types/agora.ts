@@ -6,6 +6,15 @@ export type AgoraFeedTab =
   | 'trending'
   | 'bookmarks'
   | 'notifications'
+  | 'articles'
+
+export type AgoraFeedFilter = 'all' | 'no-reposts' | 'media' | 'trusted'
+
+export type AgoraNotificationFilter = 'all' | 'replies' | 'zaps' | 'reactions'
+
+export type AgoraDensity = 'comfortable' | 'compact'
+
+export type AgoraNip05Status = 'verified' | 'invalid' | 'checking' | 'unverified'
 
 export type AgoraProfileTab = 'posts' | 'replies' | 'media' | 'likes'
 
@@ -80,6 +89,7 @@ export interface AgoraFeedItem {
   kind: 'note' | 'repost'
   note: AgoraNote
   repostedBy?: string
+  repostedByList?: string[]
   repostedAt?: number
   /** Unix timestamp in seconds used for chronological ordering */
   sortAt: number
@@ -138,8 +148,97 @@ export interface AgoraProfileViewState {
   replies: AgoraNote[]
   likes: AgoraNote[]
   followingPubkeys: string[]
+  followerPubkeys: string[]
+  followsMe: boolean
   loading: boolean
 }
+
+export interface AgoraMuteList {
+  words: string[]
+  hashtags: string[]
+  threads: string[]
+  pubkeys: string[]
+  updatedAt: number
+}
+
+export interface AgoraCustomList {
+  id: string
+  dTag: string
+  title: string
+  description?: string
+  pubkeys: string[]
+  updatedAt: number
+}
+
+export interface AgoraArticle {
+  id: string
+  dTag: string
+  pubkey: string
+  title: string
+  summary?: string
+  image?: string
+  publishedAt: number
+  createdAt: number
+  content: string
+  hashtags: string[]
+  naddr: string
+  rawEvent: NostrEvent
+}
+
+export interface AgoraPollOption {
+  id: string
+  label: string
+}
+
+export interface AgoraPoll {
+  id: string
+  pubkey: string
+  question: string
+  options: AgoraPollOption[]
+  endsAt?: number
+  createdAt: number
+  rawEvent: NostrEvent
+}
+
+export interface AgoraPollResults {
+  totalVotes: number
+  countsByOption: Record<string, number>
+  myOptionId?: string
+}
+
+export interface AgoraReplyTreeNode {
+  note: AgoraNote
+  depth: number
+  children: AgoraReplyTreeNode[]
+}
+
+export interface AgoraGroupedNotification {
+  key: string
+  kind: AgoraNotification['kind']
+  actors: string[]
+  count: number
+  createdAt: number
+  noteId?: string
+  targetNoteId?: string
+  content?: string
+  totalZapSats?: number
+  items: AgoraNotification[]
+}
+
+export interface AgoraDraftPayload {
+  text: string
+  uploads: AgoraUploadedMedia[]
+  cwEnabled: boolean
+  cwReason: string
+  threadParts?: string[]
+  updatedAt: number
+}
+
+export type AgoraContentBlock =
+  | { type: 'paragraph'; text: string }
+  | { type: 'heading'; level: 1 | 2 | 3; text: string }
+  | { type: 'blockquote'; text: string }
+  | { type: 'code'; lang?: string; code: string }
 
 export type AgoraJumpTarget =
   | { kind: 'profile'; pubkey: string; relays?: string[] }
@@ -195,6 +294,12 @@ export interface AgoraEngine {
   // Active feed & calm live buffer
   activeTab: AgoraFeedTab
   setActiveTab: (tab: AgoraFeedTab) => void
+  feedFilter: AgoraFeedFilter
+  setFeedFilter: (f: AgoraFeedFilter) => void
+  activeListId: string | null
+  setActiveListId: (id: string | null) => void
+  density: AgoraDensity
+  setDensity: (d: AgoraDensity) => void
   feedItems: AgoraFeedItem[]
   loadingFeed: boolean
   loadingMore: boolean
@@ -204,21 +309,61 @@ export interface AgoraEngine {
   refresh: () => void
   loadMore: () => Promise<void>
 
+  // Navigation history
+  canNavigateBack: boolean
+  navigateBack: () => void
+
   // Normalized caches & batch loaders
   profilesByPubkey: Record<string, AgoraProfile>
   notesById: Record<string, AgoraNote>
   statsByNoteId: Record<string, AgoraNoteStats>
+  authorRelaysByPubkey: Record<string, AgoraNip65RelayList>
+  nip05StatusByPubkey: Record<string, AgoraNip05Status>
+  ensureNip05Verified: (pubkey: string, nip05?: string) => void
   getProfile: (pubkey: string) => AgoraProfile | null
   getNote: (noteId: string) => AgoraNote | null
   getNoteStats: (noteId: string) => AgoraNoteStats
   ensureProfiles: (pubkeys: readonly string[]) => void
   ensureNotes: (ids: readonly string[]) => void
 
-  // Social graph & bookmarks
+  // Social graph, bookmarks, mutes & custom lists (NIP-51)
   followingPubkeys: string[]
   isFollowing: (pubkey: string) => boolean
   bookmarkedIds: string[]
   isBookmarked: (noteId: string) => boolean
+  muteList: AgoraMuteList
+  addMutedWord: (word: string) => Promise<boolean>
+  removeMutedWord: (word: string) => Promise<boolean>
+  muteThread: (rootId: string) => Promise<boolean>
+  unmuteThread: (rootId: string) => Promise<boolean>
+  isThreadMuted: (rootId: string) => boolean
+  customLists: AgoraCustomList[]
+  createCustomList: (
+    title: string,
+    pubkeys?: string[],
+    description?: string
+  ) => Promise<AgoraCustomList | null>
+  updateCustomList: (
+    dTag: string,
+    patch: { title?: string; description?: string; pubkeys?: string[] }
+  ) => Promise<boolean>
+  deleteCustomList: (dTag: string) => Promise<boolean>
+
+  // Long-form articles (NIP-23) & native polls (NIP-88)
+  articles: AgoraArticle[]
+  articlesById: Record<string, AgoraArticle>
+  activeArticle: AgoraArticle | null
+  openArticle: (articleId: string) => void
+  closeArticle: () => void
+  polls: AgoraPoll[]
+  pollsById: Record<string, AgoraPoll>
+  pollResultsById: Record<string, AgoraPollResults>
+  publishPoll: (
+    question: string,
+    options: string[],
+    durationSec?: number
+  ) => Promise<AgoraActionResult>
+  votePoll: (poll: AgoraPoll, optionId: string) => Promise<boolean>
 
   // Notifications
   notifications: AgoraNotification[]
@@ -257,6 +402,10 @@ export interface AgoraEngine {
   publishing: boolean
   uploadingMedia: boolean
   publishNote: (content: string, opts?: AgoraPublishNoteOptions) => Promise<AgoraActionResult>
+  publishThread: (
+    parts: Array<{ content: string; opts?: AgoraPublishNoteOptions }>
+  ) => Promise<AgoraActionResult>
+  deleteNote: (noteId: string) => Promise<AgoraActionResult>
   replyToNote: (
     parentNote: AgoraNote,
     content: string,

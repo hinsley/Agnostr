@@ -9927,3 +9927,120 @@ a.ag-untrusted-link {
     animation: none;
   }
 }
+
+/* ==========================================================================
+   Multi-Image Lightbox Gallery Controls, Counter & ALT Strip
+   ========================================================================== */
+.ag-lightbox-stage {
+  position: relative;
+}
+
+.ag-lightbox-counter {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #f8fafc;
+  background-color: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  flex-shrink: 0;
+}
+
+.ag-lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #f8fafc;
+  background-color: rgba(10, 12, 16, 0.68);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition:
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
+}
+
+.ag-lightbox-nav.prev {
+  left: max(0.75rem, env(safe-area-inset-left, 0px));
+}
+
+.ag-lightbox-nav.next {
+  right: max(0.75rem, env(safe-area-inset-right, 0px));
+}
+
+.ag-lightbox-nav:hover {
+  background-color: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.34);
+  transform: translateY(-50%) scale(1.05);
+}
+
+.ag-lightbox-footer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  background-color: rgba(10, 14, 12, 0.78);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.ag-lightbox-footer .ag-lightbox-caption {
+  background-color: transparent;
+  border-top: none;
+}
+
+.ag-lightbox-alt {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.48rem;
+  max-height: 18vh;
+  overflow-y: auto;
+  padding: 0.55rem 1.25rem;
+  color: #cbd5e1;
+  font-size: 12.5px;
+  line-height: 1.45;
+  text-align: left;
+  word-break: break-word;
+}
+
+.ag-lightbox-alt + .ag-lightbox-caption {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ag-lightbox-alt-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.36rem;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.18);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+@media (max-width: 520px) {
+  .ag-hide-xs {
+    display: none;
+  }
+
+  .ag-lightbox-nav {
+    width: 36px;
+    height: 36px;
+  }
+
+  .ag-lightbox-alt {
+    padding: 0.5rem 0.85rem;
+  }
+}
