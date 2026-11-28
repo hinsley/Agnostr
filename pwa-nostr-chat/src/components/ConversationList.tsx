@@ -45,6 +45,7 @@ import type { ServerChannel, ServerSummary } from '../types/servers'
 import type { WalletInitialIntent, ZapTarget } from '../types/wallet'
 import type { PwaState } from '../hooks/usePwa'
 import { formatBitchatPreviewText } from '../hooks/useGlobalPulse'
+import { formatTorrentFallbackText } from '../lib/torrentProtocol'
 import type { SoundCue } from '../utils/sound'
 import type { QrShareTarget } from './QrShareModal'
 import type { ServerHubTab } from './ServerHubModal'
@@ -1025,13 +1026,22 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     if (!m || m.isSystem) continue
     if (engine.isPeerBlocked(m.pubkey)) continue
     if (!m.isOwn && isPulsePreviewHidden(m.pubkey)) continue
-    const preview = formatBitchatPreviewText({
-      content: m.content,
-      hasImage: Boolean(m.imageAttachment),
-      hasVoice: Boolean(m.voiceMemo),
-      mediaUrl: m.imageAttachment?.url ?? m.voiceMemo?.url,
-      tags: m.tags,
-    })
+    let preview = ''
+    if (m.torrentAttachment) {
+      const fallback = formatTorrentFallbackText(m.torrentAttachment)
+      const caption = m.content.split(fallback).join('').trim()
+      preview = caption
+        ? `📦 ${m.torrentAttachment.fileName} — ${caption}`.slice(0, 96)
+        : fallback
+    } else {
+      preview = formatBitchatPreviewText({
+        content: m.content,
+        hasImage: Boolean(m.imageAttachment),
+        hasVoice: Boolean(m.voiceMemo),
+        mediaUrl: m.imageAttachment?.url ?? m.voiceMemo?.url,
+        tags: m.tags,
+      })
+    }
     if (!preview) continue
     const nowMs = Date.now()
     const nowSec = Math.floor(nowMs / 1000)

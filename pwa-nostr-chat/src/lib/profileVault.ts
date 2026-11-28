@@ -6,6 +6,7 @@ import type {
 } from '../types/protocol.ts'
 import { clearProfileChannelHistory } from './bitchatHistory.ts'
 import { AMAIL_DB_NAME } from './amailStorage.ts'
+import { deleteProfileTorrentDb } from './torrentStore.ts'
 import {
   encodeNpubSafe,
   generateFreshSeedKeypair,
@@ -980,6 +981,7 @@ export async function deleteStoredProfile(
   await deleteProfileVaultBucket(tgtPk)
   await clearProfileChannelHistory(tgtPk)
   await deleteIndexedDbByName(amailDbName)
+  await deleteProfileTorrentDb(tgtPk)
 
   if (tgtPk !== curPk) {
     return { deleted: true, reloaded: false, profiles: remaining }

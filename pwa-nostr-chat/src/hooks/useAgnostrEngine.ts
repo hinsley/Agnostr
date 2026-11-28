@@ -1,6 +1,6 @@
 import { isNativeAndroidBuild } from '../lib/appPlatform.ts'
 import { useNearbyRuntime } from './useNearbyRuntime.ts'
-import { isGatewayGeohash } from '../lib/nearby/gatewayPolicy.ts'
+import { isGatewayGeohash, isTorrentBridgeEvent } from '../lib/nearby/gatewayPolicy.ts'
 import { acceptChatEcho, chatRetries, publishChatWire } from '../lib/chatDelivery.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Event as NostrEvent, Filter } from 'nostr-tools'
@@ -29,6 +29,20 @@ import type {
   VoiceMemoAttachment,
   VoiceSendPhase,
 } from '../types/protocol.ts'
+import type {
+  TorrentCreateScopeContext,
+  TorrentMeshBridge,
+  TorrentShareScope,
+} from '../types/torrent.ts'
+import {
+  formatTorrentFallbackText,
+  KIND_TORRENT_SIGNAL,
+  KIND_TORRENT_STATUS,
+  TORRENT_DIRECT_SIGNAL_TAG,
+  TORRENT_SIGNALING_RELAYS,
+  TORRENT_STATUS_TAG,
+  TORRENT_SWARM_TAG_PREFIX,
+} from '../lib/torrentProtocol.ts'
 import {
   cleanMimeType,
   DEFAULT_BLOSSOM_SERVERS,
@@ -200,6 +214,7 @@ import {
 import { useProfileNotifications } from './useProfileNotifications.ts'
 import { useServers } from './useServers.ts'
 import { useToasts } from './useToasts.ts'
+import { useTorrentEngine } from './useTorrentEngine.ts'
 import { useTranscription } from './useTranscription.ts'
 import { useTranslator } from './useTranslator.ts'
 import { useTypingIndicators } from './useTypingIndicators.ts'
@@ -225,13 +240,15 @@ function extractLatestVisiblePreview(
     const pk = (m.pubkey || '').toLowerCase()
     if (!pk || blocked.has(pk)) continue
     if (strict && !m.isOwn && !own.has(pk) && !trusted.has(pk)) continue
-    const preview = formatBitchatPreviewText({
-      content: m.content,
-      hasImage: Boolean(m.imageAttachment),
-      hasVoice: Boolean(m.voiceMemo),
-      mediaUrl: m.imageAttachment?.url ?? m.voiceMemo?.url,
-      tags: m.tags,
-    })
+    const preview =
+      formatBitchatPreviewText({
+        content: m.content,
+        hasImage: Boolean(m.imageAttachment),
+        hasVoice: Boolean(m.voiceMemo),
+        mediaUrl: m.imageAttachment?.url ?? m.voiceMemo?.url,
+        tags: m.tags,
+      }) ||
+      (m.torrentAttachment ? formatTorrentFallbackText(m.torrentAttachment).slice(0, 120) : '')
     if (!preview) continue
     const nowMs = Date.now()
     const nowSec = Math.floor(nowMs / 1000)
@@ -1461,6 +1478,139 @@ export function useAgnostrEngine(): AgnostrEngine {
     [identityManager, presenceTracker]
   )
 
+  const torrentMeshListenersRef = useRef<Set<(event: NostrEvent) => void>>(new Set())
+  const torrentBridgeRelaysRef = useRef<string[]>([...TORRENT_SIGNALING_RELAYS])
+  const gatewayTorrentBridgeSubsRef = useRef<
+    Map<string, { close: () => void; timer: ReturnType<typeof setTimeout>; lastUsed: number }>
+  >(new Map())
+
+  useEffect(() => {
+    const subs = gatewayTorrentBridgeSubsRef.current
+    return () => {
+      for (const entry of subs.values()) {
+        clearTimeout(entry.timer)
+        entry.close()
+      }
+      subs.clear()
+    }
+  }, [])
+
+  const ensureGatewayTorrentBridgeSub = useCallback(
+    (ev: NostrEvent, relayUrls: string[]) => {
+      if (!pool || relayUrls.length === 0) return
+      const subs = gatewayTorrentBridgeSubsRef.current
+      const IDLE_TTL_MS = 5 * 60 * 1000
+      const MAX_SUBS = 16
+
+      const registerKey = (key: string, filters: Filter[]) => {
+        const now = Date.now()
+        const existing = subs.get(key)
+        if (existing) {
+          existing.lastUsed = now
+          clearTimeout(existing.timer)
+          existing.timer = setTimeout(() => {
+            const cur = subs.get(key)
+            if (cur === existing) {
+              cur.close()
+              subs.delete(key)
+            }
+          }, IDLE_TTL_MS)
+          return
+        }
+        while (subs.size >= MAX_SUBS) {
+          let oldestKey: string | null = null
+          let oldestAt = Infinity
+          for (const [k, v] of subs.entries()) {
+            if (v.lastUsed < oldestAt) {
+              oldestAt = v.lastUsed
+              oldestKey = k
+            }
+          }
+          if (!oldestKey) break
+          const victim = subs.get(oldestKey)
+          if (victim) {
+            clearTimeout(victim.timer)
+            victim.close()
+            subs.delete(oldestKey)
+          }
+        }
+        const subId = `agnostr-gw-trrnt-${++subSeqRef.current}`
+        const close = pool.subscribe(subId, relayUrls, filters, {
+          onEvent: (respEv) => {
+            if (!isTorrentBridgeEvent(respEv)) return
+            const entry = subs.get(key)
+            if (entry) {
+              entry.lastUsed = Date.now()
+              clearTimeout(entry.timer)
+              entry.timer = setTimeout(() => {
+                const cur = subs.get(key)
+                if (cur === entry) {
+                  cur.close()
+                  subs.delete(key)
+                }
+              }, IDLE_TTL_MS)
+            }
+            nearbyRef.current.api()?.relayTorrentEvent(respEv)
+          },
+        })
+        const timer = setTimeout(() => {
+          const cur = subs.get(key)
+          if (cur) {
+            cur.close()
+            subs.delete(key)
+          }
+        }, IDLE_TTL_MS)
+        subs.set(key, { close, timer, lastUsed: now })
+      }
+
+      const since = Math.floor(Date.now() / 1000) - 30
+      const authorPk = ev.pubkey.trim().toLowerCase()
+      if (/^[0-9a-f]{64}$/.test(authorPk)) {
+        registerKey(`p:${authorPk}`, [
+          {
+            kinds: [KIND_TORRENT_SIGNAL],
+            '#p': [authorPk],
+            '#t': [TORRENT_DIRECT_SIGNAL_TAG],
+            since,
+          },
+        ])
+      }
+
+      let swarmId: string | null = null
+      for (const tag of ev.tags) {
+        if (tag[0] === 't' && typeof tag[1] === 'string' && tag[1].startsWith(TORRENT_SWARM_TAG_PREFIX)) {
+          const candidate = tag[1].slice(TORRENT_SWARM_TAG_PREFIX.length).toLowerCase()
+          if (/^[0-9a-f]{24,64}$/.test(candidate)) {
+            swarmId = candidate
+            break
+          }
+        }
+        if (tag[0] === 'd' && typeof tag[1] === 'string' && tag[1].startsWith(`${TORRENT_STATUS_TAG}:`)) {
+          const candidate = tag[1].slice(TORRENT_STATUS_TAG.length + 1).toLowerCase()
+          if (/^[0-9a-f]{24,64}$/.test(candidate)) {
+            swarmId = candidate
+            break
+          }
+        }
+      }
+      if (swarmId) {
+        registerKey(`s:${swarmId}`, [
+          {
+            kinds: [KIND_TORRENT_SIGNAL],
+            '#t': [`${TORRENT_SWARM_TAG_PREFIX}${swarmId}`],
+            since,
+          },
+          {
+            kinds: [KIND_TORRENT_STATUS],
+            '#d': [`${TORRENT_STATUS_TAG}:${swarmId}`],
+            limit: 4,
+          },
+        ])
+      }
+    },
+    [pool]
+  )
+
   const nearby = useNearbyRuntime({
     selectedGeohash: () => activeGeohashRef.current,
     canBridge: () => navigator.onLine && pool.getTelemetrySnapshot().some(relay => relay.status === 'connected'),
@@ -1480,6 +1630,25 @@ export function useAgnostrEngine(): AgnostrEngine {
         if (previous.some(m => m.id === event.id)) return null
         return sortChannelMessagesWithPending([...previous, { ...message, viaMeshGateway: true }], 'pending-bitchat-').slice(-350)
       }, { persist: false })
+    },
+    publishTorrent: async (event) => {
+      if (!pool || !isTorrentBridgeEvent(event)) return false
+      const relayUrls = Array.from(
+        new Set([...torrentBridgeRelaysRef.current, ...TORRENT_SIGNALING_RELAYS])
+      ).slice(0, 10)
+      if (relayUrls.length === 0) return false
+      ensureGatewayTorrentBridgeSub(event, relayUrls)
+      return (await pool.publish(relayUrls, event)).acceptedRelays.length > 0
+    },
+    receiveTorrent: (event) => {
+      if (!isTorrentBridgeEvent(event)) return
+      for (const listener of torrentMeshListenersRef.current) {
+        try {
+          listener(event)
+        } catch {
+          // Ignore individual listener errors
+        }
+      }
     },
   }, identity.masterPubkey, identity.nickname)
   const nearbyRef = useRef(nearby)
@@ -2597,6 +2766,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     sendDmReaction,
     sendDirectVoiceMemo,
     sendDirectImageAttachment,
+    sendTorrentMessage,
     clearThread,
     closeThread: closeDmThreadRaw,
     mergeSyncedDmClearedAt,
@@ -2897,6 +3067,81 @@ export function useAgnostrEngine(): AgnostrEngine {
     onLocalChange: handleAmailLocalChange,
     onIncomingMail: handleIncomingAmail,
     onNotifyPushPoke: handlePushPoke,
+    pushToast,
+  })
+
+  // P2P E2EE Torrent Filesharing (AES-256-GCM chunked WebRTC swarming + BLE Mesh bridging, trusted-only, persistent no-expiry shares)
+  const torrentExtraRelays = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...customRelays,
+          ...activeServerRelays,
+          ...relaySelection.dmRelays,
+          ...relaySelection.channelRelays,
+        ])
+      ),
+    [customRelays, activeServerRelays, relaySelection.dmRelays, relaySelection.channelRelays]
+  )
+
+  useLayoutEffect(() => {
+    torrentBridgeRelaysRef.current = torrentExtraRelays
+  }, [torrentExtraRelays])
+
+  const torrentActiveScope = useMemo<{ scope: TorrentShareScope; isEncryptedGroup?: boolean }>(
+    () => ({
+      scope:
+        activeView.type === 'server'
+          ? 'server'
+          : activeView.type === 'dm'
+            ? 'dm'
+            : 'channel',
+      isEncryptedGroup: Boolean(
+        activeView.type === 'server' && serversEngine.activeServer?.encrypted
+      ),
+    }),
+    [activeView.type, serversEngine.activeServer?.encrypted]
+  )
+
+  const torrentMeshBridge = useMemo<TorrentMeshBridge>(
+    () => ({
+      isMeshAvailable: () => {
+        const n = nearbyRef.current
+        return Boolean(n.state.active && n.state.links > 0)
+      },
+      isOfflineMeshOnly: () => {
+        const n = nearbyRef.current
+        if (!n.state.active || n.state.links <= 0) return false
+        const hasConnectedRelay =
+          Boolean(pool) && pool.getTelemetrySnapshot().some((r) => r.status === 'connected')
+        return !hasConnectedRelay
+      },
+      sendEvent: async (event: NostrEvent) => {
+        const api = nearbyRef.current.api()
+        if (!api) return false
+        return await api.sendTorrentEvent(event)
+      },
+      subscribe: (listener: (event: NostrEvent) => void) => {
+        torrentMeshListenersRef.current.add(listener)
+        return () => {
+          torrentMeshListenersRef.current.delete(listener)
+        }
+      },
+    }),
+    [pool]
+  )
+
+  const torrentsEngine = useTorrentEngine({
+    relayPool: pool,
+    identityManager,
+    masterPubkey: identity.masterPubkey,
+    ownPubkeys,
+    trustedSet,
+    blockedSet,
+    turnConfig: callsEngine.turnConfig,
+    extraRelays: torrentExtraRelays,
+    activeScope: torrentActiveScope,
+    meshBridge: torrentMeshBridge,
     pushToast,
   })
 
@@ -5785,6 +6030,362 @@ export function useAgnostrEngine(): AgnostrEngine {
     ]
   )
 
+  // P2P E2EE Torrent Filesharing (creates persistent AES-256-GCM seed & publishes attachment to active DM/Group/Channel)
+  const sendTorrentAttachment = useCallback(
+    async (file: File, caption?: string, dm?: DmSendContext): Promise<boolean> => {
+      if (!pool) return false
+
+      const view = dm ? { type: 'dm' as const, peerPubkey: dm.peerPubkey } : activeViewRef.current
+      const cleanCaption = caption?.trim() ?? ''
+      const wipeGen = identityManager.getWipeGeneration()
+
+      if (view.type === 'server') {
+        const server = serversEngine.activeServer
+        const channel = serversEngine.activeChannel
+        if (!server || !channel) return false
+
+        const serverRelays =
+          server.kind === 'virtual'
+            ? server.relays.length > 0
+              ? server.relays
+              : [...relaySelectionRef.current.dmRelays]
+            : server.relayUrl
+              ? [server.relayUrl]
+              : []
+
+        const ctx: TorrentCreateScopeContext = {
+          scope: 'server',
+          targetLabel: `${server.name} · #${channel.name}`,
+          isEncryptedGroup: Boolean(server.encrypted),
+          extraRelays: Array.from(new Set([...customRelays, ...serverRelays])),
+        }
+
+        beginMediaSend()
+        try {
+          setVoiceSendPhase('encrypting')
+          const torrent = await torrentsEngine.createAndSeedFile(file, ctx)
+          if (!torrent || identityManager.getWipeGeneration() !== wipeGen) return false
+
+          setVoiceSendPhase('publishing')
+          const ok = await serversEngine.publishTorrentAttachment(torrent, cleanCaption)
+          if (ok && identityManager.getWipeGeneration() === wipeGen) {
+            pushToast(
+              'success',
+              'P2P file shared',
+              `${torrent.fileName} is now seeding to ${server.encrypted ? 'group members' : 'trusted peers'}.`
+            )
+          }
+          return ok
+        } finally {
+          endMediaSend()
+        }
+      }
+
+      if (view.type === 'dm') {
+        const targetDmPeer = view.peerPubkey.trim().toLowerCase()
+        const peerName = getCallPeerNickname(targetDmPeer) || `anon${targetDmPeer.slice(-4)}`
+        const ctx: TorrentCreateScopeContext = {
+          scope: 'dm',
+          targetLabel: `DM · ${peerName}`,
+          targetPeerPubkey: targetDmPeer,
+          extraRelays: Array.from(new Set([...customRelays, ...relaySelectionRef.current.dmRelays])),
+        }
+
+        adjustInFlightSend(1)
+        beginMediaSend()
+        try {
+          setVoiceSendPhase('encrypting')
+          const torrent = await torrentsEngine.createAndSeedFile(file, ctx)
+          if (!torrent || identityManager.getWipeGeneration() !== wipeGen) return false
+
+          setVoiceSendPhase('publishing')
+          const ok = await sendTorrentMessage(targetDmPeer, torrent, cleanCaption, dm?.replyToId)
+          if (ok && identityManager.getWipeGeneration() === wipeGen) {
+            pushToast(
+              'success',
+              'P2P file shared',
+              `${torrent.fileName} is now seeding via E2EE WebRTC.`
+            )
+          }
+          return ok
+        } finally {
+          endMediaSend()
+          adjustInFlightSend(-1)
+        }
+      }
+
+      const gh = activeGeohashRef.current
+      const targetRelays = [...relaySelectionRef.current.channelRelays]
+      const isTopic = isTopicChannel(gh)
+      const isNonEarth = isCelestialNonEarthChannel(gh)
+      const nick = identityManager.getNickname()
+      const activeKey = identityManager.getKeyMaterialForGeohash(gh)
+      const isTeleported = isTopic || isNonEarth ? false : location.isTeleported
+      const broadcastClientTag = settings.broadcastClientTag
+      const lightningAddr = zapsEngine.lightningAddress
+      const powEnabled = settings.powEnabled
+      const powTargetBits = settings.powTargetBits
+
+      const ctx: TorrentCreateScopeContext = {
+        scope: 'channel',
+        targetLabel: formatBitchatChannelHash(gh),
+        extraRelays: Array.from(new Set([...customRelays, ...targetRelays])),
+      }
+
+      adjustInFlightSend(1)
+      beginMediaSend()
+      try {
+        setVoiceSendPhase('encrypting')
+        const torrent = await torrentsEngine.createAndSeedFile(file, ctx)
+        if (!torrent || identityManager.getWipeGeneration() !== wipeGen) return false
+
+        const replyTarget = replyingToRef.current
+        replyingToRef.current = null
+        if (activeGeohashRef.current === gh) {
+          setReplyingTo(null)
+        }
+
+        return await bitchatSendQueueRef.current.enqueue(
+          `bitchat:${gh}`,
+          async () => {
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            let signedMsgId: string | null = null
+            try {
+              setVoiceSendPhase('signing')
+              const fallbackText = formatTorrentFallbackText(torrent)
+              const content = cleanCaption ? `${cleanCaption}\n${fallbackText}` : fallbackText
+              const template = isTopic
+                ? buildNamedBitchatChatTemplate({
+                    content,
+                    topic: gh,
+                    nickname: nick,
+                    replyTo: replyTarget,
+                    torrentAttachment: torrent,
+                    broadcastClientTag,
+                    lightningAddress: lightningAddr,
+                  })
+                : buildGeohashChatTemplate({
+                    content,
+                    geohash: gh,
+                    nickname: nick,
+                    isTeleported,
+                    replyTo: replyTarget,
+                    torrentAttachment: torrent,
+                    broadcastClientTag,
+                    lightningAddress: lightningAddr,
+                  })
+
+              if (powEnabled && powTargetBits > 0 && activeKey.pubkey) {
+                const nonceTag = await mineNip13NonceTag(
+                  template,
+                  activeKey.pubkey,
+                  powTargetBits,
+                  450
+                )
+                if (nonceTag) {
+                  template.tags = [...template.tags, nonceTag]
+                }
+              }
+
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+              const mesh = nearbyRef.current.api()
+              const hasConnectedRelay = pool
+                .getTelemetrySnapshot()
+                .some((r) => r.status === 'connected')
+              const hasGateway = Boolean(mesh?.hasGateway())
+              const hasMeshLinks = Boolean(
+                nearbyRef.current.state.active && nearbyRef.current.state.links > 0
+              )
+              const viaMesh =
+                !hasConnectedRelay && !isTopic && isGatewayGeohash(gh) && (hasGateway || hasMeshLinks)
+
+              let signed: NostrEvent | null = null
+              try {
+                signed = await identityManager.signEvent(template, gh)
+              } catch (signErr) {
+                if (viaMesh) {
+                  signed = mesh?.offlineEvent(template, gh) ?? null
+                } else {
+                  throw signErr
+                }
+              }
+              if (!signed) {
+                throw new Error('Unable to sign file share event.')
+              }
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+
+              if (viaMesh) {
+                setVoiceSendPhase('publishing')
+                const queued = hasGateway
+                  ? await mesh!.sendThroughGateway(signed, gh)
+                  : await mesh!.sendMeshEvent(signed, gh)
+                if (!queued) {
+                  throw new Error(
+                    'No Bluetooth link queued your file share. Try again when a peer or gateway is nearby.'
+                  )
+                }
+              }
+              if (identityManager.getWipeGeneration() !== wipeGen) return false
+
+              signedMsgId = signed.id
+              const findParent = (id: string) =>
+                messagesChannelRef.current === gh
+                  ? messagesRef.current.find((m) => m.id === id)
+                  : undefined
+              const parsed = isTopic
+                ? parseNamedBitchatChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+                : parseGeohashChatEvent(signed, gh, ownPubkeysRef.current, findParent)
+              if (parsed) {
+                parsed.deliveryStatus = viaMesh ? undefined : 'sending'
+                parsed.viaMeshGateway = viaMesh || undefined
+                parsed.isOwn = true
+                updateChannelMessages(
+                  gh,
+                  (prev) => {
+                    if (prev.some((m) => m.id === parsed.id)) return null
+                    return sortChannelMessagesWithPending(
+                      [...prev, parsed],
+                      'pending-bitchat-'
+                    ).slice(-350)
+                  },
+                  { allowBackgroundPersist: true }
+                )
+                revealLocalBitchatSend(gh, parsed.id)
+                const signedPreview = cleanCaption
+                  ? `📦 ${cleanCaption}`.slice(0, 120)
+                  : fallbackText.slice(0, 120)
+                upsertChannelPreview(
+                  gh,
+                  {
+                    id: parsed.id,
+                    preview: signedPreview,
+                    sender: parsed.nickname || nick,
+                    senderPubkey: parsed.pubkey,
+                    createdAt: parsed.createdAt,
+                  },
+                  { force: activeGeohashRef.current === gh }
+                )
+                recordRoomMessage({
+                  id: parsed.id,
+                  geohash: gh,
+                  pubkey: parsed.pubkey,
+                  sender: parsed.nickname || nick,
+                  preview: signedPreview,
+                  createdAtSec: parsed.createdAt,
+                  isAuthoritative: activeGeohashRef.current === gh,
+                })
+              }
+
+              if (viaMesh) {
+                pushToast(
+                  'success',
+                  'P2P file shared via Bluetooth Mesh',
+                  `${torrent.fileName} is seeding over Bluetooth Mesh.`
+                )
+                return true
+              }
+
+              if (!isTopic && isGatewayGeohash(gh) && hasMeshLinks) {
+                mesh?.relayEvent(signed, gh)
+              }
+
+              setVoiceSendPhase('publishing')
+              const ok = await publishChatWire({
+                rowId: signed.id,
+                publish: (ack) => pool.publish(targetRelays, signed, undefined, ack),
+                isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+                queueRetry: (replay) =>
+                  bitchatSendQueueRef.current.enqueue(`bitchat:${gh}`, replay, () => false),
+                update: (deliveryStatus, relayCount) =>
+                  updateChannelMessages(
+                    gh,
+                    (prev) =>
+                      sortChannelMessagesWithPending(
+                        prev.map((m) =>
+                          m.id !== signed.id ||
+                          (m.deliveryStatus === 'sent' && deliveryStatus !== 'sent')
+                            ? m
+                            : {
+                                ...m,
+                                deliveryStatus,
+                                relayCount: Math.max(m.relayCount ?? 0, relayCount),
+                              }
+                        ),
+                        'pending-bitchat-'
+                      ),
+                    { allowBackgroundPersist: true }
+                  ),
+                onFailure: (reason) =>
+                  pushToast('error', 'File share publish failed', reason, signed.id),
+              })
+              if (ok && identityManager.getWipeGeneration() === wipeGen) {
+                pushToast(
+                  'success',
+                  'P2P file shared',
+                  `${torrent.fileName} is now seeding to trusted peers.`
+                )
+              }
+              return ok
+            } catch (err) {
+              if (identityManager.getWipeGeneration() === wipeGen) {
+                if (signedMsgId) {
+                  updateChannelMessages(
+                    gh,
+                    (prev) => {
+                      let changed = false
+                      const next = prev.map((m) => {
+                        if (m.id !== signedMsgId) return m
+                        changed = true
+                        return {
+                          ...m,
+                          deliveryStatus: 'failed' as GeoMessage['deliveryStatus'],
+                        }
+                      })
+                      return changed ? next : null
+                    },
+                    { allowBackgroundPersist: true }
+                  )
+                }
+                pushToast(
+                  'error',
+                  'File share failed',
+                  err instanceof Error ? err.message : 'Unable to share file.'
+                )
+              }
+              return false
+            }
+          },
+          () => false
+        )
+      } finally {
+        endMediaSend()
+        adjustInFlightSend(-1)
+      }
+    },
+    [
+      pool,
+      serversEngine,
+      torrentsEngine,
+      customRelays,
+      identityManager,
+      sendTorrentMessage,
+      getCallPeerNickname,
+      location.isTeleported,
+      settings.powEnabled,
+      settings.powTargetBits,
+      settings.broadcastClientTag,
+      zapsEngine.lightningAddress,
+      updateChannelMessages,
+      revealLocalBitchatSend,
+      upsertChannelPreview,
+      recordRoomMessage,
+      adjustInFlightSend,
+      beginMediaSend,
+      endMediaSend,
+      pushToast,
+    ]
+  )
+
   // STRICT engine-level Trusted Peers guard: zero network requests for untrusted senders
   const fetchImageAttachmentBlob = useCallback(
     async (image: ImageAttachment, senderPubkey: string): Promise<string> => {
@@ -6399,6 +7000,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     fetchVoiceMemoBlob,
     sendImageAttachment,
     fetchImageAttachmentBlob,
+    sendTorrentAttachment,
 
     relays,
     connectedRelayCount: connectedRelays.length,
@@ -6441,6 +7043,7 @@ export function useAgnostrEngine(): AgnostrEngine {
     zaps: zapsEngine,
     deviceSync: deviceSyncEngine,
     amail: amailEngine,
+    torrents: torrentsEngine,
     agora: agoraEngine,
     notifications: notificationsEngine,
 

@@ -7,11 +7,13 @@ import type {
   ReplyReference,
   VoiceMemoAttachment,
 } from '../types/protocol.ts'
+import type { TorrentAttachment } from '../types/torrent.ts'
 import { normalizeGeohash } from './geohash.ts'
 import { parseInlineChatVoice } from './inlineChatVoice.ts'
 import { parseInlineChatImage } from './inlineChatImage.ts'
 import { bytesToHex, formatDisplayHandle } from './identity.ts'
 import { isOffMainThreadWorkerSupported, mineNip13OffMainThread } from './offMainThread.ts'
+import { buildTorrentTag, parseTorrentFromTags } from './torrentProtocol.ts'
 import {
   getTopicSlug,
   isCelestialNonEarthChannel,
@@ -637,6 +639,7 @@ export function buildGeohashChatTemplate(opts: {
   replyTo?: GeoMessage | null
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  torrentAttachment?: TorrentAttachment
   broadcastClientTag?: boolean
   lightningAddress?: string | null
 }): EventTemplate {
@@ -667,6 +670,9 @@ export function buildGeohashChatTemplate(opts: {
   if (opts.imageAttachment) {
     tags.push(buildImageImetaTag(opts.imageAttachment))
   }
+  if (opts.torrentAttachment) {
+    tags.push(buildTorrentTag(opts.torrentAttachment))
+  }
   return {
     kind: KIND_GEOHASH_CHAT,
     created_at: Math.floor(Date.now() / 1000),
@@ -682,6 +688,7 @@ export function buildNamedBitchatChatTemplate(opts: {
   replyTo?: GeoMessage | null
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  torrentAttachment?: TorrentAttachment
   broadcastClientTag?: boolean
   lightningAddress?: string | null
 }): EventTemplate {
@@ -710,6 +717,9 @@ export function buildNamedBitchatChatTemplate(opts: {
   }
   if (opts.imageAttachment) {
     tags.push(buildImageImetaTag(opts.imageAttachment))
+  }
+  if (opts.torrentAttachment) {
+    tags.push(buildTorrentTag(opts.torrentAttachment))
   }
   return {
     kind: KIND_NAMED_BITCHAT_CHAT,
@@ -949,6 +959,7 @@ export function parseGeohashChatEvent(
     parseVoiceMemoFromImeta(event.tags) ?? parseInlineChatVoice(displayContent, event.tags)?.memo
   const imageAttachment =
     parseImageFromImeta(event.tags) ?? parseInlineChatImage(displayContent, event.tags)?.image
+  const torrentAttachment = parseTorrentFromTags(event.tags, pubkey) ?? undefined
 
   return {
     id: event.id,
@@ -972,6 +983,7 @@ export function parseGeohashChatEvent(
     mentions: extractMentions(content),
     voiceMemo,
     imageAttachment,
+    torrentAttachment,
     deliveryStatus: 'sent',
   }
 }
@@ -1030,6 +1042,7 @@ export function parseNamedBitchatChatEvent(
     parseVoiceMemoFromImeta(event.tags) ?? parseInlineChatVoice(displayContent, event.tags)?.memo
   const imageAttachment =
     parseImageFromImeta(event.tags) ?? parseInlineChatImage(displayContent, event.tags)?.image
+  const torrentAttachment = parseTorrentFromTags(event.tags, pubkey) ?? undefined
 
   return {
     id: event.id,
@@ -1053,6 +1066,7 @@ export function parseNamedBitchatChatEvent(
     mentions: extractMentions(content),
     voiceMemo,
     imageAttachment,
+    torrentAttachment,
     deliveryStatus: 'sent',
   }
 }

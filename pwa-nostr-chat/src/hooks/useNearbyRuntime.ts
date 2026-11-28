@@ -45,6 +45,8 @@ export function useNearbyRuntime(ports: Omit<NearbyPorts, 'snapshot'>, profile: 
         canBridge: () => latest.current.canBridge?.() ?? true,
         publish: (...args) => latest.current.publish(...args),
         receive: (...args) => latest.current.receive(...args),
+        publishTorrent: (event) => latest.current.publishTorrent?.(event) ?? Promise.resolve(false),
+        receiveTorrent: (event) => latest.current.receiveTorrent?.(event),
         snapshot: setState,
       })
       resume()

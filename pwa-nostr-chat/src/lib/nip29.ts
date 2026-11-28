@@ -1,5 +1,6 @@
 import type { Event as NostrEvent, EventTemplate } from 'nostr-tools'
 import type { ImageAttachment, ReplyReference, VoiceMemoAttachment } from '../types/protocol.ts'
+import type { TorrentAttachment } from '../types/torrent.ts'
 import type {
   Nip29GroupMeta,
   Nip29RelayPreset,
@@ -18,6 +19,7 @@ import {
   parseVoiceMemoFromImeta,
 } from './bitchatProtocol.ts'
 import { formatDisplayHandle } from './identity.ts'
+import { buildTorrentTag, parseTorrentFromTags } from './torrentProtocol.ts'
 
 export const KIND_NIP29_CHAT = 9
 export const KIND_NIP29_PUT_USER = 9000
@@ -235,6 +237,7 @@ export function buildNip29ChatTemplate(opts: {
   replyTo?: ServerMessage | null
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  torrentAttachment?: TorrentAttachment
   lightningAddress?: string | null
 }): EventTemplate {
   const tags: string[][] = [['h', opts.groupId]]
@@ -272,6 +275,9 @@ export function buildNip29ChatTemplate(opts: {
   if (opts.imageAttachment) {
     tags.push(buildImageImetaTag(opts.imageAttachment))
   }
+  if (opts.torrentAttachment) {
+    tags.push(buildTorrentTag(opts.torrentAttachment))
+  }
 
   return {
     kind: KIND_NIP29_CHAT,
@@ -301,6 +307,7 @@ export function parseNip29ChatEvent(
   const nickname = rawNick || `anon${pubkey.slice(-4)}`
   const voiceMemo = parseVoiceMemoFromImeta(event.tags)
   const imageAttachment = parseImageFromImeta(event.tags)
+  const torrentAttachment = parseTorrentFromTags(event.tags, pubkey) ?? undefined
 
   let replyTo: ReplyReference | undefined
   const refTag =
@@ -335,6 +342,7 @@ export function parseNip29ChatEvent(
     mentions: extractMentions(content),
     voiceMemo,
     imageAttachment,
+    torrentAttachment,
     deliveryStatus: 'sent',
   }
 }

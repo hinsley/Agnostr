@@ -2,6 +2,7 @@ import { getShareBaseHref } from './appPlatform.ts'
 import { sha256 } from '@noble/hashes/sha256'
 import { nip19, type Event as NostrEvent, type EventTemplate } from 'nostr-tools'
 import type { ImageAttachment, ReplyReference, VoiceMemoAttachment } from '../types/protocol.ts'
+import type { TorrentAttachment } from '../types/torrent.ts'
 import type {
   ServerChannel,
   ServerInvite,
@@ -23,6 +24,11 @@ import {
 } from './bitchatProtocol.ts'
 import { CORE_DM_RELAYS, normalizeRelayUrl } from './geoRelays.ts'
 import { bytesToHex, formatDisplayHandle } from './identity.ts'
+import {
+  buildTorrentTag,
+  normalizeTorrentAttachment,
+  parseTorrentFromTags,
+} from './torrentProtocol.ts'
 import {
   getGroupSpecifier,
   hasUploadedGroupPicture,
@@ -134,6 +140,7 @@ export interface VirtualEncryptedPayload {
   replyToPubkey?: string
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  torrentAttachment?: TorrentAttachment
 }
 
 export async function encryptVirtualPayload(
@@ -207,6 +214,7 @@ export async function decryptVirtualPayload(
       replyToPubkey: typeof parsed.replyToPubkey === 'string' ? parsed.replyToPubkey : undefined,
       voiceMemo: parsed.voiceMemo,
       imageAttachment: parsed.imageAttachment,
+      torrentAttachment: parsed.torrentAttachment,
     }
   } catch {
     return null
@@ -335,6 +343,7 @@ export async function buildVirtualChatTemplate(opts: {
   replyTo?: ServerMessage | null
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  torrentAttachment?: TorrentAttachment
   lightningAddress?: string | null
 }): Promise<EventTemplate> {
   const chanTag = getVirtualChannelTag(opts.server, opts.channelId)
@@ -349,6 +358,7 @@ export async function buildVirtualChatTemplate(opts: {
       replyToPubkey: opts.replyTo && !opts.replyTo.isSystem ? opts.replyTo.pubkey : undefined,
       voiceMemo: opts.voiceMemo,
       imageAttachment: opts.imageAttachment,
+      torrentAttachment: opts.torrentAttachment,
     })
     return {
       kind: KIND_VIRTUAL_CHAT,
@@ -373,6 +383,9 @@ export async function buildVirtualChatTemplate(opts: {
   }
   if (opts.imageAttachment) {
     tags.push(buildImageImetaTag(opts.imageAttachment))
+  }
+  if (opts.torrentAttachment) {
+    tags.push(buildTorrentTag(opts.torrentAttachment))
   }
 
   return {
@@ -401,6 +414,7 @@ export async function parseVirtualChatEvent(
   let replyTo: ReplyReference | undefined
   let voiceMemo: VoiceMemoAttachment | undefined
   let imageAttachment: ImageAttachment | undefined
+  let torrentAttachment: TorrentAttachment | undefined
   let decryptFailed = false
 
   if (server.encrypted) {
@@ -417,6 +431,9 @@ export async function parseVirtualChatEvent(
       nickname = dec.nickname
       voiceMemo = dec.voiceMemo
       imageAttachment = dec.imageAttachment
+      torrentAttachment = dec.torrentAttachment
+        ? (normalizeTorrentAttachment(dec.torrentAttachment, pubkey) ?? undefined)
+        : undefined
       if (dec.replyToId) {
         const parent = findMessageById?.(dec.replyToId)
         replyTo = {
@@ -433,6 +450,7 @@ export async function parseVirtualChatEvent(
     nickname = getTagValue(event.tags, 'n')?.trim() ?? ''
     voiceMemo = parseVoiceMemoFromImeta(event.tags)
     imageAttachment = parseImageFromImeta(event.tags)
+    torrentAttachment = parseTorrentFromTags(event.tags, pubkey) ?? undefined
     const eTag = event.tags.find((t) => t[0] === 'e' && typeof t[1] === 'string' && t[1].length >= 16)
     if (eTag) {
       const parent = findMessageById?.(eTag[1])
@@ -466,6 +484,7 @@ export async function parseVirtualChatEvent(
     mentions: extractMentions(text),
     voiceMemo,
     imageAttachment,
+    torrentAttachment,
     deliveryStatus: 'sent',
   }
 }

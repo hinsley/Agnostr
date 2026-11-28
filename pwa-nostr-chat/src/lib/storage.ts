@@ -53,6 +53,8 @@ import {
   resolveActiveTranscriptionModel,
 } from './transcriptionModels.ts'
 import { archiveChannelMessages, clearChannelHistory, removeBlockedFromChannelHistory } from './bitchatHistory.ts'
+import { formatTorrentBytes } from './torrentProtocol.ts'
+import { deleteAllTorrentDbs } from './torrentStore.ts'
 import { formatVoiceDuration } from './voiceRecorder.ts'
 
 const PREFIX = 'agnostr:v2:'
@@ -759,9 +761,10 @@ export function isStuckMediaPlaceholder(msg: {
   content?: unknown
   voiceMemo?: unknown
   imageAttachment?: unknown
+  torrentAttachment?: unknown
   deliveryStatus?: unknown
 }): boolean {
-  if (msg.voiceMemo || msg.imageAttachment) return false
+  if (msg.voiceMemo || msg.imageAttachment || msg.torrentAttachment) return false
   if (typeof msg.content !== 'string') return false
   return STUCK_MEDIA_PLACEHOLDER_RE.test(msg.content.trim())
 }
@@ -795,6 +798,12 @@ function formatDmPreviewForStorage(msg: DmMessage): string {
       : msg.imageAttachment.width > 0 && msg.imageAttachment.height > 0
         ? `🖼️ Image (${msg.imageAttachment.width}×${msg.imageAttachment.height})`
         : '🖼️ Image'
+  }
+  if (msg.torrentAttachment) {
+    const sizeLabel = formatTorrentBytes(msg.torrentAttachment.size)
+    return msg.content
+      ? `📦 ${msg.torrentAttachment.fileName} (${sizeLabel}) — ${msg.content}`.slice(0, 96)
+      : `📦 ${msg.torrentAttachment.fileName} (${sizeLabel})`
   }
   return msg.content.slice(0, 96)
 }
@@ -1872,6 +1881,11 @@ export function panicWipeStorage(): void {
   } catch {
     // Ignore
   }
+  try {
+    void deleteAllTorrentDbs()
+  } catch {
+    // Ignore
+  }
 }
 
 export function formatTranscriptExport(
@@ -1917,6 +1931,7 @@ export function formatTranscriptExport(
             replyToId: m.replyTo?.id ?? null,
             voiceMemo: m.voiceMemo ?? null,
             imageAttachment: m.imageAttachment ?? null,
+            torrentAttachment: m.torrentAttachment ?? null,
             reactions: m.reactions.map((r) => ({ emoji: r.emoji, count: r.count })),
           })),
         },
@@ -1956,7 +1971,12 @@ export function formatTranscriptExport(
       const imageSuffix = m.imageAttachment
         ? ` [Image ${m.imageAttachment.width > 0 ? `${m.imageAttachment.width}x${m.imageAttachment.height}` : m.imageAttachment.mime}]`
         : ''
-      lines.push(`**[${iso}] ${m.displayHandle}**${badgeStr}${voiceSuffix}${imageSuffix}: ${m.content}`)
+      const torrentSuffix = m.torrentAttachment
+        ? ` [📦 ${m.torrentAttachment.fileName} (${formatTorrentBytes(m.torrentAttachment.size)})]`
+        : ''
+      lines.push(
+        `**[${iso}] ${m.displayHandle}**${badgeStr}${voiceSuffix}${imageSuffix}${torrentSuffix}: ${m.content}`
+      )
       if (m.reactions.length > 0) {
         lines.push(`  > Reactions: ${m.reactions.map((r) => `${r.emoji} ${r.count}`).join('  ')}`)
       }

@@ -45,6 +45,7 @@ import { BITCHAT_HISTORY_STEP, BITCHAT_WINDOW, compareHistory, readChannelHistor
 import { isStuckMediaPlaceholder } from '../lib/storage'
 import { parseInlineChatVoice } from '../lib/inlineChatVoice'
 import { parseInlineChatImage } from '../lib/inlineChatImage'
+import { formatTorrentFallbackText, parseTorrentFromTags } from '../lib/torrentProtocol'
 import { getGroupSpecifier, hasUploadedGroupPicture } from '../utils/groupIcon'
 import { formatHandle } from '../utils/identicon'
 
@@ -61,6 +62,13 @@ function extractCleanMessageText(msg: GeoMessage): string {
     if (!target) continue
     if (text === target) return ''
     text = text.split(target).join('')
+  }
+  if (msg.torrentAttachment) {
+    const fallback = formatTorrentFallbackText(msg.torrentAttachment)
+    if (text.trim() === fallback) return ''
+    if (text.includes(fallback)) {
+      text = text.split(fallback).join('')
+    }
   }
   return text.replace(/\n{3,}/g, '\n\n').trim()
 }
@@ -139,7 +147,9 @@ function hydrateAndResolveReplies(rows: GeoMessage[]): GeoMessage[] {
         const parent = byId.get(ref.id)
         if (parent) {
           const parentPreview =
-            extractCleanMessageText(parent).slice(0, 120) || parent.content.slice(0, 120)
+            extractCleanMessageText(parent).slice(0, 120) ||
+            (parent.torrentAttachment ? `📦 ${parent.torrentAttachment.fileName}`.slice(0, 120) : '') ||
+            parent.content.slice(0, 120)
           const nextRef = {
             id: ref.id,
             pubkey: ref.pubkey ?? parent.pubkey,
@@ -638,6 +648,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
           mentions: sm.mentions,
           voiceMemo: sm.voiceMemo,
           imageAttachment: sm.imageAttachment,
+          torrentAttachment: sm.torrentAttachment,
           deliveryStatus: sm.deliveryStatus,
           relayCount: sm.relayCount,
         }))
@@ -654,8 +665,14 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
         if (m.isSystem || m.isBlockedPlaceholder) return m
         const image = !m.imageAttachment ? parseInlineChatImage(m.content, m.tags)?.image : undefined
         const voice = !m.voiceMemo ? parseInlineChatVoice(m.content, m.tags)?.memo : undefined
-        return image || voice
-          ? { ...m, imageAttachment: m.imageAttachment ?? image, voiceMemo: m.voiceMemo ?? voice }
+        const torrent = !m.torrentAttachment ? (parseTorrentFromTags(m.tags, m.pubkey) ?? undefined) : undefined
+        return image || voice || torrent
+          ? {
+              ...m,
+              imageAttachment: m.imageAttachment ?? image,
+              voiceMemo: m.voiceMemo ?? voice,
+              torrentAttachment: m.torrentAttachment ?? torrent,
+            }
           : m
       }))
       return hydrateAndResolveReplies(roomRows)
@@ -685,6 +702,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
           mentions: [],
           voiceMemo: dm.voiceMemo,
           imageAttachment: dm.imageAttachment,
+          torrentAttachment: dm.torrentAttachment,
           deliveryStatus:
             dm.deliveryStatus === 'failed'
               ? 'failed'
@@ -2609,6 +2627,7 @@ export const MessageStream: React.FC<MessageStreamProps> = ({
                       onCopyText={() => engine.pushToast('info', 'Copied to clipboard')}
                       onNotify={(title: string) => engine.pushToast('info', title)}
                       contentFilter={engine.contentFilter}
+                      torrents={engine.torrents}
                       senderAvatarUrl={engine.getProfilePicture(msg.pubkey)}
                       senderLightningAddress={senderLud16}
                       canZapSender={senderCanZap}

@@ -3,6 +3,9 @@ import {
   ArrowUp,
   Camera,
   CornerUpLeft,
+  File as FileIcon,
+  FileUp,
+  HardDrive,
   Image as ImageIcon,
   ImagePlus,
   Languages,
@@ -23,6 +26,12 @@ import {
   prepareImageFile,
   revokeImagePreviewUrl,
 } from '../lib/imageProcessor'
+import {
+  formatTorrentBytes,
+  formatTorrentFallbackText,
+  getTorrentFileExtension,
+  MAX_TORRENT_FILE_BYTES,
+} from '../lib/torrentProtocol'
 import {
   formatVoiceDuration,
   isVoiceRecordingSupported,
@@ -82,13 +91,18 @@ export const Composer: React.FC<ComposerProps> = ({
   const [cameraModalOpen, setCameraModalOpen] = useState(false)
   const [pendingImage, setPendingImage] = useState<PreparedImage | null>(null)
   const [preparingImage, setPreparingImage] = useState(false)
+  const [pendingTorrentFile, setPendingTorrentFile] = useState<File | null>(null)
+  const [seedingTorrent, setSeedingTorrent] = useState(false)
   const [translatingOutgoing, setTranslatingOutgoing] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const torrentFileInputRef = useRef<HTMLInputElement | null>(null)
   const cameraInputRef = useRef<HTMLInputElement | null>(null)
   const attachWrapRef = useRef<HTMLDivElement | null>(null)
   const pendingImageRef = useRef<PreparedImage | null>(null)
+  const pendingTorrentFileRef = useRef<File | null>(null)
+  const seedingCountRef = useRef<number>(0)
   const composerQueueRef = useRef<KeyedFifoQueue>(new KeyedFifoQueue())
   const translatingCountRef = useRef<number>(0)
   const submitSeqRef = useRef(0)
@@ -100,6 +114,11 @@ export const Composer: React.FC<ComposerProps> = ({
     setTranslatingOutgoing(translatingCountRef.current > 0)
   }, [])
 
+  const adjustSeeding = useCallback((delta: number) => {
+    seedingCountRef.current = Math.max(0, seedingCountRef.current + delta)
+    setSeedingTorrent(seedingCountRef.current > 0)
+  }, [])
+
   const clearPendingImage = useCallback(() => {
     contextEpochRef.current += 1
     if (pendingImageRef.current) {
@@ -107,6 +126,18 @@ export const Composer: React.FC<ComposerProps> = ({
       pendingImageRef.current = null
     }
     setPendingImage(null)
+  }, [])
+
+  const clearPendingTorrentFile = useCallback(() => {
+    pendingTorrentFileRef.current = null
+    setPendingTorrentFile(null)
+  }, [])
+
+  const detachPendingTorrentFile = useCallback((): File | null => {
+    const staged = pendingTorrentFileRef.current
+    pendingTorrentFileRef.current = null
+    setPendingTorrentFile(null)
+    return staged
   }, [])
 
   // Detach staged image on submit without prematurely revoking its previewUrl
@@ -200,11 +231,12 @@ export const Composer: React.FC<ComposerProps> = ({
       setAttachMenuOpen(false)
       setCameraModalOpen(false)
       clearPendingImage()
+      clearPendingTorrentFile()
       setPreparingImage(false)
       dragDepthRef.current = 0
       setDragActive(false)
     }
-  }, [engine.identity.masterPubkey, activeTargetKey, clearPendingImage])
+  }, [engine.identity.masterPubkey, activeTargetKey, clearPendingImage, clearPendingTorrentFile])
 
   // Close attach-media popover on outside tap/click or Escape
   useEffect(() => {
@@ -385,6 +417,7 @@ export const Composer: React.FC<ComposerProps> = ({
         return
       }
       const prepEpoch = ++contextEpochRef.current
+      clearPendingTorrentFile()
       setVoiceMode(false)
       setPreparingImage(true)
       try {
@@ -412,7 +445,32 @@ export const Composer: React.FC<ComposerProps> = ({
         }
       }
     },
-    [canSign, preparingImage, pushToast]
+    [canSign, clearPendingTorrentFile, preparingImage, pushToast]
+  )
+
+  const stageTorrentFile = useCallback(
+    (file: File) => {
+      if (!canSign) return
+      if (file.size <= 0) {
+        pushToast('warning', 'Empty file', 'Choose a non-empty file to share via P2P.')
+        return
+      }
+      if (file.size > MAX_TORRENT_FILE_BYTES) {
+        pushToast(
+          'warning',
+          'File too large for P2P share',
+          `${file.name} (${formatTorrentBytes(file.size)}) exceeds the ${formatTorrentBytes(MAX_TORRENT_FILE_BYTES)} P2P limit.`
+        )
+        return
+      }
+      clearPendingImage()
+      setPreparingImage(false)
+      setVoiceMode(false)
+      pendingTorrentFileRef.current = file
+      setPendingTorrentFile(file)
+      requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
+    },
+    [canSign, clearPendingImage, pushToast]
   )
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -420,6 +478,14 @@ export const Composer: React.FC<ComposerProps> = ({
     e.target.value = ''
     if (file) {
       void stageImageFile(file)
+    }
+  }
+
+  const handleTorrentFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (file) {
+      stageTorrentFile(file)
     }
   }
 
@@ -437,6 +503,17 @@ export const Composer: React.FC<ComposerProps> = ({
     setAttachMenuOpen(false)
     if (!canSign || preparingImage) return
     fileInputRef.current?.click()
+  }
+
+  const handleChooseTorrentFile = () => {
+    setAttachMenuOpen(false)
+    if (!canSign) return
+    torrentFileInputRef.current?.click()
+  }
+
+  const handleOpenTorrentShares = () => {
+    setAttachMenuOpen(false)
+    engine.torrents.setSharesModalOpen(true)
   }
 
   const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -491,9 +568,12 @@ export const Composer: React.FC<ComposerProps> = ({
     setDragActive(false)
     if (!canSign) return
     const dropped = Array.from(e.dataTransfer.files)
-    const imgFile = dropped.find((f) => isSupportedImageFile(f)) ?? dropped[0]
-    if (imgFile) {
-      void stageImageFile(imgFile)
+    const firstFile = dropped[0]
+    if (!firstFile) return
+    if (isSupportedImageFile(firstFile)) {
+      void stageImageFile(firstFile)
+    } else {
+      stageTorrentFile(firstFile)
     }
   }
 
@@ -504,7 +584,8 @@ export const Composer: React.FC<ComposerProps> = ({
   const handleSubmit = (keepFocus = false) => {
     const trimmed = draft.trim()
     const stagedSnapshot = pendingImageRef.current ?? pendingImage
-    if ((!trimmed && !stagedSnapshot) || !canSign) return
+    const stagedTorrentSnapshot = pendingTorrentFileRef.current ?? pendingTorrentFile
+    if ((!trimmed && !stagedSnapshot && !stagedTorrentSnapshot) || !canSign) return
 
     const textarea = textareaRef.current
     const shouldKeepFocus =
@@ -548,8 +629,38 @@ export const Composer: React.FC<ComposerProps> = ({
       }
     }
 
-    if (stagedSnapshot || !trimmed.startsWith('/')) clearDmReplyOnSubmit()
+    if (stagedSnapshot || stagedTorrentSnapshot || !trimmed.startsWith('/')) clearDmReplyOnSubmit()
     engine.notifyTypingStopped()
+
+    if (stagedTorrentSnapshot) {
+      const stagedFile = detachPendingTorrentFile() ?? stagedTorrentSnapshot
+      const caption = trimmed || undefined
+      const submitDmContext = dmContext
+      if (trimmed) {
+        setHistory((prev) => [trimmed, ...prev.filter((x) => x !== trimmed)].slice(0, 30))
+        setHistoryIdx(-1)
+      }
+      setDraft('')
+      setCursorPos(0)
+      restoreFocusSynchronously()
+      adjustSeeding(1)
+      void engine
+        .sendTorrentAttachment(stagedFile, caption, submitDmContext)
+        .then((ok) => {
+          if (ok) {
+            onSent?.(submitIsViolet)
+          } else {
+            restoreDraftIfSafe()
+          }
+        })
+        .catch(() => {
+          restoreDraftIfSafe()
+        })
+        .finally(() => {
+          adjustSeeding(-1)
+        })
+      return
+    }
 
     if (stagedSnapshot) {
       const staged = detachPendingImage() ?? stagedSnapshot
@@ -807,6 +918,11 @@ export const Composer: React.FC<ComposerProps> = ({
     }
 
     if (e.key === 'Escape') {
+      if (pendingTorrentFile) {
+        e.preventDefault()
+        clearPendingTorrentFile()
+        return
+      }
       if (pendingImage) {
         e.preventDefault()
         clearPendingImage()
@@ -1032,6 +1148,12 @@ export const Composer: React.FC<ComposerProps> = ({
       if (stripped) return stripped.slice(0, 72)
       return `Image (${target.imageAttachment.width}×${target.imageAttachment.height})`
     }
+    if (target.torrentAttachment) {
+      const fallback = formatTorrentFallbackText(target.torrentAttachment)
+      const stripped = target.content.split(fallback).join('').trim()
+      if (stripped) return stripped.slice(0, 72)
+      return `📦 ${target.torrentAttachment.fileName}`
+    }
     return target.content.slice(0, 72)
   }, [activeReply])
 
@@ -1039,7 +1161,7 @@ export const Composer: React.FC<ComposerProps> = ({
     ? engine.identity.signMode === 'extension'
       ? 'No NIP-07 extension — switch signer in Settings…'
       : 'Enter a valid nsec key in Settings to send…'
-    : pendingImage
+    : pendingImage || pendingTorrentFile
       ? 'Add a caption…'
       : isDm && dmThread
         ? `Message ${dmThread.peerNickname}…`
@@ -1047,8 +1169,10 @@ export const Composer: React.FC<ComposerProps> = ({
           ? `Message #${activeChannel.name}…`
           : `Message ${formatBitchatChannelLabel(engine.activeGeohash)}…`
 
-  const hasContentToSend = draft.trim().length > 0 || pendingImage !== null
+  const hasContentToSend =
+    draft.trim().length > 0 || pendingImage !== null || pendingTorrentFile !== null
   const hasTopBanner = Boolean(activeReply)
+  const pendingTorrentExt = pendingTorrentFile ? getTorrentFileExtension(pendingTorrentFile.name) : ''
 
   return (
     <div className="ag-composer-dock">
@@ -1080,13 +1204,22 @@ export const Composer: React.FC<ComposerProps> = ({
           tabIndex={-1}
         />
 
+        <input
+          ref={torrentFileInputRef}
+          type="file"
+          className="sr-only"
+          onChange={handleTorrentFileInputChange}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
+
         {dragActive && (
           <div className="ag-composer-drop-overlay" role="status">
-            <ImagePlus size={18} />
+            <FileUp size={18} />
             <span>
               {isViolet
-                ? 'Drop image to encrypt & send (EXIF stripped)'
-                : 'Drop image to attach (EXIF stripped)'}
+                ? 'Drop image or file to encrypt & share (P2P E2EE)'
+                : 'Drop image to attach, or any file to share via P2P E2EE'}
             </span>
           </div>
         )}
@@ -1224,7 +1357,7 @@ export const Composer: React.FC<ComposerProps> = ({
         {/* Outgoing Translation Indicator Strip (Double-Column Translator Mode) */}
         {outgoingTranslateActive && !voiceMode && (
           <div
-            className={`ag-composer-translate-strip ${isViolet ? 'dm' : ''} ${activeReply || pendingImage ? 'has-next' : ''}`}
+            className={`ag-composer-translate-strip ${isViolet ? 'dm' : ''} ${activeReply || pendingImage || pendingTorrentFile ? 'has-next' : ''}`}
             role="status"
           >
             <div className="ag-composer-translate-left truncate">
@@ -1255,7 +1388,7 @@ export const Composer: React.FC<ComposerProps> = ({
         {/* Contextual Reply Strip */}
         {activeReply && (
           <div
-            className={`ag-composer-reply-strip ${isViolet ? 'dm' : ''} ${pendingImage && !voiceMode ? 'has-next' : ''}`}
+            className={`ag-composer-reply-strip ${isViolet ? 'dm' : ''} ${(pendingImage || pendingTorrentFile) && !voiceMode ? 'has-next' : ''}`}
           >
             <div className="ag-composer-reply-left">
               <CornerUpLeft size={14} className="ag-composer-reply-icon" />
@@ -1330,6 +1463,55 @@ export const Composer: React.FC<ComposerProps> = ({
           </div>
         )}
 
+        {/* Staged P2P Torrent File Preview Strip */}
+        {pendingTorrentFile && !voiceMode && (
+          <div
+            className={`ag-composer-file-preview ${isViolet ? 'dm' : ''} ${hasTopBanner ? 'stacked' : ''}`}
+            role="region"
+            aria-label="Staged P2P file share preview"
+          >
+            <div className="ag-composer-file-preview-left">
+              <div className="ag-composer-file-icon-tile" aria-hidden="true">
+                <FileIcon size={18} />
+                {pendingTorrentExt && (
+                  <span className="ag-composer-file-ext mono">{pendingTorrentExt.slice(0, 5)}</span>
+                )}
+              </div>
+              <div className="ag-composer-img-meta">
+                <div className="ag-composer-img-name-row">
+                  <span className="ag-composer-img-name truncate">{pendingTorrentFile.name}</span>
+                  <span
+                    className={`ag-badge ${isViolet ? 'dm' : ''}`}
+                    title="End-to-end encrypted AES-256-GCM P2P torrent · No automatic expiry"
+                  >
+                    <Lock size={10} />
+                    E2EE P2P
+                  </span>
+                </div>
+                <div className="ag-composer-img-sub tabular">
+                  <span>
+                    {formatTorrentBytes(pendingTorrentFile.size)} · No expiry · Close anytime
+                    {pendingTorrentFile.size > 100 * 1024 * 1024
+                      ? ' · Large file (keep tab open while peers download)'
+                      : ''}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="ag-composer-img-discard"
+              onPointerDown={keepTextareaFocused}
+              onMouseDown={keepTextareaFocused}
+              onClick={clearPendingTorrentFile}
+              title="Discard file (Esc)"
+              aria-label="Discard staged file"
+            >
+              <X size={15} />
+            </button>
+          </div>
+        )}
+
         {/* Sleek Full-Width Input Bar OR Voice Recorder Bar */}
         {voiceMode ? (
           <VoiceRecorderBar
@@ -1343,7 +1525,7 @@ export const Composer: React.FC<ComposerProps> = ({
           />
         ) : (
           <form
-            className={`ag-composer-bar ${isViolet ? 'dm' : ''} ${activeReply || pendingImage || outgoingTranslateActive ? 'with-strip' : ''}`}
+            className={`ag-composer-bar ${isViolet ? 'dm' : ''} ${activeReply || pendingImage || pendingTorrentFile || outgoingTranslateActive ? 'with-strip' : ''}`}
             onSubmit={(e) => {
               e.preventDefault()
               handleSubmit(true)
@@ -1355,7 +1537,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 <div
                   className={`ag-attach-menu ${isViolet ? 'dm' : ''}`}
                   role="menu"
-                  aria-label="Attach photo"
+                  aria-label="Attach photo or share P2P file"
                   data-no-swipe="true"
                 >
                   <button
@@ -1387,12 +1569,46 @@ export const Composer: React.FC<ComposerProps> = ({
                       <span className="ag-attach-menu-sub">Library or file</span>
                     </span>
                   </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="ag-attach-menu-item"
+                    onClick={handleChooseTorrentFile}
+                  >
+                    <span className="ag-attach-menu-icon" aria-hidden="true">
+                      <FileUp size={16} />
+                    </span>
+                    <span className="ag-attach-menu-copy">
+                      <span className="ag-attach-menu-label">Share File (P2P Torrent)</span>
+                      <span className="ag-attach-menu-sub">E2EE · Any file · No expiry</span>
+                    </span>
+                  </button>
+
+                  {engine.torrents.shares.length > 0 && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="ag-attach-menu-item"
+                      onClick={handleOpenTorrentShares}
+                    >
+                      <span className="ag-attach-menu-icon" aria-hidden="true">
+                        <HardDrive size={16} />
+                      </span>
+                      <span className="ag-attach-menu-copy">
+                        <span className="ag-attach-menu-label">Manage P2P Shares</span>
+                        <span className="ag-attach-menu-sub">
+                          {engine.torrents.activeShareCount} seeding · {engine.torrents.shares.length} total
+                        </span>
+                      </span>
+                    </button>
+                  )}
                 </div>
               )}
 
               <button
                 type="button"
-                className={`ag-composer-icon-btn ${isViolet ? 'dm' : ''} ${pendingImage || attachMenuOpen ? 'active' : ''}`}
+                className={`ag-composer-icon-btn ${isViolet ? 'dm' : ''} ${pendingImage || pendingTorrentFile || attachMenuOpen ? 'active' : ''}`}
                 disabled={!canSign || preparingImage}
                 onPointerDown={keepTextareaFocused}
                 onMouseDown={keepTextareaFocused}
@@ -1401,14 +1617,16 @@ export const Composer: React.FC<ComposerProps> = ({
                 aria-expanded={attachMenuOpen}
                 title={
                   !canSign
-                    ? 'Configure a signing key in Settings to send images'
+                    ? 'Configure a signing key in Settings to attach photos or files'
                     : isViolet
-                      ? 'Attach or take encrypted photo (EXIF stripped)'
-                      : 'Attach or take photo (EXIF stripped)'
+                      ? 'Attach encrypted photo or P2P E2EE file'
+                      : 'Attach photo or share P2P E2EE file'
                 }
-                aria-label={isViolet ? 'Attach encrypted photo' : 'Attach photo'}
+                aria-label={
+                  isViolet ? 'Attach encrypted photo or P2P file' : 'Attach photo or P2P file'
+                }
               >
-                {preparingImage ? (
+                {preparingImage || seedingTorrent ? (
                   <Loader2 size={17} className="ag-spin" />
                 ) : (
                   <ImagePlus size={18} />
@@ -1448,6 +1666,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 onClick={() => {
                   setAttachMenuOpen(false)
                   clearPendingImage()
+                  clearPendingTorrentFile()
                   setPreparingImage(false)
                   engine.notifyTypingStopped()
                   setVoiceMode(true)

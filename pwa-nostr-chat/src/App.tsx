@@ -82,6 +82,8 @@ import Composer from './components/Composer'
 import ToastStack from './components/ToastStack'
 import IncomingCallBanner from './components/IncomingCallBanner'
 import TrustConfirmModal from './components/TrustConfirmModal'
+import TorrentDownloadModal from './components/TorrentDownloadModal'
+import TorrentSharesModal from './components/TorrentSharesModal'
 import { ContextMenuProvider } from './components/ContextMenu'
 import { EmojiAutocompleteOverlay } from './components/EmojiAutocompleteOverlay'
 import type { SettingsTab } from './components/SettingsModal'
@@ -991,7 +993,11 @@ export function App() {
     if (!q) return []
     if (engine.activeView.type === 'dm' && engine.activeDmThread) {
       return engine.activeDmThread.messages
-        .filter((m) => m.content.toLowerCase().includes(q))
+        .filter(
+          (m) =>
+            m.content.toLowerCase().includes(q) ||
+            Boolean(m.torrentAttachment?.fileName.toLowerCase().includes(q))
+        )
         .map((m) => m.id)
     }
     if (engine.activeView.type === 'server') {
@@ -1000,7 +1006,8 @@ export function App() {
           (m) =>
             m.content.toLowerCase().includes(q) ||
             m.nickname.toLowerCase().includes(q) ||
-            m.displayHandle.toLowerCase().includes(q)
+            m.displayHandle.toLowerCase().includes(q) ||
+            Boolean(m.torrentAttachment?.fileName.toLowerCase().includes(q))
         )
         .map((m) => m.id)
     }
@@ -1009,7 +1016,8 @@ export function App() {
         (m) =>
           m.content.toLowerCase().includes(q) ||
           m.nickname.toLowerCase().includes(q) ||
-          m.displayHandle.toLowerCase().includes(q)
+          m.displayHandle.toLowerCase().includes(q) ||
+          Boolean(m.torrentAttachment?.fileName.toLowerCase().includes(q))
       )
       .map((m) => m.id)
   }, [searchQuery, engine.activeView, engine.activeDmThread, engine.servers.messages, engine.messages])
@@ -3490,6 +3498,25 @@ export function App() {
 
       {/* Global Untrusted External Link Confirmation Warning Modal */}
       <UntrustedLinkModal />
+
+      {/* Global Mandatory P2P Torrent Download Confirmation Disclaimer Modal */}
+      <TorrentDownloadModal
+        request={engine.torrents.pendingDownloadRequest}
+        avatarUrl={
+          engine.torrents.pendingDownloadRequest
+            ? engine.getProfilePicture(engine.torrents.pendingDownloadRequest.senderPubkey)
+            : undefined
+        }
+        onConfirm={engine.torrents.confirmPendingDownload}
+        onCancel={engine.torrents.cancelPendingDownload}
+      />
+
+      {/* Global P2P File Shares Manager Modal */}
+      <TorrentSharesModal
+        open={engine.torrents.sharesModalOpen}
+        torrents={engine.torrents}
+        onClose={() => engine.torrents.setSharesModalOpen(false)}
+      />
 
       {/* Universal Delete Private Chat Confirmation Modal */}
       {pendingDeleteDm &&

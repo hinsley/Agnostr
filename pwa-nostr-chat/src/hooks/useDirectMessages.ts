@@ -18,14 +18,17 @@ import type {
   ImageAttachment,
   VoiceMemoAttachment,
 } from '../types/protocol.ts'
+import type { TorrentAttachment } from '../types/torrent.ts'
 import { KIND_GIFT_WRAP, verifyEventCached } from '../lib/bitchatProtocol.ts'
 import { isAutoAnonNickname } from '../lib/deviceSync.ts'
 import {
   createEncryptedDmEvent,
   decodeDmImagePayload,
+  decodeDmTorrentPayload,
   decodeDmVoicePayload,
   decryptGiftWrapEvent,
   encodeDmImagePayload,
+  encodeDmTorrentPayload,
   encodeDmVoicePayload,
 } from '../lib/dmCrypto.ts'
 import {
@@ -50,6 +53,7 @@ import {
   saveDmSeenWrapIds,
   saveDmThreads,
 } from '../lib/storage.ts'
+import { formatTorrentFallbackText } from '../lib/torrentProtocol.ts'
 import { formatVoiceDuration } from '../lib/voiceRecorder.ts'
 
 const DM_LOOKBACK_SEC = 3 * 24 * 60 * 60 // 3 days to account for NIP-59 ±2d randomized timestamps
@@ -105,6 +109,11 @@ function formatDmPreview(msg: DmMessage): string {
         ? `🖼️ Image (${msg.imageAttachment.width}×${msg.imageAttachment.height})`
         : '🖼️ Image'
   }
+  if (msg.torrentAttachment) {
+    return msg.content
+      ? `📦 ${msg.content}`.slice(0, 96)
+      : formatTorrentFallbackText(msg.torrentAttachment).slice(0, 96)
+  }
   return msg.content.slice(0, 96)
 }
 
@@ -137,8 +146,10 @@ function isDuplicateIncomingDm(existingMessages: readonly DmMessage[], candidate
         m.content === candidate.content &&
         !candidate.voiceMemo &&
         !candidate.imageAttachment &&
+        !candidate.torrentAttachment &&
         !m.voiceMemo &&
-        !m.imageAttachment)
+        !m.imageAttachment &&
+        !m.torrentAttachment)
   )
 }
 
@@ -518,11 +529,17 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
 
             const decodedVoice = decodeDmVoicePayload(decrypted.content)
             const decodedImage = decodedVoice ? null : decodeDmImagePayload(decrypted.content)
+            const decodedTorrent =
+              decodedVoice || decodedImage
+                ? null
+                : decodeDmTorrentPayload(decrypted.content, senderPk)
             const displayContent = decodedVoice
               ? decodedVoice.caption
               : decodedImage
                 ? decodedImage.caption
-                : decrypted.content
+                : decodedTorrent
+                  ? decodedTorrent.caption
+                  : decrypted.content
             const previewText = decodedVoice
               ? decodedVoice.caption
                 ? `🎤 ${decodedVoice.caption}`
@@ -533,7 +550,11 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
                   : decodedImage.imageAttachment.width > 0 && decodedImage.imageAttachment.height > 0
                     ? `🖼️ Image (${decodedImage.imageAttachment.width}×${decodedImage.imageAttachment.height})`
                     : '🖼️ Image'
-                : decrypted.content.slice(0, 96)
+                : decodedTorrent
+                  ? decodedTorrent.caption
+                    ? `📦 ${decodedTorrent.caption}`.slice(0, 96)
+                    : formatTorrentFallbackText(decodedTorrent.torrentAttachment).slice(0, 96)
+                  : decrypted.content.slice(0, 96)
 
             const presenceNick = presenceTracker.getNickname(senderPk)
             const initialNick = pickBestPeerNickname(senderPk, presenceNick)
@@ -581,6 +602,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
               protocol: decrypted.protocol,
               voiceMemo: decodedVoice?.voiceMemo,
               imageAttachment: decodedImage?.imageAttachment,
+              torrentAttachment: decodedTorrent?.torrentAttachment,
               deliveryStatus: 'delivered',
             }
 
@@ -1348,6 +1370,203 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     [pool, identityManager, activeGeohash, presenceTracker, markPeerReadSync, markWrapIdSeen]
   )
 
+  const sendTorrentMessage = useCallback(
+    async (
+      peerPubkey: string,
+      torrent: TorrentAttachment,
+      caption?: string,
+      replyToId?: string,
+      protocolOverride?: DmProtocol
+    ): Promise<boolean> => {
+      if (!pool) return false
+      const pk = peerPubkey.trim().toLowerCase()
+      const cleanCaption = caption?.trim() ?? ''
+
+      const existingThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
+      const parent = replyToId ? existingThread?.messages.find((m) => m.id === replyToId) : undefined
+      const target = parent && dmTargetId(parent)
+      if (replyToId && !target) {
+        onErrorRef.current?.('Cannot reply', 'This message has no shared ID in this conversation.')
+        return false
+      }
+      markPeerReadSync(pk)
+      const signer = identityManager.getKeyMaterialForGeohash(activeGeohash)
+      const targetRelays = [...dmRelaysRef.current]
+      const wipeGen = identityManager.getWipeGeneration()
+      const chosenProtocol: DmProtocol =
+        protocolOverride ??
+        existingThread?.protocol ??
+        (signer.mode === 'extension' ? 'nip17' : 'bitchat')
+
+      const localMsgId = bytesToHex(crypto.getRandomValues(new Uint8Array(8)))
+      const localTorrent: TorrentAttachment = {
+        ...torrent,
+        senderPubkey: torrent.senderPubkey ?? signer.pubkey.toLowerCase(),
+      }
+
+      return await dmSendQueueRef.current.enqueue(
+        `dm:${pk}`,
+        async () => {
+          if (identityManager.getWipeGeneration() !== wipeGen) return false
+          let inserted = false
+          try {
+            const nowMs = Date.now()
+            const nowSec = Math.floor(nowMs / 1000)
+            const msgBase: DmMessage = {
+              id: localMsgId,
+              replyToId: target,
+              peerPubkey: pk,
+              senderPubkey: signer.pubkey,
+              content: cleanCaption,
+              createdAt: nowSec,
+              orderMs: nowMs,
+              isOwn: true,
+              protocol: chosenProtocol,
+              torrentAttachment: localTorrent,
+              deliveryStatus: 'sending',
+            }
+            const currentThread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
+            const nick =
+              currentThread?.peerNickname ||
+              presenceTracker.getNickname(pk) ||
+              `anon${pk.slice(-4)}`
+            const handle = formatDisplayHandle(nick, pk)
+
+            inserted = true
+            setThreads((prev) => {
+              const idx = prev.findIndex((t) => t.peerPubkey.toLowerCase() === pk)
+              if (idx !== -1) {
+                const lastOrder = getMaxOrderMs(prev[idx].messages)
+                const placed: DmMessage = {
+                  ...msgBase,
+                  orderMs: Math.max(nowMs, lastOrder + 1),
+                }
+                const nextMsgs = [...prev[idx].messages, placed].sort(compareDmMessages)
+                const tail = nextMsgs[nextMsgs.length - 1]
+                const updated: DmThread = {
+                  ...prev[idx],
+                  peerPubkey: pk,
+                  messages: nextMsgs,
+                  lastMessageAt: tail.createdAt,
+                  lastPreview: formatDmPreview(tail),
+                  unreadCount: 0,
+                }
+                const copy = [...prev]
+                copy[idx] = updated
+                copy.sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+                return copy
+              }
+              const created: DmThread = {
+                peerPubkey: pk,
+                peerNpub: encodeNpubSafe(pk),
+                peerNickname: nick,
+                peerDisplayHandle: handle,
+                protocol: chosenProtocol,
+                messages: [msgBase],
+                unreadCount: 0,
+                lastMessageAt: nowSec,
+                lastPreview: formatDmPreview(msgBase),
+              }
+              return [created, ...prev]
+            })
+
+            const wireContent = encodeDmTorrentPayload(localTorrent, cleanCaption)
+            await pool.waitForChatRelay(targetRelays)
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            const { event, protocol, wireId, orderMs } = await createEncryptedDmEvent({
+              content: wireContent,
+              recipientPubkey: pk,
+              signer,
+              protocol: chosenProtocol,
+              messageId: localMsgId,
+              action: target ? { type: 'reply', targetId: target } : undefined,
+            })
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            markWrapIdSeen(event.id, true)
+            recordProfileSeenEventIds(identityManager.getMasterKeyMaterial().pubkey, [event.id])
+            return await publishChatWire({
+              rowId: localMsgId,
+              publish: (ack) =>
+                pool.publish(
+                  [...new Set([...targetRelays, ...dmRelaysRef.current])],
+                  event,
+                  undefined,
+                  ack
+                ),
+              isCurrent: () => identityManager.getWipeGeneration() === wipeGen,
+              queueRetry: (retry) => dmSendQueueRef.current.enqueue(`dm:${pk}`, retry, () => false),
+              update: (deliveryStatus) =>
+                setThreads((prev) =>
+                  prev
+                    .map((t) => {
+                      if (t.peerPubkey.toLowerCase() !== pk) return t
+                      const messages = t.messages
+                        .map((m) =>
+                          m.id === localMsgId
+                            ? {
+                                ...m,
+                                wireId,
+                                protocol,
+                                orderMs,
+                                createdAt: Math.floor(orderMs / 1000),
+                                torrentAttachment: localTorrent,
+                                content: cleanCaption,
+                                deliveryStatus:
+                                  m.deliveryStatus === 'read' || m.deliveryStatus === 'delivered'
+                                    ? m.deliveryStatus
+                                    : deliveryStatus,
+                              }
+                            : m
+                        )
+                        .sort(compareDmMessages)
+                      const tail = messages.at(-1)
+                      return {
+                        ...t,
+                        protocol,
+                        messages,
+                        lastMessageAt: tail?.createdAt ?? 0,
+                        lastPreview: tail ? formatDmPreview(tail) : '',
+                      }
+                    })
+                    .sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+                ),
+              onSuccess: () =>
+                onNotifyPushPokeRef.current?.({
+                  recipientPubkeys: [pk],
+                  category: 'dm',
+                  eventId: localMsgId,
+                }),
+              onFailure: (reason) =>
+                onErrorRef.current?.('Encrypted file DM failed', reason, localMsgId),
+            })
+          } catch (err) {
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            if (inserted) {
+              setThreads((prev) =>
+                prev.map((t) => {
+                  if (t.peerPubkey.toLowerCase() !== pk) return t
+                  return {
+                    ...t,
+                    messages: t.messages.map((m) =>
+                      m.id === localMsgId ? { ...m, deliveryStatus: 'failed' } : m
+                    ),
+                  }
+                })
+              )
+            }
+            onErrorRef.current?.(
+              'Encrypted file DM error',
+              err instanceof Error ? err.message : 'Unable to send encrypted file'
+            )
+            return false
+          }
+        },
+        () => false
+      )
+    },
+    [pool, identityManager, activeGeohash, presenceTracker, markPeerReadSync, markWrapIdSeen]
+  )
+
   const sendDmReaction = useCallback(async (peer: string, messageId: string, emoji: string) => {
     const pk = peer.trim().toLowerCase()
     const thread = threadsRef.current.find((t) => t.peerPubkey.toLowerCase() === pk)
@@ -1771,6 +1990,7 @@ export function useDirectMessages(opts: UseDirectMessagesOptions) {
     sendDmReaction,
     sendDirectVoiceMemo,
     sendDirectImageAttachment,
+    sendTorrentMessage,
     clearThread,
     closeThread,
     mergeSyncedDmClearedAt,

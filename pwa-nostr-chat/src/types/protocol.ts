@@ -6,6 +6,7 @@ import type { DeviceSyncEngine } from './deviceSync.ts'
 import type { GameEngineController } from '../hooks/useGameEngine.ts'
 import type { NotificationEngine } from './notifications.ts'
 import type { ServersEngine } from './servers.ts'
+import type { TorrentAttachment, TorrentEngine } from './torrent.ts'
 import type { TranscriptionEngine } from './transcription.ts'
 import type { TranslatorEngine } from './translator.ts'
 import type { NearbyController } from '../hooks/useNearbyRuntime.ts'
@@ -244,6 +245,7 @@ export interface GeoMessage {
   mentions: string[]
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  torrentAttachment?: TorrentAttachment
   deliveryStatus?: MessageDeliveryStatus
   relayCount?: number
 }
@@ -359,6 +361,7 @@ export interface DmMessage {
   protocol: DmProtocol
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  torrentAttachment?: TorrentAttachment
   deliveryStatus: 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
 }
 
@@ -583,6 +586,9 @@ export interface AgnostrEngine {
   sendImageAttachment: (image: PreparedImage, caption?: string, dm?: DmSendContext) => Promise<boolean>
   /** STRICT trusted-peers-gated fetch: refuses untrusted senders with zero network requests */
   fetchImageAttachmentBlob: (image: ImageAttachment, senderPubkey: string) => Promise<string>
+  /** P2P E2EE Torrent Filesharing (no expiry, close downloads anytime, strictly trusted peers) */
+  torrents: TorrentEngine
+  sendTorrentAttachment: (file: File, caption?: string, dm?: DmSendContext) => Promise<boolean>
 
   // Relays & telemetry
   relays: RelayTelemetry[]

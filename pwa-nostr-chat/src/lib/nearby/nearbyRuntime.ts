@@ -1,5 +1,10 @@
 import type { Event as NostrEvent, EventTemplate } from 'nostr-tools'
-import { createGatewayPolicy, isGatewayGeohash, type GatewayCarrier } from './gatewayPolicy.ts'
+import {
+  createGatewayPolicy,
+  isGatewayGeohash,
+  TORRENT_BRIDGE_CARRIER_CHANNEL,
+  type GatewayCarrier,
+} from './gatewayPolicy.ts'
 import { createMeshSession, type NearbyMessage } from './meshSession.ts'
 import { cleanNickname, createMeshIdentity, encodeText, hex, MAX_TEXT_BYTES, proofId, type MeshPacket } from './meshWire.ts'
 import { Nearby, sendOnLink, unpackNearbyFrame, type NearbyState, type NearbyPlugin } from './nativeNearby.ts'
@@ -26,6 +31,8 @@ export interface NearbyPorts {
   canBridge?: () => boolean
   publish: (event: NostrEvent, geohash: string) => Promise<boolean>
   receive: (event: NostrEvent, geohash: string) => void
+  publishTorrent?: (event: NostrEvent) => Promise<boolean>
+  receiveTorrent?: (event: NostrEvent) => void
   snapshot: (state: NearbySnapshot) => void
 }
 
@@ -38,7 +45,10 @@ export interface NearbyRuntime {
   hasGateway(): boolean
   offlineEvent(template: EventTemplate, geohash: string): NostrEvent | null
   sendThroughGateway(event: NostrEvent, geohash: string): Promise<boolean>
+  sendMeshEvent(event: NostrEvent, geohash: string): Promise<boolean>
   relayEvent(event: NostrEvent, geohash: string): void
+  sendTorrentEvent(event: NostrEvent): Promise<boolean>
+  relayTorrentEvent(event: NostrEvent): void
   close(): void
 }
 
@@ -56,6 +66,7 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
   let run: Running | null = null
   let closed = false
   const deposits = new Map<string, { event: NostrEvent; geohash: string; sender: string; tries: number; running: boolean }>()
+  const torrentDeposits = new Map<string, { event: NostrEvent; sender: string; tries: number; running: boolean }>()
 
   function publish(patch: Partial<NearbySnapshot> = {}) {
     state = { ...state, peers: run?.session.peers() ?? [], ...patch }
@@ -94,8 +105,69 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
     }
   }
 
+  function flushTorrentDeposits(current: Running, only?: string) {
+    if (closed || run !== current || !canServeGateway() || !ports.publishTorrent) return
+    let started = 0
+    for (const deposit of torrentDeposits.values()) {
+      if (deposit.running || (only && only !== deposit.event.id)) continue
+      const expired =
+        deposit.event.kind === 25057 && Math.abs(Date.now() / 1000 - deposit.event.created_at) > 120
+      if (deposit.tries >= 3 || expired) {
+        torrentDeposits.delete(deposit.event.id)
+        continue
+      }
+      if (++started > 8) break
+      deposit.running = true
+      deposit.tries++
+      void ports
+        .publishTorrent(deposit.event)
+        .then((ok) => {
+          if (!ok || torrentDeposits.get(deposit.event.id) !== deposit) return
+          torrentDeposits.delete(deposit.event.id)
+        })
+        .catch(() => {})
+        .finally(() => {
+          deposit.running = false
+        })
+    }
+  }
+
   function acceptCarrier(carrier: GatewayCarrier, packet: MeshPacket, ingress: string, current: Running) {
     const sender = hex(packet.sender)
+    if (carrier.geohash === TORRENT_BRIDGE_CARRIER_CHANNEL) {
+      if (carrier.direction === 'toGateway') {
+        if (packet.recipient && hex(packet.recipient) !== current.identity.id) {
+          if (packet.ttl >= 2 && policy.acceptTorrentTransit(carrier, sender)) {
+            void multicast({ ...packet, ttl: packet.ttl - 1 }, ingress)
+          }
+          return
+        }
+        const accepted = policy.acceptTorrentUplink(carrier, sender, canServeGateway())
+        if (!accepted) return
+        ports.receiveTorrent?.(accepted)
+        if (packet.ttl >= 2) {
+          const peerCarrier = current.identity.carrier({
+            direction: 'fromGateway',
+            geohash: TORRENT_BRIDGE_CARRIER_CHANNEL,
+            eventJSON: carrier.eventJSON,
+          })
+          if (peerCarrier) void multicast({ ...peerCarrier, ttl: packet.ttl - 1 }, ingress)
+        }
+        if (
+          torrentDeposits.size < 64 &&
+          Array.from(torrentDeposits.values()).filter((d) => d.sender === sender).length < 32
+        ) {
+          torrentDeposits.set(accepted.id, { event: accepted, sender, tries: 0, running: false })
+          flushTorrentDeposits(current, accepted.id)
+        }
+        return
+      }
+      const accepted = policy.acceptTorrentDownlink(carrier)
+      if (!accepted) return
+      ports.receiveTorrent?.(accepted)
+      if (packet.ttl >= 2) void multicast({ ...packet, ttl: packet.ttl - 1 }, ingress)
+      return
+    }
     if (carrier.direction === 'toGateway') {
       if (packet.recipient && hex(packet.recipient) !== current.identity.id) {
         // The wire/session layer already verified the directed envelope. No relay
@@ -129,6 +201,7 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
         run = null
         policy.reset()
         deposits.clear()
+        torrentDeposits.clear()
         publish({ active: false, sharing: false, localId: null, links: 0, error: incoming.error })
         return
       }
@@ -158,6 +231,7 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
     if (!run || !radio.active) return
     publish()
     flushDeposits(run)
+    flushTorrentDeposits(run)
     const packet = announce()
     if (packet && radio.links.length) void multicast(packet)
   }, 15_000)
@@ -205,6 +279,7 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
       run?.session.clear()
       run = null
       deposits.clear()
+      torrentDeposits.clear()
       policy.reset()
       publish({ active: false, sharing: false, links: 0, localId: null, error: undefined })
       try { await transport.stop() } catch {
@@ -213,7 +288,10 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
     },
     share(enabled) {
       if (!radio.active || !run || run.managed) return
-      if (!enabled) deposits.clear()
+      if (!enabled) {
+        deposits.clear()
+        torrentDeposits.clear()
+      }
       publish({ sharing: enabled })
       const packet = announce()
       if (packet) void multicast(packet)
@@ -244,9 +322,41 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
       const results = await Promise.all(radio.links.map(link => sendOnLink(transport, link, intro, packet)))
       return results.some(Boolean)
     },
+    async sendMeshEvent(event, geohash) {
+      if (!run || !state.active || !state.links || !isGatewayGeohash(geohash)) return false
+      const carrier = policy.localMeshPacket(event, geohash)
+      const packet = carrier ? run.identity.carrier(carrier) : null
+      if (!packet) return false
+      return await multicast(packet)
+    },
     relayEvent(event, geohash) {
       if (!run || !radio.active || !radio.links.length || !isGatewayGeohash(geohash)) return
       const carrier = policy.relayPacket(event, geohash, canServeGateway())
+      const packet = carrier ? run.identity.carrier(carrier) : null
+      if (packet) void multicast(packet)
+    },
+    async sendTorrentEvent(event) {
+      if (!run || !state.active || !state.links) return false
+      const gateway = run.session
+        .peers()
+        .filter((peer) => peer.gateway)
+        .sort((a, b) => b.heard - a.heard)[0]
+      if (gateway) {
+        const carrier = policy.localTorrentPacket(event)
+        const packet = carrier ? run.identity.carrier(carrier, gateway.id) : null
+        const intro = announce()
+        if (!packet || !intro) return false
+        await multicast(intro)
+        return await multicast(packet)
+      }
+      const carrier = policy.localMeshTorrentPacket(event)
+      const packet = carrier ? run.identity.carrier(carrier) : null
+      if (!packet) return false
+      return await multicast(packet)
+    },
+    relayTorrentEvent(event) {
+      if (!run || !state.active || !state.links) return
+      const carrier = policy.relayTorrentPacket(event, canServeGateway())
       const packet = carrier ? run.identity.carrier(carrier) : null
       if (packet) void multicast(packet)
     },
@@ -258,6 +368,7 @@ export function makeNearbyRuntime(ports: NearbyPorts, transport: NearbyPlugin = 
       run = null
       policy.reset()
       deposits.clear()
+      torrentDeposits.clear()
       void listeners.then(handles => Promise.all(handles.map(h => h.remove()))).catch(() => {})
       void transport.stop().catch(() => {})
     },

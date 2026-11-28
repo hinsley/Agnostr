@@ -7,6 +7,7 @@ import type {
   ReplyReference,
   VoiceMemoAttachment,
 } from './protocol.ts'
+import type { TorrentAttachment } from './torrent.ts'
 
 export type ServerKind = 'virtual' | 'nip29'
 
@@ -130,6 +131,7 @@ export interface ServerMessage {
   mentions: string[]
   voiceMemo?: VoiceMemoAttachment
   imageAttachment?: ImageAttachment
+  torrentAttachment?: TorrentAttachment
   deliveryStatus?: MessageDeliveryStatus
   relayCount?: number
 }
@@ -235,6 +237,7 @@ export interface ServersEngine {
   ) => Promise<boolean>
   sendVoiceMemo: (recorded: RecordedVoiceMemo, caption?: string) => Promise<boolean>
   sendImageAttachment: (image: PreparedImage, caption?: string) => Promise<boolean>
+  publishTorrentAttachment: (torrent: TorrentAttachment, caption?: string) => Promise<boolean>
   sendReaction: (message: ServerMessage, emoji: string) => Promise<void>
   deleteMessage: (message: ServerMessage) => Promise<boolean>
   clearChannelCache: () => void

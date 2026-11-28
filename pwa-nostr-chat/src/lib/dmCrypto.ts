@@ -19,9 +19,11 @@ import type {
   VoiceMemoAttachment,
   VoiceMemoEncryption,
 } from '../types/protocol.ts'
+import type { TorrentAttachment } from '../types/torrent.ts'
 import { isDmTargetId } from './dmMessageActions.ts'
 import { KIND_DM_RUMOR, KIND_GIFT_WRAP, KIND_SEAL } from './bitchatProtocol.ts'
 import { bytesToHex, type SigningKeyMaterial } from './identity.ts'
+import { normalizeTorrentAttachment } from './torrentProtocol.ts'
 
 export const DM_VOICE_PAYLOAD_PREFIX = 'agnostr-voice-v1:'
 
@@ -186,6 +188,56 @@ export function decodeDmImagePayload(
       encryption,
       server: typeof parsed.server === 'string' ? parsed.server : undefined,
     },
+    caption: typeof parsed.caption === 'string' ? parsed.caption.trim() : '',
+  }
+}
+
+export const DM_TORRENT_PAYLOAD_PREFIX = 'agnostr-torrent-v1:'
+
+interface SerializedDmTorrentPayload extends TorrentAttachment {
+  caption?: string
+}
+
+export function encodeDmTorrentPayload(torrent: TorrentAttachment, caption?: string): string {
+  const payload: SerializedDmTorrentPayload = {
+    v: 1,
+    infoHash: torrent.infoHash,
+    swarmId: torrent.swarmId,
+    fileName: torrent.fileName,
+    mime: torrent.mime,
+    size: torrent.size,
+    pieceLength: torrent.pieceLength,
+    pieceCount: torrent.pieceCount,
+    plaintextSha256: torrent.plaintextSha256,
+    piecesRoot: torrent.piecesRoot,
+    encryption: torrent.encryption,
+    relays: torrent.relays,
+    senderPubkey: torrent.senderPubkey,
+    createdAt: torrent.createdAt,
+    caption: caption?.trim() || undefined,
+  }
+  return `${DM_TORRENT_PAYLOAD_PREFIX}${JSON.stringify(payload)}`
+}
+
+export function decodeDmTorrentPayload(
+  rawContent: string,
+  verifiedSenderPubkey?: string
+): { torrentAttachment: TorrentAttachment; caption: string } | null {
+  if (!rawContent.startsWith(DM_TORRENT_PAYLOAD_PREFIX)) return null
+  let parsed: Record<string, unknown>
+  try {
+    const raw = JSON.parse(rawContent.slice(DM_TORRENT_PAYLOAD_PREFIX.length)) as unknown
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+    parsed = raw as Record<string, unknown>
+  } catch {
+    return null
+  }
+  const candidate =
+    parsed.torrent && typeof parsed.torrent === 'object' ? parsed.torrent : parsed
+  const normalized = normalizeTorrentAttachment(candidate, verifiedSenderPubkey)
+  if (!normalized) return null
+  return {
+    torrentAttachment: normalized,
     caption: typeof parsed.caption === 'string' ? parsed.caption.trim() : '',
   }
 }

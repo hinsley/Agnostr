@@ -30,6 +30,7 @@ import {
   Zap,
 } from 'lucide-react'
 import type { GeoMessage, ImageAttachment, VoiceMemoAttachment } from '../types/protocol'
+import type { TorrentEngine } from '../types/torrent'
 import type { ContentFilterEngine } from '../types/contentFilter'
 import type {
   MemoTranscriptState,
@@ -40,6 +41,7 @@ import { clientAvatarRingClass } from '../lib/bitchatProtocol'
 import { decodeCashuTokenPreview, extractCashuTokensFromText } from '../lib/cashuWallet'
 import { usePinnedReactions } from '../lib/reactionEmojis'
 import { parseAgoraShareUrl } from '../lib/shareLinks'
+import { formatTorrentFallbackText } from '../lib/torrentProtocol'
 import { copyImageToClipboard, isCopyableImageElement } from '../utils/clipboardImage'
 import { pubkeyToColor, formatHandle } from '../utils/identicon'
 import { RichMessageContent } from '../utils/markdown'
@@ -49,6 +51,7 @@ import { ReactionPickerPopover } from './ReactionPickerPopover'
 import { requestUntrustedLinkOpen, tryOpenInternalAgoraLink } from './UntrustedLinkModal'
 import { VoiceMemoPlayer } from './VoiceMemoPlayer'
 import { ImageAttachmentCard, type LightboxImagePayload } from './ImageAttachmentCard'
+import { TorrentAttachmentCard } from './TorrentAttachmentCard'
 import { parseInlineChatVoice } from '../lib/inlineChatVoice'
 import { parseInlineChatImage } from '../lib/inlineChatImage'
 
@@ -159,6 +162,8 @@ export interface MessageItemProps {
   onNotify?: (title: string) => void
   // On-device Image Content Filter
   contentFilter?: ContentFilterEngine
+  // P2P E2EE Torrent Filesharing Engine
+  torrents?: TorrentEngine
   // Verified kind: 0 profile picture URL (falls back to identicon)
   senderAvatarUrl?: string
   // Cashu Ecash, NIP-57 Lightning Zaps & NIP-61 Nutzaps
@@ -227,6 +232,7 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
     onCopyText,
     onNotify,
     contentFilter,
+    torrents,
     senderAvatarUrl,
     senderLightningAddress = null,
     canZapSender: canZapSenderProp,
@@ -559,14 +565,32 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
       const inlineVoice = message.voiceMemo?.inlineVoiceMarker
         ? parseInlineChatVoice(caption, message.tags)
         : undefined
-      return message.voiceMemo || message.imageAttachment
-        ? extractMediaCaption(
-            inlineVoice?.caption ?? caption,
-            inlineVoice ? undefined : message.voiceMemo?.url,
-            inline ? undefined : message.imageAttachment?.url
-          )
-        : message.content
-    }, [message.isSystem, message.voiceMemo, message.imageAttachment, message.content, message.tags])
+      let out =
+        message.voiceMemo || message.imageAttachment
+          ? extractMediaCaption(
+              inlineVoice?.caption ?? caption,
+              inlineVoice ? undefined : message.voiceMemo?.url,
+              inline ? undefined : message.imageAttachment?.url
+            )
+          : message.content
+      if (message.torrentAttachment) {
+        const fallback = formatTorrentFallbackText(message.torrentAttachment)
+        const trimmedOut = out.trim()
+        if (trimmedOut === fallback) {
+          out = ''
+        } else if (trimmedOut.includes(fallback)) {
+          out = trimmedOut.split(fallback).join('').replace(/\n{3,}/g, '\n\n').trim()
+        }
+      }
+      return out
+    }, [
+      message.isSystem,
+      message.voiceMemo,
+      message.imageAttachment,
+      message.torrentAttachment,
+      message.content,
+      message.tags,
+    ])
 
     // Extract Cashu Ecash tokens (fast check -> empty array for 99.9% of messages)
     const cashuTokens: CashuTokenPreview[] = useMemo(() => {
@@ -1430,6 +1454,25 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(
                 onInspectSender={(pk, nick) => onInspectAuthor?.(pk, nick)}
                 onBlockSender={onBlockSender}
                 onOpenLightbox={onOpenLightbox}
+              />
+            </div>
+          )}
+
+          {/* Left-Aligned P2P E2EE Torrent Attachment / Untrusted Shielded Card */}
+          {message.torrentAttachment && torrents && (
+            <div className="ag-msg-media-slot">
+              <TorrentAttachmentCard
+                torrent={message.torrentAttachment}
+                senderPubkey={message.pubkey}
+                senderNickname={handle.base}
+                senderDisplayHandle={handle.full}
+                isTrusted={isSenderTrusted}
+                isOwn={message.isOwn}
+                isDmMode={isEncryptedContext}
+                torrents={torrents}
+                onTrustSender={onTrustSender}
+                onInspectSender={(pk, nick) => onInspectAuthor?.(pk, nick)}
+                onBlockSender={onBlockSender}
               />
             </div>
           )}

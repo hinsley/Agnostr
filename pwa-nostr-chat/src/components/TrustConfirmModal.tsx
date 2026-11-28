@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Check,
   Copy,
+  FileUp,
   Image as ImageIcon,
   Mic,
   ShieldAlert,
@@ -237,6 +238,16 @@ export function TrustConfirmModal({
             <span>
               <strong>People list &amp; call ringing</strong>: they will appear in your{' '}
               <strong>People</strong> tab and can ring your device with DM calls.
+            </span>
+          </li>
+          <li className="ag-trust-confirm-risk-item">
+            <span className="ag-trust-confirm-risk-icon" aria-hidden="true">
+              <FileUp size={15} />
+            </span>
+            <span>
+              <strong>P2P E2EE file torrents</strong>: they can offer encrypted peer-to-peer file
+              shares (downloading always requires a separate confirmation disclaimer and reveals
+              your IP address to connected peers).
             </span>
           </li>
         </ul>

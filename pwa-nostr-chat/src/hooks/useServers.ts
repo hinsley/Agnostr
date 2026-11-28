@@ -24,6 +24,8 @@ import type {
   ServersEngine,
   VirtualServerManifest,
 } from '../types/servers.ts'
+import type { TorrentAttachment } from '../types/torrent.ts'
+import { formatTorrentFallbackText } from '../lib/torrentProtocol.ts'
 import {
   cleanMimeType,
   DEFAULT_BLOSSOM_SERVERS,
@@ -2093,6 +2095,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       replyTarget: ServerMessage | null
       voiceAttachment?: VoiceMemoAttachment
       imageAttachment?: ImageAttachment
+      torrentAttachment?: TorrentAttachment
       onPublishedId?: (id: string) => void
       wipeGen: number
       nick: string
@@ -2109,6 +2112,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         replyTarget,
         voiceAttachment,
         imageAttachment,
+        torrentAttachment,
         onPublishedId,
         wipeGen,
         nick,
@@ -2167,6 +2171,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               replyTo: replyTarget,
               voiceMemo: voiceAttachment,
               imageAttachment,
+              torrentAttachment,
               lightningAddress: lightningAddr,
             })
           : buildNip29ChatTemplate({
@@ -2177,6 +2182,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
               replyTo: replyTarget,
               voiceMemo: voiceAttachment,
               imageAttachment,
+              torrentAttachment,
               lightningAddress: lightningAddr,
             })
 
@@ -2223,6 +2229,12 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           mentions: extractMentions(body),
           voiceMemo: voiceAttachment,
           imageAttachment,
+          torrentAttachment: torrentAttachment
+            ? {
+                ...torrentAttachment,
+                senderPubkey: torrentAttachment.senderPubkey ?? signedPk,
+              }
+            : undefined,
           deliveryStatus: 'sending',
         }
         updateServerChannelMessages(
@@ -2320,6 +2332,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
                 cleanPreview = 'Voice memo'
               } else if (imageAttachment) {
                 cleanPreview = 'Photo'
+              } else if (torrentAttachment) {
+                cleanPreview = formatTorrentFallbackText(torrentAttachment).slice(0, 110)
               }
             }
             if (pingPokeSet.size > 0) {
@@ -2942,6 +2956,84 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       settings.powEnabled,
       settings.powTargetBits,
       setVoiceSendPhase,
+      adjustInFlightSend,
+      publishServerMessageDirect,
+      pushToast,
+    ]
+  )
+
+  const publishTorrentAttachment = useCallback(
+    async (torrent: TorrentAttachment, caption?: string): Promise<boolean> => {
+      if (!activeServer || !activeChannel || !pool) return false
+
+      const server = activeServer
+      const channel = activeChannel
+      const chanId = channel.id
+      const targetKey = makeServerChanKey(server.id, chanId)
+      const replyTarget = replyingToRef.current
+      replyingToRef.current = null
+      if (activeServerChanKeyRef.current === targetKey) {
+        setReplyingTo(null)
+      }
+
+      const cleanCaption = caption?.trim() ?? ''
+      const nick = identityManager.getNickname()
+      const masterPk = identityManager.getMasterKeyMaterial().pubkey.toLowerCase()
+      const wipeGen = identityManager.getWipeGeneration()
+      const powEnabled = settings.powEnabled
+      const powTargetBits = settings.powTargetBits
+      const lightningAddr = lightningAddressRef.current
+
+      const body = server.encrypted
+        ? cleanCaption
+        : cleanCaption
+          ? `${cleanCaption}\n${formatTorrentFallbackText(torrent)}`
+          : formatTorrentFallbackText(torrent)
+
+      adjustInFlightSend(1)
+      try {
+        return await serverSendQueueRef.current.enqueue(
+          `srv:${server.id}:${chanId}`,
+          async () => {
+            if (identityManager.getWipeGeneration() !== wipeGen) return false
+            try {
+              return await publishServerMessageDirect({
+                server,
+                channel,
+                body,
+                replyTarget,
+                torrentAttachment: torrent,
+                wipeGen,
+                nick,
+                masterPk,
+                powEnabled,
+                powTargetBits,
+                lightningAddr,
+              })
+            } catch (err) {
+              if (identityManager.getWipeGeneration() === wipeGen) {
+                pushToast(
+                  'error',
+                  'Group file share failed',
+                  err instanceof Error ? err.message : 'Unable to publish file share'
+                )
+              }
+              return false
+            }
+          },
+          () => false
+        )
+      } finally {
+        adjustInFlightSend(-1)
+      }
+    },
+    [
+      activeServer,
+      activeChannel,
+      pool,
+      identityManager,
+      settings.powEnabled,
+      settings.powTargetBits,
       adjustInFlightSend,
       publishServerMessageDirect,
       pushToast,
@@ -3660,6 +3752,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       sendMessage,
       sendVoiceMemo,
       sendImageAttachment,
+      publishTorrentAttachment,
       sendReaction,
       deleteMessage,
       clearChannelCache,
@@ -3710,6 +3803,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       sendMessage,
       sendVoiceMemo,
       sendImageAttachment,
+      publishTorrentAttachment,
       sendReaction,
       deleteMessage,
       clearChannelCache,
