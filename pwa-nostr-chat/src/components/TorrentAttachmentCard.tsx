@@ -198,16 +198,18 @@ function TrustedTorrentCard({
     void checkRemoteStatus(torrent, senderPubkey)
   }, [isOwn, torrent, senderPubkey, checkRemoteStatus])
 
-  const share = torrents.getShare(torrent.infoHash)
-  const peerSeed = !isOwn && share?.isReSeed ? share : undefined
-  const transfer = torrents.transfers[torrent.infoHash]
-  const closedAt = torrents.closedBySender[torrent.infoHash]
+  const swarmId = torrent.swarmId.toLowerCase()
+  const share = torrents.getShare(swarmId)
+  const ownShare = isOwn && share && !share.isReSeed ? share : undefined
+  const peerSeed = !isOwn && share && share.isReSeed ? share : undefined
+  const transfer = torrents.transfers[swarmId]
+  const closedAt = torrents.closedBySender[swarmId]
   const ext = getTorrentFileExtension(torrent.fileName)
   const isRisky = isRiskyExecutableExtension(torrent.fileName)
 
   const isClosedByOriginalSender = isOwn
-    ? share
-      ? share.status === 'closed'
+    ? ownShare
+      ? ownShare.status === 'closed'
       : Boolean(closedAt)
     : Boolean(closedAt) || (!peerSeed && transfer?.phase === 'closed')
 
@@ -291,7 +293,7 @@ function TrustedTorrentCard({
                 <Lock size={11} aria-hidden="true" />
                 <span>Downloads closed</span>
               </span>
-            ) : share && !share.hasLocalData ? (
+            ) : ownShare && !ownShare.hasLocalData ? (
               <span className="ag-torrent-status-pill is-muted">
                 <HardDrive size={11} aria-hidden="true" />
                 <span>Local copy removed</span>
@@ -303,23 +305,25 @@ function TrustedTorrentCard({
               </span>
             )}
 
-            {share &&
-              (share.activePeerCount > 0 ||
-                share.completedDownloads > 0 ||
-                share.bytesUploaded > 0) && (
+            {ownShare &&
+              (ownShare.activePeerCount > 0 ||
+                ownShare.completedDownloads > 0 ||
+                ownShare.bytesUploaded > 0) && (
                 <span className="ag-torrent-stats mono tabular">
-                  {share.activePeerCount > 0
-                    ? `${share.activePeerCount} ${share.activePeerCount === 1 ? 'peer' : 'peers'}`
+                  {ownShare.activePeerCount > 0
+                    ? `${ownShare.activePeerCount} ${ownShare.activePeerCount === 1 ? 'peer' : 'peers'}`
                     : null}
-                  {share.activePeerCount > 0 &&
-                  (share.completedDownloads > 0 || share.bytesUploaded > 0)
+                  {ownShare.activePeerCount > 0 &&
+                  (ownShare.completedDownloads > 0 || ownShare.bytesUploaded > 0)
                     ? ' · '
                     : null}
-                  {share.completedDownloads > 0
-                    ? `${share.completedDownloads} ${share.completedDownloads === 1 ? 'dl' : 'dls'}`
+                  {ownShare.completedDownloads > 0
+                    ? `${ownShare.completedDownloads} ${ownShare.completedDownloads === 1 ? 'dl' : 'dls'}`
                     : null}
-                  {share.completedDownloads > 0 && share.bytesUploaded > 0 ? ' · ' : null}
-                  {share.bytesUploaded > 0 ? `${formatTorrentBytes(share.bytesUploaded)} sent` : null}
+                  {ownShare.completedDownloads > 0 && ownShare.bytesUploaded > 0 ? ' · ' : null}
+                  {ownShare.bytesUploaded > 0
+                    ? `${formatTorrentBytes(ownShare.bytesUploaded)} sent`
+                    : null}
                 </span>
               )}
           </div>
@@ -329,7 +333,7 @@ function TrustedTorrentCard({
               <button
                 type="button"
                 className="ag-torrent-btn danger-ghost"
-                onClick={() => void torrents.closeShareDownloads(torrent.infoHash)}
+                onClick={() => void torrents.closeShareDownloads(swarmId)}
                 title="Immediately disconnect peers and prevent future downloads"
               >
                 <Lock size={12} aria-hidden="true" />
@@ -337,22 +341,22 @@ function TrustedTorrentCard({
               </button>
             ) : (
               <>
-                {share?.hasLocalData && (
+                {ownShare?.hasLocalData && (
                   <button
                     type="button"
                     className="ag-torrent-btn"
-                    onClick={() => void torrents.reopenShareDownloads(torrent.infoHash)}
+                    onClick={() => void torrents.reopenShareDownloads(swarmId)}
                     title="Resume seeding this file to trusted peers"
                   >
                     <RotateCcw size={12} aria-hidden="true" />
                     <span>Reopen</span>
                   </button>
                 )}
-                {share && (
+                {ownShare && (
                   <button
                     type="button"
                     className="ag-torrent-btn danger-ghost"
-                    onClick={() => void torrents.deleteShareLocalData(torrent.infoHash)}
+                    onClick={() => void torrents.deleteShareLocalData(swarmId)}
                     title="Delete local encrypted pieces from this device"
                   >
                     <Trash2 size={12} aria-hidden="true" />
@@ -362,11 +366,11 @@ function TrustedTorrentCard({
               </>
             )}
 
-            {share?.hasLocalData && (
+            {ownShare?.hasLocalData && (
               <button
                 type="button"
                 className="ag-torrent-btn"
-                onClick={() => void torrents.saveLocalFile(torrent.infoHash)}
+                onClick={() => void torrents.saveLocalFile(swarmId)}
                 title="Save a local copy of this file"
               >
                 <Download size={12} aria-hidden="true" />
@@ -418,7 +422,7 @@ function TrustedTorrentCard({
             <button
               type="button"
               className="ag-torrent-btn"
-              onClick={() => torrents.cancelDownload(torrent.infoHash)}
+              onClick={() => torrents.cancelDownload(swarmId)}
             >
               <X size={12} aria-hidden="true" />
               <span>Cancel</span>
@@ -478,7 +482,7 @@ function TrustedTorrentCard({
               <button
                 type="button"
                 className="ag-torrent-btn primary"
-                onClick={() => void torrents.resumeReSeeding(torrent.infoHash)}
+                onClick={() => void torrents.resumeReSeeding(swarmId)}
                 title="Resume seeding this verified file to trusted peers"
               >
                 <Upload size={12} aria-hidden="true" />
@@ -489,7 +493,7 @@ function TrustedTorrentCard({
             <button
               type="button"
               className={`ag-torrent-btn${isClosedByOriginalSender || isActivelyReSeeding ? ' primary' : ''}`}
-              onClick={() => void torrents.saveLocalFile(torrent.infoHash)}
+              onClick={() => void torrents.saveLocalFile(swarmId)}
             >
               <Download size={12} aria-hidden="true" />
               <span>Save File</span>
@@ -499,7 +503,7 @@ function TrustedTorrentCard({
               <button
                 type="button"
                 className="ag-torrent-btn"
-                onClick={() => torrents.stopReSeeding(torrent.infoHash)}
+                onClick={() => torrents.stopReSeeding(swarmId)}
                 title="Stop seeding to other peers while keeping your local copy"
               >
                 <Square size={11} aria-hidden="true" />
@@ -510,7 +514,7 @@ function TrustedTorrentCard({
             <button
               type="button"
               className="ag-torrent-btn danger-ghost"
-              onClick={() => void torrents.removeDownloadedSeed(torrent.infoHash)}
+              onClick={() => void torrents.removeDownloadedSeed(swarmId)}
               title="Stop seeding and delete the local encrypted copy from this device"
             >
               <Trash2 size={12} aria-hidden="true" />

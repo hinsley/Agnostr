@@ -9667,6 +9667,11 @@ a.ag-untrusted-link {
   color: var(--text-muted);
 }
 
+.ag-settings-torrent-stats {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 .ag-settings-torrent-actions {
   display: inline-flex;
   align-items: center;
@@ -9679,6 +9684,157 @@ a.ag-untrusted-link {
 .ag-settings-torrent-del-btn:hover {
   color: var(--status-danger);
   border-color: color-mix(in srgb, var(--status-danger) 45%, transparent);
+}
+
+/* 6b. Dedicated Settings -> Torrents Tab (Stats Grid, Active Downloads, Nav Pill & Privacy Shortcut) */
+.ag-set-nav-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 19px;
+  padding: 0 0.38rem;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--status-ok);
+  background-color: var(--status-ok-soft);
+  border: 1px solid color-mix(in srgb, var(--status-ok) 32%, transparent);
+  flex-shrink: 0;
+}
+
+.ag-set-nav-item.active .ag-set-nav-pill {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+}
+
+.ag-torrents-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.6rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ag-torrents-stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  padding: 0.72rem 0.78rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.ag-torrents-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  line-height: 1.25;
+}
+
+.ag-torrents-stat-value {
+  font-size: 18px;
+  font-weight: 750;
+  color: var(--text-primary);
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.ag-torrents-stat-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.3;
+}
+
+.ag-torrents-dl-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.44rem;
+  padding: 0.68rem 0.76rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.ag-torrents-dl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.ag-torrents-dl-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--accent);
+}
+
+.ag-torrents-dl-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.ag-torrents-webrtc-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.06rem 0.38rem;
+  border-radius: 999px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--accent);
+  background-color: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ag-torrents-privacy-shortcut {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.68rem 0.78rem;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.ag-torrents-privacy-shortcut-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.ag-torrents-privacy-shortcut-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.ag-torrents-privacy-shortcut-meta {
+  font-size: 11.5px;
+  color: var(--text-secondary);
 }
 
 /* 7. Daylight / Light Theme Refinements */
@@ -9697,11 +9853,20 @@ a.ag-untrusted-link {
 [data-theme='daylight'] .ag-torrent-download-modal-file,
 [data-theme='daylight'] .ag-torrent-download-modal-sender,
 [data-theme='daylight'] .ag-torrent-shares-item,
-[data-theme='daylight'] .ag-settings-torrent-row {
+[data-theme='daylight'] .ag-settings-torrent-row,
+[data-theme='daylight'] .ag-torrents-stat-card,
+[data-theme='daylight'] .ag-torrents-dl-row,
+[data-theme='daylight'] .ag-torrents-privacy-shortcut {
   background-color: #f8fafc;
 }
 
 /* 8. Mobile <= 640px (390px zero horizontal overflow) & Reduced Motion */
+@media (max-width: 820px) {
+  .ag-torrents-stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 640px) {
   .ag-torrent-card,
   .ag-torrent-shield-card {
@@ -9735,6 +9900,24 @@ a.ag-untrusted-link {
   .ag-settings-torrent-actions {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .ag-torrents-stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.48rem;
+  }
+
+  .ag-torrents-stat-card {
+    padding: 0.62rem 0.66rem;
+  }
+
+  .ag-torrents-stat-value {
+    font-size: 16px;
+  }
+
+  .ag-torrents-privacy-shortcut .ag-btn {
+    width: 100%;
+    justify-content: center;
   }
 }
 

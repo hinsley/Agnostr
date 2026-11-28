@@ -195,7 +195,7 @@ export interface TorrentSwarmCallbacks {
   getTrustedSet: () => ReadonlySet<string>
   getBlockedSet: () => ReadonlySet<string>
   getTurnConfig: () => TurnServerConfig | null
-  getActiveSeedShare: (infoHash: string) => StoredTorrentShare | undefined
+  getActiveSeedShare: (swarmId: string) => StoredTorrentShare | undefined
   isOfflineMeshOnly?: () => boolean
   sendDirectSignal: (
     recipientPubkey: string,
@@ -208,17 +208,19 @@ export interface TorrentSwarmCallbacks {
   ) => Promise<void>
   onTransferUpdate: (state: TorrentTransferState) => void
   onShareStatsUpdate: (
-    infoHash: string,
+    swarmId: string,
     patch: { activePeerCount?: number; bytesUploadedDelta?: number; completedDownloadsDelta?: number }
   ) => void
-  onRemoteClosedBySender: (infoHash: string, closedAt: number) => void
+  onRemoteClosedBySender: (swarmId: string, closedAt: number) => void
   onDownloadCompleted: (torrent: TorrentAttachment, pieceHashes: string[]) => Promise<void>
 }
 
 export class TorrentSwarmManager {
   private readonly store: TorrentVaultStore
   private readonly cb: TorrentSwarmCallbacks
+  /** Active download sessions keyed strictly by unique 32-hex swarmId */
   private readonly downloads = new Map<string, ActiveDownloadSession>()
+  /** Active WebRTC links keyed strictly by `${role}:${swarmId}:${peerPubkey}` */
   private readonly links = new Map<string, TorrentPeerLink>()
   private readonly pendingCloseHandles = new Set<{
     timer: ReturnType<typeof setTimeout>
@@ -235,8 +237,8 @@ export class TorrentSwarmManager {
     this.cb = callbacks
   }
 
-  private linkKey(infoHash: string, peerPubkey: string, role: 'seeder' | 'downloader'): string {
-    return `${role}:${infoHash.toLowerCase()}:${peerPubkey.toLowerCase()}`
+  private linkKey(swarmId: string, peerPubkey: string, role: 'seeder' | 'downloader'): string {
+    return `${role}:${swarmId.toLowerCase()}:${peerPubkey.toLowerCase()}`
   }
 
   private isLinkAliveOrFresh(existing: TorrentPeerLink | undefined, graceMs: number): boolean {
@@ -255,19 +257,19 @@ export class TorrentSwarmManager {
     return false
   }
 
-  private getLinksForTorrent(infoHash: string, role?: 'seeder' | 'downloader'): TorrentPeerLink[] {
-    const clean = infoHash.toLowerCase()
+  private getLinksForTorrent(swarmId: string, role?: 'seeder' | 'downloader'): TorrentPeerLink[] {
+    const clean = swarmId.toLowerCase()
     const out: TorrentPeerLink[] = []
     for (const link of this.links.values()) {
-      if (link.infoHash !== clean || link.closed) continue
+      if (link.swarmId !== clean || link.closed) continue
       if (role && link.role !== role) continue
       out.push(link)
     }
     return out
   }
 
-  private countActiveSeedPeers(infoHash: string): number {
-    const clean = infoHash.toLowerCase()
+  private countActiveSeedPeers(swarmId: string): number {
+    const clean = swarmId.toLowerCase()
     const webrtcCount = this.getLinksForTorrent(clean, 'seeder').filter(
       (l) => l.dc?.readyState === 'open' || l.pc.connectionState === 'connected'
     ).length
@@ -286,8 +288,8 @@ export class TorrentSwarmManager {
     return webrtcCount + meshCount
   }
 
-  private recordMeshSeedPeerActivity(infoHash: string, peerPubkey: string): void {
-    const clean = infoHash.toLowerCase()
+  private recordMeshSeedPeerActivity(swarmId: string, peerPubkey: string): void {
+    const clean = swarmId.toLowerCase()
     const pk = peerPubkey.toLowerCase()
     let map = this.meshActiveSeedPeers.get(clean)
     if (!map) {
@@ -311,7 +313,7 @@ export class TorrentSwarmManager {
       if (this.destroyed) return
       const now = Date.now()
       let hasRemaining = false
-      for (const [infoHash, map] of Array.from(this.meshActiveSeedPeers.entries())) {
+      for (const [swarmId, map] of Array.from(this.meshActiveSeedPeers.entries())) {
         let changed = false
         for (const [peerPk, lastSeen] of Array.from(map.entries())) {
           if (now - lastSeen > MESH_PEER_ACTIVE_TTL_MS) {
@@ -320,13 +322,13 @@ export class TorrentSwarmManager {
           }
         }
         if (map.size === 0) {
-          this.meshActiveSeedPeers.delete(infoHash)
+          this.meshActiveSeedPeers.delete(swarmId)
         } else {
           hasRemaining = true
         }
         if (changed) {
-          this.cb.onShareStatsUpdate(infoHash, {
-            activePeerCount: this.countActiveSeedPeers(infoHash),
+          this.cb.onShareStatsUpdate(swarmId, {
+            activePeerCount: this.countActiveSeedPeers(swarmId),
           })
         }
       }
@@ -446,11 +448,12 @@ export class TorrentSwarmManager {
     const connectedPeers =
       session.transport === 'ble-mesh'
         ? session.meshResponsivePeers.size
-        : this.getLinksForTorrent(session.torrent.infoHash, 'downloader').filter(
+        : this.getLinksForTorrent(session.torrent.swarmId, 'downloader').filter(
             (l) => l.dc?.readyState === 'open'
           ).length
 
     this.cb.onTransferUpdate({
+      swarmId: session.torrent.swarmId,
       infoHash: session.torrent.infoHash,
       phase,
       transport: session.transport,
@@ -474,8 +477,9 @@ export class TorrentSwarmManager {
   ): Promise<void> {
     if (this.destroyed) return
     const infoHash = torrent.infoHash.toLowerCase()
+    const swarmId = torrent.swarmId.toLowerCase()
     const cleanSender = senderPubkey.trim().toLowerCase()
-    if (!cleanSender) return
+    if (!cleanSender || !swarmId) return
 
     // Defense-in-depth trust check before ANY network call or RTCPeerConnection
     if (
@@ -489,6 +493,7 @@ export class TorrentSwarmManager {
     const noncePrefixBytes = base64UrlDecode(torrent.encryption.noncePrefixB64)
     if (!keyBytes || keyBytes.length !== 32 || !noncePrefixBytes || noncePrefixBytes.length !== 8) {
       this.cb.onTransferUpdate({
+        swarmId,
         infoHash,
         phase: 'error',
         piecesCompleted: 0,
@@ -505,18 +510,52 @@ export class TorrentSwarmManager {
       return
     }
 
-    // Resume or restart cleanly
-    if (this.downloads.has(infoHash)) {
-      this.cancelDownload(infoHash, false)
+    // Resume or restart cleanly (strictly scoped to this unique swarmId)
+    if (this.downloads.has(swarmId)) {
+      this.cancelDownload(swarmId, false)
     }
 
-    const existingIndices = await this.store.listPieceIndices(infoHash)
-    const completedPieces = new Set<number>(
-      existingIndices.filter((i) => i >= 0 && i < torrent.pieceCount)
+    let existingIndices = (await this.store.listPieceIndices(swarmId)).filter(
+      (i) => i >= 0 && i < torrent.pieceCount
     )
-    const existingShare = await this.store.getShare(infoHash)
+    const existingShare = await this.store.getShare(swarmId)
+    const shareMetaMatches =
+      !existingShare ||
+      (existingShare.infoHash.toLowerCase() === infoHash &&
+        existingShare.encryption.keyB64 === torrent.encryption.keyB64 &&
+        existingShare.encryption.noncePrefixB64 === torrent.encryption.noncePrefixB64)
+
+    // Belt-and-suspenders key verification: ensure any cached pieces under swarmId actually decrypt with this torrent's key
+    if (existingIndices.length > 0) {
+      let sampleValid = shareMetaMatches
+      if (sampleValid) {
+        const sampleCipher = await this.store.getPiece(swarmId, existingIndices[0])
+        if (!sampleCipher) {
+          sampleValid = false
+        } else {
+          const samplePlain = await decryptTorrentPiece({
+            keyBytes,
+            noncePrefixBytes,
+            infoHash,
+            pieceIndex: existingIndices[0],
+            ciphertext: sampleCipher,
+          })
+          sampleValid = Boolean(
+            samplePlain &&
+              samplePlain.byteLength === this.expectedPlaintextPieceSize(torrent, existingIndices[0])
+          )
+        }
+      }
+      if (!sampleValid) {
+        await this.store.deletePiecesForSwarm(swarmId)
+        existingIndices = []
+      }
+    }
+
+    const completedPieces = new Set<number>(existingIndices)
     const cachedHashes =
       existingShare &&
+      shareMetaMatches &&
       Array.isArray(existingShare.pieceHashes) &&
       existingShare.pieceHashes.length === torrent.pieceCount &&
       computeTorrentMerkleRoot(existingShare.pieceHashes) === torrent.piecesRoot
@@ -530,7 +569,7 @@ export class TorrentSwarmManager {
 
     const startInMesh = this.isOfflineMeshOnly()
     const session: ActiveDownloadSession = {
-      torrent: { ...torrent, infoHash, senderPubkey: cleanSender },
+      torrent: { ...torrent, infoHash, swarmId, senderPubkey: cleanSender },
       senderPubkey: cleanSender,
       relays: Array.from(new Set(relays)),
       keyBytes,
@@ -559,7 +598,7 @@ export class TorrentSwarmManager {
       aborted: false,
       verifying: false,
     }
-    this.downloads.set(infoHash, session)
+    this.downloads.set(swarmId, session)
 
     if (completedPieces.size >= torrent.pieceCount) {
       await this.verifyAndFinalizeDownload(session)
@@ -575,7 +614,7 @@ export class TorrentSwarmManager {
       const nonce = generateRandomTokenHex(10)
       const authProof = computeTorrentAuthProof({
         infoHash,
-        swarmId: torrent.swarmId,
+        swarmId,
         keyBytes: session.keyBytes,
         peerPubkey: selfPk,
         nonce,
@@ -583,7 +622,7 @@ export class TorrentSwarmManager {
       const meshOnlyFlag = session.transport === 'ble-mesh' || this.isOfflineMeshOnly()
 
       // Direct NIP-44 seek to sender (if not already connected to sender)
-      const senderLink = this.links.get(this.linkKey(infoHash, cleanSender, 'downloader'))
+      const senderLink = this.links.get(this.linkKey(swarmId, cleanSender, 'downloader'))
       const skipDirect =
         session.transport === 'ble-mesh'
           ? session.meshResponsivePeers.has(cleanSender)
@@ -596,7 +635,7 @@ export class TorrentSwarmManager {
               v: 1,
               action: 'seek',
               infoHash,
-              swarmId: torrent.swarmId,
+              swarmId,
               sessionId: generateRandomTokenHex(8),
               nonce,
               authProof,
@@ -612,14 +651,14 @@ export class TorrentSwarmManager {
       const openPeerCount =
         session.transport === 'ble-mesh'
           ? session.meshResponsivePeers.size
-          : this.getLinksForTorrent(infoHash, 'downloader').length
+          : this.getLinksForTorrent(swarmId, 'downloader').length
       if (openPeerCount < MAX_DOWNLOADER_PEERS_PER_TORRENT) {
         void this.cb
           .publishSwarmBroadcast(
             {
               v: 1,
               action: 'seek',
-              swarmId: torrent.swarmId,
+              swarmId,
               nonce,
               authProof,
               piecesHave: session.completedPieces.size,
@@ -646,7 +685,7 @@ export class TorrentSwarmManager {
       const connected =
         session.transport === 'ble-mesh'
           ? session.meshResponsivePeers.size > 0
-          : this.getLinksForTorrent(infoHash, 'downloader').some((l) => l.dc?.readyState === 'open')
+          : this.getLinksForTorrent(swarmId, 'downloader').some((l) => l.dc?.readyState === 'open')
       if (!connected) {
         this.emitTransferState(session, 'waiting')
       }
@@ -655,8 +694,8 @@ export class TorrentSwarmManager {
     session.seekTimer = globalThis.setInterval(sendSeekWave, SEEK_RETRY_INTERVAL_MS)
   }
 
-  cancelDownload(infoHash: string, emitIdle = true): void {
-    const clean = infoHash.trim().toLowerCase()
+  cancelDownload(swarmId: string, emitIdle = true): void {
+    const clean = swarmId.trim().toLowerCase()
     const session = this.downloads.get(clean)
     if (session) {
       session.aborted = true
@@ -671,14 +710,14 @@ export class TorrentSwarmManager {
     }
   }
 
-  closeShareConnections(infoHash: string, reason = 'sender-closed'): void {
-    const clean = infoHash.trim().toLowerCase()
+  closeShareConnections(swarmId: string, reason = 'sender-closed'): void {
+    const clean = swarmId.trim().toLowerCase()
     const allLinks = this.getLinksForTorrent(clean)
     for (const link of allLinks) {
       let sentClose = false
       if (link.dc && link.dc.readyState === 'open') {
         try {
-          link.dc.send(JSON.stringify({ t: 'closed', infoHash: clean, reason }))
+          link.dc.send(JSON.stringify({ t: 'closed', infoHash: link.infoHash, reason }))
           sentClose = true
         } catch {
           // Best-effort close notification
@@ -694,8 +733,8 @@ export class TorrentSwarmManager {
     this.cb.onShareStatsUpdate(clean, { activePeerCount: 0 })
   }
 
-  abortDownloadAsClosed(infoHash: string): void {
-    const clean = infoHash.trim().toLowerCase()
+  abortDownloadAsClosed(swarmId: string): void {
+    const clean = swarmId.trim().toLowerCase()
     const session = this.downloads.get(clean)
     if (session) {
       session.aborted = true
@@ -710,91 +749,84 @@ export class TorrentSwarmManager {
 
   handleSwarmBroadcast(
     senderPubkey: string,
-    payload: TorrentSwarmBroadcastPayload,
-    matchingInfoHashes: string[]
+    payload: TorrentSwarmBroadcastPayload
   ): void {
     if (this.destroyed) return
     const pk = senderPubkey.trim().toLowerCase()
     const selfPk = this.cb.getSelfPubkey().toLowerCase()
     if (!pk || pk === selfPk) return
+    const swarmId = payload.swarmId.trim().toLowerCase()
+    if (!swarmId) return
 
     if (payload.action === 'closed') {
-      for (const infoHash of matchingInfoHashes) {
-        const dl = this.downloads.get(infoHash)
-        if (dl && dl.senderPubkey === pk) {
-          this.cb.onRemoteClosedBySender(infoHash, payload.closedAt ?? payload.ts)
-          this.abortDownloadAsClosed(infoHash)
-        }
-        const seed = this.cb.getActiveSeedShare(infoHash)
-        if (seed && seed.isReSeed && seed.senderPubkey.toLowerCase() === pk) {
-          this.cb.onRemoteClosedBySender(infoHash, payload.closedAt ?? payload.ts)
-          this.closeShareConnections(infoHash, 'sender-closed')
-        }
+      const dl = this.downloads.get(swarmId)
+      if (dl && dl.senderPubkey === pk) {
+        this.cb.onRemoteClosedBySender(swarmId, payload.closedAt ?? payload.ts)
+        this.abortDownloadAsClosed(swarmId)
+      }
+      const seed = this.cb.getActiveSeedShare(swarmId)
+      if (seed && seed.isReSeed && seed.senderPubkey.toLowerCase() === pk) {
+        this.cb.onRemoteClosedBySender(swarmId, payload.closedAt ?? payload.ts)
+        this.closeShareConnections(swarmId, 'sender-closed')
       }
       return
     }
 
     if (payload.action === 'here') {
-      for (const infoHash of matchingInfoHashes) {
-        const session = this.downloads.get(infoHash)
-        if (!session || session.aborted || session.verifying) continue
-        if (!this.canConnectToPeerForDownload(session, pk)) continue
-        session.discoveredPeers.add(pk)
-        if (payload.meshOnly === true) {
-          const hadResponsive = session.meshResponsivePeers.size > 0
-          session.meshResponsivePeers.add(pk)
-          if (!hadResponsive) {
-            this.clearUnresponsiveMeshInFlight(session)
-          }
-          this.activateMeshTransport(session, [pk])
-        } else if (session.transport === 'ble-mesh') {
-          const hadResponsive = session.meshResponsivePeers.size > 0
-          session.meshResponsivePeers.add(pk)
-          if (!hadResponsive) {
-            this.clearUnresponsiveMeshInFlight(session)
-          }
-          this.addMeshPeer(session, pk)
-          this.driveMeshDownload(session)
-        } else if (session.webrtcFallbackElapsed && session.webrtcFallbackTimer === null) {
-          this.armWebRtcFallbackTimer(session)
+      const session = this.downloads.get(swarmId)
+      if (!session || session.aborted || session.verifying) return
+      if (!this.canConnectToPeerForDownload(session, pk)) return
+      session.discoveredPeers.add(pk)
+      if (payload.meshOnly === true) {
+        const hadResponsive = session.meshResponsivePeers.size > 0
+        session.meshResponsivePeers.add(pk)
+        if (!hadResponsive) {
+          this.clearUnresponsiveMeshInFlight(session)
         }
+        this.activateMeshTransport(session, [pk])
+      } else if (session.transport === 'ble-mesh') {
+        const hadResponsive = session.meshResponsivePeers.size > 0
+        session.meshResponsivePeers.add(pk)
+        if (!hadResponsive) {
+          this.clearUnresponsiveMeshInFlight(session)
+        }
+        this.addMeshPeer(session, pk)
+        this.driveMeshDownload(session)
+      } else if (session.webrtcFallbackElapsed && session.webrtcFallbackTimer === null) {
+        this.armWebRtcFallbackTimer(session)
       }
       return
     }
 
     if (payload.action === 'seek' && payload.nonce && payload.authProof) {
-      for (const infoHash of matchingInfoHashes) {
-        const share = this.cb.getActiveSeedShare(infoHash)
-        if (share) {
-          if (this.canAcceptPeerForSeed(share, pk, payload.nonce, payload.authProof)) {
-            this.broadcastHereIfAllowed(
-              share.infoHash,
-              share.swarmId,
-              share.pieceCount,
-              share.pieceCount,
-              share.relays
-            )
-            if (!payload.meshOnly && !this.isOfflineMeshOnly()) {
-              void this.initiateSeederOffer(share, pk, generateRandomTokenHex(8))
-            }
-          }
-          continue
-        }
-        const partial = this.downloads.get(infoHash)
-        if (
-          partial &&
-          this.canAcceptPeerForPartialDownloadSeed(partial, pk, payload.nonce, payload.authProof)
-        ) {
+      const share = this.cb.getActiveSeedShare(swarmId)
+      if (share) {
+        if (this.canAcceptPeerForSeed(share, pk, payload.nonce, payload.authProof)) {
           this.broadcastHereIfAllowed(
-            partial.torrent.infoHash,
-            partial.torrent.swarmId,
-            partial.completedPieces.size,
-            partial.torrent.pieceCount,
-            partial.relays
+            share.swarmId,
+            share.pieceCount,
+            share.pieceCount,
+            share.relays
           )
           if (!payload.meshOnly && !this.isOfflineMeshOnly()) {
-            void this.initiatePartialSeederOffer(partial, pk, generateRandomTokenHex(8))
+            void this.initiateSeederOffer(share, pk, generateRandomTokenHex(8))
           }
+        }
+        return
+      }
+      const partial = this.downloads.get(swarmId)
+      if (
+        partial &&
+        this.canAcceptPeerForPartialDownloadSeed(partial, pk, payload.nonce, payload.authProof)
+      ) {
+        this.broadcastHereIfAllowed(
+          partial.torrent.swarmId,
+          partial.completedPieces.size,
+          partial.torrent.pieceCount,
+          partial.relays
+        )
+        if (!payload.meshOnly && !this.isOfflineMeshOnly()) {
+          void this.initiatePartialSeederOffer(partial, pk, generateRandomTokenHex(8))
         }
       }
     }
@@ -811,6 +843,7 @@ export class TorrentSwarmManager {
     if (this.cb.getBlockedSet().has(pk)) return
 
     const infoHash = payload.infoHash.toLowerCase()
+    const swarmId = payload.swarmId.toLowerCase()
 
     if (payload.action === 'mesh-meta-req') {
       await this.handleMeshMetaReq(pk, payload)
@@ -830,11 +863,11 @@ export class TorrentSwarmManager {
     }
 
     if (payload.action === 'seek') {
-      const share = this.cb.getActiveSeedShare(infoHash)
+      const share = this.cb.getActiveSeedShare(swarmId)
       if (share) {
+        if (share.infoHash.toLowerCase() !== infoHash) return
         if (!this.canAcceptPeerForSeed(share, pk, payload.nonce, payload.authProof)) return
         this.broadcastHereIfAllowed(
-          share.infoHash,
           share.swarmId,
           share.pieceCount,
           share.pieceCount,
@@ -845,13 +878,13 @@ export class TorrentSwarmManager {
         }
         return
       }
-      const partial = this.downloads.get(infoHash)
+      const partial = this.downloads.get(swarmId)
       if (
         partial &&
+        partial.torrent.infoHash.toLowerCase() === infoHash &&
         this.canAcceptPeerForPartialDownloadSeed(partial, pk, payload.nonce, payload.authProof)
       ) {
         this.broadcastHereIfAllowed(
-          partial.torrent.infoHash,
           partial.torrent.swarmId,
           partial.completedPieces.size,
           partial.torrent.pieceCount,
@@ -865,8 +898,9 @@ export class TorrentSwarmManager {
     }
 
     if (payload.action === 'offer') {
-      const session = this.downloads.get(infoHash)
+      const session = this.downloads.get(swarmId)
       if (!session || session.aborted) return
+      if (session.torrent.infoHash.toLowerCase() !== infoHash) return
       if (!this.canConnectToPeerForDownload(session, pk)) return
       const expectedProof = computeTorrentAuthProof({
         infoHash,
@@ -884,8 +918,16 @@ export class TorrentSwarmManager {
     }
 
     if (payload.action === 'answer') {
-      const link = this.links.get(this.linkKey(infoHash, pk, 'seeder'))
-      if (!link || link.closed || link.sessionId !== payload.sessionId || !payload.sdp) return
+      const link = this.links.get(this.linkKey(swarmId, pk, 'seeder'))
+      if (
+        !link ||
+        link.closed ||
+        link.infoHash !== infoHash ||
+        link.sessionId !== payload.sessionId ||
+        !payload.sdp
+      ) {
+        return
+      }
       try {
         await link.pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp })
         await this.flushPendingIce(link)
@@ -902,9 +944,11 @@ export class TorrentSwarmManager {
       if (candidates.length === 0) return
 
       const candidateLinks = [
-        this.links.get(this.linkKey(infoHash, pk, 'seeder')),
-        this.links.get(this.linkKey(infoHash, pk, 'downloader')),
-      ].filter((l): l is TorrentPeerLink => Boolean(l && !l.closed && l.sessionId === payload.sessionId))
+        this.links.get(this.linkKey(swarmId, pk, 'seeder')),
+        this.links.get(this.linkKey(swarmId, pk, 'downloader')),
+      ].filter((l): l is TorrentPeerLink =>
+        Boolean(l && !l.closed && l.infoHash === infoHash && l.sessionId === payload.sessionId)
+      )
 
       for (const link of candidateLinks) {
         for (const c of candidates) {
@@ -930,13 +974,13 @@ export class TorrentSwarmManager {
     if (typeof RTCPeerConnection === 'undefined' || !session.pieceHashes) return
     const infoHash = session.torrent.infoHash
     const swarmId = session.torrent.swarmId
-    const key = this.linkKey(infoHash, peerPubkey, 'seeder')
+    const key = this.linkKey(swarmId, peerPubkey, 'seeder')
     const existing = this.links.get(key)
     if (this.isLinkAliveOrFresh(existing, 6_000)) {
       return
     }
     if (existing) this.closeLink(existing)
-    if (this.getLinksForTorrent(infoHash, 'seeder').length >= MAX_SEEDER_PEERS_PER_TORRENT) {
+    if (this.getLinksForTorrent(swarmId, 'seeder').length >= MAX_SEEDER_PEERS_PER_TORRENT) {
       return
     }
 
@@ -1010,14 +1054,15 @@ export class TorrentSwarmManager {
     sessionId: string
   ): Promise<void> {
     if (typeof RTCPeerConnection === 'undefined') return
-    const key = this.linkKey(share.infoHash, peerPubkey, 'seeder')
+    const swarmId = share.swarmId.toLowerCase()
+    const key = this.linkKey(swarmId, peerPubkey, 'seeder')
     const existing = this.links.get(key)
     if (this.isLinkAliveOrFresh(existing, 6_000)) {
       return
     }
     if (existing) this.closeLink(existing)
 
-    if (this.getLinksForTorrent(share.infoHash, 'seeder').length >= MAX_SEEDER_PEERS_PER_TORRENT) {
+    if (this.getLinksForTorrent(swarmId, 'seeder').length >= MAX_SEEDER_PEERS_PER_TORRENT) {
       return
     }
 
@@ -1097,7 +1142,7 @@ export class TorrentSwarmManager {
     remoteSdp: string
   ): Promise<void> {
     if (typeof RTCPeerConnection === 'undefined') return
-    const key = this.linkKey(session.torrent.infoHash, peerPubkey, 'downloader')
+    const key = this.linkKey(session.torrent.swarmId, peerPubkey, 'downloader')
     const existing = this.links.get(key)
     if (this.isLinkAliveOrFresh(existing, 4_000)) {
       return
@@ -1105,7 +1150,7 @@ export class TorrentSwarmManager {
     if (existing) this.closeLink(existing)
 
     if (
-      this.getLinksForTorrent(session.torrent.infoHash, 'downloader').length >=
+      this.getLinksForTorrent(session.torrent.swarmId, 'downloader').length >=
       MAX_DOWNLOADER_PEERS_PER_TORRENT
     ) {
       return
@@ -1270,11 +1315,11 @@ export class TorrentSwarmManager {
       | { kind: 'share'; share: StoredTorrentShare }
       | { kind: 'partial'; session: ActiveDownloadSession }
       | null => {
-      const liveShare = this.cb.getActiveSeedShare(infoHash)
+      const liveShare = this.cb.getActiveSeedShare(swarmId)
       if (liveShare && liveShare.status === 'active' && liveShare.hasLocalData) {
         return { kind: 'share', share: liveShare }
       }
-      const partial = this.downloads.get(infoHash)
+      const partial = this.downloads.get(swarmId)
       if (partial && !partial.aborted && partial.completedPieces.size > 0 && partial.pieceHashes) {
         return { kind: 'partial', session: partial }
       }
@@ -1289,8 +1334,8 @@ export class TorrentSwarmManager {
         this.closeLink(link)
         return
       }
-      this.cb.onShareStatsUpdate(infoHash, {
-        activePeerCount: this.countActiveSeedPeers(infoHash),
+      this.cb.onShareStatsUpdate(swarmId, {
+        activePeerCount: this.countActiveSeedPeers(swarmId),
       })
       const selfPk = this.cb.getSelfPubkey().toLowerCase()
       const nonce = generateRandomTokenHex(8)
@@ -1375,7 +1420,7 @@ export class TorrentSwarmManager {
       if (msg.t === 'done') {
         if (!link.countedCompletion) {
           link.countedCompletion = true
-          this.cb.onShareStatsUpdate(infoHash, { completedDownloadsDelta: 1 })
+          this.cb.onShareStatsUpdate(swarmId, { completedDownloadsDelta: 1 })
         }
       }
     }
@@ -1394,8 +1439,8 @@ export class TorrentSwarmManager {
     link.uploading = true
     try {
       while (!link.closed && link.dc && link.dc.readyState === 'open' && link.uploadQueue.length > 0) {
-        const liveShare = this.cb.getActiveSeedShare(link.infoHash)
-        const partialSession = !liveShare ? this.downloads.get(link.infoHash) : undefined
+        const liveShare = this.cb.getActiveSeedShare(link.swarmId)
+        const partialSession = !liveShare ? this.downloads.get(link.swarmId) : undefined
         const canServe =
           Boolean(liveShare && liveShare.status === 'active' && liveShare.hasLocalData) ||
           Boolean(partialSession && !partialSession.aborted && partialSession.completedPieces.size > 0)
@@ -1406,7 +1451,7 @@ export class TorrentSwarmManager {
         }
         const pieceIndex = link.uploadQueue.shift()
         if (pieceIndex === undefined) break
-        const encryptedPiece = await this.store.getPiece(link.infoHash, pieceIndex)
+        const encryptedPiece = await this.store.getPiece(link.swarmId, pieceIndex)
         if (!encryptedPiece || link.closed || !link.dc || link.dc.readyState !== 'open') continue
 
         const totalLen = encryptedPiece.byteLength
@@ -1421,7 +1466,7 @@ export class TorrentSwarmManager {
           const slice = encryptedPiece.subarray(offset, end)
           const frame = encodeTorrentPieceChunkFrame(pieceIndex, offset, totalLen, slice)
           link.dc.send(frame)
-          this.cb.onShareStatsUpdate(link.infoHash, { bytesUploadedDelta: slice.byteLength })
+          this.cb.onShareStatsUpdate(link.swarmId, { bytesUploadedDelta: slice.byteLength })
           offset = end
         }
       }
@@ -1526,8 +1571,8 @@ export class TorrentSwarmManager {
 
     if (msg.t === 'closed') {
       if (link.peerPubkey === session.senderPubkey) {
-        this.cb.onRemoteClosedBySender(session.torrent.infoHash, Date.now())
-        this.abortDownloadAsClosed(session.torrent.infoHash)
+        this.cb.onRemoteClosedBySender(session.torrent.swarmId, Date.now())
+        this.abortDownloadAsClosed(session.torrent.swarmId)
       } else {
         this.closeLink(link)
         this.scheduleDownloadRequests(session)
@@ -1663,7 +1708,7 @@ export class TorrentSwarmManager {
         }
       }
 
-      await this.store.putPiece(session.torrent.infoHash, pieceIndex, assembly.buffer)
+      await this.store.putPiece(session.torrent.swarmId, pieceIndex, assembly.buffer)
       if (session.aborted) return
 
       session.completedPieces.add(pieceIndex)
@@ -1677,7 +1722,7 @@ export class TorrentSwarmManager {
     }
 
     // Notify ALL connected peers (downloaders & seeder upload channels) that we now have this piece
-    for (const peerLink of this.getLinksForTorrent(session.torrent.infoHash)) {
+    for (const peerLink of this.getLinksForTorrent(session.torrent.swarmId)) {
       if (peerLink.dc?.readyState === 'open') {
         this.sendControl(peerLink.dc, {
           t: 'have',
@@ -1698,7 +1743,7 @@ export class TorrentSwarmManager {
 
   private scheduleDownloadRequests(session: ActiveDownloadSession): void {
     if (session.aborted || session.verifying) return
-    const downloaderLinks = this.getLinksForTorrent(session.torrent.infoHash, 'downloader').filter(
+    const downloaderLinks = this.getLinksForTorrent(session.torrent.swarmId, 'downloader').filter(
       (l) => l.dc?.readyState === 'open'
     )
     if (downloaderLinks.length === 0) return
@@ -1754,13 +1799,12 @@ export class TorrentSwarmManager {
   }
 
   private broadcastHereIfAllowed(
-    infoHash: string,
     swarmId: string,
     piecesHave: number,
     pieceCount: number,
     relays: string[]
   ): void {
-    const clean = infoHash.toLowerCase()
+    const clean = swarmId.toLowerCase()
     const now = Date.now()
     const last = this.lastHereBroadcastAt.get(clean) ?? 0
     if (now - last < HERE_BROADCAST_THROTTLE_MS) return
@@ -1770,7 +1814,7 @@ export class TorrentSwarmManager {
         {
           v: 1,
           action: 'here',
-          swarmId: swarmId.toLowerCase(),
+          swarmId: clean,
           piecesHave,
           pieceCount,
           ...(this.isOfflineMeshOnly() ? { meshOnly: true } : {}),
@@ -1792,7 +1836,7 @@ export class TorrentSwarmManager {
       session.webrtcFallbackTimer = null
       session.webrtcFallbackElapsed = true
       if (session.aborted || session.verifying || session.transport !== 'webrtc') return
-      const hasOpenDc = this.getLinksForTorrent(session.torrent.infoHash, 'downloader').some(
+      const hasOpenDc = this.getLinksForTorrent(session.torrent.swarmId, 'downloader').some(
         (l) => l.dc?.readyState === 'open'
       )
       if (!hasOpenDc && session.discoveredPeers.size > 0) {
@@ -1819,7 +1863,7 @@ export class TorrentSwarmManager {
 
     // Close any stalled WebRTC downloader links when switching to BLE Mesh bridge
     if (!wasMesh) {
-      for (const link of this.getLinksForTorrent(session.torrent.infoHash, 'downloader')) {
+      for (const link of this.getLinksForTorrent(session.torrent.swarmId, 'downloader')) {
         this.closeLink(link)
       }
     }
@@ -2039,25 +2083,25 @@ export class TorrentSwarmManager {
     payload: TorrentMeshMetaReqPayload
   ): Promise<void> {
     const infoHash = payload.infoHash.toLowerCase()
+    const swarmId = payload.swarmId.toLowerCase()
     const authNonce = payload.nonce ?? String(payload.ts)
-    const share = this.cb.getActiveSeedShare(infoHash)
-    const partial = !share ? this.downloads.get(infoHash) : undefined
+    const share = this.cb.getActiveSeedShare(swarmId)
+    const partial = !share ? this.downloads.get(swarmId) : undefined
 
     let pieceHashes: string[] | null = null
-    let swarmId = ''
     let relays: string[] = []
 
     if (share) {
+      if (share.infoHash.toLowerCase() !== infoHash) return
       if (!this.canAcceptPeerForSeed(share, peerPubkey, authNonce, payload.authProof)) return
       pieceHashes = share.pieceHashes
-      swarmId = share.swarmId
       relays = share.relays
     } else if (partial) {
+      if (partial.torrent.infoHash.toLowerCase() !== infoHash) return
       if (!this.canAcceptPeerForPartialDownloadSeed(partial, peerPubkey, authNonce, payload.authProof)) {
         return
       }
       pieceHashes = partial.pieceHashes
-      swarmId = partial.torrent.swarmId
       relays = partial.relays
     } else {
       return
@@ -2068,7 +2112,7 @@ export class TorrentSwarmManager {
     const page = pieceHashes.slice(offset, offset + MESH_HASHES_PER_PAGE)
     if (page.length === 0) return
 
-    this.recordMeshSeedPeerActivity(infoHash, peerPubkey)
+    this.recordMeshSeedPeerActivity(swarmId, peerPubkey)
     await this.cb
       .sendDirectSignal(
         peerPubkey,
@@ -2089,8 +2133,10 @@ export class TorrentSwarmManager {
 
   private handleMeshMetaRes(peerPubkey: string, payload: TorrentMeshMetaResPayload): void {
     const infoHash = payload.infoHash.toLowerCase()
-    const session = this.downloads.get(infoHash)
+    const swarmId = payload.swarmId.toLowerCase()
+    const session = this.downloads.get(swarmId)
     if (!session || session.aborted || session.verifying || session.pieceHashes) return
+    if (session.torrent.infoHash.toLowerCase() !== infoHash) return
     if (!this.canConnectToPeerForDownload(session, peerPubkey)) return
     if (payload.totalHashes !== session.torrent.pieceCount) return
     if (payload.offset + payload.hashes.length > session.torrent.pieceCount) return
@@ -2138,33 +2184,33 @@ export class TorrentSwarmManager {
     payload: TorrentMeshChunkReqPayload
   ): Promise<void> {
     const infoHash = payload.infoHash.toLowerCase()
+    const swarmId = payload.swarmId.toLowerCase()
     const authNonce = payload.nonce ?? String(payload.ts)
-    const share = this.cb.getActiveSeedShare(infoHash)
-    const partial = !share ? this.downloads.get(infoHash) : undefined
+    const share = this.cb.getActiveSeedShare(swarmId)
+    const partial = !share ? this.downloads.get(swarmId) : undefined
 
     let pieceCount = 0
-    let swarmId = ''
     let relays: string[] = []
 
     if (share) {
+      if (share.infoHash.toLowerCase() !== infoHash) return
       if (!this.canAcceptPeerForSeed(share, peerPubkey, authNonce, payload.authProof)) return
       pieceCount = share.pieceCount
-      swarmId = share.swarmId
       relays = share.relays
     } else if (partial) {
+      if (partial.torrent.infoHash.toLowerCase() !== infoHash) return
       if (!this.canAcceptPeerForPartialDownloadSeed(partial, peerPubkey, authNonce, payload.authProof)) {
         return
       }
       if (!partial.completedPieces.has(payload.pieceIndex)) return
       pieceCount = partial.torrent.pieceCount
-      swarmId = partial.torrent.swarmId
       relays = partial.relays
     } else {
       return
     }
 
     if (payload.pieceIndex < 0 || payload.pieceIndex >= pieceCount) return
-    const encryptedPiece = await this.store.getPiece(infoHash, payload.pieceIndex)
+    const encryptedPiece = await this.store.getPiece(swarmId, payload.pieceIndex)
     if (!encryptedPiece || encryptedPiece.byteLength === 0) return
 
     const chunkSize = Math.max(1, Math.min(MESH_CHUNK_BYTES, payload.chunkSize))
@@ -2194,20 +2240,20 @@ export class TorrentSwarmManager {
       )
       .catch(() => {})
 
-    this.recordMeshSeedPeerActivity(infoHash, peerPubkey)
+    this.recordMeshSeedPeerActivity(swarmId, peerPubkey)
     let completedDownloadsDelta: number | undefined
     if (
       share &&
       payload.pieceIndex === share.pieceCount - 1 &&
       payload.chunkIndex === totalChunks - 1
     ) {
-      const doneKey = `${infoHash}:${peerPubkey}`
+      const doneKey = `${swarmId}:${peerPubkey}`
       if (!this.meshCompletedPeers.has(doneKey)) {
         this.meshCompletedPeers.add(doneKey)
         completedDownloadsDelta = 1
       }
     }
-    this.cb.onShareStatsUpdate(infoHash, {
+    this.cb.onShareStatsUpdate(swarmId, {
       bytesUploadedDelta: slice.byteLength,
       ...(completedDownloadsDelta ? { completedDownloadsDelta } : {}),
     })
@@ -2218,8 +2264,10 @@ export class TorrentSwarmManager {
     payload: TorrentMeshChunkResPayload
   ): Promise<void> {
     const infoHash = payload.infoHash.toLowerCase()
-    const session = this.downloads.get(infoHash)
+    const swarmId = payload.swarmId.toLowerCase()
+    const session = this.downloads.get(swarmId)
     if (!session || session.aborted || session.verifying || !session.pieceHashes) return
+    if (session.torrent.infoHash.toLowerCase() !== infoHash) return
     if (!this.canConnectToPeerForDownload(session, peerPubkey)) return
     if (payload.pieceIndex < 0 || payload.pieceIndex >= session.torrent.pieceCount) return
     if (
@@ -2302,7 +2350,7 @@ export class TorrentSwarmManager {
         }
       }
 
-      await this.store.putPiece(infoHash, payload.pieceIndex, assembly.buffer)
+      await this.store.putPiece(swarmId, payload.pieceIndex, assembly.buffer)
       if (session.aborted) return
 
       session.completedPieces.add(payload.pieceIndex)
@@ -2328,13 +2376,14 @@ export class TorrentSwarmManager {
 
     this.emitTransferState(session, 'verifying')
 
+    const swarmId = session.torrent.swarmId
     const fullHasher = sha256.create()
     const computedPieceHashes: string[] = []
     let totalVerifiedBytes = 0
 
     for (let i = 0; i < session.torrent.pieceCount; i += 1) {
       if (session.aborted) return
-      const encrypted = await this.store.getPiece(session.torrent.infoHash, i)
+      const encrypted = await this.store.getPiece(swarmId, i)
       if (!encrypted) {
         await this.failDownload(session, `Missing piece ${i + 1}/${session.torrent.pieceCount}.`)
         return
@@ -2362,13 +2411,13 @@ export class TorrentSwarmManager {
       actualFullHash !== session.torrent.plaintextSha256.toLowerCase() ||
       actualPiecesRoot !== session.torrent.piecesRoot.toLowerCase()
     ) {
-      await this.store.deletePiecesForInfoHash(session.torrent.infoHash)
+      await this.store.deletePiecesForSwarm(swarmId)
       await this.failDownload(session, 'SHA-256 verification mismatch — file rejected.')
       return
     }
 
     // Notify connected seeders that transfer completed cleanly
-    for (const link of this.getLinksForTorrent(session.torrent.infoHash, 'downloader')) {
+    for (const link of this.getLinksForTorrent(swarmId, 'downloader')) {
       const sentDone = link.dc?.readyState === 'open'
       if (sentDone && link.dc) {
         this.sendControl(link.dc, { t: 'done', infoHash: session.torrent.infoHash })
@@ -2376,7 +2425,7 @@ export class TorrentSwarmManager {
       this.closeLink(link, sentDone ? 150 : 0)
     }
 
-    this.downloads.delete(session.torrent.infoHash)
+    this.downloads.delete(swarmId)
     await this.cb.onDownloadCompleted(session.torrent, computedPieceHashes)
     this.emitTransferState(session, 'completed', {
       completedAvailable: true,
@@ -2386,8 +2435,8 @@ export class TorrentSwarmManager {
 
   private async failDownload(session: ActiveDownloadSession, error: string): Promise<void> {
     this.clearSessionTimers(session)
-    this.downloads.delete(session.torrent.infoHash)
-    for (const link of this.getLinksForTorrent(session.torrent.infoHash, 'downloader')) {
+    this.downloads.delete(session.torrent.swarmId)
+    for (const link of this.getLinksForTorrent(session.torrent.swarmId, 'downloader')) {
       this.closeLink(link)
     }
     this.emitTransferState(session, 'error', { error })
@@ -2413,7 +2462,7 @@ export class TorrentSwarmManager {
 
     // Release any in-flight pieces assigned to this peer so other peers can finish them
     if (link.role === 'downloader') {
-      const session = this.downloads.get(link.infoHash)
+      const session = this.downloads.get(link.swarmId)
       if (session) {
         for (const pieceIdx of link.inFlightRequests) {
           if (session.inFlightGlobal.get(pieceIdx) === link.peerPubkey) {
@@ -2454,8 +2503,8 @@ export class TorrentSwarmManager {
     }
 
     if (link.role === 'seeder') {
-      this.cb.onShareStatsUpdate(link.infoHash, {
-        activePeerCount: this.countActiveSeedPeers(link.infoHash),
+      this.cb.onShareStatsUpdate(link.swarmId, {
+        activePeerCount: this.countActiveSeedPeers(link.swarmId),
       })
     }
   }
@@ -2469,8 +2518,8 @@ export class TorrentSwarmManager {
     this.meshActiveSeedPeers.clear()
     this.meshCompletedPeers.clear()
     this.lastHereBroadcastAt.clear()
-    for (const infoHash of Array.from(this.downloads.keys())) {
-      this.cancelDownload(infoHash, false)
+    for (const swarmId of Array.from(this.downloads.keys())) {
+      this.cancelDownload(swarmId, false)
     }
     for (const link of Array.from(this.links.values())) {
       this.closeLink(link)

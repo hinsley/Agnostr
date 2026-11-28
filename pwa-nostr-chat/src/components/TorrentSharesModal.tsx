@@ -78,14 +78,15 @@ export function TorrentSharesModal({ open, torrents, onClose }: TorrentSharesMod
   const hasBothGroups = ownShares.length > 0 && peerSeeds.length > 0
 
   const renderShareItem = (share: TorrentShareRecord) => {
+    const swarmId = share.swarmId.toLowerCase()
     const isPeerSeed = Boolean(share.isReSeed)
-    const closedByOriginalSender = isPeerSeed && Boolean(torrents.closedBySender[share.infoHash])
+    const closedByOriginalSender = isPeerSeed && Boolean(torrents.closedBySender[swarmId])
     const isActive = share.status === 'active' && !closedByOriginalSender
     const ext = getTorrentFileExtension(share.fileName)
 
     return (
       <div
-        key={share.infoHash}
+        key={swarmId}
         className={`ag-torrent-shares-item${isActive ? '' : ' is-closed'}`}
       >
         <div className="ag-torrent-shares-item-top">
@@ -158,7 +159,7 @@ export function TorrentSharesModal({ open, torrents, onClose }: TorrentSharesMod
                   <button
                     type="button"
                     className="ag-torrent-btn"
-                    onClick={() => torrents.stopReSeeding(share.infoHash)}
+                    onClick={() => torrents.stopReSeeding(swarmId)}
                     title="Stop seeding to other peers while keeping your local copy"
                   >
                     <Square size={11} aria-hidden="true" />
@@ -169,7 +170,7 @@ export function TorrentSharesModal({ open, torrents, onClose }: TorrentSharesMod
                     <button
                       type="button"
                       className="ag-torrent-btn primary"
-                      onClick={() => void torrents.resumeReSeeding(share.infoHash)}
+                      onClick={() => void torrents.resumeReSeeding(swarmId)}
                       title="Resume seeding this verified file to trusted peers"
                     >
                       <Upload size={12} aria-hidden="true" />
@@ -182,7 +183,7 @@ export function TorrentSharesModal({ open, torrents, onClose }: TorrentSharesMod
                 <button
                   type="button"
                   className="ag-torrent-btn"
-                  onClick={() => void torrents.saveLocalFile(share.infoHash)}
+                  onClick={() => void torrents.saveLocalFile(swarmId)}
                 >
                   <Download size={12} aria-hidden="true" />
                   <span>Save</span>
@@ -192,7 +193,7 @@ export function TorrentSharesModal({ open, torrents, onClose }: TorrentSharesMod
               <button
                 type="button"
                 className="ag-torrent-btn danger-ghost"
-                onClick={() => void torrents.removeDownloadedSeed(share.infoHash)}
+                onClick={() => void torrents.removeDownloadedSeed(swarmId)}
                 title="Stop seeding and delete local downloaded seed pieces"
               >
                 <Trash2 size={12} aria-hidden="true" />
@@ -205,7 +206,7 @@ export function TorrentSharesModal({ open, torrents, onClose }: TorrentSharesMod
                 <button
                   type="button"
                   className="ag-torrent-btn danger-ghost"
-                  onClick={() => void torrents.closeShareDownloads(share.infoHash)}
+                  onClick={() => void torrents.closeShareDownloads(swarmId)}
                 >
                   <Lock size={12} aria-hidden="true" />
                   <span>Close Downloads</span>
@@ -215,7 +216,7 @@ export function TorrentSharesModal({ open, torrents, onClose }: TorrentSharesMod
                   <button
                     type="button"
                     className="ag-torrent-btn"
-                    onClick={() => void torrents.reopenShareDownloads(share.infoHash)}
+                    onClick={() => void torrents.reopenShareDownloads(swarmId)}
                   >
                     <RotateCcw size={12} aria-hidden="true" />
                     <span>Reopen</span>
@@ -227,7 +228,7 @@ export function TorrentSharesModal({ open, torrents, onClose }: TorrentSharesMod
                 <button
                   type="button"
                   className="ag-torrent-btn"
-                  onClick={() => void torrents.saveLocalFile(share.infoHash)}
+                  onClick={() => void torrents.saveLocalFile(swarmId)}
                 >
                   <Download size={12} aria-hidden="true" />
                   <span>Save</span>
@@ -237,7 +238,7 @@ export function TorrentSharesModal({ open, torrents, onClose }: TorrentSharesMod
               <button
                 type="button"
                 className="ag-torrent-btn danger-ghost"
-                onClick={() => void torrents.deleteShareLocalData(share.infoHash)}
+                onClick={() => void torrents.deleteShareLocalData(swarmId)}
               >
                 <Trash2 size={12} aria-hidden="true" />
                 <span>Delete local copy</span>

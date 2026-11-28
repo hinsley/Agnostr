@@ -240,20 +240,20 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
   }, [])
 
   const recordClosedBySender = useCallback(
-    (infoHash: string, closedAt: number) => {
-      const cleanHash = infoHash.trim().toLowerCase()
-      if (!/^[0-9a-f]{64}$/.test(cleanHash)) return
+    (swarmId: string, closedAt: number) => {
+      const cleanSwarm = swarmId.trim().toLowerCase()
+      if (!/^[0-9a-f]{32}$/.test(cleanSwarm)) return
       const ts = Number.isFinite(closedAt) && closedAt > 0 ? Math.floor(closedAt) : Date.now()
-      saveCachedRevocation(cleanHash, ts)
+      saveCachedRevocation(cleanSwarm, ts)
       setClosedBySender((prev) => {
-        if ((prev[cleanHash] ?? 0) >= ts) return prev
-        const next = { ...prev, [cleanHash]: ts }
+        if ((prev[cleanSwarm] ?? 0) >= ts) return prev
+        const next = { ...prev, [cleanSwarm]: ts }
         closedBySenderRef.current = next
         return next
       })
-      activeDownloadTorrentsRef.current.delete(cleanHash)
-      // If we were re-seeding a downloaded copy of this torrent, stop immediately
-      const existing = allSharesRef.current.get(cleanHash)
+      activeDownloadTorrentsRef.current.delete(cleanSwarm)
+      // If we were re-seeding a downloaded copy of this specific swarm, stop immediately
+      const existing = allSharesRef.current.get(cleanSwarm)
       if (existing && existing.isReSeed && existing.status === 'active') {
         const closedCopy: StoredTorrentShare = {
           ...existing,
@@ -261,17 +261,17 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
           closedAt: ts,
           activePeerCount: 0,
         }
-        allSharesRef.current.set(cleanHash, closedCopy)
+        allSharesRef.current.set(cleanSwarm, closedCopy)
         syncSharesStateFromRef()
         void storeRef.current?.putShare(closedCopy)
-        swarmRef.current?.closeShareConnections(cleanHash, 'sender-closed')
+        swarmRef.current?.closeShareConnections(cleanSwarm, 'sender-closed')
       }
       setTransfers((prev) => {
-        const cur = prev[cleanHash]
+        const cur = prev[cleanSwarm]
         if (!cur) return prev
         return {
           ...prev,
-          [cleanHash]: {
+          [cleanSwarm]: {
             ...cur,
             phase: cur.completedAvailable ? 'completed' : 'closed',
             isReSeeding: false,
@@ -285,6 +285,28 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     },
     [syncSharesStateFromRef]
   )
+
+  const clearClosedBySender = useCallback((swarmId: string, reopenedAt?: number) => {
+    const cleanSwarm = swarmId.trim().toLowerCase()
+    if (!/^[0-9a-f]{32}$/.test(cleanSwarm)) return
+    const existingClosedAt = closedBySenderRef.current[cleanSwarm] ?? 0
+    if (
+      typeof reopenedAt === 'number' &&
+      Number.isFinite(reopenedAt) &&
+      existingClosedAt > 0 &&
+      reopenedAt <= existingClosedAt
+    ) {
+      return
+    }
+    clearCachedRevocation(cleanSwarm)
+    setClosedBySender((prev) => {
+      if (!(cleanSwarm in prev)) return prev
+      const next = { ...prev }
+      delete next[cleanSwarm]
+      closedBySenderRef.current = next
+      return next
+    })
+  }, [])
 
   // Initialize profile-scoped IndexedDB vault + WebRTC swarm manager and auto-resume persistent shares
   useEffect(() => {
@@ -300,8 +322,8 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
       getTrustedSet: () => trustedSetRef.current,
       getBlockedSet: () => blockedSetRef.current,
       getTurnConfig: () => turnConfigRef.current,
-      getActiveSeedShare: (infoHash) => {
-        const s = allSharesRef.current.get(infoHash.toLowerCase())
+      getActiveSeedShare: (swarmId) => {
+        const s = allSharesRef.current.get(swarmId.toLowerCase())
         if (!s || s.status !== 'active' || !s.hasLocalData) return undefined
         return s
       },
@@ -326,28 +348,30 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
       },
       onTransferUpdate: (state) => {
         if (cancelled) return
+        const cleanSwarm = state.swarmId.toLowerCase()
         if (
           state.phase === 'completed' ||
           state.phase === 'closed' ||
           state.phase === 'error' ||
           state.phase === 'idle'
         ) {
-          activeDownloadTorrentsRef.current.delete(state.infoHash)
+          activeDownloadTorrentsRef.current.delete(cleanSwarm)
         }
-        const isClosed = Boolean(closedBySenderRef.current[state.infoHash])
+        const isClosed = Boolean(closedBySenderRef.current[cleanSwarm])
         const normalizedState: TorrentTransferState =
           isClosed && state.isReSeeding
             ? {
                 ...state,
+                swarmId: cleanSwarm,
                 phase: state.completedAvailable ? 'completed' : 'closed',
                 isReSeeding: false,
               }
-            : state
-        setTransfers((prev) => ({ ...prev, [state.infoHash]: normalizedState }))
+            : { ...state, swarmId: cleanSwarm }
+        setTransfers((prev) => ({ ...prev, [cleanSwarm]: normalizedState }))
       },
-      onShareStatsUpdate: (infoHash, patch) => {
+      onShareStatsUpdate: (swarmId, patch) => {
         if (cancelled) return
-        const clean = infoHash.toLowerCase()
+        const clean = swarmId.toLowerCase()
         const existing = allSharesRef.current.get(clean)
         if (!existing) return
         const updated: StoredTorrentShare = {
@@ -395,22 +419,23 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
           }
         }
       },
-      onRemoteClosedBySender: (infoHash, closedAt) => {
+      onRemoteClosedBySender: (swarmId, closedAt) => {
         if (cancelled) return
-        recordClosedBySender(infoHash, closedAt)
+        recordClosedBySender(swarmId, closedAt)
       },
       onDownloadCompleted: async (torrent, pieceHashes) => {
         if (cancelled) return
         const infoHash = torrent.infoHash.toLowerCase()
-        const dlMeta = activeDownloadTorrentsRef.current.get(infoHash)
-        const isClosed = Boolean(closedBySenderRef.current[infoHash])
+        const swarmId = torrent.swarmId.toLowerCase()
+        const dlMeta = activeDownloadTorrentsRef.current.get(swarmId)
+        const isClosed = Boolean(closedBySenderRef.current[swarmId])
         const origSender = (dlMeta?.senderPubkey || torrent.senderPubkey || '').toLowerCase()
         const targetLabel = dlMeta?.senderDisplayHandle
           ? `From ${dlMeta.senderDisplayHandle}`
           : torrent.fileName
         const reSeedShare: StoredTorrentShare = {
           infoHash,
-          swarmId: torrent.swarmId.toLowerCase(),
+          swarmId,
           fileName: torrent.fileName,
           mime: torrent.mime,
           size: torrent.size,
@@ -433,10 +458,10 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
           isReSeed: true,
           pieceHashes,
         }
-        allSharesRef.current.set(infoHash, reSeedShare)
+        allSharesRef.current.set(swarmId, reSeedShare)
         syncSharesStateFromRef()
         await store.putShare(reSeedShare)
-        void saveLocalFileRef.current(infoHash)
+        void saveLocalFileRef.current(swarmId)
         pushToastRef.current(
           'success',
           'P2P download verified',
@@ -456,17 +481,20 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
       setClosedBySender(cachedClosed)
 
       for (const s of loaded) {
+        const cleanSwarm = s.swarmId.toLowerCase()
         const cleanHash = s.infoHash.toLowerCase()
         const normalized: StoredTorrentShare = {
           ...s,
           infoHash: cleanHash,
+          swarmId: cleanSwarm,
           activePeerCount: 0,
         }
-        map.set(cleanHash, normalized)
+        map.set(cleanSwarm, normalized)
         if (normalized.isReSeed && normalized.hasLocalData) {
           const isReSeeding =
-            normalized.status === 'active' && !cachedClosed[cleanHash]
-          hydratedTransfers[cleanHash] = {
+            normalized.status === 'active' && !cachedClosed[cleanSwarm]
+          hydratedTransfers[cleanSwarm] = {
+            swarmId: cleanSwarm,
             infoHash: cleanHash,
             phase: isReSeeding ? 'seeding' : 'completed',
             piecesCompleted: normalized.pieceCount,
@@ -552,7 +580,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         addEntry(share.swarmId, share.infoHash, share.isReSeed ? share.senderPubkey : undefined, share.relays)
       }
     }
-    for (const [infoHash, t] of Object.entries(transfers)) {
+    for (const [swarmId, t] of Object.entries(transfers)) {
       if (
         t.phase === 'checking' ||
         t.phase === 'waiting' ||
@@ -560,9 +588,9 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         t.phase === 'downloading' ||
         t.phase === 'verifying'
       ) {
-        const dl = activeDownloadTorrentsRef.current.get(infoHash)
+        const dl = activeDownloadTorrentsRef.current.get(swarmId)
         if (dl) {
-          addEntry(dl.torrent.swarmId, infoHash, dl.senderPubkey, dl.relays)
+          addEntry(dl.torrent.swarmId, dl.torrent.infoHash, dl.senderPubkey, dl.relays)
         }
       }
     }
@@ -600,16 +628,15 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     const swarmTags: string[] = []
     const statusDTags: string[] = []
     const statusAuthors = new Set<string>()
-    const swarmToInfoHashes = new Map<string, string[]>()
+    const activeSwarmIds = new Set<string>()
     const statusDTagToEntry = new Map<
       string,
-      { swarmId: string; infoHashes: string[]; senderPubkeys: Set<string> }
+      { swarmId: string; senderPubkeys: Set<string> }
     >()
 
     for (const d of descriptors) {
       swarmTags.push(getTorrentSwarmTag(d.swarmId))
-      const hashes = Array.from(d.infoHashes)
-      swarmToInfoHashes.set(d.swarmId, hashes)
+      activeSwarmIds.add(d.swarmId)
       for (const r of d.relays) extraList.push(r)
       if (d.senderPubkeys.size > 0) {
         const dTag = getTorrentStatusDTag(d.swarmId)
@@ -617,7 +644,6 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         for (const pk of d.senderPubkeys) statusAuthors.add(pk)
         statusDTagToEntry.set(dTag, {
           swarmId: d.swarmId,
-          infoHashes: hashes,
           senderPubkeys: d.senderPubkeys,
         })
       }
@@ -648,10 +674,12 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         const authorPk = ev.pubkey.trim().toLowerCase()
         if (!entry.senderPubkeys.has(authorPk)) return
         const parsed = parseTorrentStatusEvent(ev, entry.swarmId, authorPk)
-        if (!parsed || parsed.status !== 'closed') return
-        for (const ih of entry.infoHashes) {
-          recordClosedBySender(ih, parsed.updatedAt)
-          swarmRef.current?.abortDownloadAsClosed(ih)
+        if (!parsed) return
+        if (parsed.status === 'closed') {
+          recordClosedBySender(entry.swarmId, parsed.updatedAt)
+          swarmRef.current?.abortDownloadAsClosed(entry.swarmId)
+        } else if (parsed.status === 'active') {
+          clearClosedBySender(entry.swarmId, parsed.updatedAt)
         }
         return
       }
@@ -675,15 +703,10 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         if (tag[0] !== 't' || typeof tag[1] !== 'string') continue
         if (!tag[1].startsWith('agnostr-torrent-')) continue
         const swarmId = tag[1].slice('agnostr-torrent-'.length).toLowerCase()
-        const matchingHashes = swarmToInfoHashes.get(swarmId)
-        if (!matchingHashes || matchingHashes.length === 0) continue
+        if (!activeSwarmIds.has(swarmId)) continue
         const parsed = parseTorrentSwarmBroadcastEvent(ev, swarmId)
         if (!parsed) continue
-        swarmRef.current?.handleSwarmBroadcast(
-          parsed.senderPubkey,
-          parsed.payload,
-          matchingHashes
-        )
+        swarmRef.current?.handleSwarmBroadcast(parsed.senderPubkey, parsed.payload)
         break
       }
     }
@@ -740,25 +763,26 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     identityManager,
     getSignalRelays,
     recordClosedBySender,
+    clearClosedBySender,
   ])
 
   const checkRemoteStatus = useCallback(
     async (torrent: TorrentAttachment, senderPubkey: string): Promise<TorrentShareStatus> => {
-      const infoHash = torrent.infoHash.trim().toLowerCase()
+      const swarmId = torrent.swarmId.trim().toLowerCase()
       const senderPk = senderPubkey.trim().toLowerCase()
 
       // STRICT TRUSTED-ONLY ENFORCEMENT: zero network requests for untrusted senders!
       if (!isTrustedOrOwnSender(senderPk)) {
-        return closedBySenderRef.current[infoHash] ? 'closed' : 'active'
+        return closedBySenderRef.current[swarmId] ? 'closed' : 'active'
       }
 
       const pool = relayPoolRef.current
       const relays = getSignalRelays(torrent.relays)
       if (!pool || relays.length === 0 || meshBridgeRef.current?.isOfflineMeshOnly()) {
-        return closedBySenderRef.current[infoHash] ? 'closed' : 'active'
+        return closedBySenderRef.current[swarmId] ? 'closed' : 'active'
       }
 
-      const dTag = getTorrentStatusDTag(torrent.swarmId)
+      const dTag = getTorrentStatusDTag(swarmId)
       return await new Promise<TorrentShareStatus>((resolve) => {
         let settled = false
         let bestStatus: TorrentShareStatus | null = null
@@ -770,24 +794,17 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
           globalThis.clearTimeout(timer)
           unsub()
           if (bestStatus === 'closed') {
-            recordClosedBySender(infoHash, bestUpdatedAt)
-            swarmRef.current?.abortDownloadAsClosed(infoHash)
+            recordClosedBySender(swarmId, bestUpdatedAt)
+            swarmRef.current?.abortDownloadAsClosed(swarmId)
             resolve('closed')
             return
           }
-          if (bestStatus === 'active' && bestUpdatedAt > (closedBySenderRef.current[infoHash] ?? 0)) {
-            clearCachedRevocation(infoHash)
-            setClosedBySender((prev) => {
-              if (!(infoHash in prev)) return prev
-              const next = { ...prev }
-              delete next[infoHash]
-              closedBySenderRef.current = next
-              return next
-            })
+          if (bestStatus === 'active' && bestUpdatedAt > (closedBySenderRef.current[swarmId] ?? 0)) {
+            clearClosedBySender(swarmId, bestUpdatedAt)
             resolve('active')
             return
           }
-          resolve(closedBySenderRef.current[infoHash] ? 'closed' : 'active')
+          resolve(closedBySenderRef.current[swarmId] ? 'closed' : 'active')
         }
 
         const timer = globalThis.setTimeout(finish, REMOTE_STATUS_QUERY_TIMEOUT_MS)
@@ -804,7 +821,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
           ],
           {
             onEvent: (ev) => {
-              const parsed = parseTorrentStatusEvent(ev, torrent.swarmId, senderPk)
+              const parsed = parseTorrentStatusEvent(ev, swarmId, senderPk)
               if (!parsed) return
               if (parsed.updatedAt >= bestUpdatedAt) {
                 bestUpdatedAt = parsed.updatedAt
@@ -820,7 +837,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         )
       })
     },
-    [isTrustedOrOwnSender, getSignalRelays, recordClosedBySender]
+    [isTrustedOrOwnSender, getSignalRelays, recordClosedBySender, clearClosedBySender]
   )
 
   const createAndSeedFile = useCallback(
@@ -880,7 +897,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         })
         const swarmId = computeTorrentSwarmId(infoHash, keyBytes)
 
-        // Pass 2: Encrypt every piece with AES-256-GCM + AAD and persist into profile-scoped IndexedDB (NO expiry)
+        // Pass 2: Encrypt every piece with AES-256-GCM + AAD and persist under unique swarmId (NO expiry)
         for (let i = 0; i < pieceCount; i += 1) {
           const start = i * pieceLength
           const end = Math.min(start + pieceLength, size)
@@ -892,7 +909,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
             pieceIndex: i,
             plaintext: new Uint8Array(plainBuf),
           })
-          await store.putPiece(infoHash, i, encrypted)
+          await store.putPiece(swarmId, i, encrypted)
         }
 
         const relays = getSignalRelays(ctx.extraRelays)
@@ -928,16 +945,10 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         }
 
         await store.putShare(shareRecord)
-        clearCachedRevocation(infoHash)
-        setClosedBySender((prev) => {
-          if (!(infoHash in prev)) return prev
-          const next = { ...prev }
-          delete next[infoHash]
-          closedBySenderRef.current = next
-          return next
-        })
+        // Only clear revocation for this brand-new swarmId — never alter any other share/re-seed of the same file
+        clearClosedBySender(swarmId)
 
-        allSharesRef.current.set(infoHash, shareRecord)
+        allSharesRef.current.set(swarmId, shareRecord)
         syncSharesStateFromRef()
 
         // Publish signed replaceable kind:30078 'active' status (best-effort)
@@ -973,7 +984,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         return null
       }
     },
-    [getSignalRelays, signAndPublishTemplate, syncSharesStateFromRef]
+    [getSignalRelays, signAndPublishTemplate, syncSharesStateFromRef, clearClosedBySender]
   )
 
   const requestDownload = useCallback(
@@ -985,6 +996,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     ) => {
       const senderPk = senderPubkey.trim().toLowerCase()
       const infoHash = torrent.infoHash.trim().toLowerCase()
+      const swarmId = torrent.swarmId.trim().toLowerCase()
 
       // STRICT TRUSTED-ONLY ENFORCEMENT: hard-reject untrusted pubkeys with ZERO network requests!
       if (!isTrustedOrOwnSender(senderPk)) {
@@ -996,7 +1008,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         return
       }
 
-      if (closedBySenderRef.current[infoHash]) {
+      if (closedBySenderRef.current[swarmId]) {
         pushToastRef.current(
           'info',
           'Downloads closed',
@@ -1006,7 +1018,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
       }
 
       const req: PendingTorrentDownloadRequest = {
-        torrent: { ...torrent, infoHash, senderPubkey: senderPk },
+        torrent: { ...torrent, infoHash, swarmId, senderPubkey: senderPk },
         senderPubkey: senderPk,
         senderNickname: senderNickname.trim() || `anon${senderPk.slice(-4)}`,
         senderDisplayHandle: senderDisplayHandle.trim() || senderNickname.trim() || senderPk.slice(0, 12),
@@ -1032,6 +1044,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
 
     const senderPk = req.senderPubkey.trim().toLowerCase()
     const infoHash = req.torrent.infoHash.trim().toLowerCase()
+    const swarmId = req.torrent.swarmId.trim().toLowerCase()
 
     // Re-verify trust boundary right before initiating any network activity
     if (!isTrustedOrOwnSender(senderPk)) {
@@ -1045,7 +1058,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
 
     const relays = getSignalRelays(req.torrent.relays)
     const currentScope = activeScopeRef.current
-    activeDownloadTorrentsRef.current.set(infoHash, {
+    activeDownloadTorrentsRef.current.set(swarmId, {
       torrent: req.torrent,
       senderPubkey: senderPk,
       senderDisplayHandle: req.senderDisplayHandle,
@@ -1057,7 +1070,8 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     const initialTransport = meshBridgeRef.current?.isOfflineMeshOnly() ? 'ble-mesh' : 'webrtc'
     setTransfers((prev) => ({
       ...prev,
-      [infoHash]: {
+      [swarmId]: {
+        swarmId,
         infoHash,
         phase: 'checking',
         transport: initialTransport,
@@ -1074,11 +1088,12 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     }))
 
     const remoteStatus = await checkRemoteStatus(req.torrent, senderPk)
-    if (remoteStatus === 'closed' || closedBySenderRef.current[infoHash]) {
-      activeDownloadTorrentsRef.current.delete(infoHash)
+    if (remoteStatus === 'closed' || closedBySenderRef.current[swarmId]) {
+      activeDownloadTorrentsRef.current.delete(swarmId)
       setTransfers((prev) => ({
         ...prev,
-        [infoHash]: {
+        [swarmId]: {
+          swarmId,
           infoHash,
           phase: 'closed',
           piecesCompleted: 0,
@@ -1099,15 +1114,15 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     await swarmRef.current?.startDownload(req.torrent, senderPk, relays)
   }, [isTrustedOrOwnSender, getSignalRelays, checkRemoteStatus])
 
-  const cancelDownload = useCallback((infoHash: string) => {
-    const clean = infoHash.trim().toLowerCase()
+  const cancelDownload = useCallback((swarmId: string) => {
+    const clean = swarmId.trim().toLowerCase()
     activeDownloadTorrentsRef.current.delete(clean)
     swarmRef.current?.cancelDownload(clean, true)
   }, [])
 
   const stopReSeeding = useCallback(
-    (infoHash: string) => {
-      const clean = infoHash.trim().toLowerCase()
+    (swarmId: string) => {
+      const clean = swarmId.trim().toLowerCase()
       swarmRef.current?.closeShareConnections(clean, 'reseed-stopped')
       const existing = allSharesRef.current.get(clean)
       if (existing && existing.isReSeed) {
@@ -1139,8 +1154,8 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
   )
 
   const resumeReSeeding = useCallback(
-    async (infoHash: string): Promise<boolean> => {
-      const clean = infoHash.trim().toLowerCase()
+    async (swarmId: string): Promise<boolean> => {
+      const clean = swarmId.trim().toLowerCase()
       const store = storeRef.current
       const existing = allSharesRef.current.get(clean) ?? (await store?.getShare(clean)) ?? null
       if (!existing || !existing.isReSeed || !existing.hasLocalData) {
@@ -1207,7 +1222,8 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         return {
           ...prev,
           [clean]: {
-            infoHash: clean,
+            swarmId: clean,
+            infoHash: existing.infoHash.toLowerCase(),
             phase: 'seeding',
             piecesCompleted: existing.pieceCount,
             pieceCount: existing.pieceCount,
@@ -1227,8 +1243,8 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
   )
 
   const removeDownloadedSeed = useCallback(
-    async (infoHash: string): Promise<boolean> => {
-      const clean = infoHash.trim().toLowerCase()
+    async (swarmId: string): Promise<boolean> => {
+      const clean = swarmId.trim().toLowerCase()
       const existing = allSharesRef.current.get(clean) ?? (await storeRef.current?.getShare(clean)) ?? null
       if (existing && !existing.isReSeed) {
         // Strictly for downloaded peer seeds; never publish sender revocation or remove own share here
@@ -1250,8 +1266,8 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
   )
 
   const closeShareDownloads = useCallback(
-    async (infoHash: string): Promise<void> => {
-      const clean = infoHash.trim().toLowerCase()
+    async (swarmId: string): Promise<void> => {
+      const clean = swarmId.trim().toLowerCase()
       const store = storeRef.current
       const existing = allSharesRef.current.get(clean) ?? (await store?.getShare(clean)) ?? null
       if (existing?.isReSeed) {
@@ -1308,8 +1324,8 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
   )
 
   const reopenShareDownloads = useCallback(
-    async (infoHash: string): Promise<void> => {
-      const clean = infoHash.trim().toLowerCase()
+    async (swarmId: string): Promise<void> => {
+      const clean = swarmId.trim().toLowerCase()
       const store = storeRef.current
       const existing = allSharesRef.current.get(clean) ?? (await store?.getShare(clean)) ?? null
       if (existing?.isReSeed) {
@@ -1351,14 +1367,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
       }
       allSharesRef.current.set(clean, reopened)
       syncSharesStateFromRef()
-      clearCachedRevocation(clean)
-      setClosedBySender((prev) => {
-        if (!(clean in prev)) return prev
-        const next = { ...prev }
-        delete next[clean]
-        closedBySenderRef.current = next
-        return next
-      })
+      clearClosedBySender(clean)
       await store?.putShare(reopened)
 
       const relays = getSignalRelays(reopened.relays)
@@ -1369,12 +1378,12 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
       })
       await signAndPublishTemplate(statusTmpl, relays)
     },
-    [getSignalRelays, resumeReSeeding, signAndPublishTemplate, syncSharesStateFromRef]
+    [getSignalRelays, resumeReSeeding, signAndPublishTemplate, syncSharesStateFromRef, clearClosedBySender]
   )
 
   const deleteShareLocalData = useCallback(
-    async (infoHash: string): Promise<void> => {
-      const clean = infoHash.trim().toLowerCase()
+    async (swarmId: string): Promise<void> => {
+      const clean = swarmId.trim().toLowerCase()
       const existing = allSharesRef.current.get(clean)
       if (existing?.isReSeed) {
         await removeDownloadedSeed(clean)
@@ -1398,8 +1407,8 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     [closeShareDownloads, removeDownloadedSeed, syncSharesStateFromRef]
   )
 
-  const saveLocalFile = useCallback(async (infoHash: string): Promise<boolean> => {
-    const clean = infoHash.trim().toLowerCase()
+  const saveLocalFile = useCallback(async (swarmId: string): Promise<boolean> => {
+    const clean = swarmId.trim().toLowerCase()
     const store = storeRef.current
     if (!store) return false
     const share = allSharesRef.current.get(clean) ?? (await store.getShare(clean))
@@ -1415,6 +1424,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     try {
       const chunks: BlobPart[] = []
       const fullHasher = sha256.create()
+      const pieceInfoHash = share.infoHash.toLowerCase()
       for (let i = 0; i < share.pieceCount; i += 1) {
         const encrypted = await store.getPiece(clean, i)
         if (!encrypted) {
@@ -1424,7 +1434,7 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
         const decrypted = await decryptTorrentPiece({
           keyBytes,
           noncePrefixBytes,
-          infoHash: clean,
+          infoHash: pieceInfoHash,
           pieceIndex: i,
           ciphertext: encrypted,
         })
@@ -1471,8 +1481,8 @@ export function useTorrentEngine(opts: UseTorrentEngineOptions): TorrentEngine {
     saveLocalFileRef.current = saveLocalFile
   }, [saveLocalFile])
 
-  const getShare = useCallback((infoHash: string): TorrentShareRecord | undefined => {
-    const found = allSharesRef.current.get(infoHash.trim().toLowerCase())
+  const getShare = useCallback((swarmId: string): TorrentShareRecord | undefined => {
+    const found = allSharesRef.current.get(swarmId.trim().toLowerCase())
     return found ? stripStoredPieceHashes(found) : undefined
   }, [])
 

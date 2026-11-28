@@ -9,6 +9,7 @@ import {
   Bell,
   BellOff,
   BellRing,
+  Bluetooth,
   Camera,
   Captions,
   Check,
@@ -49,6 +50,7 @@ import {
   User,
   Volume2,
   VolumeX,
+  Wifi,
   X,
   Zap,
 } from 'lucide-react'
@@ -80,9 +82,14 @@ import {
 } from '../lib/callRecorder.ts'
 import { DEFAULT_TRANSCRIPTION_MODEL_ID } from '../lib/transcriptionModels.ts'
 import type { SavedCallTranscript } from '../types/transcription.ts'
+import type { TorrentShareRecord, TorrentTransferPhase, TorrentTransferState } from '../types/torrent.ts'
 import { DEFAULT_PUSH_BRIDGE_URL, DEFAULT_VAPID_PUBLIC_KEY } from '../lib/storage.ts'
 import { buildDmShareUrl } from '../lib/shareLinks.ts'
-import { formatTorrentBytes, getTorrentFileExtension } from '../lib/torrentProtocol.ts'
+import {
+  formatTorrentBytes,
+  formatTorrentSpeed,
+  getTorrentFileExtension,
+} from '../lib/torrentProtocol.ts'
 import { bitchatAudio, type SoundCue } from '../utils/sound.ts'
 import { pubkeyToColor, shortPubkey } from '../utils/identicon.ts'
 import { AvatarImg } from './AvatarImg.tsx'
@@ -97,6 +104,7 @@ export type SettingsTab =
   | 'translator'
   | 'appearance'
   | 'calls'
+  | 'torrents'
   | 'network'
 
 export interface SettingsModalProps {
@@ -270,6 +278,16 @@ const NAV_ITEMS: readonly SettingsNavItem[] = [
       'translator translate translation language source incoming outgoing double column opus m2m100 nllb200 neural on-device model cache webgpu wasm',
   },
   {
+    id: 'torrents',
+    category: 'Communication',
+    label: 'Torrents',
+    subtitle: 'Open shares, seeding & stats',
+    description:
+      'Monitor live P2P E2EE file shares, peer seeding, bandwidth stats, and download controls.',
+    keywords:
+      'torrents p2p seeding uploads downloads close downloads bandwidth filesharing stats swarm vault ble mesh webrtc e2ee',
+  },
+  {
     id: 'privacy',
     category: 'Privacy & Safety',
     label: 'Privacy & Trust',
@@ -323,6 +341,46 @@ function shortDeviceTag(deviceId: string): string {
   const clean = deviceId.replace(/[^a-zA-Z0-9]/g, '')
   if (!clean) return '#0000'
   return `#${clean.slice(-4).toLowerCase()}`
+}
+
+function formatTorrentDate(tsMs: number): string {
+  try {
+    return new Date(tsMs).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    })
+  } catch {
+    return ''
+  }
+}
+
+function isTorrentTransferInFlight(phase: TorrentTransferPhase): boolean {
+  return (
+    phase === 'checking' ||
+    phase === 'waiting' ||
+    phase === 'connecting' ||
+    phase === 'downloading' ||
+    phase === 'verifying'
+  )
+}
+
+function torrentTransferPhaseLabel(phase: TorrentTransferPhase, isBleMesh: boolean): string {
+  switch (phase) {
+    case 'checking':
+      return 'Checking availability…'
+    case 'waiting':
+      return isBleMesh ? 'Waiting over BLE Mesh…' : 'Waiting for peers…'
+    case 'connecting':
+      return isBleMesh ? 'Bridging via BLE Mesh…' : 'Connecting…'
+    case 'downloading':
+      return isBleMesh ? 'Downloading via BLE Mesh…' : 'Downloading…'
+    case 'verifying':
+      return 'Verifying SHA-256…'
+    default:
+      return 'Transferring…'
+  }
 }
 
 function formatDeviceSyncStatus(dev: LinkedDeviceInfo): { text: string; title: string } {
@@ -1460,6 +1518,8 @@ export function SettingsModal({
         return <ShieldAlert size={16} />
       case 'translator':
         return <Languages size={16} />
+      case 'torrents':
+        return <HardDrive size={16} />
       case 'appearance':
         return <Palette size={16} />
       case 'calls':
@@ -3466,242 +3526,43 @@ export function SettingsModal({
         )}
       </SettingsSection>
 
-      {/* 3. P2P File Shares (Torrents) */}
+      {/* 3. P2P Torrents Shortcut */}
       <SettingsSection
-        title="P2P File Shares (Torrents)"
-        description="Your shares have no expiry (close downloads anytime) · Downloaded peer files can also seed to trusted peers."
+        title="P2P Torrents"
+        description="Manage open file shares, peer seeding, live stats, and download controls."
         badge={
-          <span className="ag-badge ag-badge-muted mono">
+          <span className="ag-badge ag-badge-muted mono tabular">
             {engine.torrents.activeShareCount} seeding
           </span>
         }
-        action={
-          engine.torrents.shares.length > 0 ? (
-            <button
-              type="button"
-              className="ag-btn ag-btn-secondary ag-btn-xs"
-              onClick={() => {
-                engine.torrents.setSharesModalOpen(true)
-                onPlaySound?.('click')
-              }}
-            >
-              <HardDrive size={12} />
-              <span>Manage All</span>
-            </button>
-          ) : undefined
-        }
       >
-        {engine.torrents.shares.length === 0 ? (
-          <p className="ag-set-empty">
-            No files currently shared or seeded. Attach any file from a chat composer to share via
-            E2EE P2P, or download a trusted peer&apos;s file to help seed the swarm.
-          </p>
-        ) : (
-          <div className="ag-set-card-list ag-settings-torrent-list" role="list">
-            {[...engine.torrents.shares]
-              .sort((a, b) => {
-                if (Boolean(a.isReSeed) !== Boolean(b.isReSeed)) return a.isReSeed ? 1 : -1
-                if (a.status !== b.status) return a.status === 'active' ? -1 : 1
-                return b.createdAt - a.createdAt
-              })
-              .map((share) => {
-                const ext = getTorrentFileExtension(share.fileName)
-                const isPeerSeed = Boolean(share.isReSeed)
-                const isClosedBySender =
-                  isPeerSeed && Boolean(engine.torrents.closedBySender[share.infoHash])
-                const isActive = share.status === 'active' && !isClosedBySender
-                return (
-                  <div
-                    key={share.infoHash}
-                    role="listitem"
-                    className={`ag-settings-torrent-row ${isActive ? 'is-active' : 'is-closed'}`}
-                  >
-                    <div className="ag-settings-torrent-main">
-                      <span className="ag-settings-torrent-icon" aria-hidden="true">
-                        <FileIcon size={16} />
-                        {ext && (
-                          <span className="ag-settings-torrent-ext mono">{ext.slice(0, 4)}</span>
-                        )}
-                      </span>
-                      <div className="ag-settings-torrent-copy">
-                        <div className="ag-settings-torrent-head">
-                          <span
-                            className="ag-settings-torrent-name truncate"
-                            title={share.fileName}
-                          >
-                            {share.fileName}
-                          </span>
-                          <span
-                            className={`ag-torrent-role-pill${isPeerSeed ? ' is-peer' : ' is-own'}`}
-                          >
-                            {isPeerSeed ? 'Seeding Peer File' : 'Your Share'}
-                          </span>
-                          {isPeerSeed ? (
-                            isClosedBySender ? (
-                              <span className="ag-torrent-status-pill is-closed">
-                                <Lock size={10} aria-hidden="true" />
-                                <span>Closed by sender</span>
-                              </span>
-                            ) : isActive ? (
-                              <span className="ag-torrent-status-pill is-seeding">Seeding</span>
-                            ) : (
-                              <span className="ag-torrent-status-pill is-muted">Not seeding</span>
-                            )
-                          ) : (
-                            <span
-                              className={`ag-torrent-status-pill ${isActive ? 'is-active' : 'is-closed'}`}
-                            >
-                              {isActive ? 'No expiry' : 'Closed'}
-                            </span>
-                          )}
-                        </div>
-                        <div className="ag-settings-torrent-meta tabular truncate">
-                          <span>{formatTorrentBytes(share.size)}</span>
-                          <span> · {share.targetLabel}</span>
-                          {share.activePeerCount > 0 && (
-                            <span>
-                              {' '}
-                              · {share.activePeerCount}{' '}
-                              {share.activePeerCount === 1 ? 'peer' : 'peers'}
-                            </span>
-                          )}
-                          {share.bytesUploaded > 0 && (
-                            <span> · {formatTorrentBytes(share.bytesUploaded)} sent</span>
-                          )}
-                          {share.completedDownloads > 0 && (
-                            <span> · {share.completedDownloads} dl</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="ag-settings-torrent-actions">
-                      {isPeerSeed ? (
-                        <>
-                          {!isClosedBySender &&
-                            (isActive ? (
-                              <button
-                                type="button"
-                                className="ag-btn ag-btn-secondary ag-btn-xs"
-                                onClick={() => {
-                                  onPlaySound?.('click')
-                                  engine.torrents.stopReSeeding(share.infoHash)
-                                }}
-                                title="Stop seeding this downloaded peer file"
-                              >
-                                <Square size={11} />
-                                <span>Stop Seeding</span>
-                              </button>
-                            ) : (
-                              share.hasLocalData && (
-                                <button
-                                  type="button"
-                                  className="ag-btn ag-btn-secondary ag-btn-xs"
-                                  onClick={() => {
-                                    onPlaySound?.('click')
-                                    void engine.torrents.resumeReSeeding(share.infoHash)
-                                  }}
-                                  title="Seed this downloaded peer file to trusted peers"
-                                >
-                                  <Upload size={12} />
-                                  <span>Seed to Swarm</span>
-                                </button>
-                              )
-                            ))}
-                          {share.hasLocalData && (
-                            <button
-                              type="button"
-                              className="ag-btn ag-btn-ghost ag-btn-xs"
-                              onClick={() => {
-                                onPlaySound?.('click')
-                                void engine.torrents.saveLocalFile(share.infoHash)
-                              }}
-                              title={`Save ${share.fileName}`}
-                              aria-label={`Save ${share.fileName}`}
-                            >
-                              <Download size={12} />
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            className="ag-btn ag-btn-ghost ag-btn-xs ag-settings-torrent-del-btn"
-                            onClick={() => {
-                              onPlaySound?.('click')
-                              void engine.torrents.removeDownloadedSeed(share.infoHash)
-                            }}
-                            title={`Remove local seed for ${share.fileName}`}
-                            aria-label={`Remove local seed for ${share.fileName}`}
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          {isActive ? (
-                            <button
-                              type="button"
-                              className="ag-btn ag-btn-secondary ag-btn-xs ag-settings-torrent-close-btn"
-                              onClick={() => {
-                                onPlaySound?.('click')
-                                void engine.torrents.closeShareDownloads(share.infoHash)
-                              }}
-                              title="Close downloads for this shared file"
-                            >
-                              <Lock size={12} />
-                              <span>Close Downloads</span>
-                            </button>
-                          ) : (
-                            share.hasLocalData && (
-                              <button
-                                type="button"
-                                className="ag-btn ag-btn-secondary ag-btn-xs"
-                                onClick={() => {
-                                  onPlaySound?.('click')
-                                  void engine.torrents.reopenShareDownloads(share.infoHash)
-                                }}
-                                title="Reopen downloads for this shared file"
-                              >
-                                <RotateCcw size={12} />
-                                <span>Reopen</span>
-                              </button>
-                            )
-                          )}
-                          {share.hasLocalData && (
-                            <>
-                              <button
-                                type="button"
-                                className="ag-btn ag-btn-ghost ag-btn-xs"
-                                onClick={() => {
-                                  onPlaySound?.('click')
-                                  void engine.torrents.saveLocalFile(share.infoHash)
-                                }}
-                                title={`Save ${share.fileName}`}
-                                aria-label={`Save ${share.fileName}`}
-                              >
-                                <Download size={12} />
-                              </button>
-                              <button
-                                type="button"
-                                className="ag-btn ag-btn-ghost ag-btn-xs ag-settings-torrent-del-btn"
-                                onClick={() => {
-                                  onPlaySound?.('click')
-                                  void engine.torrents.deleteShareLocalData(share.infoHash)
-                                }}
-                                title={`Delete local copy of ${share.fileName}`}
-                                aria-label={`Delete local copy of ${share.fileName}`}
-                              >
-                                <Trash2 size={12} />
-                              </button>
-                            </>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
+        <div className="ag-torrents-privacy-shortcut">
+          <div className="ag-torrents-privacy-shortcut-copy">
+            <span className="ag-torrents-privacy-shortcut-title">
+              <HardDrive size={15} aria-hidden="true" />
+              <span>E2EE P2P File Shares &amp; Peer Seeds</span>
+            </span>
+            <span className="ag-torrents-privacy-shortcut-meta mono tabular">
+              {engine.torrents.activeShareCount} seeding ·{' '}
+              {formatTorrentBytes(
+                engine.torrents.shares.reduce((acc, s) => acc + (s.bytesUploaded || 0), 0),
+              )}{' '}
+              uploaded
+            </span>
           </div>
-        )}
+          <button
+            type="button"
+            className="ag-btn ag-btn-secondary ag-btn-sm"
+            onClick={() => {
+              onPlaySound?.('click')
+              setActiveTab('torrents')
+              setMobileScreen('detail')
+            }}
+          >
+            <span>Open Torrents</span>
+            <ChevronRight size={14} aria-hidden="true" />
+          </button>
+        </div>
       </SettingsSection>
 
       {/* 4. Blocked Users */}
@@ -3769,6 +3630,638 @@ export function SettingsModal({
       </SettingsSection>
     </div>
   )
+
+  const renderTorrentsTab = () => {
+    const tEngine = engine.torrents
+    const shares = tEngine.shares
+    const closedBySender = tEngine.closedBySender
+
+    const inFlightDownloads: { swarmId: string; transfer: TorrentTransferState }[] = []
+    for (const [key, transfer] of Object.entries(tEngine.transfers)) {
+      if (isTorrentTransferInFlight(transfer.phase)) {
+        const sid = (transfer.swarmId || key).toLowerCase()
+        inFlightDownloads.push({ swarmId: sid, transfer })
+      }
+    }
+    inFlightDownloads.sort((a, b) => b.transfer.updatedAt - a.transfer.updatedAt)
+
+    const openOwnShares: TorrentShareRecord[] = []
+    const activePeerSeeds: TorrentShareRecord[] = []
+    const closedOrStoppedShares: TorrentShareRecord[] = []
+
+    let shareActivePeers = 0
+    let totalBytesUploaded = 0
+    let totalDownloadsServed = 0
+    let totalLocalBytes = 0
+    let totalFilesStored = 0
+
+    for (const share of shares) {
+      const sid = share.swarmId.toLowerCase()
+      const isPeerSeed = Boolean(share.isReSeed)
+      const isClosedByOriginalSender = isPeerSeed && Boolean(closedBySender[sid])
+
+      shareActivePeers += share.activePeerCount || 0
+      totalBytesUploaded += share.bytesUploaded || 0
+      totalDownloadsServed += share.completedDownloads || 0
+      if (share.hasLocalData) {
+        totalLocalBytes += share.size || 0
+        totalFilesStored += 1
+      }
+
+      if (!isPeerSeed && share.status === 'active') {
+        openOwnShares.push(share)
+      } else if (isPeerSeed && share.status === 'active' && !isClosedByOriginalSender) {
+        activePeerSeeds.push(share)
+      } else {
+        closedOrStoppedShares.push(share)
+      }
+    }
+
+    openOwnShares.sort((a, b) => b.createdAt - a.createdAt)
+    activePeerSeeds.sort((a, b) => b.createdAt - a.createdAt)
+    closedOrStoppedShares.sort((a, b) => b.createdAt - a.createdAt)
+
+    const downloadPeers = inFlightDownloads.reduce(
+      (acc, item) => acc + (item.transfer.connectedPeers || 0),
+      0,
+    )
+    const totalConnectedPeers = shareActivePeers + downloadPeers
+
+    const renderStatsMeta = (share: TorrentShareRecord) => {
+      const parts: string[] = []
+      if (share.activePeerCount > 0) {
+        parts.push(`${share.activePeerCount} ${share.activePeerCount === 1 ? 'peer' : 'peers'}`)
+      }
+      if (share.completedDownloads > 0) {
+        parts.push(
+          `${share.completedDownloads} ${share.completedDownloads === 1 ? 'download' : 'downloads'}`,
+        )
+      }
+      if (share.bytesUploaded > 0) {
+        parts.push(`${formatTorrentBytes(share.bytesUploaded)} uploaded`)
+      }
+      return parts.length > 0 ? parts.join(' · ') : null
+    }
+
+    return (
+      <div className="ag-set-pane-stack">
+        {/* 1. Live P2P Torrent Stats Overview */}
+        <div className="ag-torrents-stats-grid" role="region" aria-label="P2P torrent statistics">
+          <div className="ag-torrents-stat-card">
+            <span className="ag-torrents-stat-label">Open &amp; Seeding</span>
+            <span className="ag-torrents-stat-value mono tabular">
+              {tEngine.activeShareCount}
+            </span>
+            <span className="ag-torrents-stat-sub truncate">
+              {openOwnShares.length} your {openOwnShares.length === 1 ? 'share' : 'shares'} ·{' '}
+              {activePeerSeeds.length} peer {activePeerSeeds.length === 1 ? 'seed' : 'seeds'}
+            </span>
+          </div>
+
+          <div className="ag-torrents-stat-card">
+            <span className="ag-torrents-stat-label">Connected Peers</span>
+            <span className="ag-torrents-stat-value mono tabular">{totalConnectedPeers}</span>
+            <span className="ag-torrents-stat-sub truncate">
+              {inFlightDownloads.length > 0
+                ? `${inFlightDownloads.length} active ${inFlightDownloads.length === 1 ? 'download' : 'downloads'}`
+                : 'Live P2P swarm'}
+            </span>
+          </div>
+
+          <div className="ag-torrents-stat-card">
+            <span className="ag-torrents-stat-label">Total Uploaded</span>
+            <span className="ag-torrents-stat-value mono tabular">
+              {formatTorrentBytes(totalBytesUploaded)}
+            </span>
+            <span className="ag-torrents-stat-sub truncate">
+              {totalDownloadsServed} {totalDownloadsServed === 1 ? 'download' : 'downloads'} served
+            </span>
+          </div>
+
+          <div className="ag-torrents-stat-card">
+            <span className="ag-torrents-stat-label">Local Encrypted Vault</span>
+            <span className="ag-torrents-stat-value mono tabular">
+              {formatTorrentBytes(totalLocalBytes)}
+            </span>
+            <span className="ag-torrents-stat-sub truncate">
+              {totalFilesStored} stored · {closedOrStoppedShares.length} closed
+            </span>
+          </div>
+        </div>
+
+        {/* Empty State */}
+        {shares.length === 0 && inFlightDownloads.length === 0 && (
+          <SettingsSection
+            title="P2P File Shares & Seeding"
+            description="End-to-end encrypted WebRTC & Bluetooth Mesh torrents · Trusted Peers only."
+          >
+            <p className="ag-set-empty">
+              No active shares, peer seeds, or downloads yet. Click the attach icon in any Bitchat
+              channel, group, or DM composer and choose <strong>Share File (P2P Torrent)</strong> to
+              share any file with no expiry.
+            </p>
+          </SettingsSection>
+        )}
+
+        {/* 2. Active Downloads */}
+        {inFlightDownloads.length > 0 && (
+          <SettingsSection
+            title="Active Downloads"
+            description="Live encrypted piece transfers currently downloading from trusted peers."
+            badge={
+              <span className="ag-badge ag-badge-muted mono tabular">
+                {inFlightDownloads.length}
+              </span>
+            }
+          >
+            <div className="ag-set-card-list ag-settings-torrent-list" role="list">
+              {inFlightDownloads.map(({ swarmId, transfer }) => {
+                const knownShare = tEngine.getShare(swarmId)
+                const isBleMesh = transfer.transport === 'ble-mesh'
+                const pct =
+                  transfer.totalBytes > 0
+                    ? Math.max(
+                        0,
+                        Math.min(
+                          100,
+                          Math.round((transfer.bytesTransferred / transfer.totalBytes) * 100),
+                        ),
+                      )
+                    : transfer.pieceCount > 0
+                      ? Math.max(
+                          0,
+                          Math.min(
+                            100,
+                            Math.round((transfer.piecesCompleted / transfer.pieceCount) * 100),
+                          ),
+                        )
+                      : 0
+                return (
+                  <div key={swarmId} role="listitem" className="ag-torrents-dl-row">
+                    <div className="ag-torrents-dl-head">
+                      <div className="ag-torrents-dl-title-wrap">
+                        <Loader2 size={13} className="ag-spin" aria-hidden="true" />
+                        <span
+                          className="ag-settings-torrent-name truncate"
+                          title={knownShare?.fileName || transfer.infoHash}
+                        >
+                          {knownShare?.fileName || `Torrent #${transfer.infoHash.slice(0, 10)}`}
+                        </span>
+                        {isBleMesh ? (
+                          <span className="ag-torrent-mesh-tag">
+                            <Bluetooth size={9} aria-hidden="true" />
+                            <span>BLE Mesh</span>
+                          </span>
+                        ) : (
+                          <span className="ag-torrents-webrtc-tag">
+                            <Wifi size={9} aria-hidden="true" />
+                            <span>WebRTC</span>
+                          </span>
+                        )}
+                      </div>
+                      <span className="ag-torrent-progress-pct mono tabular">{pct}%</span>
+                    </div>
+
+                    <div
+                      className="ag-torrent-progress-track"
+                      role="progressbar"
+                      aria-valuenow={pct}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                    >
+                      <span
+                        className={`ag-torrent-progress-fill${
+                          transfer.phase === 'waiting' || transfer.phase === 'checking'
+                            ? ' is-indeterminate'
+                            : ''
+                        }`}
+                        style={{ width: `${Math.max(4, pct)}%` }}
+                      />
+                    </div>
+
+                    <div className="ag-torrents-dl-meta">
+                      <span className="ag-torrent-stats mono tabular">
+                        {torrentTransferPhaseLabel(transfer.phase, isBleMesh)} ·{' '}
+                        {formatTorrentBytes(transfer.bytesTransferred)} /{' '}
+                        {formatTorrentBytes(transfer.totalBytes)}
+                        {transfer.speedBytesPerSec > 0
+                          ? ` · ${formatTorrentSpeed(transfer.speedBytesPerSec)}`
+                          : ''}
+                        {transfer.connectedPeers > 0
+                          ? ` · ${transfer.connectedPeers} ${transfer.connectedPeers === 1 ? 'peer' : 'peers'}`
+                          : ''}
+                      </span>
+                      <button
+                        type="button"
+                        className="ag-btn ag-btn-secondary ag-btn-xs"
+                        onClick={() => {
+                          onPlaySound?.('click')
+                          tEngine.cancelDownload(swarmId)
+                        }}
+                      >
+                        <X size={12} />
+                        <span>Cancel</span>
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </SettingsSection>
+        )}
+
+        {/* 3. Open Shares You're Seeding (Your Uploads) */}
+        {openOwnShares.length > 0 && (
+          <SettingsSection
+            title="Open Shares You're Seeding"
+            description="Your uploads remain available with no automatic expiry until you close downloads."
+            badge={
+              <span className="ag-badge ag-badge-muted mono tabular">{openOwnShares.length}</span>
+            }
+            action={
+              openOwnShares.length >= 2 ? (
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-secondary ag-btn-xs ag-settings-torrent-close-btn"
+                  onClick={() => {
+                    onPlaySound?.('click')
+                    void Promise.all(
+                      openOwnShares.map((s) =>
+                        tEngine.closeShareDownloads(s.swarmId.toLowerCase()),
+                      ),
+                    )
+                  }}
+                  title="Close downloads on all open uploads"
+                >
+                  <Lock size={12} />
+                  <span>Close All</span>
+                </button>
+              ) : undefined
+            }
+          >
+            <div className="ag-set-card-list ag-settings-torrent-list" role="list">
+              {openOwnShares.map((share) => {
+                const sid = share.swarmId.toLowerCase()
+                const ext = getTorrentFileExtension(share.fileName)
+                const statsLine = renderStatsMeta(share)
+                return (
+                  <div key={sid} role="listitem" className="ag-settings-torrent-row is-active">
+                    <div className="ag-settings-torrent-main">
+                      <span className="ag-settings-torrent-icon" aria-hidden="true">
+                        <FileIcon size={16} />
+                        {ext && (
+                          <span className="ag-settings-torrent-ext mono">{ext.slice(0, 4)}</span>
+                        )}
+                      </span>
+                      <div className="ag-settings-torrent-copy">
+                        <div className="ag-settings-torrent-head">
+                          <span className="ag-settings-torrent-name truncate" title={share.fileName}>
+                            {share.fileName}
+                          </span>
+                          {ext && <span className="ag-torrent-ext-pill mono">.{ext}</span>}
+                          <span className="ag-torrent-status-pill is-seeding">
+                            <span className="ag-torrent-live-dot" aria-hidden="true" />
+                            <span>No expiry</span>
+                          </span>
+                        </div>
+                        <div className="ag-settings-torrent-meta mono tabular truncate">
+                          <span>{formatTorrentBytes(share.size)}</span>
+                          <span>
+                            {' '}
+                            · {share.pieceCount} {share.pieceCount === 1 ? 'piece' : 'pieces'}
+                          </span>
+                          <span> · {share.targetLabel}</span>
+                          <span> · {formatTorrentDate(share.createdAt)}</span>
+                        </div>
+                        {statsLine && (
+                          <div className="ag-settings-torrent-stats mono tabular">{statsLine}</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="ag-settings-torrent-actions">
+                      <button
+                        type="button"
+                        className="ag-btn ag-btn-secondary ag-btn-xs ag-settings-torrent-close-btn"
+                        onClick={() => {
+                          onPlaySound?.('click')
+                          void tEngine.closeShareDownloads(sid)
+                        }}
+                        title="Immediately disconnect peers and prevent future downloads"
+                      >
+                        <Lock size={12} />
+                        <span>Close Downloads</span>
+                      </button>
+                      {share.hasLocalData && (
+                        <button
+                          type="button"
+                          className="ag-btn ag-btn-ghost ag-btn-xs"
+                          onClick={() => {
+                            onPlaySound?.('click')
+                            void tEngine.saveLocalFile(sid)
+                          }}
+                          title={`Save ${share.fileName}`}
+                          aria-label={`Save ${share.fileName}`}
+                        >
+                          <Download size={12} />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="ag-btn ag-btn-ghost ag-btn-xs ag-settings-torrent-del-btn"
+                        onClick={() => {
+                          onPlaySound?.('click')
+                          void tEngine.deleteShareLocalData(sid)
+                        }}
+                        title={`Delete local copy of ${share.fileName}`}
+                        aria-label={`Delete local copy of ${share.fileName}`}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </SettingsSection>
+        )}
+
+        {/* 4. Seeding Peer Torrents */}
+        {activePeerSeeds.length > 0 && (
+          <SettingsSection
+            title="Seeding Peer Torrents"
+            description="Verified files you downloaded and are currently helping seed to trusted peers."
+            badge={
+              <span className="ag-badge ag-badge-muted mono tabular">
+                {activePeerSeeds.length}
+              </span>
+            }
+            action={
+              activePeerSeeds.length >= 2 ? (
+                <button
+                  type="button"
+                  className="ag-btn ag-btn-secondary ag-btn-xs"
+                  onClick={() => {
+                    onPlaySound?.('click')
+                    for (const s of activePeerSeeds) {
+                      tEngine.stopReSeeding(s.swarmId.toLowerCase())
+                    }
+                  }}
+                  title="Stop seeding all downloaded peer files"
+                >
+                  <Square size={11} />
+                  <span>Stop All</span>
+                </button>
+              ) : undefined
+            }
+          >
+            <div className="ag-set-card-list ag-settings-torrent-list" role="list">
+              {activePeerSeeds.map((share) => {
+                const sid = share.swarmId.toLowerCase()
+                const ext = getTorrentFileExtension(share.fileName)
+                const statsLine = renderStatsMeta(share)
+                return (
+                  <div key={sid} role="listitem" className="ag-settings-torrent-row is-active">
+                    <div className="ag-settings-torrent-main">
+                      <span className="ag-settings-torrent-icon" aria-hidden="true">
+                        <FileIcon size={16} />
+                        {ext && (
+                          <span className="ag-settings-torrent-ext mono">{ext.slice(0, 4)}</span>
+                        )}
+                      </span>
+                      <div className="ag-settings-torrent-copy">
+                        <div className="ag-settings-torrent-head">
+                          <span className="ag-settings-torrent-name truncate" title={share.fileName}>
+                            {share.fileName}
+                          </span>
+                          {ext && <span className="ag-torrent-ext-pill mono">.{ext}</span>}
+                          <span className="ag-torrent-role-pill is-peer">Seeding Peer File</span>
+                          <span className="ag-torrent-status-pill is-seeding">
+                            <span className="ag-torrent-live-dot" aria-hidden="true" />
+                            <span>Seeding</span>
+                          </span>
+                        </div>
+                        <div className="ag-settings-torrent-meta mono tabular truncate">
+                          <span>{formatTorrentBytes(share.size)}</span>
+                          <span> · {share.targetLabel}</span>
+                          <span> · {formatTorrentDate(share.createdAt)}</span>
+                        </div>
+                        {statsLine && (
+                          <div className="ag-settings-torrent-stats mono tabular">{statsLine}</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="ag-settings-torrent-actions">
+                      <button
+                        type="button"
+                        className="ag-btn ag-btn-secondary ag-btn-xs"
+                        onClick={() => {
+                          onPlaySound?.('click')
+                          tEngine.stopReSeeding(sid)
+                        }}
+                        title="Stop seeding while keeping your local copy"
+                      >
+                        <Square size={11} />
+                        <span>Stop Seeding</span>
+                      </button>
+                      {share.hasLocalData && (
+                        <button
+                          type="button"
+                          className="ag-btn ag-btn-ghost ag-btn-xs"
+                          onClick={() => {
+                            onPlaySound?.('click')
+                            void tEngine.saveLocalFile(sid)
+                          }}
+                          title={`Save ${share.fileName}`}
+                          aria-label={`Save ${share.fileName}`}
+                        >
+                          <Download size={12} />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="ag-btn ag-btn-ghost ag-btn-xs ag-settings-torrent-del-btn"
+                        onClick={() => {
+                          onPlaySound?.('click')
+                          void tEngine.removeDownloadedSeed(sid)
+                        }}
+                        title={`Remove local seed for ${share.fileName}`}
+                        aria-label={`Remove local seed for ${share.fileName}`}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </SettingsSection>
+        )}
+
+        {/* 5. Closed & Stopped Torrents */}
+        {closedOrStoppedShares.length > 0 && (
+          <SettingsSection
+            title="Closed & Stopped Torrents"
+            description="Closed uploads and paused or sender-closed peer copies stored locally."
+            badge={
+              <span className="ag-badge ag-badge-muted mono tabular">
+                {closedOrStoppedShares.length}
+              </span>
+            }
+          >
+            <div className="ag-set-card-list ag-settings-torrent-list" role="list">
+              {closedOrStoppedShares.map((share) => {
+                const sid = share.swarmId.toLowerCase()
+                const ext = getTorrentFileExtension(share.fileName)
+                const isPeerSeed = Boolean(share.isReSeed)
+                const isClosedByOriginalSender = isPeerSeed && Boolean(closedBySender[sid])
+                const statsLine = renderStatsMeta(share)
+                return (
+                  <div key={sid} role="listitem" className="ag-settings-torrent-row is-closed">
+                    <div className="ag-settings-torrent-main">
+                      <span className="ag-settings-torrent-icon" aria-hidden="true">
+                        <FileIcon size={16} />
+                        {ext && (
+                          <span className="ag-settings-torrent-ext mono">{ext.slice(0, 4)}</span>
+                        )}
+                      </span>
+                      <div className="ag-settings-torrent-copy">
+                        <div className="ag-settings-torrent-head">
+                          <span className="ag-settings-torrent-name truncate" title={share.fileName}>
+                            {share.fileName}
+                          </span>
+                          {ext && <span className="ag-torrent-ext-pill mono">.{ext}</span>}
+                          <span
+                            className={`ag-torrent-role-pill${isPeerSeed ? ' is-peer' : ' is-own'}`}
+                          >
+                            {isPeerSeed ? 'Seeding Peer File' : 'Your Share'}
+                          </span>
+                          {isPeerSeed ? (
+                            isClosedByOriginalSender ? (
+                              <span className="ag-torrent-status-pill is-closed">
+                                <Lock size={10} aria-hidden="true" />
+                                <span>Closed by sender</span>
+                              </span>
+                            ) : (
+                              <span className="ag-torrent-status-pill is-muted">Not seeding</span>
+                            )
+                          ) : (
+                            <span className="ag-torrent-status-pill is-closed">
+                              <Lock size={10} aria-hidden="true" />
+                              <span>Closed</span>
+                            </span>
+                          )}
+                        </div>
+                        <div className="ag-settings-torrent-meta mono tabular truncate">
+                          <span>{formatTorrentBytes(share.size)}</span>
+                          <span> · {share.targetLabel}</span>
+                          <span> · {formatTorrentDate(share.createdAt)}</span>
+                        </div>
+                        {statsLine && (
+                          <div className="ag-settings-torrent-stats mono tabular">{statsLine}</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="ag-settings-torrent-actions">
+                      {isPeerSeed ? (
+                        <>
+                          {!isClosedByOriginalSender && share.hasLocalData && (
+                            <button
+                              type="button"
+                              className="ag-btn ag-btn-secondary ag-btn-xs"
+                              onClick={() => {
+                                onPlaySound?.('click')
+                                void tEngine.resumeReSeeding(sid)
+                              }}
+                              title="Resume seeding this verified peer file to trusted peers"
+                            >
+                              <Upload size={12} />
+                              <span>Seed to Swarm</span>
+                            </button>
+                          )}
+                          {share.hasLocalData && (
+                            <button
+                              type="button"
+                              className="ag-btn ag-btn-ghost ag-btn-xs"
+                              onClick={() => {
+                                onPlaySound?.('click')
+                                void tEngine.saveLocalFile(sid)
+                              }}
+                              title={`Save ${share.fileName}`}
+                              aria-label={`Save ${share.fileName}`}
+                            >
+                              <Download size={12} />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="ag-btn ag-btn-ghost ag-btn-xs ag-settings-torrent-del-btn"
+                            onClick={() => {
+                              onPlaySound?.('click')
+                              void tEngine.removeDownloadedSeed(sid)
+                            }}
+                            title={`Remove local copy of ${share.fileName}`}
+                            aria-label={`Remove local copy of ${share.fileName}`}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          {share.hasLocalData && (
+                            <button
+                              type="button"
+                              className="ag-btn ag-btn-secondary ag-btn-xs"
+                              onClick={() => {
+                                onPlaySound?.('click')
+                                void tEngine.reopenShareDownloads(sid)
+                              }}
+                              title="Reopen downloads for this shared file"
+                            >
+                              <RotateCcw size={12} />
+                              <span>Reopen</span>
+                            </button>
+                          )}
+                          {share.hasLocalData && (
+                            <button
+                              type="button"
+                              className="ag-btn ag-btn-ghost ag-btn-xs"
+                              onClick={() => {
+                                onPlaySound?.('click')
+                                void tEngine.saveLocalFile(sid)
+                              }}
+                              title={`Save ${share.fileName}`}
+                              aria-label={`Save ${share.fileName}`}
+                            >
+                              <Download size={12} />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="ag-btn ag-btn-ghost ag-btn-xs ag-settings-torrent-del-btn"
+                            onClick={() => {
+                              onPlaySound?.('click')
+                              void tEngine.deleteShareLocalData(sid)
+                            }}
+                            title={`Delete local copy of ${share.fileName}`}
+                            aria-label={`Delete local copy of ${share.fileName}`}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </SettingsSection>
+        )}
+      </div>
+    )
+  }
 
   const renderContentFilterTab = () => {
     const cf = engine.contentFilter
@@ -5648,6 +6141,14 @@ export function SettingsModal({
                                 <span className="ag-set-nav-label">{item.label}</span>
                                 <span className="ag-set-nav-sub">{item.subtitle}</span>
                               </span>
+                              {item.id === 'torrents' && engine.torrents.activeShareCount > 0 && (
+                                <span
+                                  className="ag-set-nav-pill mono tabular"
+                                  title={`${engine.torrents.activeShareCount} active P2P torrents seeding`}
+                                >
+                                  {engine.torrents.activeShareCount}
+                                </span>
+                              )}
                               <ChevronRight size={16} className="ag-set-nav-chevron" />
                             </button>
                           )
@@ -5686,6 +6187,7 @@ export function SettingsModal({
               {activeTab === 'privacy' && renderPrivacyTab()}
               {activeTab === 'content-filter' && renderContentFilterTab()}
               {activeTab === 'translator' && renderTranslatorTab()}
+              {activeTab === 'torrents' && renderTorrentsTab()}
               {activeTab === 'appearance' && renderAppearanceTab()}
               {activeTab === 'calls' && renderCallsTab()}
               {activeTab === 'network' && renderNetworkTab()}

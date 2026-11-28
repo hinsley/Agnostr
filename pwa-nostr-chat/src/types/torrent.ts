@@ -82,6 +82,9 @@ export interface TorrentShareRecord {
 }
 
 export interface TorrentTransferState {
+  /** Unique 32-hex per-share swarm identifier (primary key for transfers, storage, and revocations) */
+  swarmId: string
+  /** 64-hex deterministic plaintext content infoHash */
   infoHash: string
   phase: TorrentTransferPhase
   transport?: TorrentTransport
@@ -116,7 +119,9 @@ export interface TorrentCreateScopeContext {
 export interface TorrentEngine {
   shares: TorrentShareRecord[]
   activeShareCount: number
+  /** Active/completed transfer states keyed strictly by unique 32-hex `swarmId` */
   transfers: Record<string, TorrentTransferState>
+  /** Authoritative sender-closed revocation timestamps keyed strictly by unique 32-hex `swarmId` */
   closedBySender: Record<string, number>
   pendingDownloadRequest: PendingTorrentDownloadRequest | null
   sharesModalOpen: boolean
@@ -133,17 +138,17 @@ export interface TorrentEngine {
   ) => void
   confirmPendingDownload: () => Promise<void>
   cancelPendingDownload: () => void
-  cancelDownload: (infoHash: string) => void
-  saveLocalFile: (infoHash: string) => Promise<boolean>
-  closeShareDownloads: (infoHash: string) => Promise<void>
-  reopenShareDownloads: (infoHash: string) => Promise<void>
-  deleteShareLocalData: (infoHash: string) => Promise<void>
-  stopReSeeding: (infoHash: string) => void
-  resumeReSeeding: (infoHash: string) => Promise<boolean>
-  removeDownloadedSeed: (infoHash: string) => Promise<boolean>
+  cancelDownload: (swarmId: string) => void
+  saveLocalFile: (swarmId: string) => Promise<boolean>
+  closeShareDownloads: (swarmId: string) => Promise<void>
+  reopenShareDownloads: (swarmId: string) => Promise<void>
+  deleteShareLocalData: (swarmId: string) => Promise<void>
+  stopReSeeding: (swarmId: string) => void
+  resumeReSeeding: (swarmId: string) => Promise<boolean>
+  removeDownloadedSeed: (swarmId: string) => Promise<boolean>
   checkRemoteStatus: (
     torrent: TorrentAttachment,
     senderPubkey: string
   ) => Promise<TorrentShareStatus>
-  getShare: (infoHash: string) => TorrentShareRecord | undefined
+  getShare: (swarmId: string) => TorrentShareRecord | undefined
 }
