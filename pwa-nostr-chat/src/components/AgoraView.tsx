@@ -109,7 +109,12 @@ import {
   requestUntrustedLinkOpen,
   tryOpenInternalAgoraLink,
 } from './UntrustedLinkModal.tsx'
+import { AGORA_WOT_DISCOVERY_ENABLED } from '../features/agoraDiscovery/featureFlag.ts'
 import '../styles/agora.css'
+
+const AgoraDiscoveryView = React.lazy(
+  () => import('../features/agoraDiscovery/AgoraDiscoveryView.tsx')
+)
 
 export interface AgoraViewProps {
   engine: AgnostrEngine
@@ -133,10 +138,14 @@ const FEED_NAV_ITEMS: ReadonlyArray<{
   label: string
   mobileLabel: string
   icon: typeof Users
+  beta?: boolean
 }> = [
   { id: 'following', label: 'Following', mobileLabel: 'Following', icon: Users },
   { id: 'global', label: 'Global', mobileLabel: 'Global', icon: Globe },
   { id: 'trending', label: 'Trending', mobileLabel: 'Trending', icon: Flame },
+  ...(AGORA_WOT_DISCOVERY_ENABLED
+    ? [{ id: 'discover' as const, label: 'Discover', mobileLabel: 'Discover', icon: Compass, beta: true }]
+    : []),
   { id: 'articles', label: 'Articles', mobileLabel: 'Articles', icon: BookOpen },
   { id: 'bookmarks', label: 'Bookmarks', mobileLabel: 'Saved', icon: Bookmark },
   { id: 'notifications', label: 'Notifications', mobileLabel: 'Alerts', icon: Bell },
@@ -3210,6 +3219,7 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const [manualComposerModal, setManualComposerModal] = useState<ComposerModalState | null>(null)
   const [editProfileOpen, setEditProfileOpen] = useState(false)
   const [curationModalOpen, setCurationModalOpen] = useState(false)
+  const [discoverSimilarPubkey, setDiscoverSimilarPubkey] = useState<string | null>(null)
   const [socialListModal, setSocialListModal] = useState<{
     title: string
     pubkeys: string[]
@@ -3395,7 +3405,14 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
   const inSearch = !inThread && !inProfile && Boolean(agora.searchQuery || agora.activeHashtag)
   const inNotifications = !inThread && !inProfile && !inSearch && agora.activeTab === 'notifications'
   const inArticles = !inThread && !inProfile && !inSearch && agora.activeTab === 'articles'
-  const inStandardFeed = !inThread && !inProfile && !inSearch && !inNotifications && !inArticles
+  const inDiscover =
+    AGORA_WOT_DISCOVERY_ENABLED &&
+    !inThread &&
+    !inProfile &&
+    !inSearch &&
+    agora.activeTab === 'discover'
+  const inStandardFeed =
+    !inThread && !inProfile && !inSearch && !inNotifications && !inArticles && !inDiscover
   const showInlineComposer =
     inStandardFeed &&
     (agora.activeTab === 'following' ||
@@ -3843,6 +3860,8 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
         return 'Global'
       case 'trending':
         return 'Trending'
+      case 'discover':
+        return 'Discover'
       case 'articles':
         return 'Articles'
       case 'bookmarks':
@@ -4694,6 +4713,20 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                 >
                   <Icon size={17} />
                   <span className="truncate">{item.label}</span>
+                  {item.beta && (
+                    <span
+                      className="ag-agora-nav-badge"
+                      style={{
+                        backgroundColor: 'var(--accent-soft)',
+                        color: 'var(--accent)',
+                        fontSize: '9.5px',
+                        letterSpacing: '0.02em',
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      Beta
+                    </span>
+                  )}
                   {item.id === 'notifications' && agora.unreadNotificationCount > 0 && (
                     <span className="ag-agora-nav-badge tabular">
                       {agora.unreadNotificationCount > 99 ? '99+' : agora.unreadNotificationCount}
@@ -5372,6 +5405,20 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                             <MessageCircle size={13} />
                             <span>Message</span>
                           </button>
+                          {AGORA_WOT_DISCOVERY_ENABLED && (
+                            <button
+                              type="button"
+                              className="ag-agora-pill-btn"
+                              onClick={() => {
+                                setDiscoverSimilarPubkey(agora.profileView!.pubkey)
+                                handleSelectTab('discover')
+                              }}
+                              title="Find similar voices in Web-of-Trust Discovery"
+                            >
+                              <Compass size={13} />
+                              <span>Similar</span>
+                            </button>
+                          )}
                           {onOpenAmailCompose && (
                             <button
                               type="button"
@@ -5685,6 +5732,33 @@ export const AgoraView: React.FC<AgoraViewProps> = ({
                   </div>
                 )}
               </>
+            )}
+
+            {/* ===== VIEW D3: WEB-OF-TRUST GRAPH DISCOVERY (Experimental) ===== */}
+            {inDiscover && (
+              <React.Suspense
+                fallback={
+                  <div className="ag-agora-skeleton-list">
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
+                    <AgoraSkeletonCard />
+                  </div>
+                }
+              >
+                <AgoraDiscoveryView
+                  engine={engine}
+                  initialSimilarPubkey={discoverSimilarPubkey}
+                  onConsumedInitialSimilar={() => setDiscoverSimilarPubkey(null)}
+                  onOpenProfile={handleOpenProfile}
+                  onOpenThread={handleOpenThread}
+                  onOpenArticle={(articleId) => {
+                    onPlaySound?.('click')
+                    agora.openArticle(articleId)
+                  }}
+                  onOpenDm={onOpenDm}
+                  onPlaySound={onPlaySound}
+                />
+              </React.Suspense>
             )}
 
             {/* ===== VIEW E: STANDARD FEED (Following / Global / Trending / Bookmarks) ===== */}

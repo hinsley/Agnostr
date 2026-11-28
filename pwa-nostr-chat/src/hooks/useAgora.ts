@@ -2016,7 +2016,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
     pendingItemsRef.current.clear()
     setPendingNewCount(0)
 
-    if (activeTab === 'notifications') {
+    if (activeTab === 'notifications' || activeTab === 'discover') {
       setLoadingFeed(false)
       return
     }
@@ -4820,6 +4820,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       myProfile,
       socialRelays,
       myNip65Relays,
+      queryRelaysOneShot: queryOneShot,
 
       activeTab,
       setActiveTab,
@@ -4931,6 +4932,7 @@ export function useAgora(options: UseAgoraOptions): AgoraEngine {
       myProfile,
       socialRelays,
       myNip65Relays,
+      queryOneShot,
       activeTab,
       setActiveTab,
       feedFilter,

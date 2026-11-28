@@ -1,4 +1,4 @@
-import type { Event as NostrEvent } from 'nostr-tools'
+import type { Event as NostrEvent, Filter } from 'nostr-tools'
 
 export type AgoraFeedTab =
   | 'following'
@@ -7,6 +7,7 @@ export type AgoraFeedTab =
   | 'bookmarks'
   | 'notifications'
   | 'articles'
+  | 'discover'
 
 export type AgoraFeedFilter = 'all' | 'no-reposts' | 'media' | 'trusted'
 
@@ -290,6 +291,16 @@ export interface AgoraEngine {
   myProfile: AgoraProfile | null
   socialRelays: string[]
   myNip65Relays: AgoraNip65RelayList | null
+  queryRelaysOneShot: (
+    prefix: string,
+    relays: readonly string[],
+    filters: Filter[],
+    opts: {
+      onEvent: (event: NostrEvent, relayUrl: string) => void
+      timeoutMs?: number
+      targetEose?: number
+    }
+  ) => { promise: Promise<void>; cancel: () => void }
 
   // Active feed & calm live buffer
   activeTab: AgoraFeedTab
